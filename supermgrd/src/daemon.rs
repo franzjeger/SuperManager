@@ -2222,15 +2222,14 @@ impl DaemonService {
                             if std::fs::write(&tmp_path, pw.as_bytes()).is_ok() {
                                 #[cfg(unix)]
                                 {
-                                    // Owner-read-only. Use nix chown to transfer
-                                    // ownership to the real user so sshpass can read it.
+                                    // Readable by owner + group + other so the
+                                    // user's sshpass process can read it.  The
+                                    // file is deleted after 60 seconds.
                                     use std::os::unix::fs::PermissionsExt;
                                     let _ = std::fs::set_permissions(
                                         &tmp_path,
-                                        std::fs::Permissions::from_mode(0o600),
+                                        std::fs::Permissions::from_mode(0o644),
                                     );
-                                    let real_uid = nix::unistd::Uid::from_raw(1000);
-                                    let _ = nix::unistd::chown(&tmp_path, Some(real_uid), None);
                                 }
                                 tmp_files_to_clean.push(tmp_path.clone());
                                 pw_cmd = format!("sshpass -f {} ", tmp_path.display());
@@ -2257,23 +2256,25 @@ impl DaemonService {
                 if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
                     let tmp_dir = std::env::temp_dir().join("supermgrd");
                     let _ = std::fs::create_dir_all(&tmp_dir);
-                    let tmp_path = tmp_dir.join(format!("connect_{}.pem", id.simple()));
-                    if std::fs::write(&tmp_path, &bytes).is_ok() {
+                    let src_path = tmp_dir.join(format!("connect_{}.pem", id.simple()));
+                    if std::fs::write(&src_path, &bytes).is_ok() {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
                             let _ = std::fs::set_permissions(
-                                &tmp_path,
-                                std::fs::Permissions::from_mode(0o600),
+                                &src_path,
+                                std::fs::Permissions::from_mode(0o644),
                             );
-                            // Chown to UID 1000 so the user can read it.
-                            let real_uid = nix::unistd::Uid::from_raw(1000);
-                            let _ = nix::unistd::chown(&tmp_path, Some(real_uid), None);
                         }
-                        tmp_files_to_clean.push(tmp_path.clone());
+                        tmp_files_to_clean.push(src_path.clone());
+                        // ssh requires 0600 on key files. The daemon writes as
+                        // root, so we wrap the command: copy the key to a
+                        // user-owned temp file with correct permissions, then ssh.
+                        let user_key = format!("/tmp/.supermgr_key_{}", id.simple());
                         cmd = format!(
-                            "ssh -p {port} -i {} -o IdentitiesOnly=yes {username}@{hostname}",
-                            tmp_path.display()
+                            "cp {src} {dst} && chmod 600 {dst} && ssh -p {port} -i {dst} -o IdentitiesOnly=yes {username}@{hostname}; rm -f {dst}",
+                            src = src_path.display(),
+                            dst = user_key,
                         );
                     }
                 }
