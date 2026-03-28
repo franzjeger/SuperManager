@@ -2222,15 +2222,15 @@ impl DaemonService {
                             if std::fs::write(&tmp_path, pw.as_bytes()).is_ok() {
                                 #[cfg(unix)]
                                 {
+                                    // Owner-read-only. Use nix chown to transfer
+                                    // ownership to the real user so sshpass can read it.
                                     use std::os::unix::fs::PermissionsExt;
                                     let _ = std::fs::set_permissions(
                                         &tmp_path,
                                         std::fs::Permissions::from_mode(0o600),
                                     );
-                                    let _ = std::process::Command::new("chown")
-                                        .arg("1000")
-                                        .arg(&tmp_path)
-                                        .status();
+                                    let real_uid = nix::unistd::Uid::from_raw(1000);
+                                    let _ = nix::unistd::chown(&tmp_path, Some(real_uid), None);
                                 }
                                 tmp_files_to_clean.push(tmp_path.clone());
                                 pw_cmd = format!("sshpass -f {} ", tmp_path.display());
@@ -2266,20 +2266,9 @@ impl DaemonService {
                                 &tmp_path,
                                 std::fs::Permissions::from_mode(0o600),
                             );
-                            // The daemon runs as root but the GUI user needs
-                            // to read this file.  Chown to the calling user
-                            // (PKEXEC_UID / SUDO_UID) or fall back to UID 1000.
-                            let real_uid = std::env::var("PKEXEC_UID")
-                                .ok()
-                                .and_then(|s| s.parse::<u32>().ok())
-                                .or_else(|| std::env::var("SUDO_UID")
-                                    .ok()
-                                    .and_then(|s| s.parse::<u32>().ok()))
-                                .unwrap_or(1000);
-                            let _ = std::process::Command::new("chown")
-                                .arg(real_uid.to_string())
-                                .arg(&tmp_path)
-                                .status();
+                            // Chown to UID 1000 so the user can read it.
+                            let real_uid = nix::unistd::Uid::from_raw(1000);
+                            let _ = nix::unistd::chown(&tmp_path, Some(real_uid), None);
                         }
                         tmp_files_to_clean.push(tmp_path.clone());
                         cmd = format!(
