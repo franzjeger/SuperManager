@@ -1035,6 +1035,8 @@ pub fn build_ui(
                 if host.device_type == supermgr_core::ssh::DeviceType::Fortigate && host.has_api {
                     ssh::host_detail::refresh_fortigate_dashboard(
                         host.id.to_string(),
+                        host.hostname.clone(),
+                        host.api_port.unwrap_or(443),
                         &rt_sel,
                         &tx_sel,
                     );
@@ -1050,9 +1052,16 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
             let s = app_state.lock().expect("lock");
-            if let Some(host_id) = s.selected_ssh_host.clone() {
-                drop(s);
-                ssh::host_detail::refresh_fortigate_dashboard(host_id, &rt, &tx);
+            if let Some(host_id) = &s.selected_ssh_host {
+                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                    ssh::host_detail::refresh_fortigate_dashboard(
+                        host_id.clone(),
+                        host.hostname.clone(),
+                        host.api_port.unwrap_or(443),
+                        &rt,
+                        &tx,
+                    );
+                }
             }
         });
     }

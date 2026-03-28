@@ -1991,11 +1991,17 @@ impl DaemonService {
         info!("fortigate_api: {method} {url}");
         crate::audit::log_event("FG_API", &format!("{method} {url}"));
 
-        let client = reqwest::Client::builder()
+        let client = match reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(std::time::Duration::from_secs(30))
             .build()
-            .map_err(|e| fdo::Error::Failed(format!("HTTP client: {e}")))?;
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("fortigate_api: client build failed: {e:#}");
+                return Err(fdo::Error::Failed(format!("HTTP client build failed: {e}")));
+            }
+        };
 
         let mut req = match method.to_uppercase().as_str() {
             "GET" => client.get(&url),
@@ -2016,8 +2022,10 @@ impl DaemonService {
 
         let resp = req.send().await
             .map_err(|e| {
-                // Strip token from error message to avoid leaking secrets.
                 let msg = e.to_string().replace(&token, "***");
+                error!("fortigate_api: send failed: {msg}");
+                error!("fortigate_api: is_connect={} is_timeout={} is_request={}",
+                    e.is_connect(), e.is_timeout(), e.is_request());
                 fdo::Error::Failed(format!("API request failed: {msg}"))
             })?;
 

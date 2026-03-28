@@ -340,11 +340,31 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
 /// back to the GTK main thread via `AppMsg::FortigateStatus`.
 pub fn refresh_fortigate_dashboard(
     host_id: String,
+    hostname: String,
+    api_port: u16,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
     let tx = tx.clone();
     rt.spawn(async move {
+        // Quick TCP check before making the full API call — avoids a 30s
+        // timeout when the host is unreachable (e.g. VPN not connected).
+        let addr = format!("{hostname}:{api_port}");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        ).await {
+            Ok(Ok(_)) => {} // reachable, proceed
+            _ => {
+                // Not reachable — show "Unreachable" without error toast.
+                let _ = tx.send(AppMsg::FortigateStatus {
+                    host_id,
+                    data: serde_json::json!({ "error": "host unreachable" }),
+                });
+                return;
+            }
+        }
+
         let result = async {
             let conn = zbus::Connection::system().await?;
             let proxy = DaemonProxy::new(&conn).await?;
