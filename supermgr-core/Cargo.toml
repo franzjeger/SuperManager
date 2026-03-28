@@ -1,0 +1,24 @@
+[package]
+name        = "supermgr-core"
+version     = "0.1.0"
+edition     = "2021"
+description = "Shared types, D-Bus interface definitions, and backend trait for SuperManager"
+license     = "GPL-3.0-or-later"
+
+[dependencies]
+async-trait    = { workspace = true }
+chrono         = { workspace = true }
+ipnet          = { workspace = true }
+secret-service = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+ssh-key        = { workspace = true }
+thiserror      = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+uuid           = { workspace = true }
+zbus           = { workspace = true }
+zeroize        = { workspace = true }
+
+[lints]
+workspace = true

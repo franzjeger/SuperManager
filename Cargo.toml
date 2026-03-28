@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    "supermgr-core",
+    "supermgrd",
+    "supermgr",
+    "supermgr-mcp",
+]
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions — all workspace members inherit from here.
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# Async runtime
+tokio       = { version = "1.42",  features = ["full"] }
+# Serialisation
+serde       = { version = "1.0",   features = ["derive"] }
+serde_json  = { version = "1.0",   default-features = false, features = ["std"] }
+toml        = { version = "0.8",   features = ["parse"] }
+# Error handling
+thiserror   = "2.0"
+anyhow      = "1.0"
+# Logging / tracing
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter", "fmt"] }
+# D-Bus (tokio backend)
+zbus        = { version = "4.4",  features = ["tokio"] }
+# WireGuard kernel netlink control
+wireguard-control = "1.7.1"
+# GNOME Keyring / KWallet secret storage
+secret-service = { version = "5.0", features = ["rt-tokio-crypto-rust"] }
+# Identifiers
+uuid        = { version = "1.11", features = ["v4", "serde"] }
+# Timestamp / duration
+chrono      = { version = "0.4",  features = ["serde"] }
+# IP network address arithmetic
+ipnet       = { version = "2.10", features = ["serde"] }
+# Secure memory wiping
+zeroize     = { version = "1.8",  features = ["derive"] }
+# Async trait objects
+async-trait = "0.1"
+# Base64 encoding (secrets file)
+base64      = "0.22"
+# HTTP client — Azure Entra ID OAuth2 PKCE flow (rustls, no openssl dep)
+reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# SHA-256 for PKCE code_challenge
+sha2        = "0.10"
+# SSH key generation, parsing, fingerprinting (RustCrypto)
+ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_core"] }
+# RSA key generation with bit-size control
+rsa         = { version = "0.9",  features = ["std"] }
+# Async SSH client (pure Rust, tokio-native)
+russh       = "0.46"
+# SFTP over russh
+russh-sftp  = "2.0"
+# SSH key loading for russh authentication
+russh-keys  = "0.46"
+# Random number generation
+rand        = "0.8"
+
+# ---------------------------------------------------------------------------
+# Workspace-wide lint configuration
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all       = { level = "warn", priority = -1 }
+pedantic  = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"

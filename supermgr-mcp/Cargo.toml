@@ -1,0 +1,23 @@
+[package]
+name = "supermgr-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP (Model Context Protocol) server for SuperManager — exposes SSH/VPN operations as tools for Claude Code."
+
+[dependencies]
+supermgr-core = { path = "../supermgr-core" }
+
+# Async runtime
+tokio       = { workspace = true }
+zbus        = { workspace = true }
+
+# Serialization
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+
+# Error handling
+anyhow      = { workspace = true }
+
+# Logging
+tracing             = { workspace = true }
+tracing-subscriber  = { workspace = true }

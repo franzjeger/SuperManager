@@ -1,0 +1,36 @@
+[package]
+name        = "supermgr"
+version     = "0.1.0"
+edition     = "2021"
+description = "GTK4/Adwaita GUI for the SuperManager SSH + VPN manager"
+license     = "GPL-3.0-or-later"
+
+[[bin]]
+name = "supermgr"
+path = "src/main.rs"
+
+[dependencies]
+supermgr-core  = { path = "../supermgr-core" }
+
+anyhow         = { workspace = true }
+futures-util   = { version = "0.3", default-features = false, features = ["std"] }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid           = { workspace = true }
+zbus           = { workspace = true }
+
+# GTK4 + Adwaita
+gtk4        = { version = "0.9",  features = ["v4_12"] }
+libadwaita  = { version = "0.7",  features = ["v1_5"] }
+
+# System tray (StatusNotifierItem)
+ksni        = { version = "0.3",  features = ["tokio"] }
+
+# HTTP client for Claude API
+reqwest     = { workspace = true }
+
+[lints]
+workspace = true

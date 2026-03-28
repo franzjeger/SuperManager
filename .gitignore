@@ -1,0 +1,10 @@
+/target/
+__pycache__/
+*.pyc
+.claude/
+*.enc
+*.pem
+*.key
+secrets.json
+settings.local.json
+/migrate_from_old.py

@@ -1,0 +1,23 @@
+[Unit]
+Description=SuperManager daemon (SSH + VPN)
+After=network.target dbus.service
+Wants=dbus.service
+
+[Service]
+RuntimeDirectory=supermgrd
+Type=simple
+ExecStart=/usr/local/bin/supermgrd
+Restart=on-failure
+RestartSec=5
+
+# Capabilities: CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_MODULE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_MODULE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/supermgrd /etc/swanctl/conf.d /run/supermgrd
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target
