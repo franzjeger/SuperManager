@@ -36,7 +36,6 @@ pub struct SshHostDetail {
     pub auth_method_row: adw::ActionRow,
 
     pub connect_btn: gtk4::Button,
-    pub web_ui_btn: gtk4::Button,
     pub test_btn: gtk4::Button,
     pub push_key_btn: gtk4::Button,
     pub push_key_api_btn: gtk4::Button,
@@ -197,12 +196,6 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .css_classes(["suggested-action"])
         .tooltip_text("Open SSH session in terminal")
         .build();
-    let web_ui_btn = gtk4::Button::builder()
-        .label("Web UI")
-        .css_classes(["flat"])
-        .tooltip_text("Open FortiGate web interface in browser")
-        .visible(false)
-        .build();
     let test_btn = gtk4::Button::builder()
         .label("Test")
         .css_classes(["flat"])
@@ -233,7 +226,6 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     btn_box.append(&pin_btn);
     btn_box.append(&connect_btn);
-    btn_box.append(&web_ui_btn);
     btn_box.append(&test_btn);
     btn_box.append(&push_key_btn);
     btn_box.append(&push_key_api_btn);
@@ -275,7 +267,6 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         device_type_row,
         auth_method_row,
         connect_btn,
-        web_ui_btn,
         test_btn,
         push_key_btn,
         push_key_api_btn,
@@ -325,11 +316,8 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
 
     // Show FortiGate dashboard and "Push Key via API" button when applicable.
     let is_fortigate_api = host.device_type == DeviceType::Fortigate && host.has_api;
-    let is_fortigate = host.device_type == DeviceType::Fortigate;
     detail.fg_dashboard_group.set_visible(is_fortigate_api);
     detail.push_key_api_btn.set_visible(is_fortigate_api);
-    // Show Web UI button for any FortiGate (uses api_port or default 443).
-    detail.web_ui_btn.set_visible(is_fortigate);
 
     if is_fortigate_api {
         // Reset dashboard rows to loading placeholders.

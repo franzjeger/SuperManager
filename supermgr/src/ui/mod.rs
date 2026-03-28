@@ -1487,21 +1487,6 @@ pub fn build_ui(
         });
     }
 
-    // --- FortiGate Web UI button -----------------------------------------------
-    {
-        let app_state = Arc::clone(&app_state);
-        ssh_host_detail.web_ui_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
-            if let Some(host_id) = &s.selected_ssh_host {
-                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
-                    let port = host.api_port.unwrap_or(443);
-                    let url = format!("https://{}:{}", host.hostname, port);
-                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-                }
-            }
-        });
-    }
-
     // --- SSH Edit Host button -----------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
