@@ -220,8 +220,8 @@ pub fn build_ui(
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SuperManager")
-        .default_width(1000)
-        .default_height(650)
+        .default_width(1200)
+        .default_height(750)
         .build();
 
     // Apply persisted opacity.
@@ -2408,19 +2408,31 @@ pub fn build_ui(
     {
         let unlock_btn = lock_page.unlock_btn.clone();
         let set_btn = lock_page.set_btn.clone();
-        lock_page.password_row.connect_activate(move |_| {
-            if unlock_btn.is_visible() {
-                unlock_btn.emit_clicked();
-            } else if set_btn.is_visible() {
-                set_btn.emit_clicked();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+                if unlock_btn.is_visible() {
+                    unlock_btn.emit_clicked();
+                } else if set_btn.is_visible() {
+                    set_btn.emit_clicked();
+                }
+                return glib::Propagation::Stop;
             }
+            glib::Propagation::Proceed
         });
+        lock_page.password_row.add_controller(key_ctrl);
     }
     {
         let set_btn = lock_page.set_btn.clone();
-        lock_page.confirm_row.connect_activate(move |_| {
-            set_btn.emit_clicked();
+        let key_ctrl = gtk4::EventControllerKey::new();
+        key_ctrl.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+                set_btn.emit_clicked();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
         });
+        lock_page.confirm_row.add_controller(key_ctrl);
     }
 
     window.present();
