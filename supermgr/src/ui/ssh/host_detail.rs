@@ -368,12 +368,26 @@ pub fn refresh_fortigate_dashboard(
         let result = async {
             let conn = zbus::Connection::system().await?;
             let proxy = DaemonProxy::new(&conn).await?;
+            // Fetch system status (hostname, firmware, serial).
             let resp = proxy
                 .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/status", "")
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let data: Value = serde_json::from_str(&resp)
+            let mut data: Value = serde_json::from_str(&resp)
                 .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+
+            // Also fetch resource usage for CPU/memory.
+            if let Ok(res_resp) = proxy
+                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/resource/usage", "")
+                .await
+            {
+                if let Ok(res_data) = serde_json::from_str::<Value>(&res_resp) {
+                    if let Some(results) = res_data.get("results") {
+                        data["resource"] = results.clone();
+                    }
+                }
+            }
+
             Ok::<Value, anyhow::Error>(data)
         }
         .await;
@@ -411,47 +425,45 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
         return;
     }
 
-    // The FortiGate /api/v2/monitor/system/status response has a `results`
-    // object (not an array) with the system info fields directly.
+    // FortiGate /api/v2/monitor/system/status puts some fields at top level
+    // (version, serial, build) and others inside "results" (hostname, etc.).
     let results = data.get("results").unwrap_or(data);
 
-    let firmware = results
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("--");
-    detail.fg_firmware_row.set_subtitle(firmware);
+    // Helper: check both top-level and results for a field.
+    let get_str = |key: &str| -> &str {
+        data.get(key)
+            .and_then(|v| v.as_str())
+            .or_else(|| results.get(key).and_then(|v| v.as_str()))
+            .unwrap_or("--")
+    };
 
-    let hostname = results
-        .get("hostname")
-        .and_then(|v| v.as_str())
-        .unwrap_or("--");
-    detail.fg_hostname_row.set_subtitle(hostname);
+    let version = get_str("version");
+    let build = data.get("build").and_then(|v| v.as_u64()).unwrap_or(0);
+    let firmware = if build > 0 {
+        format!("{version} (build {build})")
+    } else {
+        version.to_string()
+    };
+    detail.fg_firmware_row.set_subtitle(&firmware);
+    detail.fg_hostname_row.set_subtitle(get_str("hostname"));
+    detail.fg_serial_row.set_subtitle(get_str("serial"));
+    detail.fg_ha_row.set_subtitle(get_str("ha_mode"));
 
-    let serial = results
-        .get("serial")
-        .and_then(|v| v.as_str())
-        .unwrap_or("--");
-    detail.fg_serial_row.set_subtitle(serial);
-
-    // HA mode: standalone, a-p (active-passive), a-a (active-active), etc.
-    let ha = results
-        .get("ha_mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("--");
-    detail.fg_ha_row.set_subtitle(ha);
-
-    // CPU usage -- may be reported as a percentage integer.
-    let cpu = results
-        .get("cpu")
+    // CPU/Memory from /api/v2/monitor/system/resource/usage.
+    let resource = data.get("resource");
+    let cpu = resource
+        .and_then(|r| r.get("cpu"))
         .and_then(|v| v.as_u64())
+        .or_else(|| results.get("cpu").and_then(|v| v.as_u64()))
         .map(|v| format!("{v}%"))
         .unwrap_or_else(|| "--".to_owned());
     detail.fg_cpu_row.set_subtitle(&cpu);
 
-    // Memory usage -- may be reported as a percentage integer.
-    let mem = results
-        .get("mem")
+    // Memory usage from resource endpoint.
+    let mem = resource
+        .and_then(|r| r.get("mem"))
         .and_then(|v| v.as_u64())
+        .or_else(|| results.get("mem").and_then(|v| v.as_u64()))
         .map(|v| format!("{v}%"))
         .unwrap_or_else(|| "--".to_owned());
     detail.fg_memory_row.set_subtitle(&mem);
