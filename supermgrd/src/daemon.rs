@@ -2211,35 +2211,36 @@ impl DaemonService {
             // Check if we have a stored password — use sshpass if available.
             let mut pw_cmd = String::new();
             if let Some(ref pw_label) = password_label {
-                if let Ok(pw_bytes) = crate::secrets::retrieve_secret(pw_label).await {
-                    if let Ok(pw) = String::from_utf8(pw_bytes) {
-                        // Write password to temp file for sshpass -f
-                        let tmp_dir = std::env::temp_dir().join("supermgrd");
-                        let _ = std::fs::create_dir_all(&tmp_dir);
-                        let tmp_path = tmp_dir.join(format!("pw_{}.txt", id.simple()));
-                        if std::fs::write(&tmp_path, pw.as_bytes()).is_ok() {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                let _ = std::fs::set_permissions(
-                                    &tmp_path,
-                                    std::fs::Permissions::from_mode(0o600),
-                                );
-                                let real_uid = std::env::var("PKEXEC_UID")
-                                    .ok()
-                                    .and_then(|s| s.parse::<u32>().ok())
-                                    .or_else(|| std::env::var("SUDO_UID")
-                                        .ok()
-                                        .and_then(|s| s.parse::<u32>().ok()))
-                                    .unwrap_or(1000);
-                                let _ = std::process::Command::new("chown")
-                                    .arg(real_uid.to_string())
-                                    .arg(&tmp_path)
-                                    .status();
+                info!("ssh_connect_command: retrieving password from '{pw_label}'");
+                match crate::secrets::retrieve_secret(pw_label).await {
+                    Ok(pw_bytes) => {
+                        if let Ok(pw) = String::from_utf8(pw_bytes) {
+                            let tmp_dir = std::env::temp_dir().join("supermgrd");
+                            let _ = std::fs::create_dir_all(&tmp_dir);
+                            let tmp_path = tmp_dir.join(format!("pw_{}.txt", id.simple()));
+                            info!("ssh_connect_command: writing password to {}", tmp_path.display());
+                            if std::fs::write(&tmp_path, pw.as_bytes()).is_ok() {
+                                #[cfg(unix)]
+                                {
+                                    use std::os::unix::fs::PermissionsExt;
+                                    let _ = std::fs::set_permissions(
+                                        &tmp_path,
+                                        std::fs::Permissions::from_mode(0o600),
+                                    );
+                                    let _ = std::process::Command::new("chown")
+                                        .arg("1000")
+                                        .arg(&tmp_path)
+                                        .status();
+                                }
+                                tmp_files_to_clean.push(tmp_path.clone());
+                                pw_cmd = format!("sshpass -f {} ", tmp_path.display());
+                            } else {
+                                warn!("ssh_connect_command: failed to write password file");
                             }
-                            tmp_files_to_clean.push(tmp_path.clone());
-                            pw_cmd = format!("sshpass -f {} ", tmp_path.display());
                         }
+                    }
+                    Err(e) => {
+                        warn!("ssh_connect_command: failed to retrieve password: {e}");
                     }
                 }
             }
