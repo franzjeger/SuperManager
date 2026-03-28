@@ -137,16 +137,37 @@ For FortiGate devices, you can use both SSH and REST API — prefer REST API whe
 ///
 /// Accepts the existing conversation history and returns the updated history
 /// after appending the new user message and all assistant/tool exchanges.
+///
+/// `context` is a snapshot of the current app state (VPN status, hosts, keys)
+/// that is injected into the system prompt so Claude has immediate awareness
+/// without needing to call tools first.
 pub async fn send_message(
     api_key: &str,
     user_text: &str,
     tx: &mpsc::Sender<AppMsg>,
     mut messages: Vec<Value>,
+    context: &str,
 ) -> Result<Vec<Value>> {
-    let conn = zbus::Connection::system().await.context("D-Bus connection")?;
+    // Try D-Bus connection; if it fails (daemon restarted), notify the user
+    // and retry once after a short delay.
+    let conn = match zbus::Connection::system().await {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = tx.send(AppMsg::ConsoleResponse(
+                "\nDaemon connection lost — reconnecting...\n".into(),
+            ));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            zbus::Connection::system()
+                .await
+                .context("D-Bus reconnect failed — is the daemon running?")?
+        }
+    };
     let proxy = DaemonProxy::new(&conn).await.context("DaemonProxy")?;
 
     let client = reqwest::Client::new();
+
+    // Build the full system prompt with injected state context.
+    let full_system = format!("{SYSTEM_PROMPT}\n\n## Current State\n{context}");
 
     // Append the new user message to the conversation history.
     messages.push(json!({ "role": "user", "content": user_text }));
@@ -156,7 +177,7 @@ pub async fn send_message(
         let body = json!({
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
-            "system": SYSTEM_PROMPT,
+            "system": full_system,
             "tools": tools(),
             "messages": messages,
             "stream": true,

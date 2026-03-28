@@ -508,6 +508,13 @@ pub async fn dbus_ssh_delete_host(host_id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub async fn dbus_ssh_toggle_pin(host_id: String) -> anyhow::Result<Vec<SshHostSummary>> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    let json = proxy.ssh_toggle_pin(&host_id).await?;
+    Ok(serde_json::from_str(&json)?)
+}
+
 pub async fn dbus_ssh_add_host(host_json: String) -> anyhow::Result<(Vec<SshHostSummary>, String)> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
@@ -539,6 +546,12 @@ pub async fn dbus_ssh_connect_command(host_id: String) -> anyhow::Result<String>
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     Ok(proxy.ssh_connect_command(&host_id).await?)
+}
+
+pub async fn dbus_ssh_test_connection(host_id: String) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy.ssh_test_connection(&host_id).await?)
 }
 
 pub async fn dbus_ssh_export_public_key(key_id: String) -> anyhow::Result<String> {

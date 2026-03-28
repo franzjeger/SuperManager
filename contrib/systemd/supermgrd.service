@@ -1,23 +1,23 @@
 [Unit]
-Description=SuperManager daemon (SSH + VPN)
-After=network.target dbus.service
-Wants=dbus.service
+Description=SuperManager Daemon — SSH + VPN management service
+After=network-online.target dbus.service
+Wants=network-online.target
 
 [Service]
-RuntimeDirectory=supermgrd
-Type=simple
-ExecStart=/usr/local/bin/supermgrd
+Type=dbus
+BusName=org.supermgr.Daemon
+ExecStart=/usr/bin/supermgrd
 Restart=on-failure
 RestartSec=5
 
-# Capabilities: CAP_NET_ADMIN, CAP_NET_RAW, CAP_SYS_MODULE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_MODULE
+# Security hardening
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-
-NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/supermgrd /etc/swanctl/conf.d /run/supermgrd
-ProtectHome=yes
+ProtectHome=read-only
+ReadWritePaths=/etc/supermgrd /var/log/supermgrd /run/supermgrd /etc/swanctl/conf.d
+PrivateTmp=true
+NoNewPrivileges=false
 
 [Install]
 WantedBy=multi-user.target

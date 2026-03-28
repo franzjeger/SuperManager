@@ -137,6 +137,15 @@ pub enum AppMsg {
         /// Whether the host is reachable.
         reachable: bool,
     },
+    // FortiGate messages
+    /// FortiGate system status data fetched for a host.
+    FortigateStatus {
+        /// UUID string of the host.
+        host_id: String,
+        /// Parsed JSON response from `/api/v2/monitor/system/status`.
+        data: Value,
+    },
+
     // Console messages
     /// Append a message to the console chat (role = "assistant" or "tool").
     ConsoleResponse(String),

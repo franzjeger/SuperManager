@@ -103,6 +103,7 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_add_host(&self, host_json: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> { ... }
+//       async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()> { ... }
 //       async fn ssh_list_hosts(&self) -> fdo::Result<String> { ... }
 //       async fn ssh_get_host(&self, host_id: &str) -> fdo::Result<String> { ... }
@@ -110,6 +111,7 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_revoke_key(&self, key_id: &str, host_ids_json: &str, use_sudo: bool) -> fdo::Result<String> { ... }
 //       async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> { ... }
 //       async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String> { ... }
+//       async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
 //
 //       #[zbus(signal)]
 //       async fn state_changed(ctx: &zbus::SignalContext<'_>, state_json: String) -> zbus::Result<()>;
@@ -408,6 +410,12 @@ pub trait Daemon {
     /// `host_json` is the full JSON-serialised host object with updated fields.
     async fn ssh_update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()>;
 
+    /// Toggle the pinned/favourite state of an SSH host.
+    ///
+    /// Flips `pinned` and returns the refreshed host list as a JSON array of
+    /// [`crate::ssh::host::SshHostSummary`] objects.
+    async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String>;
+
     /// Delete an SSH host by UUID string.
     async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()>;
 
@@ -478,6 +486,12 @@ pub trait Daemon {
     /// The returned string is suitable for `std::process::Command` or display
     /// to the user (e.g. `"ssh -i /path/to/key user@host -p 22"`).
     async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String>;
+
+    /// Test SSH and (optionally) FortiGate API connectivity for a host.
+    ///
+    /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
+    /// `{"ssh": "timeout", "api": "auth_failed"}`.
+    async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String>;
 
     // =======================================================================
     // Signals

@@ -8,8 +8,10 @@ use std::sync::{mpsc, Arc, Mutex};
 use gtk4::{glib, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
-use tracing::{error, info};
+use serde_json::Value;
+use tracing::{error, info, warn};
 
+use supermgr_core::dbus::DaemonProxy;
 use supermgr_core::ssh::host::{AuthMethod, SshHostSummary};
 use supermgr_core::ssh::DeviceType;
 
@@ -34,9 +36,22 @@ pub struct SshHostDetail {
     pub auth_method_row: adw::ActionRow,
 
     pub connect_btn: gtk4::Button,
+    pub test_btn: gtk4::Button,
     pub push_key_btn: gtk4::Button,
+    pub push_key_api_btn: gtk4::Button,
     pub edit_btn: gtk4::Button,
     pub delete_btn: gtk4::Button,
+    pub pin_btn: gtk4::ToggleButton,
+
+    // FortiGate dashboard widgets (only visible for FortiGate hosts with API).
+    pub fg_dashboard_group: adw::PreferencesGroup,
+    pub fg_firmware_row: adw::ActionRow,
+    pub fg_hostname_row: adw::ActionRow,
+    pub fg_serial_row: adw::ActionRow,
+    pub fg_ha_row: adw::ActionRow,
+    pub fg_cpu_row: adw::ActionRow,
+    pub fg_memory_row: adw::ActionRow,
+    pub fg_refresh_btn: gtk4::Button,
 }
 
 // ---------------------------------------------------------------------------
@@ -113,6 +128,62 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     details_group.add(&auth_method_row);
 
+    // FortiGate dashboard (hidden by default).
+    let fg_dashboard_group = adw::PreferencesGroup::builder()
+        .title("FortiGate Dashboard")
+        .margin_top(12)
+        .visible(false)
+        .build();
+
+    let fg_firmware_row = adw::ActionRow::builder()
+        .title("Firmware")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_firmware_row);
+
+    let fg_hostname_row = adw::ActionRow::builder()
+        .title("Hostname")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_hostname_row);
+
+    let fg_serial_row = adw::ActionRow::builder()
+        .title("Serial Number")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_serial_row);
+
+    let fg_ha_row = adw::ActionRow::builder()
+        .title("HA Status")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_ha_row);
+
+    let fg_cpu_row = adw::ActionRow::builder()
+        .title("CPU Usage")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_cpu_row);
+
+    let fg_memory_row = adw::ActionRow::builder()
+        .title("Memory Usage")
+        .subtitle("--")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_memory_row);
+
+    let fg_refresh_btn = gtk4::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Refresh FortiGate dashboard")
+        .css_classes(["flat"])
+        .build();
+    fg_dashboard_group.set_header_suffix(Some(&fg_refresh_btn));
+
     // Action buttons.
     let btn_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
@@ -125,9 +196,20 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .css_classes(["suggested-action"])
         .tooltip_text("Open SSH session in terminal")
         .build();
+    let test_btn = gtk4::Button::builder()
+        .label("Test")
+        .css_classes(["flat"])
+        .tooltip_text("Test SSH and API connectivity")
+        .build();
     let push_key_btn = gtk4::Button::builder()
         .label("Push Key\u{2026}")
         .css_classes(["flat"])
+        .build();
+    let push_key_api_btn = gtk4::Button::builder()
+        .label("Push Key via API\u{2026}")
+        .css_classes(["flat"])
+        .tooltip_text("Push SSH key to FortiGate admin via REST API")
+        .visible(false)
         .build();
     let edit_btn = gtk4::Button::builder()
         .label("Edit\u{2026}")
@@ -137,8 +219,16 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .label("Delete")
         .css_classes(["destructive-action"])
         .build();
+    let pin_btn = gtk4::ToggleButton::builder()
+        .icon_name("starred-symbolic")
+        .tooltip_text("Pin / unpin this host")
+        .css_classes(["flat"])
+        .build();
+    btn_box.append(&pin_btn);
     btn_box.append(&connect_btn);
+    btn_box.append(&test_btn);
     btn_box.append(&push_key_btn);
+    btn_box.append(&push_key_api_btn);
     btn_box.append(&edit_btn);
     btn_box.append(&delete_btn);
 
@@ -155,6 +245,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     detail_box.append(&host_label_lbl);
     detail_box.append(&group_badge);
     detail_box.append(&details_group);
+    detail_box.append(&fg_dashboard_group);
     detail_box.append(&btn_box);
 
     detail_stack.add_named(&detail_box, Some("detail"));
@@ -176,9 +267,20 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         device_type_row,
         auth_method_row,
         connect_btn,
+        test_btn,
         push_key_btn,
+        push_key_api_btn,
         edit_btn,
         delete_btn,
+        pin_btn,
+        fg_dashboard_group,
+        fg_firmware_row,
+        fg_hostname_row,
+        fg_serial_row,
+        fg_ha_row,
+        fg_cpu_row,
+        fg_memory_row,
+        fg_refresh_btn,
     };
 
     (bundle, content_scroll.upcast())
@@ -210,7 +312,115 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
     };
     detail.auth_method_row.set_subtitle(auth_str);
 
+    detail.pin_btn.set_active(host.pinned);
+
+    // Show FortiGate dashboard and "Push Key via API" button when applicable.
+    let is_fortigate_api = host.device_type == DeviceType::Fortigate && host.has_api;
+    detail.fg_dashboard_group.set_visible(is_fortigate_api);
+    detail.push_key_api_btn.set_visible(is_fortigate_api);
+
+    if is_fortigate_api {
+        // Reset dashboard rows to loading placeholders.
+        detail.fg_firmware_row.set_subtitle("Loading\u{2026}");
+        detail.fg_hostname_row.set_subtitle("Loading\u{2026}");
+        detail.fg_serial_row.set_subtitle("Loading\u{2026}");
+        detail.fg_ha_row.set_subtitle("Loading\u{2026}");
+        detail.fg_cpu_row.set_subtitle("Loading\u{2026}");
+        detail.fg_memory_row.set_subtitle("Loading\u{2026}");
+    }
+
     detail.detail_stack.set_visible_child_name("detail");
+}
+
+// ---------------------------------------------------------------------------
+// FortiGate dashboard
+// ---------------------------------------------------------------------------
+
+/// Kick off an async fetch of the FortiGate system status and send the result
+/// back to the GTK main thread via `AppMsg::FortigateStatus`.
+pub fn refresh_fortigate_dashboard(
+    host_id: String,
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+) {
+    let tx = tx.clone();
+    rt.spawn(async move {
+        let result = async {
+            let conn = zbus::Connection::system().await?;
+            let proxy = DaemonProxy::new(&conn).await?;
+            let resp = proxy
+                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/status", "")
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let data: Value = serde_json::from_str(&resp)
+                .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+            Ok::<Value, anyhow::Error>(data)
+        }
+        .await;
+
+        match result {
+            Ok(data) => {
+                let _ = tx.send(AppMsg::FortigateStatus {
+                    host_id,
+                    data,
+                });
+            }
+            Err(e) => {
+                warn!("FortiGate dashboard fetch failed for {host_id}: {e}");
+                let _ = tx.send(AppMsg::OperationFailed(
+                    format!("FortiGate status: {e}"),
+                ));
+            }
+        }
+    });
+}
+
+/// Apply FortiGate status data to the dashboard rows.
+pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
+    // The FortiGate /api/v2/monitor/system/status response has a `results`
+    // object (not an array) with the system info fields directly.
+    let results = data.get("results").unwrap_or(data);
+
+    let firmware = results
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("--");
+    detail.fg_firmware_row.set_subtitle(firmware);
+
+    let hostname = results
+        .get("hostname")
+        .and_then(|v| v.as_str())
+        .unwrap_or("--");
+    detail.fg_hostname_row.set_subtitle(hostname);
+
+    let serial = results
+        .get("serial")
+        .and_then(|v| v.as_str())
+        .unwrap_or("--");
+    detail.fg_serial_row.set_subtitle(serial);
+
+    // HA mode: standalone, a-p (active-passive), a-a (active-active), etc.
+    let ha = results
+        .get("ha_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("--");
+    detail.fg_ha_row.set_subtitle(ha);
+
+    // CPU usage -- may be reported as a percentage integer.
+    let cpu = results
+        .get("cpu")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("{v}%"))
+        .unwrap_or_else(|| "--".to_owned());
+    detail.fg_cpu_row.set_subtitle(&cpu);
+
+    // Memory usage -- may be reported as a percentage integer.
+    let mem = results
+        .get("mem")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("{v}%"))
+        .unwrap_or_else(|| "--".to_owned());
+    detail.fg_memory_row.set_subtitle(&mem);
 }
 
 // ---------------------------------------------------------------------------

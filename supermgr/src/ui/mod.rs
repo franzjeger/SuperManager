@@ -993,6 +993,8 @@ pub fn build_ui(
         let auth_method_row = host_detail.auth_method_row.clone();
         let host_detail_stack = host_detail.detail_stack.clone();
         let ssh_host_detail_for_closure = ssh_host_detail.clone();
+        let rt_sel = rt.clone();
+        let tx_sel = tx.clone();
         ssh_host_list.connect_row_activated(move |_list, row| {
             // Skip non-selectable group header rows.
             if !row.is_selectable() {
@@ -1028,6 +1030,29 @@ pub fn build_ui(
                 ssh_content_stack.set_visible_child_name("host-detail");
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
+
+                // Auto-refresh FortiGate dashboard if applicable.
+                if host.device_type == supermgr_core::ssh::DeviceType::Fortigate && host.has_api {
+                    ssh::host_detail::refresh_fortigate_dashboard(
+                        host.id.to_string(),
+                        &rt_sel,
+                        &tx_sel,
+                    );
+                }
+            }
+        });
+    }
+
+    // --- FortiGate dashboard refresh button -----------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
+            let s = app_state.lock().expect("lock");
+            if let Some(host_id) = s.selected_ssh_host.clone() {
+                drop(s);
+                ssh::host_detail::refresh_fortigate_dashboard(host_id, &rt, &tx);
             }
         });
     }
@@ -1414,6 +1439,54 @@ pub fn build_ui(
         });
     }
 
+    // --- SSH Test Connection button -------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let toast_overlay = toast_overlay.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.test_btn.connect_clicked(move |_| {
+            let host_id = {
+                let s = app_state.lock().expect("lock");
+                s.selected_ssh_host.clone()
+            };
+            if let Some(host_id) = host_id {
+                let tx = tx.clone();
+                tx.send(AppMsg::ShowToast("Testing connection\u{2026}".to_string())).ok();
+                rt.spawn(async move {
+                    let msg = match crate::dbus_client::dbus_ssh_test_connection(host_id).await {
+                        Ok(json) => {
+                            // Parse result JSON and build a human-readable summary.
+                            let v: serde_json::Value = serde_json::from_str(&json)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": json}));
+                            let ssh_status = v.get("ssh")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("unknown");
+                            let mut parts = vec![format!("SSH: {ssh_status}")];
+                            if let Some(api) = v.get("api").and_then(|s| s.as_str()) {
+                                parts.push(format!("API: {api}"));
+                            }
+                            let summary = parts.join(", ");
+                            if ssh_status == "ok" {
+                                AppMsg::ShowToast(format!("Connection test passed ({summary})"))
+                            } else {
+                                AppMsg::OperationFailed(
+                                    format!("Connection test: {summary}"),
+                                )
+                            }
+                        }
+                        Err(e) => AppMsg::OperationFailed(
+                            format!("Connection test failed: {e}"),
+                        ),
+                    };
+                    let _ = tx.send(msg);
+                });
+            } else {
+                toast_overlay.add_toast(adw::Toast::new("No host selected"));
+            }
+        });
+    }
+
     // --- SSH Edit Host button -----------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -1557,6 +1630,27 @@ pub fn build_ui(
         });
     }
 
+    // --- Pin toggle button ---------------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        ssh_host_detail.pin_btn.connect_clicked(move |_btn| {
+            let host_id = {
+                app_state.lock().expect("lock").selected_ssh_host.clone()
+            };
+            let Some(host_id) = host_id else { return };
+            let tx = tx.clone();
+            rt.spawn(async move {
+                let msg = match crate::dbus_client::dbus_ssh_toggle_pin(host_id).await {
+                    Ok(hosts) => AppMsg::SshHostsRefreshed(hosts),
+                    Err(e) => AppMsg::OperationFailed(e.to_string()),
+                };
+                tx.send(msg).ok();
+            });
+        });
+    }
+
     // --- Banner "Retry" button ----------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -1621,6 +1715,7 @@ pub fn build_ui(
     let rx_ssh_content_stack = ssh_content_stack.clone();
     let rx_ssh_key_pubkey_view = ssh_key_detail.public_key_view.clone();
     let rx_console_panel = console_panel.clone();
+    let rx_ssh_host_detail = ssh_host_detail.clone();
 
     let prev_state_init: VpnState = {
         let s = rx_app_state.lock().expect("lock");
@@ -1866,7 +1961,47 @@ pub fn build_ui(
                 }
                 AppMsg::OperationFailed(msg) => {
                     error!("operation failed: {}", msg);
-                    rx_toast_overlay.add_toast(adw::Toast::new(&msg));
+                    if msg.len() <= 80 {
+                        rx_toast_overlay.add_toast(adw::Toast::new(&msg));
+                    } else {
+                        // Truncated toast with a "Details" button for long errors.
+                        let short = format!("{}…", &msg[..77]);
+                        let toast = adw::Toast::builder()
+                            .title(&short)
+                            .button_label("Details")
+                            .timeout(5)
+                            .build();
+                        let full_msg = msg.clone();
+                        let win = rx_window.clone();
+                        toast.connect_button_clicked(move |_| {
+                            let dialog = adw::AlertDialog::builder()
+                                .heading("Error Details")
+                                .body_use_markup(false)
+                                .build();
+                            // Use a scrollable monospace TextView for the full error.
+                            let text_view = gtk4::TextView::builder()
+                                .editable(false)
+                                .cursor_visible(false)
+                                .wrap_mode(gtk4::WrapMode::WordChar)
+                                .monospace(true)
+                                .top_margin(8)
+                                .bottom_margin(8)
+                                .left_margin(8)
+                                .right_margin(8)
+                                .build();
+                            text_view.buffer().set_text(&full_msg);
+                            let scroll = gtk4::ScrolledWindow::builder()
+                                .min_content_width(400)
+                                .min_content_height(200)
+                                .child(&text_view)
+                                .build();
+                            dialog.set_extra_child(Some(&scroll));
+                            dialog.add_response("close", "Close");
+                            dialog.set_default_response(Some("close"));
+                            dialog.present(Some(&win));
+                        });
+                        rx_toast_overlay.add_toast(toast);
+                    }
                 }
                 AppMsg::ShowToast(msg) => {
                     rx_toast_overlay.add_toast(adw::Toast::new(&msg));
@@ -1953,9 +2088,39 @@ pub fn build_ui(
                     rx_toast_overlay.add_toast(adw::Toast::new("SSH hosts updated"));
                 }
                 AppMsg::HostHealthChanged { host_id, reachable } => {
+                    let was_known_before;
+                    let old_reachable;
                     {
                         let mut s = rx_app_state.lock().expect("lock");
-                        s.host_health.insert(host_id, reachable);
+                        old_reachable = s.host_health.get(&host_id).copied();
+                        was_known_before = old_reachable.is_some();
+                        s.host_health.insert(host_id.clone(), reachable);
+                    }
+                    // Desktop notification on state *change* (not initial discovery).
+                    if was_known_before && old_reachable != Some(reachable) {
+                        let s = rx_app_state.lock().expect("lock");
+                        let host_label = s.ssh_hosts.iter()
+                            .find(|h| h.id.to_string() == host_id)
+                            .map(|h| h.label.clone())
+                            .unwrap_or_else(|| host_id.clone());
+                        drop(s);
+                        let (title, body) = if reachable {
+                            (
+                                format!("\u{2b24} {} is now reachable", host_label),
+                                "Host came back online.".to_owned(),
+                            )
+                        } else {
+                            (
+                                format!("\u{2b24} {} is unreachable", host_label),
+                                "Host went offline.".to_owned(),
+                            )
+                        };
+                        if let Some(app) = rx_window.application() {
+                            let notif = gio::Notification::new(&title);
+                            notif.set_body(Some(&body));
+                            let notif_id = format!("host-health-{}", host_id);
+                            app.send_notification(Some(&notif_id), &notif);
+                        }
                     }
                     let s = rx_app_state.lock().expect("lock");
                     let filter = s.ssh_filter.clone();
@@ -1978,6 +2143,17 @@ pub fn build_ui(
                 } => {
                     rx_toast_overlay
                         .add_toast(adw::Toast::new(&format!("{host_label}: {message}")));
+                }
+                // === FortiGate messages =======================================
+                AppMsg::FortigateStatus { host_id, data } => {
+                    // Only apply if this host is still the selected one.
+                    let s = rx_app_state.lock().expect("lock");
+                    if s.selected_ssh_host.as_deref() == Some(&host_id) {
+                        ssh::host_detail::apply_fortigate_status(
+                            &rx_ssh_host_detail,
+                            &data,
+                        );
+                    }
                 }
                 // === Console messages =========================================
                 AppMsg::ConsoleResponse(text) => {

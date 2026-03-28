@@ -6,6 +6,8 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
+use supermgr_core::vpn::state::VpnState;
+
 use crate::app::{AppMsg, AppState};
 
 const API_KEY_URL: &str = "https://console.anthropic.com/settings/keys";
@@ -170,7 +172,22 @@ pub fn build_console_page(
             let tx = tx.clone();
             let text = text.clone();
             let app_state = Arc::clone(&app_state);
-            let messages = app_state.lock().unwrap().console_messages.clone();
+            let (messages, context) = {
+                let s = app_state.lock().unwrap();
+                let vpn = match &s.vpn_state {
+                    VpnState::Connected { .. } => "VPN: connected",
+                    VpnState::Disconnected => "VPN: disconnected",
+                    _ => "VPN: transitioning",
+                };
+                let hosts: Vec<String> = s.ssh_hosts.iter()
+                    .map(|h| format!("- {} ({}@{}:{}, {}, id={})", h.label, h.username, h.hostname, h.port, h.device_type, h.id))
+                    .collect();
+                let keys: Vec<String> = s.ssh_keys.iter()
+                    .map(|k| format!("- {} ({:?}, {})", k.name, k.key_type, k.fingerprint))
+                    .collect();
+                let ctx = format!("{vpn}\n\nSSH Hosts:\n{}\n\nSSH Keys:\n{}", hosts.join("\n"), keys.join("\n"));
+                (s.console_messages.clone(), ctx)
+            };
             rt.spawn(async move {
                 let _ = tx.send(AppMsg::ConsoleThinking(true));
 
@@ -183,7 +200,7 @@ pub fn build_console_page(
                     return;
                 };
 
-                match super::claude::send_message(&api_key, &text, &tx, messages).await {
+                match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
                     Ok(updated_messages) => {
                         app_state.lock().unwrap().console_messages = updated_messages;
                     }

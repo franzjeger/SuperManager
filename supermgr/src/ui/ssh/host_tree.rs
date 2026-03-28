@@ -92,9 +92,12 @@ pub fn populate_ssh_host_list(
         groups.entry(group_name).or_default().push(host);
     }
 
-    // Sort hosts within each group alphabetically by label.
+    // Sort hosts within each group: pinned first, then alphabetically by label.
     for hosts_in_group in groups.values_mut() {
-        hosts_in_group.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+        hosts_in_group.sort_by(|a, b| {
+            b.pinned.cmp(&a.pinned)
+                .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
+        });
     }
 
     // Track row indices to map selection back to host IDs.
@@ -132,8 +135,13 @@ pub fn populate_ssh_host_list(
                 host.hostname, port_str, host.username
             );
 
+            let display_title = if host.pinned {
+                format!("\u{2605} {}", host.label)
+            } else {
+                host.label.clone()
+            };
             let row = adw::ActionRow::builder()
-                .title(host.label.as_str())
+                .title(&display_title)
                 .subtitle(&subtitle)
                 .activatable(true)
                 .build();

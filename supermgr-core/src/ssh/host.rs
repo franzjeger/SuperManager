@@ -78,6 +78,10 @@ pub struct SshHost {
     #[serde(default)]
     pub api_verify_tls: bool,
 
+    /// Whether this host is pinned/favourited (appears at the top of lists).
+    #[serde(default)]
+    pub pinned: bool,
+
     /// When this host was created.
     #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -129,6 +133,10 @@ pub struct SshHostSummary {
     /// FortiGate REST API port (for display in edit dialog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
+
+    /// Whether this host is pinned/favourited.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 impl From<&SshHost> for SshHostSummary {
@@ -146,6 +154,7 @@ impl From<&SshHost> for SshHostSummary {
             vpn_profile_id: host.vpn_profile_id,
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
+            pinned: host.pinned,
         }
     }
 }

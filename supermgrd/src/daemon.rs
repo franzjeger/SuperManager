@@ -1553,11 +1553,32 @@ impl DaemonService {
         if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
             host.api_port = Some(v as u16);
         }
+        if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
+            host.pinned = v;
+        }
         host.updated_at = chrono::Utc::now();
 
         let host = host.clone();
         state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
         Ok(())
+    }
+
+    /// Toggle the pinned/favourite state of an SSH host.
+    ///
+    /// Flips the `pinned` boolean and persists the change.  Returns the
+    /// refreshed host list (JSON array of summaries) so the GUI can update.
+    async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let mut state = self.state.lock().await;
+        let host = state.ssh_hosts.get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.pinned = !host.pinned;
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
+        serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Delete an SSH host by UUID.
@@ -2423,6 +2444,110 @@ impl DaemonService {
         );
 
         Ok(summary.to_string())
+    }
+
+    // =======================================================================
+    // SSH test connection
+    // =======================================================================
+
+    /// Test SSH and (optionally) FortiGate API connectivity for a host.
+    ///
+    /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
+    /// `{"ssh": "timeout", "api": "auth_failed"}`.  The `api` field is only
+    /// present when the host has a FortiGate API token configured.
+    async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let host = {
+            let state = self.state.lock().await;
+            state.ssh_hosts.get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .clone()
+        };
+
+        info!("ssh_test_connection: testing {}@{}:{}", host.username, host.hostname, host.port);
+
+        // --- Test SSH connectivity ---
+        let state_arc = Arc::clone(&self.state);
+        let ssh_result = match tokio::time::timeout(
+            Duration::from_secs(10),
+            connect_to_ssh_host(&host, &None, &state_arc),
+        ).await {
+            Ok(Ok(_session)) => "ok".to_string(),
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                if msg.contains("auth") || msg.contains("Auth") {
+                    "auth_failed".to_string()
+                } else if msg.contains("refused") {
+                    "connection_refused".to_string()
+                } else {
+                    format!("error: {msg}")
+                }
+            }
+            Err(_) => "timeout".to_string(),
+        };
+
+        // --- Test FortiGate API connectivity (if configured) ---
+        let api_result = if host.api_token_ref.is_some() {
+            let token_label = host.api_token_ref.as_ref().unwrap().label().to_owned();
+            let api_port = host.api_port.unwrap_or(443);
+
+            match secrets::retrieve_secret(&token_label).await {
+                Ok(token_bytes) => {
+                    match String::from_utf8(token_bytes) {
+                        Ok(token) => {
+                            let token = token.trim().to_owned();
+                            let url = format!(
+                                "https://{}:{}/api/v2/monitor/system/status",
+                                host.hostname, api_port,
+                            );
+                            let client = reqwest::Client::builder()
+                                .danger_accept_invalid_certs(true)
+                                .timeout(Duration::from_secs(10))
+                                .build()
+                                .map_err(|e| fdo::Error::Failed(format!("HTTP client: {e}")))?;
+
+                            match client.get(&url)
+                                .query(&[("access_token", &token)])
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    let status = resp.status().as_u16();
+                                    if status == 200 {
+                                        Some("ok".to_string())
+                                    } else if status == 401 || status == 403 {
+                                        Some("auth_failed".to_string())
+                                    } else {
+                                        Some(format!("http_{status}"))
+                                    }
+                                }
+                                Err(e) => {
+                                    if e.is_timeout() {
+                                        Some("timeout".to_string())
+                                    } else {
+                                        Some(format!("error: {e}"))
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => Some("error: invalid token encoding".to_string()),
+                    }
+                }
+                Err(e) => Some(format!("error: retrieve token: {e}")),
+            }
+        } else {
+            None
+        };
+
+        let mut result = serde_json::json!({ "ssh": ssh_result });
+        if let Some(api) = api_result {
+            result["api"] = serde_json::Value::String(api);
+        }
+
+        info!("ssh_test_connection result for {id}: {result}");
+        Ok(result.to_string())
     }
 
     // =======================================================================
