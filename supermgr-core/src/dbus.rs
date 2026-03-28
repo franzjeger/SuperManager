@@ -112,6 +112,7 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> { ... }
 //       async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
+//       async fn fortigate_push_ssh_key(&self, host_id: &str, key_id: &str, admin_user: &str) -> fdo::Result<String> { ... }
 //
 //       #[zbus(signal)]
 //       async fn state_changed(ctx: &zbus::SignalContext<'_>, state_json: String) -> zbus::Result<()>;
@@ -474,6 +475,21 @@ pub trait Daemon {
         method: &str,
         path: &str,
         body: &str,
+    ) -> fdo::Result<String>;
+
+    /// Push an SSH public key to a FortiGate admin user via REST API.
+    ///
+    /// `host_id` is the UUID of the FortiGate host with an API token configured.
+    /// `key_id` is the UUID of the SSH key whose public key will be pushed.
+    /// `admin_user` is the FortiGate admin username (e.g. `"admin"`).
+    ///
+    /// The key is set as `ssh-public-key1` on the admin user via
+    /// `PUT /api/v2/cmdb/system/admin/{admin_user}`.
+    async fn fortigate_push_ssh_key(
+        &self,
+        host_id: &str,
+        key_id: &str,
+        admin_user: &str,
     ) -> fdo::Result<String>;
 
     /// Execute a shell command on a remote SSH host.

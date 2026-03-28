@@ -2030,6 +2030,52 @@ impl DaemonService {
         Ok(resp_body)
     }
 
+    /// Push an SSH public key to a FortiGate admin user via REST API.
+    ///
+    /// Calls `PUT /api/v2/cmdb/system/admin/{admin_user}` with the public key
+    /// assigned to `ssh-public-key1`.  Returns a JSON result with status.
+    async fn fortigate_push_ssh_key(
+        &self,
+        host_id: &str,
+        key_id: &str,
+        admin_user: &str,
+    ) -> fdo::Result<String> {
+        let hid = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid host UUID".into()))?;
+        let kid = Uuid::parse_str(key_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid key UUID".into()))?;
+
+        // Get the public key text.
+        let pubkey = {
+            let state = self.state.lock().await;
+            let key = state.ssh_keys.get(&kid)
+                .ok_or_else(|| fdo::Error::UnknownObject("SSH key not found".into()))?;
+            key.public_key.clone()
+        };
+
+        // Build the request body for FortiGate admin update.
+        let body = serde_json::json!({
+            "ssh-public-key1": pubkey,
+        });
+
+        info!(
+            "fortigate_push_ssh_key: pushing key {} to admin '{}' on host {}",
+            kid, admin_user, hid
+        );
+        crate::audit::log_event(
+            "FG_PUSH_KEY",
+            &format!("key={kid} admin={admin_user} host={hid}"),
+        );
+
+        // Delegate to the existing fortigate_api method.
+        let path = format!("/api/v2/cmdb/system/admin/{admin_user}");
+        let resp = self
+            .fortigate_api(host_id, "PUT", &path, &body.to_string())
+            .await?;
+
+        Ok(resp)
+    }
+
     /// Execute a shell command on a remote SSH host and return the result.
     ///
     /// Returns JSON: `{ "stdout": "...", "stderr": "...", "exit_code": N }`.

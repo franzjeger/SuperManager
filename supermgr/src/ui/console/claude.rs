@@ -121,6 +121,19 @@ fn tools() -> Value {
                 },
                 "required": ["host_id", "token"]
             }
+        },
+        {
+            "name": "fortigate_push_ssh_key",
+            "description": "Push an SSH public key to a FortiGate admin user via REST API. Sets ssh-public-key1 on the admin user. Requires an API token to be configured on the host.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "host_id": { "type": "string", "description": "UUID of the FortiGate host" },
+                    "key_id": { "type": "string", "description": "UUID of the SSH key to push" },
+                    "admin_user": { "type": "string", "description": "FortiGate admin username (e.g. 'admin')" }
+                },
+                "required": ["host_id", "key_id", "admin_user"]
+            }
         }
     ])
 }
@@ -513,6 +526,14 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
             let port = args["port"].as_u64().unwrap_or(443) as u16;
             proxy.ssh_set_api_token(host_id, token, port).await?;
             Ok(json!({ "status": "stored", "host_id": host_id, "port": port }))
+        }
+        "fortigate_push_ssh_key" => {
+            let host_id = args["host_id"].as_str().context("missing host_id")?;
+            let key_id = args["key_id"].as_str().context("missing key_id")?;
+            let admin_user = args["admin_user"].as_str().context("missing admin_user")?;
+            info!("tool fortigate_push_ssh_key: key={key_id} admin={admin_user} host={host_id}");
+            let resp = proxy.fortigate_push_ssh_key(host_id, key_id, admin_user).await?;
+            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
         }
         _ => anyhow::bail!("unknown tool: {name}"),
     }

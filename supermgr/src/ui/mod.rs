@@ -1487,6 +1487,21 @@ pub fn build_ui(
         });
     }
 
+    // --- FortiGate Web UI button -----------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        ssh_host_detail.web_ui_btn.connect_clicked(move |_| {
+            let s = app_state.lock().expect("lock");
+            if let Some(host_id) = &s.selected_ssh_host {
+                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                    let port = host.api_port.unwrap_or(443);
+                    let url = format!("https://{}:{}", host.hostname, port);
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                }
+            }
+        });
+    }
+
     // --- SSH Edit Host button -----------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -1584,6 +1599,115 @@ pub fn build_ui(
                 &rt,
                 &tx,
             );
+        });
+    }
+
+    // --- SSH Host Push Key via API button (FortiGate) -------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        let window = window.clone();
+        let toast_overlay = toast_overlay.clone();
+        ssh_host_detail.push_key_api_btn.connect_clicked(move |_| {
+            let s = app_state.lock().expect("lock");
+            let host_id = match s.selected_ssh_host.clone() {
+                Some(id) => id,
+                None => return,
+            };
+            let keys = s.ssh_keys.clone();
+            drop(s);
+
+            if keys.is_empty() {
+                toast_overlay.add_toast(adw::Toast::new("No SSH keys available"));
+                return;
+            }
+
+            // Build a dialog that asks for admin user + which key to push.
+            let dialog = adw::AlertDialog::new(
+                Some("Push Key via FortiGate API"),
+                Some("Push an SSH public key to a FortiGate admin user."),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("push", "Push Key");
+            dialog.set_response_appearance("push", adw::ResponseAppearance::Suggested);
+
+            let content = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(8)
+                .build();
+
+            let admin_entry = adw::EntryRow::builder()
+                .title("Admin Username")
+                .text("admin")
+                .build();
+            let admin_group = adw::PreferencesGroup::new();
+            admin_group.add(&admin_entry);
+            content.append(&admin_group);
+
+            let key_combo = gtk4::DropDown::from_strings(
+                &keys.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+            );
+            let key_group = adw::PreferencesGroup::builder()
+                .title("SSH Key")
+                .build();
+            let key_row = adw::ActionRow::builder()
+                .title("Key")
+                .activatable(false)
+                .build();
+            key_row.add_suffix(&key_combo);
+            key_group.add(&key_row);
+            content.append(&key_group);
+
+            dialog.set_extra_child(Some(&content));
+
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let toast_overlay = toast_overlay.clone();
+            dialog.connect_response(Some("push"), move |_dlg, _resp| {
+                let admin_user = admin_entry.text().to_string();
+                if admin_user.is_empty() {
+                    toast_overlay.add_toast(adw::Toast::new("Admin username is required"));
+                    return;
+                }
+                let selected_idx = key_combo.selected() as usize;
+                let key_id = match keys.get(selected_idx) {
+                    Some(k) => k.id.to_string(),
+                    None => return,
+                };
+                let host_id = host_id.clone();
+                let tx = tx.clone();
+                let toast_overlay = toast_overlay.clone();
+                rt.spawn(async move {
+                    let conn = match zbus::Connection::system().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("D-Bus: {e}")));
+                            return;
+                        }
+                    };
+                    let proxy = match supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("proxy: {e}")));
+                            return;
+                        }
+                    };
+                    match proxy.fortigate_push_ssh_key(&host_id, &key_id, &admin_user).await {
+                        Ok(_) => {
+                            let _ = tx.send(AppMsg::ShowToast(
+                                format!("SSH key pushed to FortiGate admin '{admin_user}'"),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(
+                                format!("Push key via API failed: {e}"),
+                            ));
+                        }
+                    }
+                });
+            });
+            dialog.present(Some(&window));
         });
     }
 
