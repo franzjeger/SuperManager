@@ -131,6 +131,19 @@ pub async fn retrieve_secret(label: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("base64 decode failed for label '{label}'"))
 }
 
+/// Return the entire label→base64 map (for backup/export).
+pub async fn read_all_secrets() -> Result<HashMap<String, String>> {
+    read_map().await
+}
+
+/// Store a pre-encoded (base64) secret directly — used by backup import
+/// to avoid double-encoding.
+pub async fn store_secret_raw(label: &str, base64_value: &str) -> Result<()> {
+    let mut map = read_map().await?;
+    map.insert(label.to_owned(), base64_value.to_owned());
+    write_map(&map).await
+}
+
 /// Remove the entry for `label`.  No-op if the label does not exist.
 pub async fn delete_secret(label: &str) -> Result<()> {
     let mut map = read_map().await?;

@@ -2263,12 +2263,23 @@ impl DaemonService {
         let ssh_keys: Vec<&SshKey> = state.ssh_keys.values().collect();
         let ssh_hosts: Vec<&SshHost> = state.ssh_hosts.values().collect();
 
+        // Include all secrets so the backup is self-contained.
+        let all_secrets: std::collections::HashMap<String, String> =
+            match secrets::read_all_secrets().await {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("export_all: could not read secrets: {e}");
+                    std::collections::HashMap::new()
+                }
+            };
+
         let backup = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "exported_at": chrono::Utc::now().to_rfc3339(),
             "profiles": profiles,
             "ssh_keys": ssh_keys,
             "ssh_hosts": ssh_hosts,
+            "secrets": all_secrets,
         });
 
         serde_json::to_string_pretty(&backup)
@@ -2383,15 +2394,32 @@ impl DaemonService {
             }
         }
 
+        // --- Secrets ---
+        let mut imported_secrets: u32 = 0;
+        if let Some(obj) = backup.get("secrets").and_then(|v| v.as_object()) {
+            for (label, value) in obj {
+                if let Some(encoded) = value.as_str() {
+                    if let Err(e) = secrets::store_secret_raw(label, encoded).await {
+                        warn!("import_all: failed to store secret '{label}': {e}");
+                    } else {
+                        imported_secrets += 1;
+                    }
+                }
+            }
+            info!("import_all: restored {imported_secrets} secret(s)");
+        }
+
         let summary = serde_json::json!({
             "profiles": imported_profiles,
             "ssh_keys": imported_keys,
             "ssh_hosts": imported_hosts,
+            "secrets": imported_secrets,
         });
 
         info!(
             "import_all: imported {imported_profiles} profile(s), \
-             {imported_keys} SSH key(s), {imported_hosts} SSH host(s)"
+             {imported_keys} SSH key(s), {imported_hosts} SSH host(s), \
+             {imported_secrets} secret(s)"
         );
 
         Ok(summary.to_string())

@@ -1343,67 +1343,67 @@ pub fn show_settings_dialog(
     import_row.add_suffix(&import_btn);
     backup_group.add(&import_row);
 
-    // Export button: ask daemon for full config JSON, then save via FileDialog.
+    // Export button: show file save dialog first, then fetch config and write.
     {
         let window = window.clone();
         let tx = tx.clone();
         let rt = rt.clone();
         export_btn.connect_clicked(move |_| {
-            let window = window.clone();
+            let filter = gtk4::FileFilter::new();
+            filter.set_name(Some("JSON backup (*.json)"));
+            filter.add_pattern("*.json");
+
+            let dialog = gtk4::FileDialog::builder()
+                .title("Export SuperManager Config")
+                .initial_name("supermanager-backup.json")
+                .default_filter(&filter)
+                .modal(true)
+                .build();
+
             let tx = tx.clone();
-            rt.spawn(async move {
-                match crate::dbus_client::dbus_export_all().await {
-                    Ok(json) => {
-                        // Schedule the file-save dialog on the main GTK thread.
-                        glib::idle_add_once(move || {
-                            let filter = gtk4::FileFilter::new();
-                            filter.set_name(Some("JSON backup (*.json)"));
-                            filter.add_pattern("*.json");
-
-                            let dialog = gtk4::FileDialog::builder()
-                                .title("Export SuperManager Config")
-                                .initial_name("supermanager-backup.json")
-                                .default_filter(&filter)
-                                .modal(true)
-                                .build();
-
-                            let tx = tx.clone();
-                            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
-                                match result {
-                                    Ok(file) => {
-                                        if let Some(path) = file.path() {
-                                            match std::fs::write(&path, &json) {
-                                                Ok(()) => {
-                                                    let _ = tx.send(AppMsg::ShowToast(
-                                                        format!("Config exported to {}", path.display()),
-                                                    ));
-                                                }
-                                                Err(e) => {
-                                                    let _ = tx.send(AppMsg::OperationFailed(
-                                                        format!("Failed to write file: {e}"),
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(ref e)
-                                        if e.matches(gio::IOErrorEnum::Cancelled)
-                                            || e.matches(gio::IOErrorEnum::Failed) => {}
-                                    Err(e) => {
-                                        error!("export file dialog error: {e}");
-                                        let _ = tx.send(AppMsg::OperationFailed(
-                                            format!("File dialog: {e}"),
-                                        ));
-                                    }
-                                }
-                            });
-                        });
+            let rt = rt.clone();
+            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+                let path = match result {
+                    Ok(file) => match file.path() {
+                        Some(p) => p,
+                        None => return,
+                    },
+                    Err(ref e)
+                        if e.matches(gio::IOErrorEnum::Cancelled)
+                            || e.matches(gio::IOErrorEnum::Failed) =>
+                    {
+                        return;
                     }
                     Err(e) => {
-                        error!("export_all failed: {e}");
-                        let _ = tx.send(AppMsg::OperationFailed(format!("Export failed: {e}")));
+                        error!("export file dialog error: {e}");
+                        let _ = tx.send(AppMsg::OperationFailed(format!("File dialog: {e}")));
+                        return;
                     }
-                }
+                };
+
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    match crate::dbus_client::dbus_export_all().await {
+                        Ok(json) => match std::fs::write(&path, &json) {
+                            Ok(()) => {
+                                let _ = tx.send(AppMsg::ShowToast(
+                                    format!("Config exported to {}", path.display()),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(
+                                    format!("Failed to write file: {e}"),
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            error!("export_all failed: {e}");
+                            let _ = tx.send(AppMsg::OperationFailed(
+                                format!("Export failed: {e}"),
+                            ));
+                        }
+                    }
+                });
             });
         });
     }
