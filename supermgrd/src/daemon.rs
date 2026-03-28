@@ -304,6 +304,7 @@ impl DaemonService {
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
     ) -> fdo::Result<()> {
+        crate::audit::log_event("VPN_DISCONNECT", "");
         let backend = {
             let mut state = self.state.lock().await;
             match state.active_backend.take() {
@@ -1967,6 +1968,7 @@ impl DaemonService {
 
         let url = format!("https://{hostname}:{api_port}{path}");
         info!("fortigate_api: {method} {url}");
+        crate::audit::log_event("FG_API", &format!("{method} {url}"));
 
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -2022,6 +2024,7 @@ impl DaemonService {
         };
 
         info!("ssh_execute_command: {}@{}:{} $ {}", host.username, host.hostname, host.port, command);
+        crate::audit::log_event("SSH_EXEC", &format!("{}@{} $ {}", host.username, host.hostname, command));
 
         let state_arc = Arc::clone(&self.state);
         let session = connect_to_ssh_host(&host, &None, &state_arc).await
@@ -2128,6 +2131,11 @@ impl DaemonService {
             (host.port, host.username.clone(), host.hostname.clone(), host.auth_method, key_label, pw_label)
         };
 
+        crate::audit::log_event("SSH_CONNECT", &format!("{username}@{hostname}:{port}"));
+
+        // Collect temp files created during this call so we can schedule cleanup.
+        let mut tmp_files_to_clean: Vec<PathBuf> = Vec::new();
+
         let mut cmd = if auth_method == AuthMethod::Password {
             // Check if we have a stored password — use sshpass if available.
             let mut pw_cmd = String::new();
@@ -2158,6 +2166,7 @@ impl DaemonService {
                                     .arg(&tmp_path)
                                     .status();
                             }
+                            tmp_files_to_clean.push(tmp_path.clone());
                             pw_cmd = format!("sshpass -f {} ", tmp_path.display());
                         }
                     }
@@ -2200,6 +2209,7 @@ impl DaemonService {
                                 .arg(&tmp_path)
                                 .status();
                         }
+                        tmp_files_to_clean.push(tmp_path.clone());
                         cmd = format!(
                             "ssh -p {port} -i {} -o IdentitiesOnly=yes {username}@{hostname}",
                             tmp_path.display()
@@ -2207,6 +2217,17 @@ impl DaemonService {
                     }
                 }
             }
+        }
+
+        // Schedule cleanup of temp files after 60 seconds.
+        for path in tmp_files_to_clean {
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if path.exists() {
+                    let _ = std::fs::remove_file(&path);
+                    debug!("cleaned up temp file: {}", path.display());
+                }
+            });
         }
 
         Ok(cmd)
@@ -2225,6 +2246,155 @@ impl DaemonService {
             .map(|(id, &reachable)| (id.to_string(), reachable))
             .collect();
         serde_json::to_string(&map).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    // =======================================================================
+    // Config backup & restore
+    // =======================================================================
+
+    /// Export all configuration (profiles, SSH keys, SSH hosts) as a single
+    /// JSON string.  Secret values (private keys, passwords) are **not**
+    /// included -- only their `SecretRef` labels.  The caller (GUI) saves the
+    /// returned string to a file chosen by the user.
+    async fn export_all(&self) -> fdo::Result<String> {
+        let state = self.state.lock().await;
+
+        let profiles: Vec<&Profile> = state.profiles.values().collect();
+        let ssh_keys: Vec<&SshKey> = state.ssh_keys.values().collect();
+        let ssh_hosts: Vec<&SshHost> = state.ssh_hosts.values().collect();
+
+        let backup = serde_json::json!({
+            "version": 1,
+            "exported_at": chrono::Utc::now().to_rfc3339(),
+            "profiles": profiles,
+            "ssh_keys": ssh_keys,
+            "ssh_hosts": ssh_hosts,
+        });
+
+        serde_json::to_string_pretty(&backup)
+            .map_err(|e| fdo::Error::Failed(format!("JSON serialisation failed: {e}")))
+    }
+
+    /// Import configuration from a JSON backup string previously produced by
+    /// [`Self::export_all`].
+    ///
+    /// Each imported item receives a new UUID so it never collides with
+    /// existing data.  Returns a JSON summary:
+    /// `{"profiles": N, "ssh_keys": N, "ssh_hosts": N}`.
+    async fn import_all(&self, data: &str) -> fdo::Result<String> {
+        let backup: serde_json::Value = serde_json::from_str(data)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+
+        let mut imported_profiles: u32 = 0;
+        let mut imported_keys: u32 = 0;
+        let mut imported_hosts: u32 = 0;
+
+        let mut state = self.state.lock().await;
+
+        // --- Profiles ---
+        if let Some(arr) = backup.get("profiles").and_then(|v| v.as_array()) {
+            for item in arr {
+                match serde_json::from_value::<Profile>(item.clone()) {
+                    Ok(mut profile) => {
+                        let new_id = Uuid::new_v4();
+                        profile.id = new_id;
+                        if let Err(e) = state.save_profile(&profile) {
+                            warn!("import_all: failed to save profile '{}': {e}", profile.name);
+                            continue;
+                        }
+                        info!("import_all: imported profile '{}' as {new_id}", profile.name);
+                        state.profiles.insert(new_id, profile);
+                        imported_profiles += 1;
+                    }
+                    Err(e) => {
+                        warn!("import_all: skipping malformed profile: {e}");
+                    }
+                }
+            }
+        }
+
+        // --- SSH keys ---
+        if let Some(arr) = backup.get("ssh_keys").and_then(|v| v.as_array()) {
+            for item in arr {
+                match serde_json::from_value::<SshKey>(item.clone()) {
+                    Ok(mut key) => {
+                        let new_id = Uuid::new_v4();
+                        key.id = new_id;
+                        let path = state.ssh_key_dir.join(format!("{new_id}.toml"));
+                        match toml::to_string_pretty(&key) {
+                            Ok(text) => {
+                                if let Err(e) = std::fs::create_dir_all(&state.ssh_key_dir) {
+                                    warn!("import_all: mkdir ssh_key_dir: {e}");
+                                    continue;
+                                }
+                                if let Err(e) = std::fs::write(&path, &text) {
+                                    warn!("import_all: write SSH key file: {e}");
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("import_all: TOML serialise SSH key: {e}");
+                                continue;
+                            }
+                        }
+                        info!("import_all: imported SSH key '{}' as {new_id}", key.name);
+                        state.ssh_keys.insert(new_id, key);
+                        imported_keys += 1;
+                    }
+                    Err(e) => {
+                        warn!("import_all: skipping malformed SSH key: {e}");
+                    }
+                }
+            }
+        }
+
+        // --- SSH hosts ---
+        if let Some(arr) = backup.get("ssh_hosts").and_then(|v| v.as_array()) {
+            for item in arr {
+                match serde_json::from_value::<SshHost>(item.clone()) {
+                    Ok(mut host) => {
+                        let new_id = Uuid::new_v4();
+                        host.id = new_id;
+                        let path = state.ssh_host_dir.join(format!("{new_id}.toml"));
+                        match toml::to_string_pretty(&host) {
+                            Ok(text) => {
+                                if let Err(e) = std::fs::create_dir_all(&state.ssh_host_dir) {
+                                    warn!("import_all: mkdir ssh_host_dir: {e}");
+                                    continue;
+                                }
+                                if let Err(e) = std::fs::write(&path, &text) {
+                                    warn!("import_all: write SSH host file: {e}");
+                                    continue;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("import_all: TOML serialise SSH host: {e}");
+                                continue;
+                            }
+                        }
+                        info!("import_all: imported SSH host '{}' as {new_id}", host.label);
+                        state.ssh_hosts.insert(new_id, host);
+                        imported_hosts += 1;
+                    }
+                    Err(e) => {
+                        warn!("import_all: skipping malformed SSH host: {e}");
+                    }
+                }
+            }
+        }
+
+        let summary = serde_json::json!({
+            "profiles": imported_profiles,
+            "ssh_keys": imported_keys,
+            "ssh_hosts": imported_hosts,
+        });
+
+        info!(
+            "import_all: imported {imported_profiles} profile(s), \
+             {imported_keys} SSH key(s), {imported_hosts} SSH host(s)"
+        );
+
+        Ok(summary.to_string())
     }
 
     // =======================================================================
@@ -2601,6 +2771,7 @@ pub async fn connect_profile(
     }
 
     info!("=== [{}] connecting ===", profile.name);
+    crate::audit::log_event("VPN_CONNECT", &profile.name);
 
     // Emit StateChanged(Connecting) before spawning so the client sees it promptly.
     let state_json = {

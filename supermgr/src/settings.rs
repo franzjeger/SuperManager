@@ -7,7 +7,9 @@
 
 use std::path::PathBuf;
 
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,10 +40,21 @@ pub struct AppSettings {
     /// Anthropic API key for the built-in Claude console.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub anthropic_api_key: String,
+    /// Master password hash stored as `"salt_hex:hash_hex"`.
+    /// Empty string means no master password has been set yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub password_hash: String,
+    /// Minutes of inactivity before the session auto-locks.
+    #[serde(default = "default_auto_lock_minutes")]
+    pub auto_lock_minutes: u64,
 }
 
 fn default_opacity() -> f64 {
     1.0
+}
+
+fn default_auto_lock_minutes() -> u64 {
+    15
 }
 
 impl Default for AppSettings {
@@ -50,7 +63,60 @@ impl Default for AppSettings {
             color_scheme: ColorScheme::default(),
             opacity: 1.0,
             anthropic_api_key: String::new(),
+            password_hash: String::new(),
+            auto_lock_minutes: 15,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Password hashing helpers
+// ---------------------------------------------------------------------------
+
+/// Hash a password with the given hex-encoded salt using SHA-256.
+fn hash_password(password: &str, salt: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(password.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// Generate a random 16-byte salt and return it as a hex string.
+fn generate_salt() -> String {
+    let salt_bytes: [u8; 16] = rand::thread_rng().gen();
+    salt_bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl AppSettings {
+    /// Returns `true` if a master password has been configured.
+    pub fn has_password(&self) -> bool {
+        !self.password_hash.is_empty()
+    }
+
+    /// Verify `password` against the stored `salt:hash`.
+    pub fn verify_password(&self, password: &str) -> bool {
+        if self.password_hash.is_empty() {
+            return false;
+        }
+        if let Some((salt, expected_hash)) = self.password_hash.split_once(':') {
+            hash_password(password, salt) == expected_hash
+        } else {
+            false
+        }
+    }
+
+    /// Hash and store a new master password.  Saves to disk immediately.
+    pub fn set_password(&mut self, password: &str) {
+        let salt = generate_salt();
+        let hash = hash_password(password, &salt);
+        self.password_hash = format!("{salt}:{hash}");
+        self.save();
+    }
+
+    /// Remove the master password (disables the lock screen).
+    pub fn clear_password(&mut self) {
+        self.password_hash.clear();
+        self.save();
     }
 }
 

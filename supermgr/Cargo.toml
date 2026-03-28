@@ -32,5 +32,9 @@ ksni        = { version = "0.3",  features = ["tokio"] }
 # HTTP client for Claude API
 reqwest     = { workspace = true }
 
+# Password hashing (SHA-256) and salt generation
+sha2        = { workspace = true }
+rand        = { workspace = true }
+
 [lints]
 workspace = true

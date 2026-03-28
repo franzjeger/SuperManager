@@ -125,6 +125,10 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //
 //       async fn ssh_host_health(&self) -> fdo::Result<String> { ... }
 //
+//       // --- Config backup & restore ---
+//       async fn export_all(&self) -> fdo::Result<String> { ... }
+//       async fn import_all(&self, data: &str) -> fdo::Result<String> { ... }
+//
 //       #[zbus(signal)]
 //       async fn host_health_changed(ctx: &zbus::SignalContext<'_>, host_id: String, reachable: bool) -> zbus::Result<()>;
 //   }
@@ -520,6 +524,19 @@ pub trait Daemon {
 
     /// Return a JSON map of `host_id → reachable(bool)` for all SSH hosts.
     async fn ssh_host_health(&self) -> fdo::Result<String>;
+
+    // =======================================================================
+    // Config backup & restore
+    // =======================================================================
+
+    /// Export all configuration (profiles, SSH keys, SSH hosts) as a single
+    /// JSON string.  Secret values are not included -- only `SecretRef` labels.
+    async fn export_all(&self) -> fdo::Result<String>;
+
+    /// Import configuration from a JSON backup string produced by
+    /// [`Self::export_all`].  Each imported item receives a new UUID.
+    /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "ssh_hosts": N}`.
+    async fn import_all(&self, data: &str) -> fdo::Result<String>;
 
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]

@@ -114,6 +114,93 @@ fn push_tray_update(
 }
 
 // ---------------------------------------------------------------------------
+// Lock screen page
+// ---------------------------------------------------------------------------
+
+/// Widgets composing the lock / set-password page.
+#[derive(Clone)]
+struct LockPage {
+    container: gtk4::Box,
+    password_row: adw::PasswordEntryRow,
+    confirm_row: adw::PasswordEntryRow,
+    unlock_btn: gtk4::Button,
+    set_btn: gtk4::Button,
+    status_label: gtk4::Label,
+}
+
+/// Build the lock screen page (password entry + unlock / set-password buttons).
+fn build_lock_page() -> LockPage {
+    let container = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .halign(gtk4::Align::Center)
+        .valign(gtk4::Align::Center)
+        .spacing(24)
+        .margin_start(48)
+        .margin_end(48)
+        .build();
+
+    let icon = gtk4::Image::builder()
+        .icon_name("system-lock-screen-symbolic")
+        .pixel_size(64)
+        .build();
+    container.append(&icon);
+
+    let title = gtk4::Label::builder()
+        .label("SuperManager")
+        .css_classes(["title-1"])
+        .build();
+    container.append(&title);
+
+    let status_label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["dim-label"])
+        .wrap(true)
+        .build();
+    container.append(&status_label);
+
+    let prefs_group = adw::PreferencesGroup::new();
+
+    let password_row = adw::PasswordEntryRow::builder()
+        .title("Master Password")
+        .build();
+    prefs_group.add(&password_row);
+
+    let confirm_row = adw::PasswordEntryRow::builder()
+        .title("Confirm Password")
+        .build();
+    prefs_group.add(&confirm_row);
+    container.append(&prefs_group);
+
+    let btn_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .halign(gtk4::Align::Center)
+        .spacing(12)
+        .build();
+
+    let unlock_btn = gtk4::Button::builder()
+        .label("Unlock")
+        .css_classes(["suggested-action", "pill"])
+        .build();
+    btn_box.append(&unlock_btn);
+
+    let set_btn = gtk4::Button::builder()
+        .label("Set Password")
+        .css_classes(["suggested-action", "pill"])
+        .build();
+    btn_box.append(&set_btn);
+    container.append(&btn_box);
+
+    LockPage {
+        container,
+        password_row,
+        confirm_row,
+        unlock_btn,
+        set_btn,
+        status_label,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -496,7 +583,93 @@ pub fn build_ui(
     main_toolbar.add_top_bar(&header);
     main_toolbar.set_content(Some(&toast_overlay));
 
-    window.set_content(Some(&main_toolbar));
+    // =========================================================================
+    // Lock screen (overlays entire app content via a GtkStack)
+    // =========================================================================
+    let lock_page = build_lock_page();
+    let outer_stack = gtk4::Stack::builder()
+        .transition_type(gtk4::StackTransitionType::Crossfade)
+        .transition_duration(200)
+        .build();
+    outer_stack.add_named(&lock_page.container, Some("lock"));
+    outer_stack.add_named(&main_toolbar, Some("app"));
+
+    // Determine initial page: locked if password is set, otherwise app.
+    {
+        let s = app_settings.lock().expect("lock");
+        if s.has_password() {
+            outer_stack.set_visible_child_name("lock");
+            lock_page.status_label.set_text("Enter your master password to unlock.");
+            lock_page.set_btn.set_visible(false);
+            lock_page.confirm_row.set_visible(false);
+        } else {
+            // No password yet — go straight to the app.
+            outer_stack.set_visible_child_name("app");
+        }
+    }
+
+    window.set_content(Some(&outer_stack));
+
+    // =========================================================================
+    // Inactivity timer — auto-lock after N minutes
+    // =========================================================================
+    // `inactivity_counter` counts elapsed seconds.  A 1-second tick
+    // increments it; any user input resets it to 0.  When it reaches
+    // `auto_lock_minutes * 60` and a password is set, we lock.
+    let inactivity_counter: std::rc::Rc<std::cell::Cell<u64>> =
+        std::rc::Rc::new(std::cell::Cell::new(0));
+
+    // Reset inactivity on any key press or mouse click/motion.
+    {
+        let ctr = inactivity_counter.clone();
+        let motion_ctrl = gtk4::EventControllerMotion::new();
+        motion_ctrl.connect_motion(move |_, _, _| {
+            ctr.set(0);
+        });
+        window.add_controller(motion_ctrl);
+    }
+    {
+        let ctr = inactivity_counter.clone();
+        let click_ctrl = gtk4::GestureClick::new();
+        click_ctrl.connect_pressed(move |_, _, _, _| {
+            ctr.set(0);
+        });
+        window.add_controller(click_ctrl);
+    }
+    {
+        let ctr = inactivity_counter.clone();
+        let key_inactivity_ctrl = gtk4::EventControllerKey::new();
+        key_inactivity_ctrl.connect_key_pressed(move |_, _, _, _| {
+            ctr.set(0);
+            glib::Propagation::Proceed
+        });
+        window.add_controller(key_inactivity_ctrl);
+    }
+
+    // 1-second tick.
+    {
+        let ctr = inactivity_counter.clone();
+        let outer_stack = outer_stack.clone();
+        let lock_page = lock_page.clone();
+        let app_settings = Arc::clone(&app_settings);
+        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+            // Only tick when the app page is visible (not already locked).
+            if outer_stack.visible_child_name().as_deref() == Some("app") {
+                let cur = ctr.get() + 1;
+                ctr.set(cur);
+                let s = app_settings.lock().expect("lock");
+                if s.has_password() && s.auto_lock_minutes > 0 {
+                    let limit = s.auto_lock_minutes * 60;
+                    if cur >= limit {
+                        drop(s);
+                        lock_session(&outer_stack, &lock_page);
+                        ctr.set(0);
+                    }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Paint initial VPN state.
     {
@@ -521,8 +694,15 @@ pub fn build_ui(
     {
         let window = window.clone();
         let app_settings = Arc::clone(&app_settings);
+        let tx = tx.clone();
+        let rt = rt.clone();
         settings_btn.connect_clicked(move |_| {
-            vpn::dialogs::show_settings_dialog(&window, Arc::clone(&app_settings));
+            vpn::dialogs::show_settings_dialog(
+                &window,
+                Arc::clone(&app_settings),
+                &tx,
+                &rt,
+            );
         });
     }
 
@@ -1843,6 +2023,9 @@ pub fn build_ui(
         let view_stack = view_stack.clone();
         let ssh_search_entry = ssh_search_entry.clone();
         let console_input = console_panel.input_view.clone();
+        let outer_stack_k = outer_stack.clone();
+        let lock_page_k = lock_page.clone();
+        let app_settings_k = Arc::clone(&app_settings);
         let key_ctrl = gtk4::EventControllerKey::new();
         key_ctrl.connect_key_pressed(move |_, key, _, mods| {
             let ctrl = mods.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
@@ -1866,6 +2049,14 @@ pub fn build_ui(
                         ssh_search_entry.grab_focus();
                         return glib::Propagation::Stop;
                     }
+                    // Ctrl+L: manually lock the session.
+                    gtk4::gdk::Key::l => {
+                        let s = app_settings_k.lock().expect("lock");
+                        if s.has_password() {
+                            lock_session(&outer_stack_k, &lock_page_k);
+                        }
+                        return glib::Propagation::Stop;
+                    }
                     _ => {}
                 }
             }
@@ -1874,5 +2065,94 @@ pub fn build_ui(
         window.add_controller(key_ctrl);
     }
 
+    // =========================================================================
+    // Lock-screen wiring
+    // =========================================================================
+
+    // --- Unlock button -------------------------------------------------------
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let outer_stack = outer_stack.clone();
+        let lock_page = lock_page.clone();
+        let inactivity_counter = inactivity_counter.clone();
+        lock_page.unlock_btn.connect_clicked(move |_| {
+            let password = lock_page.password_row.text().to_string();
+            let s = app_settings.lock().expect("lock");
+            if s.verify_password(&password) {
+                lock_page.password_row.set_text("");
+                lock_page.status_label.set_text("");
+                outer_stack.set_visible_child_name("app");
+                // Reset inactivity counter on unlock.
+                inactivity_counter.set(0);
+            } else {
+                lock_page.status_label.set_text("Incorrect password.");
+            }
+        });
+    }
+
+    // --- Set Password button (first-time setup, also accessible from lock) ----
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let outer_stack = outer_stack.clone();
+        let lock_page = lock_page.clone();
+        let inactivity_counter = inactivity_counter.clone();
+        lock_page.set_btn.connect_clicked(move |_| {
+            let pw = lock_page.password_row.text().to_string();
+            let confirm = lock_page.confirm_row.text().to_string();
+            if pw.is_empty() {
+                lock_page.status_label.set_text("Password cannot be empty.");
+                return;
+            }
+            if pw != confirm {
+                lock_page.status_label.set_text("Passwords do not match.");
+                return;
+            }
+            {
+                let mut s = app_settings.lock().expect("lock");
+                s.set_password(&pw);
+            }
+            lock_page.password_row.set_text("");
+            lock_page.confirm_row.set_text("");
+            lock_page.status_label.set_text("");
+            outer_stack.set_visible_child_name("app");
+            inactivity_counter.set(0);
+        });
+    }
+
+    // Allow pressing Enter in the password row to trigger unlock/set.
+    {
+        let unlock_btn = lock_page.unlock_btn.clone();
+        let set_btn = lock_page.set_btn.clone();
+        lock_page.password_row.connect_activate(move |_| {
+            if unlock_btn.is_visible() {
+                unlock_btn.emit_clicked();
+            } else if set_btn.is_visible() {
+                set_btn.emit_clicked();
+            }
+        });
+    }
+    {
+        let set_btn = lock_page.set_btn.clone();
+        lock_page.confirm_row.connect_activate(move |_| {
+            set_btn.emit_clicked();
+        });
+    }
+
     window.present();
+}
+
+// ---------------------------------------------------------------------------
+// Lock-screen helpers
+// ---------------------------------------------------------------------------
+
+/// Switch the outer stack to the lock page and prepare it for unlock.
+fn lock_session(outer_stack: &gtk4::Stack, lock_page: &LockPage) {
+    lock_page.password_row.set_text("");
+    lock_page.confirm_row.set_text("");
+    lock_page.status_label.set_text("Session locked. Enter your password.");
+    lock_page.unlock_btn.set_visible(true);
+    lock_page.set_btn.set_visible(false);
+    lock_page.confirm_row.set_visible(false);
+    outer_stack.set_visible_child_name("lock");
+    lock_page.password_row.grab_focus();
 }

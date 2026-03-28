@@ -446,6 +446,25 @@ pub async fn dbus_export_profile(profile_id: String) -> anyhow::Result<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Config backup & restore
+// ---------------------------------------------------------------------------
+
+/// Call `ExportAll` on the daemon.  Returns the full backup JSON string.
+pub async fn dbus_export_all() -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    Ok(proxy.export_all().await.context("ExportAll")?)
+}
+
+/// Call `ImportAll(data)` on the daemon.  Returns the summary JSON string
+/// (e.g. `{"profiles": 2, "ssh_keys": 1, "ssh_hosts": 3}`).
+pub async fn dbus_import_all(data: String) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    Ok(proxy.import_all(&data).await.context("ImportAll")?)
+}
+
+// ---------------------------------------------------------------------------
 // SSH D-Bus wrappers
 // ---------------------------------------------------------------------------
 

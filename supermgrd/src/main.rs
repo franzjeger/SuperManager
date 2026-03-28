@@ -25,6 +25,7 @@
 
 #![deny(missing_docs)]
 
+mod audit;
 mod vpn;
 mod ssh;
 mod daemon;

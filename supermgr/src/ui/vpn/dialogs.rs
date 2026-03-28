@@ -1156,6 +1156,8 @@ pub fn show_logs_dialog(
 pub fn show_settings_dialog(
     window: &adw::ApplicationWindow,
     app_settings: Arc<Mutex<AppSettings>>,
+    tx: &mpsc::Sender<AppMsg>,
+    rt: &tokio::runtime::Handle,
 ) {
     let dialog = adw::Dialog::builder()
         .title("Settings")
@@ -1236,9 +1238,250 @@ pub fn show_settings_dialog(
         });
     }
 
+    // --- Security group (master password / auto-lock) ---
+    let security_group = adw::PreferencesGroup::builder()
+        .title("Security")
+        .description("Master password and session lock")
+        .build();
+
+    let has_pw = app_settings.lock().expect("lock").has_password();
+
+    let pw_status_row = adw::ActionRow::builder()
+        .title("Master Password")
+        .subtitle(if has_pw { "Set" } else { "Not set" })
+        .build();
+
+    let change_pw_btn = gtk4::Button::builder()
+        .label(if has_pw { "Change" } else { "Set" })
+        .valign(gtk4::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    pw_status_row.add_suffix(&change_pw_btn);
+
+    if has_pw {
+        let remove_pw_btn = gtk4::Button::builder()
+            .label("Remove")
+            .valign(gtk4::Align::Center)
+            .css_classes(["flat", "destructive-action"])
+            .build();
+        pw_status_row.add_suffix(&remove_pw_btn);
+
+        let app_settings_rm = Arc::clone(&app_settings);
+        let pw_status_row_rm = pw_status_row.clone();
+        remove_pw_btn.connect_clicked(move |btn| {
+            let mut s = app_settings_rm.lock().expect("lock");
+            s.clear_password();
+            pw_status_row_rm.set_subtitle("Not set");
+            btn.set_visible(false);
+        });
+    }
+
+    security_group.add(&pw_status_row);
+
+    // Change / set password button -> opens a small inline dialog.
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let window = window.clone();
+        change_pw_btn.connect_clicked(move |_| {
+            show_change_password_dialog(&window, Arc::clone(&app_settings));
+        });
+    }
+
+    let auto_lock_row = adw::SpinRow::builder()
+        .title("Auto-lock timeout")
+        .subtitle("Minutes of inactivity (0 = disabled)")
+        .adjustment(&gtk4::Adjustment::new(
+            app_settings.lock().expect("lock").auto_lock_minutes as f64,
+            0.0,
+            120.0,
+            1.0,
+            5.0,
+            0.0,
+        ))
+        .build();
+    security_group.add(&auto_lock_row);
+
+    {
+        let app_settings = Arc::clone(&app_settings);
+        auto_lock_row.connect_value_notify(move |row| {
+            let mut s = app_settings.lock().expect("lock");
+            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+            {
+                s.auto_lock_minutes = row.value() as u64;
+            }
+            s.save();
+        });
+    }
+
+    // --- Backup & Restore group ---
+    let backup_group = adw::PreferencesGroup::builder()
+        .title("Backup & Restore")
+        .description("Export or import all configuration")
+        .build();
+
+    let export_row = adw::ActionRow::builder()
+        .title("Export Config")
+        .subtitle("Save all profiles, SSH keys, and hosts to a JSON file")
+        .build();
+    let export_btn = gtk4::Button::builder()
+        .label("Export")
+        .valign(gtk4::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    export_row.add_suffix(&export_btn);
+    backup_group.add(&export_row);
+
+    let import_row = adw::ActionRow::builder()
+        .title("Import Config")
+        .subtitle("Restore configuration from a backup file")
+        .build();
+    let import_btn = gtk4::Button::builder()
+        .label("Import")
+        .valign(gtk4::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    import_row.add_suffix(&import_btn);
+    backup_group.add(&import_row);
+
+    // Export button: ask daemon for full config JSON, then save via FileDialog.
+    {
+        let window = window.clone();
+        let tx = tx.clone();
+        let rt = rt.clone();
+        export_btn.connect_clicked(move |_| {
+            let window = window.clone();
+            let tx = tx.clone();
+            rt.spawn(async move {
+                match crate::dbus_client::dbus_export_all().await {
+                    Ok(json) => {
+                        // Schedule the file-save dialog on the main GTK thread.
+                        glib::idle_add_once(move || {
+                            let filter = gtk4::FileFilter::new();
+                            filter.set_name(Some("JSON backup (*.json)"));
+                            filter.add_pattern("*.json");
+
+                            let dialog = gtk4::FileDialog::builder()
+                                .title("Export SuperManager Config")
+                                .initial_name("supermanager-backup.json")
+                                .default_filter(&filter)
+                                .modal(true)
+                                .build();
+
+                            let tx = tx.clone();
+                            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+                                match result {
+                                    Ok(file) => {
+                                        if let Some(path) = file.path() {
+                                            match std::fs::write(&path, &json) {
+                                                Ok(()) => {
+                                                    let _ = tx.send(AppMsg::ShowToast(
+                                                        format!("Config exported to {}", path.display()),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    let _ = tx.send(AppMsg::OperationFailed(
+                                                        format!("Failed to write file: {e}"),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(ref e)
+                                        if e.matches(gio::IOErrorEnum::Cancelled)
+                                            || e.matches(gio::IOErrorEnum::Failed) => {}
+                                    Err(e) => {
+                                        error!("export file dialog error: {e}");
+                                        let _ = tx.send(AppMsg::OperationFailed(
+                                            format!("File dialog: {e}"),
+                                        ));
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    Err(e) => {
+                        error!("export_all failed: {e}");
+                        let _ = tx.send(AppMsg::OperationFailed(format!("Export failed: {e}")));
+                    }
+                }
+            });
+        });
+    }
+
+    // Import button: open a JSON file, read it, send to daemon via ImportAll.
+    {
+        let window = window.clone();
+        let tx = tx.clone();
+        let rt = rt.clone();
+        import_btn.connect_clicked(move |_| {
+            let filter = gtk4::FileFilter::new();
+            filter.set_name(Some("JSON backup (*.json)"));
+            filter.add_pattern("*.json");
+
+            let dialog = gtk4::FileDialog::builder()
+                .title("Import SuperManager Config")
+                .default_filter(&filter)
+                .modal(true)
+                .build();
+
+            let tx = tx.clone();
+            let rt = rt.clone();
+            dialog.open(Some(&window), gio::Cancellable::NONE, move |result| {
+                let file = match result {
+                    Ok(f) => f,
+                    Err(ref e)
+                        if e.matches(gio::IOErrorEnum::Cancelled)
+                            || e.matches(gio::IOErrorEnum::Failed) =>
+                    {
+                        return;
+                    }
+                    Err(e) => {
+                        error!("import file dialog error: {e}");
+                        let _ = tx.send(AppMsg::OperationFailed(format!("File dialog: {e}")));
+                        return;
+                    }
+                };
+
+                let Some(path) = file.path() else {
+                    let _ = tx.send(AppMsg::OperationFailed(
+                        "Cannot import: file has no local path".into(),
+                    ));
+                    return;
+                };
+
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    match tokio::fs::read_to_string(&path).await {
+                        Ok(data) => match crate::dbus_client::dbus_import_all(data).await {
+                            Ok(summary) => {
+                                let _ = tx.send(AppMsg::ShowToast(
+                                    format!("Import complete: {summary}"),
+                                ));
+                            }
+                            Err(e) => {
+                                error!("import_all failed: {e}");
+                                let _ = tx.send(AppMsg::OperationFailed(
+                                    format!("Import failed: {e}"),
+                                ));
+                            }
+                        },
+                        Err(e) => {
+                            error!("failed to read backup file: {e}");
+                            let _ = tx.send(AppMsg::OperationFailed(
+                                format!("Failed to read file: {e}"),
+                            ));
+                        }
+                    }
+                });
+            });
+        });
+    }
+
     let prefs_page = adw::PreferencesPage::new();
     prefs_page.add(&appearance_group);
     prefs_page.add(&console_group);
+    prefs_page.add(&security_group);
+    prefs_page.add(&backup_group);
 
     let header = adw::HeaderBar::new();
     let vbox = gtk4::Box::builder()
@@ -1277,6 +1520,107 @@ pub fn show_settings_dialog(
             let mut s = app_settings.lock().expect("lock");
             s.opacity = val;
             s.save();
+        });
+    }
+
+    dialog.present(Some(window));
+}
+
+/// Small dialog to set or change the master password.
+fn show_change_password_dialog(
+    window: &adw::ApplicationWindow,
+    app_settings: Arc<Mutex<AppSettings>>,
+) {
+    let has_pw = app_settings.lock().expect("lock").has_password();
+
+    let dialog = adw::Dialog::builder()
+        .title(if has_pw { "Change Password" } else { "Set Password" })
+        .content_width(340)
+        .build();
+
+    let group = adw::PreferencesGroup::new();
+
+    let current_row = adw::PasswordEntryRow::builder()
+        .title("Current Password")
+        .build();
+    if has_pw {
+        group.add(&current_row);
+    }
+
+    let new_row = adw::PasswordEntryRow::builder()
+        .title("New Password")
+        .build();
+    group.add(&new_row);
+
+    let confirm_row = adw::PasswordEntryRow::builder()
+        .title("Confirm New Password")
+        .build();
+    group.add(&confirm_row);
+
+    let status = gtk4::Label::builder()
+        .css_classes(["error"])
+        .wrap(true)
+        .visible(false)
+        .build();
+
+    let save_btn = gtk4::Button::builder()
+        .label("Save")
+        .css_classes(["suggested-action", "pill"])
+        .halign(gtk4::Align::Center)
+        .margin_top(12)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    let vbox = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(12)
+        .spacing(12)
+        .build();
+    vbox.append(&header);
+    vbox.append(&group);
+    vbox.append(&status);
+    vbox.append(&save_btn);
+    dialog.set_child(Some(&vbox));
+
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let current_row = current_row.clone();
+        let new_row = new_row.clone();
+        let confirm_row = confirm_row.clone();
+        let status = status.clone();
+        let dialog = dialog.clone();
+        save_btn.connect_clicked(move |_| {
+            let s = app_settings.lock().expect("lock");
+            let has = s.has_password();
+            if has {
+                let cur = current_row.text().to_string();
+                if !s.verify_password(&cur) {
+                    status.set_text("Current password is incorrect.");
+                    status.set_visible(true);
+                    return;
+                }
+            }
+            drop(s);
+
+            let new_pw = new_row.text().to_string();
+            let confirm = confirm_row.text().to_string();
+            if new_pw.is_empty() {
+                status.set_text("New password cannot be empty.");
+                status.set_visible(true);
+                return;
+            }
+            if new_pw != confirm {
+                status.set_text("Passwords do not match.");
+                status.set_visible(true);
+                return;
+            }
+            {
+                let mut s = app_settings.lock().expect("lock");
+                s.set_password(&new_pw);
+            }
+            dialog.close();
         });
     }
 
