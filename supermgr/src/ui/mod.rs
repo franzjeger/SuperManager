@@ -2404,35 +2404,26 @@ pub fn build_ui(
         });
     }
 
-    // Allow pressing Enter in the password row to trigger unlock/set.
+    // Allow pressing Enter anywhere on the lock page to trigger unlock/set.
     {
         let unlock_btn = lock_page.unlock_btn.clone();
         let set_btn = lock_page.set_btn.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
+        let key_ctrl = gtk4::EventControllerKey::builder()
+            .propagation_phase(gtk4::PropagationPhase::Capture)
+            .build();
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
             if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
                 if unlock_btn.is_visible() {
                     unlock_btn.emit_clicked();
+                    return glib::Propagation::Stop;
                 } else if set_btn.is_visible() {
                     set_btn.emit_clicked();
+                    return glib::Propagation::Stop;
                 }
-                return glib::Propagation::Stop;
             }
             glib::Propagation::Proceed
         });
-        lock_page.password_row.add_controller(key_ctrl);
-    }
-    {
-        let set_btn = lock_page.set_btn.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
-                set_btn.emit_clicked();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        lock_page.confirm_row.add_controller(key_ctrl);
+        lock_page.container.add_controller(key_ctrl);
     }
 
     window.present();

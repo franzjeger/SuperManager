@@ -245,8 +245,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     detail_box.append(&host_label_lbl);
     detail_box.append(&group_badge);
     detail_box.append(&details_group);
-    detail_box.append(&fg_dashboard_group);
     detail_box.append(&btn_box);
+    detail_box.append(&fg_dashboard_group);
 
     detail_stack.add_named(&detail_box, Some("detail"));
     detail_stack.set_visible_child_name("empty");
@@ -367,9 +367,11 @@ pub fn refresh_fortigate_dashboard(
             }
             Err(e) => {
                 warn!("FortiGate dashboard fetch failed for {host_id}: {e}");
-                let _ = tx.send(AppMsg::OperationFailed(
-                    format!("FortiGate status: {e}"),
-                ));
+                // Show "Unreachable" in dashboard instead of noisy error toast.
+                let _ = tx.send(AppMsg::FortigateStatus {
+                    host_id,
+                    data: serde_json::json!({ "error": e.to_string() }),
+                });
             }
         }
     });
@@ -377,6 +379,18 @@ pub fn refresh_fortigate_dashboard(
 
 /// Apply FortiGate status data to the dashboard rows.
 pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
+    // Handle error case — show "Unreachable" in all fields.
+    if data.get("error").is_some() {
+        let msg = "Unreachable";
+        detail.fg_firmware_row.set_subtitle(msg);
+        detail.fg_hostname_row.set_subtitle(msg);
+        detail.fg_serial_row.set_subtitle(msg);
+        detail.fg_ha_row.set_subtitle(msg);
+        detail.fg_cpu_row.set_subtitle(msg);
+        detail.fg_memory_row.set_subtitle(msg);
+        return;
+    }
+
     // The FortiGate /api/v2/monitor/system/status response has a `results`
     // object (not an array) with the system info fields directly.
     let results = data.get("results").unwrap_or(data);
