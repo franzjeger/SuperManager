@@ -2015,7 +2015,11 @@ impl DaemonService {
         }
 
         let resp = req.send().await
-            .map_err(|e| fdo::Error::Failed(format!("API request failed: {e}")))?;
+            .map_err(|e| {
+                // Strip token from error message to avoid leaking secrets.
+                let msg = e.to_string().replace(&token, "***");
+                fdo::Error::Failed(format!("API request failed: {msg}"))
+            })?;
 
         let status = resp.status().as_u16();
         let resp_body = resp.text().await

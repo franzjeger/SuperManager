@@ -41,8 +41,8 @@ zeroize     = { version = "1.8",  features = ["derive"] }
 async-trait = "0.1"
 # Base64 encoding (secrets file)
 base64      = "0.22"
-# HTTP client — Azure Entra ID OAuth2 PKCE flow (rustls, no openssl dep)
-reqwest     = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# HTTP client — native-tls for FortiGate compat, rustls-tls for Claude API
+reqwest     = { version = "0.12", default-features = false, features = ["json", "native-tls", "stream"] }
 # SHA-256 for PKCE code_challenge
 sha2        = "0.10"
 # SSH key generation, parsing, fingerprinting (RustCrypto)
