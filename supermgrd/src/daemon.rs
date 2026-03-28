@@ -2011,9 +2011,7 @@ impl DaemonService {
             _ => return Err(fdo::Error::InvalidArgs(format!("invalid method: {method}"))),
         };
 
-        // FortiGate supports both Bearer header and query parameter.
-        // Use query parameter as it's more reliable across firmware versions.
-        req = req.query(&[("access_token", &token)]);
+        req = req.header("Authorization", format!("Bearer {token}"));
         if !body.is_empty() && method.to_uppercase() != "GET" {
             req = req
                 .header("Content-Type", "application/json")
