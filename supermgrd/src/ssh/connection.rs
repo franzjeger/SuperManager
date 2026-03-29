@@ -184,14 +184,15 @@ impl SshSession {
         Ok((exit_status, stdout_str, stderr_str))
     }
 
-    /// Run an interactive shell session, sending lines sequentially with delays.
+    /// Run an interactive shell session, sending lines sequentially.
     ///
-    /// Used for commands that prompt for input (e.g. FortiGate `generate-key`
-    /// which asks for the admin password).
+    /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
+    /// line.  Used for commands that prompt for input (e.g. FortiGate
+    /// `generate-key` which asks for the admin password).
     pub async fn shell_interact(
         &self,
         lines: &[&str],
-        delay_ms: u64,
+        _delay_ms: u64,
         timeout_secs: u64,
     ) -> Result<String, SshError> {
         let mut channel = self
@@ -220,47 +221,44 @@ impl SshSession {
                 reason: format!("request_shell failed: {e}"),
             })?;
 
-        // Small delay to let the shell initialize.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // Send each line with a delay between them.
-        for line in lines {
-            let data = format!("{line}\n");
-            channel
-                .data(data.as_bytes())
-                .await
-                .map_err(|e| SshError::ConnectionFailed {
-                    host: String::new(),
-                    reason: format!("send data failed: {e}"),
-                })?;
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        }
-
-        // Collect output with a timeout.
-        let mut output = Vec::new();
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(timeout_secs);
+        let mut output = Vec::new();
 
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-
-            match tokio::time::timeout(remaining, channel.wait()).await {
-                Ok(Some(russh::ChannelMsg::Data { data })) => {
-                    output.extend_from_slice(&data);
-                    // Check if we got a prompt back (FortiGate ends with " # " or " $ ").
-                    let text = String::from_utf8_lossy(&output);
-                    if text.contains("New API key:") || text.ends_with("# ") || text.ends_with("$ ") {
-                        break;
+        // Macro-like helper: drain channel data until a keyword appears
+        // or a shell prompt is detected.
+        macro_rules! wait_for {
+            ($keywords:expr) => {
+                loop {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() { break; }
+                    match tokio::time::timeout(remaining, channel.wait()).await {
+                        Ok(Some(russh::ChannelMsg::Data { data })) => {
+                            output.extend_from_slice(&data);
+                            let text = String::from_utf8_lossy(&output);
+                            let found = $keywords.iter().any(|kw: &&str| text.contains(kw));
+                            let trimmed = text.trim_end();
+                            if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
+                                break;
+                            }
+                        }
+                        Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
+                        Ok(None) => break,
+                        Ok(_) => {}
+                        Err(_) => break,
                     }
                 }
-                Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                Ok(None) => break,
-                Ok(_) => {}
-                Err(_) => break, // timeout
-            }
+            };
+        }
+
+        // Wait for initial shell prompt.
+        wait_for!(&["#", "$"]);
+
+        // Send each line and wait for the next prompt or password request.
+        for line in lines {
+            let data = format!("{line}\n");
+            let _ = channel.data(data.as_bytes()).await;
+            wait_for!(&["# ", "$ ", "password:", "Password:", "New API key:", "API key:"]);
         }
 
         let _ = channel.close().await;
