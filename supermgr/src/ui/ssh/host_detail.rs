@@ -43,6 +43,9 @@ pub struct SshHostDetail {
     pub delete_btn: gtk4::Button,
     pub pin_btn: gtk4::ToggleButton,
 
+    // UniFi set-inform button (only visible for UniFi device type).
+    pub set_inform_btn: gtk4::Button,
+
     // FortiGate dashboard widgets (only visible for FortiGate hosts with API).
     pub fg_dashboard_group: adw::PreferencesGroup,
     pub fg_firmware_row: adw::ActionRow,
@@ -211,6 +214,12 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .tooltip_text("Push SSH key to FortiGate admin via REST API")
         .visible(false)
         .build();
+    let set_inform_btn = gtk4::Button::builder()
+        .label("Set Inform\u{2026}")
+        .css_classes(["flat"])
+        .tooltip_text("Adopt this UniFi device to a controller")
+        .visible(false)
+        .build();
     let edit_btn = gtk4::Button::builder()
         .label("Edit\u{2026}")
         .css_classes(["flat"])
@@ -229,6 +238,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     btn_box.append(&test_btn);
     btn_box.append(&push_key_btn);
     btn_box.append(&push_key_api_btn);
+    btn_box.append(&set_inform_btn);
     btn_box.append(&edit_btn);
     btn_box.append(&delete_btn);
 
@@ -270,6 +280,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         test_btn,
         push_key_btn,
         push_key_api_btn,
+        set_inform_btn,
         edit_btn,
         delete_btn,
         pin_btn,
@@ -318,6 +329,9 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
     let is_fortigate_api = host.device_type == DeviceType::Fortigate && host.has_api;
     detail.fg_dashboard_group.set_visible(is_fortigate_api);
     detail.push_key_api_btn.set_visible(is_fortigate_api);
+
+    // Show "Set Inform" button for UniFi devices.
+    detail.set_inform_btn.set_visible(host.device_type == DeviceType::UniFi);
 
     if is_fortigate_api {
         // Reset dashboard rows to loading placeholders.

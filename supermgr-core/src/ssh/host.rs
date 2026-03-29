@@ -78,6 +78,15 @@ pub struct SshHost {
     #[serde(default)]
     pub api_verify_tls: bool,
 
+    /// UniFi Controller URL (e.g. "https://unifi.example.com:8443").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_controller_url: Option<String>,
+
+    /// Reference to the UniFi Controller API credentials in the secret service.
+    /// Stored as JSON: `{"username": "...", "password": "..."}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_api_token_ref: Option<SecretRef>,
+
     /// Whether this host is pinned/favourited (appears at the top of lists).
     #[serde(default)]
     pub pinned: bool,
@@ -134,6 +143,10 @@ pub struct SshHostSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
 
+    /// Whether a UniFi Controller URL is configured for this host.
+    #[serde(default)]
+    pub has_unifi_controller: bool,
+
     /// Whether this host is pinned/favourited.
     #[serde(default)]
     pub pinned: bool,
@@ -154,6 +167,7 @@ impl From<&SshHost> for SshHostSummary {
             vpn_profile_id: host.vpn_profile_id,
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
+            has_unifi_controller: host.unifi_controller_url.is_some(),
             pinned: host.pinned,
         }
     }

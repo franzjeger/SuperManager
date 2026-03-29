@@ -6,7 +6,9 @@
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
+use std::io::Write as IoWrite;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -327,6 +329,20 @@ fn build_step1_customer_info(
         .description("Enter the customer and site details for this deployment.")
         .build();
 
+    // Template selector — pre-fills the wizard with common setups
+    let template_row = adw::ComboRow::builder()
+        .title("Template")
+        .subtitle("Pre-fill with a common deployment profile")
+        .build();
+    let template_list = gtk4::StringList::new(&[
+        "Custom",
+        "SMB Office",
+        "Retail Store",
+        "Branch Office",
+        "Home Office",
+    ]);
+    template_row.set_model(Some(&template_list));
+
     let name_row = adw::EntryRow::builder()
         .title("Customer Name")
         .build();
@@ -458,6 +474,142 @@ fn build_step1_customer_info(
     // Set initial device type
     state.borrow_mut().device_type = "FortiGate".to_string();
 
+    // Template selection handler — fills WizardState with template defaults
+    // but preserves customer_name and location.
+    {
+        let state = Rc::clone(state);
+        template_row.connect_selected_notify(move |row| {
+            let idx = row.selected();
+            let mut s = state.borrow_mut();
+            // Preserve customer-specific fields
+            let name = s.customer_name.clone();
+            let loc = s.location.clone();
+            let host_id = s.target_host_id.clone();
+            let host_label = s.target_host_label.clone();
+            let device_type = s.device_type.clone();
+
+            match idx {
+                1 => {
+                    // SMB Office — 3 VLANs (Staff/Guests/Mgmt), full security, S2S VPN
+                    s.wan_type = "Static".into();
+                    s.wan_ip = String::new();
+                    s.wan_gateway = String::new();
+                    s.wan_dns = "1.1.1.1".into();
+                    s.lan_subnet = "10.10.0.0/24".into();
+                    s.management_vlan = true;
+                    s.vlans = vec![
+                        VlanEntry { id: 10, name: "Staff".into(), subnet: "10.10.10.0/24".into() },
+                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.10.20.0/24".into() },
+                        VlanEntry { id: 99, name: "Management".into(), subnet: "10.10.99.0/24".into() },
+                    ];
+                    s.vpn_site_to_site = true;
+                    s.vpn_remote_access = false;
+                    s.dns_servers = "1.1.1.1, 8.8.8.8".into();
+                    s.ntp_server = "pool.ntp.org".into();
+                    s.syslog_enabled = true;
+                    s.syslog_target = String::new();
+                    s.admin_https_port = 8443;
+                    s.default_deny = true;
+                    s.allow_outbound_web = true;
+                    s.allow_dns = true;
+                    s.enable_ips = true;
+                    s.enable_web_filter = true;
+                    s.enable_antivirus = true;
+                }
+                2 => {
+                    // Retail Store — 2 VLANs (POS/Guests), no VPN, strict security
+                    s.wan_type = "DHCP".into();
+                    s.wan_ip = String::new();
+                    s.wan_gateway = String::new();
+                    s.wan_dns = String::new();
+                    s.lan_subnet = "10.20.0.0/24".into();
+                    s.management_vlan = false;
+                    s.vlans = vec![
+                        VlanEntry { id: 10, name: "POS".into(), subnet: "10.20.10.0/24".into() },
+                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.20.20.0/24".into() },
+                    ];
+                    s.vpn_site_to_site = false;
+                    s.vpn_remote_access = false;
+                    s.dns_servers = "1.1.1.1, 1.0.0.1".into();
+                    s.ntp_server = "pool.ntp.org".into();
+                    s.syslog_enabled = false;
+                    s.syslog_target = String::new();
+                    s.admin_https_port = 443;
+                    s.default_deny = true;
+                    s.allow_outbound_web = true;
+                    s.allow_dns = true;
+                    s.enable_ips = true;
+                    s.enable_web_filter = true;
+                    s.enable_antivirus = true;
+                }
+                3 => {
+                    // Branch Office — 4 VLANs (Staff/Guests/IoT/Mgmt), S2S VPN, remote access
+                    s.wan_type = "Static".into();
+                    s.wan_ip = String::new();
+                    s.wan_gateway = String::new();
+                    s.wan_dns = "1.1.1.1".into();
+                    s.lan_subnet = "10.30.0.0/24".into();
+                    s.management_vlan = true;
+                    s.vlans = vec![
+                        VlanEntry { id: 10, name: "Staff".into(), subnet: "10.30.10.0/24".into() },
+                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.30.20.0/24".into() },
+                        VlanEntry { id: 30, name: "IoT".into(), subnet: "10.30.30.0/24".into() },
+                        VlanEntry { id: 99, name: "Management".into(), subnet: "10.30.99.0/24".into() },
+                    ];
+                    s.vpn_site_to_site = true;
+                    s.vpn_remote_access = true;
+                    s.dns_servers = "1.1.1.1, 8.8.8.8".into();
+                    s.ntp_server = "pool.ntp.org".into();
+                    s.syslog_enabled = true;
+                    s.syslog_target = String::new();
+                    s.admin_https_port = 8443;
+                    s.default_deny = true;
+                    s.allow_outbound_web = true;
+                    s.allow_dns = true;
+                    s.enable_ips = true;
+                    s.enable_web_filter = true;
+                    s.enable_antivirus = true;
+                }
+                4 => {
+                    // Home Office — 1 VLAN, remote access VPN, basic security
+                    s.wan_type = "DHCP".into();
+                    s.wan_ip = String::new();
+                    s.wan_gateway = String::new();
+                    s.wan_dns = String::new();
+                    s.lan_subnet = "192.168.1.0/24".into();
+                    s.management_vlan = false;
+                    s.vlans = vec![
+                        VlanEntry { id: 10, name: "LAN".into(), subnet: "192.168.1.0/24".into() },
+                    ];
+                    s.vpn_site_to_site = false;
+                    s.vpn_remote_access = true;
+                    s.dns_servers = "1.1.1.1, 8.8.8.8".into();
+                    s.ntp_server = "pool.ntp.org".into();
+                    s.syslog_enabled = false;
+                    s.syslog_target = String::new();
+                    s.admin_https_port = 443;
+                    s.default_deny = true;
+                    s.allow_outbound_web = true;
+                    s.allow_dns = true;
+                    s.enable_ips = false;
+                    s.enable_web_filter = false;
+                    s.enable_antivirus = true;
+                }
+                _ => {
+                    // "Custom" (idx 0) — no changes
+                    return;
+                }
+            }
+
+            // Restore customer-specific fields
+            s.customer_name = name;
+            s.location = loc;
+            s.target_host_id = host_id;
+            s.target_host_label = host_label;
+            s.device_type = device_type;
+        });
+    }
+
     // Demo button — fills all wizard steps with test data
     let demo_btn = gtk4::Button::builder()
         .label("Load Demo Data")
@@ -516,6 +668,7 @@ fn build_step1_customer_info(
         });
     }
 
+    customer_group.add(&template_row);
     customer_group.add(&name_row);
     customer_group.add(&location_row);
     customer_group.add(&device_type_row);
@@ -533,8 +686,37 @@ fn build_step1_customer_info(
     demo_action_row.add_suffix(&demo_btn);
     demo_group.add(&demo_action_row);
 
+    // Batch provisioning group
+    let batch_btn = gtk4::Button::builder()
+        .label("Batch Mode")
+        .tooltip_text("Provision multiple devices from a CSV table")
+        .css_classes(["flat"])
+        .build();
+    {
+        let state = Rc::clone(state);
+        let app_state = Arc::clone(app_state);
+        batch_btn.connect_clicked(move |btn| {
+            let window = btn
+                .root()
+                .and_then(|r| r.downcast::<gtk4::Window>().ok());
+            show_batch_dialog(window.as_ref(), &state, &app_state);
+        });
+    }
+    let batch_group = adw::PreferencesGroup::builder()
+        .title("Batch Provisioning")
+        .description("Generate configs for multiple devices from a CSV table.")
+        .build();
+    let batch_action_row = adw::ActionRow::builder()
+        .title("Batch Mode")
+        .subtitle("Paste or load a CSV with multiple device entries")
+        .activatable_widget(&batch_btn)
+        .build();
+    batch_action_row.add_suffix(&batch_btn);
+    batch_group.add(&batch_action_row);
+
     page.add(&customer_group);
     page.add(&demo_group);
+    page.add(&batch_group);
 
     page.upcast()
 }
@@ -1117,12 +1299,34 @@ fn build_step5_review(
         .tooltip_text("Save report as PDF (requires wkhtmltopdf or weasyprint)")
         .build();
 
+    let diagram_btn = gtk4::Button::builder()
+        .label("Network Diagram")
+        .css_classes(["flat", "pill"])
+        .tooltip_text("Generate an SVG network topology diagram")
+        .build();
+
+    let diff_btn = gtk4::Button::builder()
+        .label("Diff with Device")
+        .css_classes(["flat", "pill"])
+        .sensitive(false)
+        .tooltip_text("Compare generated config with the device's current config via SSH")
+        .build();
+
+    let history_btn = gtk4::Button::builder()
+        .label("History")
+        .css_classes(["flat", "pill"])
+        .tooltip_text("View previous config versions for this customer")
+        .build();
+
     btn_box.append(&generate_spinner);
     btn_box.append(&generate_btn);
     btn_box.append(&push_btn);
+    btn_box.append(&diff_btn);
     btn_box.append(&export_btn);
     btn_box.append(&export_html_btn);
     btn_box.append(&export_pdf_btn);
+    btn_box.append(&diagram_btn);
+    btn_box.append(&history_btn);
 
     // Generate button — sends wizard state to Claude.
     //
@@ -1133,6 +1337,7 @@ fn build_step5_review(
         let state = Rc::clone(state);
         let rt = rt.clone();
         let push_btn = push_btn.clone();
+        let diff_btn = diff_btn.clone();
         let export_btn = export_btn.clone();
         let export_html_btn = export_html_btn.clone();
         let export_pdf_btn = export_pdf_btn.clone();
@@ -1181,12 +1386,14 @@ fn build_step5_review(
             // Poll for the result on the GTK main thread.
             let buf = config_buffer.clone();
             let pb = push_btn.clone();
+            let db = diff_btn.clone();
             let eb = export_btn.clone();
             let ehb = export_html_btn.clone();
             let epb = export_pdf_btn.clone();
             let gb = generate_btn.clone();
             let gs = generate_spinner.clone();
             let ws = Rc::clone(&state);
+            let rt_poll = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 let maybe = result_slot.lock().unwrap().take();
                 if let Some(config_text) = maybe {
@@ -1194,12 +1401,33 @@ fn build_step5_review(
                     buf.set_text(&config_text);
                     let ok = !config_text.starts_with("# Error");
                     pb.set_sensitive(ok);
+                    db.set_sensitive(ok);
                     eb.set_sensitive(ok);
                     ehb.set_sensitive(ok);
                     epb.set_sensitive(ok);
                     gb.set_sensitive(true);
                     gs.set_visible(false);
                     gs.set_spinning(false);
+
+                    // Auto-save config version via D-Bus
+                    if ok {
+                        let s = ws.borrow();
+                        let customer = s.customer_name.clone();
+                        let device_type = s.device_type.clone();
+                        let config = config_text.clone();
+                        drop(s);
+                        rt_poll.spawn(async move {
+                            match save_config_version_dbus(&customer, &device_type, &config).await {
+                                Ok(filename) => {
+                                    tracing::info!("auto-saved config version: {filename}");
+                                }
+                                Err(e) => {
+                                    tracing::warn!("failed to auto-save config version: {e}");
+                                }
+                            }
+                        });
+                    }
+
                     return glib::ControlFlow::Break;
                 }
                 glib::ControlFlow::Continue
@@ -1241,6 +1469,70 @@ fn build_step5_review(
                 if *done_flag.lock().unwrap() {
                     btn.set_sensitive(true);
                     btn.set_label("Push Config");
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+
+    // Diff with Device button — SSH into device, fetch config, show diff
+    {
+        let state = Rc::clone(state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        diff_btn.connect_clicked(move |btn| {
+            let s = state.borrow().clone();
+            if s.generated_config.is_empty() || s.target_host_id.is_empty() {
+                let _ = tx.send(AppMsg::ShowToast(
+                    "Generate a config and select a target host first.".into(),
+                ));
+                return;
+            }
+
+            btn.set_sensitive(false);
+            btn.set_label("Fetching...");
+
+            let result_slot: Arc<Mutex<Option<Result<String, String>>>> =
+                Arc::new(Mutex::new(None));
+
+            {
+                let slot = Arc::clone(&result_slot);
+                let host_id = s.target_host_id.clone();
+                let device_type = s.device_type.clone();
+                rt.spawn(async move {
+                    let res = fetch_device_config(&host_id, &device_type).await;
+                    *slot.lock().unwrap() = Some(
+                        res.map_err(|e| format!("{e}"))
+                    );
+                });
+            }
+
+            let btn = btn.clone();
+            let generated = s.generated_config.clone();
+            let device_label = s.target_host_label.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let maybe = result_slot.lock().unwrap().take();
+                if let Some(result) = maybe {
+                    btn.set_sensitive(true);
+                    btn.set_label("Diff with Device");
+                    match result {
+                        Ok(device_config) => {
+                            let window = btn
+                                .root()
+                                .and_then(|r| r.downcast::<gtk4::Window>().ok());
+                            show_diff_dialog(
+                                window.as_ref(),
+                                &device_config,
+                                &generated,
+                                &format!("Current ({})", device_label),
+                                "Generated Config",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to fetch device config: {e}");
+                        }
+                    }
                     return glib::ControlFlow::Break;
                 }
                 glib::ControlFlow::Continue
@@ -1443,11 +1735,435 @@ fn build_step5_review(
         });
     }
 
+    // Network Diagram button — generates SVG and shows in a dialog
+    {
+        let state = Rc::clone(state);
+        let tx = tx.clone();
+        diagram_btn.connect_clicked(move |btn| {
+            let s = state.borrow().clone();
+            let svg = generate_network_svg(&s);
+
+            // Write SVG to a temp file so gtk4::Picture can load it
+            let tmp_svg = std::env::temp_dir().join("supermgr-network-diagram.svg");
+            if let Err(e) = std::fs::write(&tmp_svg, &svg) {
+                tracing::error!("Failed to write temp SVG: {e}");
+                return;
+            }
+
+            let picture = gtk4::Picture::builder()
+                .file(&gio::File::for_path(&tmp_svg))
+                .can_shrink(true)
+                .content_fit(gtk4::ContentFit::Contain)
+                .width_request(820)
+                .height_request(620)
+                .build();
+
+            let scroll = gtk4::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk4::PolicyType::Automatic)
+                .vscrollbar_policy(gtk4::PolicyType::Automatic)
+                .vexpand(true)
+                .hexpand(true)
+                .child(&picture)
+                .build();
+
+            let export_svg_btn = gtk4::Button::builder()
+                .label("Export SVG")
+                .css_classes(["suggested-action", "pill"])
+                .halign(gtk4::Align::Center)
+                .margin_top(8)
+                .margin_bottom(8)
+                .build();
+
+            let content = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(8)
+                .margin_start(12)
+                .margin_end(12)
+                .margin_top(12)
+                .margin_bottom(12)
+                .build();
+            content.append(&scroll);
+            content.append(&export_svg_btn);
+
+            let dialog = adw::Dialog::builder()
+                .title("Network Topology Diagram")
+                .content_width(860)
+                .content_height(680)
+                .child(&content)
+                .build();
+
+            // Export SVG button inside the dialog
+            {
+                let svg_data = svg.clone();
+                let customer = s.customer_name.to_lowercase().replace(' ', "-");
+                let tx = tx.clone();
+                export_svg_btn.connect_clicked(move |_| {
+                    let file_dialog = gtk4::FileDialog::builder()
+                        .title("Export Network Diagram")
+                        .initial_name(format!("{customer}-network-diagram.svg"))
+                        .build();
+
+                    let svg_data = svg_data.clone();
+                    let tx = tx.clone();
+                    file_dialog.save(
+                        None::<&gtk4::Window>,
+                        None::<&gio::Cancellable>,
+                        move |result| {
+                            if let Ok(file) = result {
+                                if let Some(path) = file.path() {
+                                    match std::fs::write(&path, &svg_data) {
+                                        Ok(()) => {
+                                            let _ = tx.send(AppMsg::ShowToast(format!(
+                                                "SVG diagram saved to {}",
+                                                path.display()
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "Failed to export SVG diagram: {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    );
+                });
+            }
+
+            // Present dialog — get the root widget as the parent
+            if let Some(root) = btn.root() {
+                if let Some(window) = root.downcast_ref::<gtk4::Window>() {
+                    dialog.present(Some(window));
+                } else {
+                    dialog.present(None::<&gtk4::Widget>);
+                }
+            } else {
+                dialog.present(None::<&gtk4::Widget>);
+            }
+        });
+    }
+
+    // History button — list and view/diff previous config versions
+    {
+        let state = Rc::clone(state);
+        let rt = rt.clone();
+        let config_buffer = config_buffer.clone();
+        history_btn.connect_clicked(move |btn| {
+            let customer = state.borrow().customer_name.clone();
+            if customer.is_empty() {
+                return;
+            }
+            let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let btn = btn.clone();
+            btn.set_sensitive(false);
+            {
+                let slot = Arc::clone(&result_slot);
+                let customer = customer.clone();
+                rt.spawn(async move {
+                    match list_config_versions_dbus(&customer).await {
+                        Ok(json) => *slot.lock().unwrap() = Some(json),
+                        Err(e) => *slot.lock().unwrap() = Some(format!("ERROR:{e}")),
+                    }
+                });
+            }
+            let config_buffer = config_buffer.clone();
+            let rt2 = rt.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                let maybe = result_slot.lock().unwrap().take();
+                if let Some(json) = maybe {
+                    btn.set_sensitive(true);
+                    if json.starts_with("ERROR:") {
+                        tracing::warn!("failed to list config versions: {}", &json[6..]);
+                        return glib::ControlFlow::Break;
+                    }
+                    show_history_dialog(&json, &config_buffer, &rt2);
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        });
+    }
+
     page.append(&summary_label);
     page.append(&config_scroll);
     page.append(&btn_box);
 
     page.upcast()
+}
+
+// ---------------------------------------------------------------------------
+// SVG network diagram generation
+// ---------------------------------------------------------------------------
+
+/// Generate an SVG network topology diagram from the wizard state.
+///
+/// Produces a clean, professional diagram showing:
+/// - Internet cloud at top
+/// - WAN interface with IP
+/// - Firewall/Router box in centre (labelled with hostname)
+/// - VLAN segments as coloured boxes below
+/// - VPN tunnel indicators if S2S/RA VPN is enabled
+fn generate_network_svg(state: &WizardState) -> String {
+    // Assign a colour to each VLAN based on name keywords.
+    fn vlan_color(name: &str) -> &'static str {
+        let lower = name.to_lowercase();
+        if lower.contains("staff") || lower.contains("corporate") || lower.contains("employee") {
+            "#4CAF50"
+        } else if lower.contains("guest") {
+            "#FF9800"
+        } else if lower.contains("iot") || lower.contains("device") {
+            "#2196F3"
+        } else if lower.contains("mgmt") || lower.contains("management") {
+            "#9C27B0"
+        } else {
+            "#607D8B"
+        }
+    }
+
+    /// Return a suitable text colour (white or dark) for a given VLAN background.
+    fn text_color_for(bg: &str) -> &'static str {
+        match bg {
+            "#4CAF50" | "#2196F3" | "#9C27B0" | "#607D8B" => "white",
+            _ => "#333",
+        }
+    }
+
+    let hostname = if state.customer_name.is_empty() {
+        "Firewall".to_string()
+    } else {
+        let loc = if state.location.is_empty() {
+            String::new()
+        } else {
+            format!("-{}", state.location.to_uppercase().replace(' ', "-"))
+        };
+        format!(
+            "FG-{}{loc}",
+            state
+                .customer_name
+                .to_uppercase()
+                .replace(' ', "-")
+                .chars()
+                .take(16)
+                .collect::<String>()
+        )
+    };
+
+    let wan_ip_label = if state.wan_ip.is_empty() {
+        match state.wan_type.as_str() {
+            "DHCP" => "DHCP".to_string(),
+            "PPPoE" => "PPPoE".to_string(),
+            _ => "WAN".to_string(),
+        }
+    } else {
+        state.wan_ip.clone()
+    };
+
+    let vlan_count = state.vlans.len().max(1);
+    let vlan_box_w: u32 = 160;
+    let vlan_box_h: u32 = 80;
+    let vlan_spacing: u32 = 24;
+    let total_vlan_width =
+        (vlan_count as u32) * vlan_box_w + (vlan_count as u32).saturating_sub(1) * vlan_spacing;
+    let svg_w = total_vlan_width.max(600) + 100;
+    let svg_h: u32 = if state.vpn_site_to_site || state.vpn_remote_access {
+        580
+    } else {
+        520
+    };
+    let cx = svg_w / 2;
+
+    // Firewall box geometry
+    let fw_w: u32 = 280;
+    let fw_h: u32 = 60;
+    let fw_x = cx - fw_w / 2;
+    let fw_y: u32 = 170;
+
+    // LAN label
+    let lan_label_y = fw_y + fw_h + 30;
+    let lan_subnet_label = if state.lan_subnet.is_empty() {
+        String::new()
+    } else {
+        format!("LAN: {}", state.lan_subnet)
+    };
+
+    // VLAN row
+    let vlan_row_y = lan_label_y + 30;
+    let vlan_start_x = cx - total_vlan_width / 2;
+
+    let mut svg = String::with_capacity(4096);
+
+    // SVG header
+    svg.push_str(&format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{svg_w}" height="{svg_h}" viewBox="0 0 {svg_w} {svg_h}">
+<defs>
+  <style>
+    text {{ font-family: 'Cantarell', 'Segoe UI', sans-serif; }}
+    .label {{ font-size: 11px; fill: #666; }}
+    .title {{ font-size: 13px; font-weight: bold; }}
+    .small {{ font-size: 10px; }}
+  </style>
+  <filter id="shadow" x="-4%" y="-4%" width="108%" height="108%">
+    <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.15"/>
+  </filter>
+</defs>
+<rect width="100%" height="100%" fill="#fafafa" rx="12"/>
+"##
+    ));
+
+    // Internet cloud
+    svg.push_str(&format!(
+        r##"<ellipse cx="{cx}" cy="50" rx="110" ry="38" fill="#e8e8e8" stroke="#999" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="{cx}" y="46" text-anchor="middle" class="title" fill="#555">Internet</text>
+<text x="{cx}" y="62" text-anchor="middle" class="small" fill="#888">WAN: {wan_type}</text>
+"##,
+        wan_type = html_escape(&state.wan_type)
+    ));
+
+    // WAN link (cloud to firewall)
+    let ip_label_w = wan_ip_label.len() as u32 * 8 + 16;
+    svg.push_str(&format!(
+        r##"<line x1="{cx}" y1="88" x2="{cx}" y2="{fw_y}" stroke="#555" stroke-width="2.5" stroke-dasharray="6,3"/>
+<rect x="{ip_x}" y="110" width="{ip_label_w}" height="20" rx="4" fill="white" stroke="#ccc" stroke-width="0.5"/>
+<text x="{ip_tx}" y="124" text-anchor="middle" class="label" fill="#333">{wan_ip}</text>
+"##,
+        ip_x = cx + 8,
+        ip_tx = cx + 8 + ip_label_w / 2,
+        wan_ip = html_escape(&wan_ip_label),
+    ));
+
+    // Firewall box
+    svg.push_str(&format!(
+        r##"<rect x="{fw_x}" y="{fw_y}" width="{fw_w}" height="{fw_h}" rx="10" fill="#1a365d" stroke="#0d1b2a" stroke-width="1.5" filter="url(#shadow)"/>
+<text x="{cx}" y="{name_y}" text-anchor="middle" font-size="14" font-weight="bold" fill="white">{hostname}</text>
+<text x="{cx}" y="{type_y}" text-anchor="middle" font-size="10" fill="#aac4e0">{device_type}</text>
+"##,
+        name_y = fw_y + 26,
+        type_y = fw_y + 44,
+        device_type = html_escape(&state.device_type),
+        hostname = html_escape(&hostname),
+    ));
+
+    // Vertical line from firewall to VLAN row
+    svg.push_str(&format!(
+        r##"<line x1="{cx}" y1="{y1}" x2="{cx}" y2="{y2}" stroke="#555" stroke-width="2"/>
+"##,
+        y1 = fw_y + fw_h,
+        y2 = lan_label_y - 6,
+    ));
+
+    // LAN subnet label
+    if !lan_subnet_label.is_empty() {
+        svg.push_str(&format!(
+            r##"<text x="{cx}" y="{lan_label_y}" text-anchor="middle" class="label">{lan}</text>
+"##,
+            lan = html_escape(&lan_subnet_label)
+        ));
+    }
+
+    // VLAN boxes
+    if state.vlans.is_empty() {
+        // Show a placeholder LAN box
+        let bx = cx - 80;
+        svg.push_str(&format!(
+            r##"<rect x="{bx}" y="{vlan_row_y}" width="160" height="70" rx="8" fill="#607D8B" stroke="#455A64" stroke-width="1" filter="url(#shadow)"/>
+<text x="{cx}" y="{t1}" text-anchor="middle" font-size="12" font-weight="bold" fill="white">LAN</text>
+<text x="{cx}" y="{t2}" text-anchor="middle" font-size="10" fill="#ddd">{sub}</text>
+"##,
+            t1 = vlan_row_y + 30,
+            t2 = vlan_row_y + 48,
+            sub = if state.lan_subnet.is_empty() {
+                "No VLANs configured"
+            } else {
+                &state.lan_subnet
+            }
+        ));
+    } else {
+        for (i, vlan) in state.vlans.iter().enumerate() {
+            let bx = vlan_start_x + (i as u32) * (vlan_box_w + vlan_spacing);
+            let bcx = bx + vlan_box_w / 2;
+            let color = vlan_color(&vlan.name);
+            let text_c = text_color_for(color);
+
+            // Connecting line from centre to each VLAN box
+            svg.push_str(&format!(
+                r##"<line x1="{cx}" y1="{y1}" x2="{bcx}" y2="{vlan_row_y}" stroke="#888" stroke-width="1.5"/>
+"##,
+                y1 = vlan_row_y - 4,
+            ));
+
+            // VLAN box
+            svg.push_str(&format!(
+                r##"<rect x="{bx}" y="{vlan_row_y}" width="{vlan_box_w}" height="{vlan_box_h}" rx="8" fill="{color}" stroke="#333" stroke-width="0.8" filter="url(#shadow)"/>
+<text x="{bcx}" y="{t1}" text-anchor="middle" font-size="12" font-weight="bold" fill="{text_c}">{name}</text>
+<text x="{bcx}" y="{t2}" text-anchor="middle" font-size="10" fill="{text_c}">VLAN {vid}</text>
+<text x="{bcx}" y="{t3}" text-anchor="middle" font-size="10" fill="{text_c}" opacity="0.85">{subnet}</text>
+"##,
+                t1 = vlan_row_y + 28,
+                t2 = vlan_row_y + 46,
+                t3 = vlan_row_y + 62,
+                name = html_escape(&vlan.name),
+                vid = vlan.id,
+                subnet = html_escape(&vlan.subnet),
+            ));
+        }
+    }
+
+    // VPN tunnel indicators
+    if state.vpn_site_to_site || state.vpn_remote_access {
+        let vpn_labels: Vec<&str> = {
+            let mut v = Vec::new();
+            if state.vpn_site_to_site {
+                v.push("Site-to-Site VPN (IKEv2)");
+            }
+            if state.vpn_remote_access {
+                v.push("Remote Access VPN (IPsec)");
+            }
+            v
+        };
+
+        let fw_mid = fw_y + fw_h / 2;
+
+        // VPN dashed line and icon to the right of the firewall
+        svg.push_str(&format!(
+            r##"<line x1="{x1}" y1="{fw_mid}" x2="{x2}" y2="{fw_mid}" stroke="#e65100" stroke-width="2" stroke-dasharray="8,4"/>
+<ellipse cx="{vpn_cx}" cy="{fw_mid}" rx="14" ry="14" fill="#fff3e0" stroke="#e65100" stroke-width="1.5"/>
+<text x="{vpn_cx}" y="{lock_y}" text-anchor="middle" font-size="14" fill="#e65100">&#x26BF;</text>
+"##,
+            x1 = fw_x + fw_w,
+            x2 = fw_x + fw_w + 50,
+            vpn_cx = fw_x + fw_w + 70,
+            lock_y = fw_mid + 5,
+        ));
+
+        for (i, label) in vpn_labels.iter().enumerate() {
+            svg.push_str(&format!(
+                r##"<text x="{tx}" y="{ty}" text-anchor="start" class="label" fill="#e65100">{label}</text>
+"##,
+                tx = fw_x + fw_w + 92,
+                ty = fw_mid - 2 + (i as u32) * 16,
+            ));
+        }
+
+        // Legend
+        let legend_y = vlan_row_y + vlan_box_h + 30;
+        svg.push_str(&format!(
+            r##"<line x1="30" y1="{legend_y}" x2="60" y2="{legend_y}" stroke="#e65100" stroke-width="2" stroke-dasharray="8,4"/>
+<text x="68" y="{ty}" text-anchor="start" class="small" fill="#888">VPN tunnel</text>
+"##,
+            ty = legend_y + 4,
+        ));
+    }
+
+    // Footer
+    svg.push_str(&format!(
+        r##"<text x="{cx}" y="{fy}" text-anchor="middle" font-size="9" fill="#bbb">Generated by SuperManager</text>
+"##,
+        fy = svg_h - 10,
+    ));
+
+    svg.push_str("</svg>\n");
+    svg
 }
 
 // ---------------------------------------------------------------------------
@@ -2022,3 +2738,1139 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
 
 use gtk4::gio;
 use gtk4::glib;
+
+// ---------------------------------------------------------------------------
+// Config versioning D-Bus helpers
+// ---------------------------------------------------------------------------
+
+/// Save a config version via D-Bus.
+async fn save_config_version_dbus(
+    customer: &str,
+    device_type: &str,
+    config: &str,
+) -> anyhow::Result<String> {
+    use supermgr_core::dbus::DaemonProxy;
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    let filename = proxy.save_config_version(customer, device_type, config).await?;
+    Ok(filename)
+}
+
+/// List config versions for a customer via D-Bus.
+async fn list_config_versions_dbus(customer: &str) -> anyhow::Result<String> {
+    use supermgr_core::dbus::DaemonProxy;
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    let json = proxy.list_config_versions(customer).await?;
+    Ok(json)
+}
+
+/// Retrieve a config version by filename via D-Bus.
+async fn get_config_version_dbus(filename: &str) -> anyhow::Result<String> {
+    use supermgr_core::dbus::DaemonProxy;
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    let config = proxy.get_config_version(filename).await?;
+    Ok(config)
+}
+
+// ---------------------------------------------------------------------------
+// History dialog
+// ---------------------------------------------------------------------------
+
+/// Show a dialog listing saved config versions with ability to view or diff.
+fn show_history_dialog(
+    versions_json: &str,
+    current_buffer: &gtk4::TextBuffer,
+    rt: &tokio::runtime::Handle,
+) {
+    let entries: Vec<serde_json::Value> = match serde_json::from_str(versions_json) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let dialog = adw::Dialog::builder()
+        .title("Config Version History")
+        .content_width(700)
+        .content_height(500)
+        .build();
+
+    let toolbar_view = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    toolbar_view.add_top_bar(&header);
+
+    if entries.is_empty() {
+        let status = adw::StatusPage::builder()
+            .title("No Versions Found")
+            .description("Generate a configuration first to create a saved version.")
+            .icon_name("document-open-recent-symbolic")
+            .build();
+        toolbar_view.set_content(Some(&status));
+        dialog.set_child(Some(&toolbar_view));
+        dialog.present(None::<&gtk4::Widget>);
+        return;
+    }
+
+    let list_box = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .margin_start(16)
+        .margin_end(16)
+        .margin_top(8)
+        .margin_bottom(8)
+        .build();
+
+    let current_text = {
+        let (start, end) = current_buffer.bounds();
+        current_buffer.text(&start, &end, false).to_string()
+    };
+
+    for entry in &entries {
+        let filename = entry["filename"].as_str().unwrap_or("unknown").to_string();
+        let timestamp = entry["timestamp"].as_str().unwrap_or("").to_string();
+
+        // Trim the timestamp for display
+        let display_ts = if timestamp.len() > 19 {
+            &timestamp[..19]
+        } else {
+            &timestamp
+        };
+
+        let row = adw::ActionRow::builder()
+            .title(&filename)
+            .subtitle(display_ts)
+            .build();
+
+        let view_btn = gtk4::Button::builder()
+            .label("View")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
+            .build();
+
+        let diff_btn = gtk4::Button::builder()
+            .label("Diff")
+            .css_classes(["flat"])
+            .valign(gtk4::Align::Center)
+            .build();
+
+        // View button — load this version's config into a new dialog
+        {
+            let filename = filename.clone();
+            let rt = rt.clone();
+            view_btn.connect_clicked(move |btn| {
+                let filename = filename.clone();
+                let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+                btn.set_sensitive(false);
+                let btn2 = btn.clone();
+                {
+                    let slot = Arc::clone(&result_slot);
+                    rt.spawn(async move {
+                        match get_config_version_dbus(&filename).await {
+                            Ok(config) => *slot.lock().unwrap() = Some(config),
+                            Err(e) => *slot.lock().unwrap() = Some(format!("# Error: {e}")),
+                        }
+                    });
+                }
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let maybe = result_slot.lock().unwrap().take();
+                    if let Some(config) = maybe {
+                        btn2.set_sensitive(true);
+                        show_config_viewer_dialog(&config);
+                        return glib::ControlFlow::Break;
+                    }
+                    glib::ControlFlow::Continue
+                });
+            });
+        }
+
+        // Diff button — show unified diff between this version and current
+        {
+            let filename = filename.clone();
+            let rt = rt.clone();
+            let current_text = current_text.clone();
+            diff_btn.connect_clicked(move |btn| {
+                let filename = filename.clone();
+                let current_text = current_text.clone();
+                let result_slot: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+                btn.set_sensitive(false);
+                let btn2 = btn.clone();
+                {
+                    let slot = Arc::clone(&result_slot);
+                    rt.spawn(async move {
+                        match get_config_version_dbus(&filename).await {
+                            Ok(old_config) => {
+                                let diff = compute_unified_diff(&old_config, &current_text);
+                                *slot.lock().unwrap() = Some(diff);
+                            }
+                            Err(e) => {
+                                *slot.lock().unwrap() = Some(format!("# Error: {e}"));
+                            }
+                        }
+                    });
+                }
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    let maybe = result_slot.lock().unwrap().take();
+                    if let Some(diff_text) = maybe {
+                        btn2.set_sensitive(true);
+                        show_config_viewer_dialog(&diff_text);
+                        return glib::ControlFlow::Break;
+                    }
+                    glib::ControlFlow::Continue
+                });
+            });
+        }
+
+        row.add_suffix(&diff_btn);
+        row.add_suffix(&view_btn);
+        list_box.append(&row);
+    }
+
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&list_box)
+        .build();
+
+    toolbar_view.set_content(Some(&scrolled));
+    dialog.set_child(Some(&toolbar_view));
+    dialog.present(None::<&gtk4::Widget>);
+}
+
+/// Show a read-only dialog with config or diff text.
+fn show_config_viewer_dialog(text: &str) {
+    let dialog = adw::Dialog::builder()
+        .title("Config Version")
+        .content_width(800)
+        .content_height(600)
+        .build();
+
+    let toolbar_view = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    toolbar_view.add_top_bar(&header);
+
+    let buf = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
+    buf.set_text(text);
+
+    let view = gtk4::TextView::builder()
+        .buffer(&buf)
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::Word)
+        .vexpand(true)
+        .hexpand(true)
+        .top_margin(12)
+        .bottom_margin(12)
+        .left_margin(16)
+        .right_margin(16)
+        .build();
+
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&view)
+        .build();
+    scrolled.add_css_class("card");
+
+    toolbar_view.set_content(Some(&scrolled));
+    dialog.set_child(Some(&toolbar_view));
+    dialog.present(None::<&gtk4::Widget>);
+}
+
+/// Compute a simple unified diff between two texts.
+fn compute_unified_diff(old: &str, new: &str) -> String {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    let mut output = String::new();
+    output.push_str("--- previous version\n");
+    output.push_str("+++ current\n");
+
+    // Simple line-by-line diff (Myers-like would be better but this is functional)
+    let max = old_lines.len().max(new_lines.len());
+    let mut i = 0;
+    let mut j = 0;
+    while i < old_lines.len() || j < new_lines.len() {
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            output.push_str(&format!(" {}\n", old_lines[i]));
+            i += 1;
+            j += 1;
+        } else {
+            // Try to find the old line later in new (addition before it)
+            let mut found_in_new = false;
+            for k in (j + 1)..new_lines.len().min(j + 5) {
+                if i < old_lines.len() && new_lines[k] == old_lines[i] {
+                    // Lines j..k in new are additions
+                    for add in j..k {
+                        output.push_str(&format!("+{}\n", new_lines[add]));
+                    }
+                    j = k;
+                    found_in_new = true;
+                    break;
+                }
+            }
+            if !found_in_new {
+                // Try to find the new line later in old (deletion before it)
+                let mut found_in_old = false;
+                for k in (i + 1)..old_lines.len().min(i + 5) {
+                    if j < new_lines.len() && old_lines[k] == new_lines[j] {
+                        for del in i..k {
+                            output.push_str(&format!("-{}\n", old_lines[del]));
+                        }
+                        i = k;
+                        found_in_old = true;
+                        break;
+                    }
+                }
+                if !found_in_old {
+                    if i < old_lines.len() {
+                        output.push_str(&format!("-{}\n", old_lines[i]));
+                        i += 1;
+                    }
+                    if j < new_lines.len() {
+                        output.push_str(&format!("+{}\n", new_lines[j]));
+                        j += 1;
+                    }
+                }
+            }
+        }
+        if i >= max && j >= max {
+            break;
+        }
+    }
+    if output.lines().count() <= 2 {
+        output.push_str("\n(no differences)\n");
+    }
+    output
+}
+
+// ---------------------------------------------------------------------------
+// Batch provisioning
+// ---------------------------------------------------------------------------
+
+/// A single row parsed from the batch CSV.
+#[derive(Debug, Clone)]
+struct BatchEntry {
+    customer_name: String,
+    location: String,
+    device_type: String,
+    wan_type: String,
+    wan_ip: String,
+    lan_subnet: String,
+}
+
+/// Parse CSV text into batch entries.
+/// Expected columns: customer_name, location, device_type, wan_type, wan_ip, lan_subnet
+fn parse_batch_csv(text: &str) -> Result<Vec<BatchEntry>, String> {
+    let mut entries = Vec::new();
+    let mut lines = text.lines();
+
+    // Skip header if present
+    let first = match lines.next() {
+        Some(l) => l.trim(),
+        None => return Err("Empty CSV input".into()),
+    };
+
+    let is_header = first.to_lowercase().contains("customer")
+        || first.to_lowercase().contains("name");
+    if !is_header {
+        if let Some(entry) = parse_csv_line(first)? {
+            entries.push(entry);
+        }
+    }
+
+    for (i, line) in lines.enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        match parse_csv_line(line) {
+            Ok(Some(entry)) => entries.push(entry),
+            Ok(None) => {}
+            Err(e) => return Err(format!("Line {}: {}", i + 2, e)),
+        }
+    }
+
+    if entries.is_empty() {
+        return Err("No valid entries found in CSV".into());
+    }
+    Ok(entries)
+}
+
+fn parse_csv_line(line: &str) -> Result<Option<BatchEntry>, String> {
+    let fields: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    if fields.len() < 6 {
+        return Err(format!(
+            "Expected 6 columns (customer_name, location, device_type, wan_type, \
+             wan_ip, lan_subnet), got {}",
+            fields.len()
+        ));
+    }
+    Ok(Some(BatchEntry {
+        customer_name: fields[0].to_string(),
+        location: fields[1].to_string(),
+        device_type: fields[2].to_string(),
+        wan_type: fields[3].to_string(),
+        wan_ip: fields[4].to_string(),
+        lan_subnet: fields[5].to_string(),
+    }))
+}
+
+/// Build a WizardState from a BatchEntry with sensible defaults.
+fn batch_entry_to_state(entry: &BatchEntry) -> WizardState {
+    WizardState {
+        customer_name: entry.customer_name.clone(),
+        location: entry.location.clone(),
+        device_type: entry.device_type.clone(),
+        wan_type: entry.wan_type.clone(),
+        wan_ip: entry.wan_ip.clone(),
+        wan_gateway: String::new(),
+        wan_dns: "1.1.1.1".into(),
+        lan_subnet: entry.lan_subnet.clone(),
+        vlans: Vec::new(),
+        management_vlan: false,
+        dns_servers: "1.1.1.1, 8.8.8.8".into(),
+        ntp_server: "pool.ntp.org".into(),
+        admin_https_port: 443,
+        default_deny: true,
+        allow_outbound_web: true,
+        allow_dns: true,
+        enable_ips: true,
+        enable_web_filter: true,
+        enable_antivirus: true,
+        ..Default::default()
+    }
+}
+
+/// Show the batch provisioning dialog.
+fn show_batch_dialog(
+    parent: Option<&gtk4::Window>,
+    _state: &Rc<RefCell<WizardState>>,
+    _app_state: &Arc<Mutex<AppState>>,
+) {
+    let dialog = gtk4::Window::builder()
+        .title("Batch Provisioning")
+        .default_width(900)
+        .default_height(650)
+        .modal(true)
+        .build();
+
+    if let Some(p) = parent {
+        dialog.set_transient_for(Some(p));
+    }
+
+    let main_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    main_box.append(&header);
+
+    let content_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .margin_start(16)
+        .margin_end(16)
+        .margin_bottom(16)
+        .build();
+
+    let info_label = gtk4::Label::builder()
+        .label(
+            "Paste CSV data or load a CSV file. Columns: customer_name, \
+             location, device_type, wan_type, wan_ip, lan_subnet",
+        )
+        .wrap(true)
+        .css_classes(["dim-label"])
+        .halign(gtk4::Align::Start)
+        .build();
+    content_box.append(&info_label);
+
+    // CSV text area
+    let csv_buffer = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
+    csv_buffer.set_text(
+        "customer_name, location, device_type, wan_type, wan_ip, lan_subnet\n\
+         Acme Corp, Oslo HQ, FortiGate, Static, 203.0.113.10, 10.42.100.0/24\n\
+         Beta Inc, Bergen, FortiGate, DHCP, , 10.50.0.0/24\n",
+    );
+
+    let csv_view = gtk4::TextView::builder()
+        .buffer(&csv_buffer)
+        .editable(true)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::None)
+        .vexpand(true)
+        .hexpand(true)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(12)
+        .right_margin(12)
+        .build();
+    let csv_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .min_content_height(150)
+        .child(&csv_view)
+        .build();
+    csv_scroll.add_css_class("card");
+    content_box.append(&csv_scroll);
+
+    // Buttons row
+    let btn_row = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk4::Align::Center)
+        .margin_top(8)
+        .build();
+
+    let load_btn = gtk4::Button::builder()
+        .label("Load CSV")
+        .css_classes(["flat"])
+        .build();
+
+    let preview_btn = gtk4::Button::builder()
+        .label("Preview")
+        .css_classes(["suggested-action", "pill"])
+        .build();
+
+    let generate_all_btn = gtk4::Button::builder()
+        .label("Generate All")
+        .css_classes(["pill"])
+        .sensitive(false)
+        .build();
+
+    let export_all_btn = gtk4::Button::builder()
+        .label("Export All")
+        .css_classes(["flat", "pill"])
+        .sensitive(false)
+        .build();
+
+    btn_row.append(&load_btn);
+    btn_row.append(&preview_btn);
+    btn_row.append(&generate_all_btn);
+    btn_row.append(&export_all_btn);
+    content_box.append(&btn_row);
+
+    // Preview table
+    let preview_label = gtk4::Label::builder()
+        .label("Preview")
+        .css_classes(["title-4"])
+        .halign(gtk4::Align::Start)
+        .margin_top(8)
+        .build();
+    content_box.append(&preview_label);
+
+    let preview_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let preview_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .min_content_height(150)
+        .child(&preview_list)
+        .build();
+    content_box.append(&preview_scroll);
+
+    // Status area
+    let status_buffer = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
+    let status_view = gtk4::TextView::builder()
+        .buffer(&status_buffer)
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::Word)
+        .vexpand(true)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(12)
+        .right_margin(12)
+        .build();
+    let status_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .min_content_height(100)
+        .child(&status_view)
+        .build();
+    status_scroll.add_css_class("card");
+    content_box.append(&status_scroll);
+
+    main_box.append(&content_box);
+
+    // Shared state
+    let parsed_entries: Rc<RefCell<Vec<BatchEntry>>> = Rc::new(RefCell::new(Vec::new()));
+    let generated_configs: Rc<RefCell<Vec<(String, String)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
+    // Load CSV button
+    {
+        let csv_buffer = csv_buffer.clone();
+        let dialog_ref = dialog.clone();
+        load_btn.connect_clicked(move |_| {
+            let file_dialog = gtk4::FileDialog::builder()
+                .title("Load CSV File")
+                .build();
+            let csv_buffer = csv_buffer.clone();
+            file_dialog.open(
+                Some(&dialog_ref),
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                csv_buffer.set_text(&content);
+                            }
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    // Preview button
+    {
+        let csv_buffer = csv_buffer.clone();
+        let preview_list = preview_list.clone();
+        let parsed_entries = Rc::clone(&parsed_entries);
+        let generate_all_btn = generate_all_btn.clone();
+        let status_buffer = status_buffer.clone();
+        preview_btn.connect_clicked(move |_| {
+            let (start, end) = csv_buffer.bounds();
+            let text = csv_buffer.text(&start, &end, false).to_string();
+
+            while let Some(child) = preview_list.first_child() {
+                preview_list.remove(&child);
+            }
+
+            match parse_batch_csv(&text) {
+                Ok(entries) => {
+                    for (i, entry) in entries.iter().enumerate() {
+                        let row = adw::ActionRow::builder()
+                            .title(&format!(
+                                "{}. {} — {}",
+                                i + 1,
+                                entry.customer_name,
+                                entry.location,
+                            ))
+                            .subtitle(&format!(
+                                "{} | WAN: {} {} | LAN: {}",
+                                entry.device_type,
+                                entry.wan_type,
+                                if entry.wan_ip.is_empty() {
+                                    ""
+                                } else {
+                                    &entry.wan_ip
+                                },
+                                entry.lan_subnet,
+                            ))
+                            .build();
+                        preview_list.append(&row);
+                    }
+                    status_buffer.set_text(&format!(
+                        "Parsed {} entries. Click \"Generate All\" to generate configs.",
+                        entries.len()
+                    ));
+                    *parsed_entries.borrow_mut() = entries;
+                    generate_all_btn.set_sensitive(true);
+                }
+                Err(e) => {
+                    status_buffer.set_text(&format!("Parse error: {e}"));
+                    parsed_entries.borrow_mut().clear();
+                    generate_all_btn.set_sensitive(false);
+                }
+            }
+        });
+    }
+
+    // Generate All button
+    {
+        let parsed_entries = Rc::clone(&parsed_entries);
+        let generated_configs = Rc::clone(&generated_configs);
+        let status_buffer = status_buffer.clone();
+        let export_all_btn = export_all_btn.clone();
+        generate_all_btn.connect_clicked(move |btn| {
+            let entries = parsed_entries.borrow().clone();
+            if entries.is_empty() {
+                return;
+            }
+
+            btn.set_sensitive(false);
+            btn.set_label("Generating...");
+            status_buffer.set_text("Generating configs for all entries...\n");
+
+            let mut configs = Vec::new();
+            let mut status_text = String::new();
+            for (i, entry) in entries.iter().enumerate() {
+                let ws = batch_entry_to_state(entry);
+                let prompt = build_generation_prompt(&ws);
+                let filename = format!(
+                    "{}-{}.conf",
+                    ws.device_type.to_lowercase(),
+                    ws.customer_name.to_lowercase().replace(' ', "-"),
+                );
+                let config_text = format!(
+                    "# Generated config for: {} ({})\n\
+                     # Location: {}\n\
+                     # Device: {} | WAN: {} {}\n\
+                     # LAN: {}\n\
+                     #\n\
+                     # --- Prompt sent to Claude ---\n\
+                     {}\n",
+                    entry.customer_name,
+                    filename,
+                    entry.location,
+                    entry.device_type,
+                    entry.wan_type,
+                    entry.wan_ip,
+                    entry.lan_subnet,
+                    prompt,
+                );
+                configs.push((filename, config_text));
+                status_text.push_str(&format!(
+                    "[{}/{}] Prepared: {}\n",
+                    i + 1,
+                    entries.len(),
+                    entry.customer_name,
+                ));
+            }
+
+            status_text.push_str(&format!(
+                "\nDone. {} configs ready. Click \"Export All\" to save as ZIP.\n",
+                configs.len()
+            ));
+            status_buffer.set_text(&status_text);
+            *generated_configs.borrow_mut() = configs;
+            export_all_btn.set_sensitive(true);
+            btn.set_sensitive(true);
+            btn.set_label("Generate All");
+        });
+    }
+
+    // Export All button
+    {
+        let generated_configs = Rc::clone(&generated_configs);
+        let status_buffer = status_buffer.clone();
+        let dialog_ref = dialog.clone();
+        export_all_btn.connect_clicked(move |_| {
+            let configs = generated_configs.borrow().clone();
+            if configs.is_empty() {
+                return;
+            }
+
+            let file_dialog = gtk4::FileDialog::builder()
+                .title("Save Batch Configs (ZIP)")
+                .initial_name("batch-configs.zip")
+                .build();
+
+            let configs = configs.clone();
+            let sb = status_buffer.clone();
+            file_dialog.save(
+                Some(&dialog_ref),
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            match export_configs_as_zip(&path, &configs) {
+                                Ok(()) => {
+                                    sb.set_text(&format!(
+                                        "Exported {} configs to {}",
+                                        configs.len(),
+                                        path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    sb.set_text(&format!("Export failed: {e}"));
+                                }
+                            }
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    dialog.set_child(Some(&main_box));
+    dialog.present();
+}
+
+/// Export configs as a minimal uncompressed ZIP archive (no external crate needed).
+fn export_configs_as_zip(
+    path: &std::path::Path,
+    configs: &[(String, String)],
+) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("Create file: {e}"))?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    let mut central_dir = Vec::new();
+    let mut offset: u32 = 0;
+
+    for (name, content) in configs {
+        let name_bytes = name.as_bytes();
+        let content_bytes = content.as_bytes();
+        let crc = crc32_simple(content_bytes);
+
+        let local_header = build_zip_local_header(name_bytes, content_bytes, crc);
+        writer
+            .write_all(&local_header)
+            .map_err(|e| format!("Write: {e}"))?;
+        writer
+            .write_all(content_bytes)
+            .map_err(|e| format!("Write: {e}"))?;
+
+        let cd_entry = build_zip_cd_entry(name_bytes, content_bytes, crc, offset);
+        central_dir.push(cd_entry);
+
+        offset += local_header.len() as u32 + content_bytes.len() as u32;
+    }
+
+    let cd_offset = offset;
+    let mut cd_size: u32 = 0;
+    for entry in &central_dir {
+        writer
+            .write_all(entry)
+            .map_err(|e| format!("Write: {e}"))?;
+        cd_size += entry.len() as u32;
+    }
+
+    let num_entries = configs.len() as u16;
+    let eocd = build_zip_eocd(num_entries, cd_size, cd_offset);
+    writer
+        .write_all(&eocd)
+        .map_err(|e| format!("Write: {e}"))?;
+
+    Ok(())
+}
+
+fn build_zip_local_header(name: &[u8], content: &[u8], crc: u32) -> Vec<u8> {
+    let mut h = Vec::new();
+    h.extend_from_slice(&0x04034b50u32.to_le_bytes()); // local file header signature
+    h.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    h.extend_from_slice(&0u16.to_le_bytes()); // flags
+    h.extend_from_slice(&0u16.to_le_bytes()); // compression: store
+    h.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    h.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    h.extend_from_slice(&crc.to_le_bytes());
+    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
+    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
+    h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    h.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+    h.extend_from_slice(name);
+    h
+}
+
+fn build_zip_cd_entry(name: &[u8], content: &[u8], crc: u32, offset: u32) -> Vec<u8> {
+    let mut h = Vec::new();
+    h.extend_from_slice(&0x02014b50u32.to_le_bytes()); // central dir signature
+    h.extend_from_slice(&20u16.to_le_bytes()); // version made by
+    h.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    h.extend_from_slice(&0u16.to_le_bytes()); // flags
+    h.extend_from_slice(&0u16.to_le_bytes()); // compression: store
+    h.extend_from_slice(&0u16.to_le_bytes()); // mod time
+    h.extend_from_slice(&0u16.to_le_bytes()); // mod date
+    h.extend_from_slice(&crc.to_le_bytes());
+    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
+    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
+    h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    h.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+    h.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    h.extend_from_slice(&0u16.to_le_bytes()); // disk number start
+    h.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+    h.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    h.extend_from_slice(&offset.to_le_bytes()); // local header offset
+    h.extend_from_slice(name);
+    h
+}
+
+fn build_zip_eocd(num_entries: u16, cd_size: u32, cd_offset: u32) -> Vec<u8> {
+    let mut h = Vec::new();
+    h.extend_from_slice(&0x06054b50u32.to_le_bytes()); // end of central dir signature
+    h.extend_from_slice(&0u16.to_le_bytes()); // disk number
+    h.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
+    h.extend_from_slice(&num_entries.to_le_bytes()); // entries on disk
+    h.extend_from_slice(&num_entries.to_le_bytes()); // total entries
+    h.extend_from_slice(&cd_size.to_le_bytes());
+    h.extend_from_slice(&cd_offset.to_le_bytes());
+    h.extend_from_slice(&0u16.to_le_bytes()); // comment length
+    h
+}
+
+/// Simple CRC-32 (ISO 3309) without external crate.
+fn crc32_simple(data: &[u8]) -> u32 {
+    let mut crc: u32 = 0xFFFF_FFFF;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB8_8320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    !crc
+}
+
+// ---------------------------------------------------------------------------
+// Config diff (device comparison)
+// ---------------------------------------------------------------------------
+
+/// Fetch current config from a device via SSH.
+async fn fetch_device_config(host_id: &str, device_type: &str) -> anyhow::Result<String> {
+    use anyhow::Context;
+
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus connection failed — is the daemon running?")?;
+
+    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn)
+        .await
+        .context("DaemonProxy creation failed")?;
+
+    let command = match device_type {
+        "FortiGate" => "show full-configuration",
+        "UniFi" => "cat /tmp/system.cfg",
+        _ => "show full-configuration",
+    };
+
+    let result = proxy
+        .ssh_execute_command(host_id, command)
+        .await
+        .context("SSH execute failed")?;
+
+    Ok(result)
+}
+
+/// Compute a simple line-based diff for side-by-side display.
+/// Returns (tag, line) pairs: ' ' = unchanged, '-' = removed, '+' = added.
+fn compute_line_diff(old_text: &str, new_text: &str) -> Vec<(char, String)> {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+
+    let old_set: HashSet<&str> = old_lines.iter().copied().collect();
+    let new_set: HashSet<&str> = new_lines.iter().copied().collect();
+
+    let mut result = Vec::new();
+    let mut oi = 0;
+    let mut ni = 0;
+
+    while oi < old_lines.len() && ni < new_lines.len() {
+        if old_lines[oi] == new_lines[ni] {
+            result.push((' ', old_lines[oi].to_string()));
+            oi += 1;
+            ni += 1;
+        } else if !new_set.contains(old_lines[oi]) {
+            result.push(('-', old_lines[oi].to_string()));
+            oi += 1;
+        } else if !old_set.contains(new_lines[ni]) {
+            result.push(('+', new_lines[ni].to_string()));
+            ni += 1;
+        } else {
+            result.push(('-', old_lines[oi].to_string()));
+            oi += 1;
+        }
+    }
+
+    while oi < old_lines.len() {
+        result.push(('-', old_lines[oi].to_string()));
+        oi += 1;
+    }
+    while ni < new_lines.len() {
+        result.push(('+', new_lines[ni].to_string()));
+        ni += 1;
+    }
+
+    result
+}
+
+/// Show a side-by-side diff dialog comparing old (device) config vs new (generated) config.
+///
+/// Left pane shows the device's current config with removed lines highlighted red.
+/// Right pane shows the generated config with added lines highlighted green.
+/// A "Copy Unified Diff" button copies the diff in unified format.
+fn show_diff_dialog(
+    parent: Option<&gtk4::Window>,
+    old_text: &str,
+    new_text: &str,
+    old_label: &str,
+    new_label: &str,
+) {
+    let dialog = gtk4::Window::builder()
+        .title("Config Diff")
+        .default_width(1100)
+        .default_height(700)
+        .modal(true)
+        .build();
+
+    if let Some(p) = parent {
+        dialog.set_transient_for(Some(p));
+    }
+
+    let main_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    main_box.append(&header);
+
+    // Stats bar
+    let diff_lines = compute_line_diff(old_text, new_text);
+    let added = diff_lines.iter().filter(|(t, _)| *t == '+').count();
+    let removed = diff_lines.iter().filter(|(t, _)| *t == '-').count();
+    let unchanged = diff_lines.iter().filter(|(t, _)| *t == ' ').count();
+
+    let stats_label = gtk4::Label::builder()
+        .label(&format!(
+            "  +{added} added   -{removed} removed   {unchanged} unchanged",
+        ))
+        .css_classes(["dim-label"])
+        .halign(gtk4::Align::Start)
+        .margin_start(16)
+        .margin_top(8)
+        .margin_bottom(4)
+        .build();
+    main_box.append(&stats_label);
+
+    // Side-by-side paned view
+    let paned = gtk4::Paned::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .vexpand(true)
+        .hexpand(true)
+        .build();
+
+    // Left side: old (device) config
+    let left_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    let left_title = gtk4::Label::builder()
+        .label(old_label)
+        .css_classes(["title-4"])
+        .halign(gtk4::Align::Start)
+        .margin_start(12)
+        .margin_top(8)
+        .margin_bottom(4)
+        .build();
+    left_box.append(&left_title);
+
+    let left_tag_table = gtk4::TextTagTable::new();
+    let removed_tag = gtk4::TextTag::builder()
+        .name("removed")
+        .background("rgba(255, 80, 80, 0.25)")
+        .build();
+    left_tag_table.add(&removed_tag);
+
+    let left_buffer = gtk4::TextBuffer::new(Some(&left_tag_table));
+    let left_view = gtk4::TextView::builder()
+        .buffer(&left_buffer)
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::None)
+        .vexpand(true)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(12)
+        .right_margin(12)
+        .build();
+    let left_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&left_view)
+        .build();
+    left_scroll.add_css_class("card");
+    left_box.append(&left_scroll);
+
+    // Right side: new (generated) config
+    let right_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    let right_title = gtk4::Label::builder()
+        .label(new_label)
+        .css_classes(["title-4"])
+        .halign(gtk4::Align::Start)
+        .margin_start(12)
+        .margin_top(8)
+        .margin_bottom(4)
+        .build();
+    right_box.append(&right_title);
+
+    let right_tag_table = gtk4::TextTagTable::new();
+    let added_tag = gtk4::TextTag::builder()
+        .name("added")
+        .background("rgba(80, 200, 80, 0.25)")
+        .build();
+    right_tag_table.add(&added_tag);
+
+    let right_buffer = gtk4::TextBuffer::new(Some(&right_tag_table));
+    let right_view = gtk4::TextView::builder()
+        .buffer(&right_buffer)
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::None)
+        .vexpand(true)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(12)
+        .right_margin(12)
+        .build();
+    let right_scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .child(&right_view)
+        .build();
+    right_scroll.add_css_class("card");
+    right_box.append(&right_scroll);
+
+    // Populate buffers with colored diff lines
+    for (tag, line) in &diff_lines {
+        match tag {
+            '-' => {
+                let start_offset = left_buffer.end_iter().offset();
+                left_buffer.insert(&mut left_buffer.end_iter(), &format!("- {line}\n"));
+                let start = left_buffer.iter_at_offset(start_offset);
+                let end = left_buffer.end_iter();
+                left_buffer.apply_tag_by_name("removed", &start, &end);
+            }
+            '+' => {
+                let start_offset = right_buffer.end_iter().offset();
+                right_buffer.insert(&mut right_buffer.end_iter(), &format!("+ {line}\n"));
+                let start = right_buffer.iter_at_offset(start_offset);
+                let end = right_buffer.end_iter();
+                right_buffer.apply_tag_by_name("added", &start, &end);
+            }
+            _ => {
+                left_buffer.insert(&mut left_buffer.end_iter(), &format!("  {line}\n"));
+                right_buffer.insert(&mut right_buffer.end_iter(), &format!("  {line}\n"));
+            }
+        }
+    }
+
+    paned.set_start_child(Some(&left_box));
+    paned.set_end_child(Some(&right_box));
+    paned.set_position(550);
+
+    main_box.append(&paned);
+
+    // Bottom bar
+    let bottom_bar = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk4::Align::Center)
+        .margin_top(8)
+        .margin_bottom(12)
+        .build();
+
+    let copy_btn = gtk4::Button::builder()
+        .label("Copy Unified Diff")
+        .css_classes(["flat", "pill"])
+        .build();
+    {
+        let diff_lines = diff_lines.clone();
+        copy_btn.connect_clicked(move |btn| {
+            let mut unified = String::new();
+            unified.push_str("--- Device Config\n");
+            unified.push_str("+++ Generated Config\n");
+            for (tag, line) in &diff_lines {
+                unified.push(*tag);
+                unified.push(' ');
+                unified.push_str(line);
+                unified.push('\n');
+            }
+            let clipboard = btn.display().clipboard();
+            clipboard.set_text(&unified);
+        });
+    }
+    bottom_bar.append(&copy_btn);
+    main_box.append(&bottom_bar);
+
+    dialog.set_child(Some(&main_box));
+    dialog.present();
+}

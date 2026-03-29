@@ -1716,6 +1716,91 @@ pub fn build_ui(
         });
     }
 
+    // --- UniFi Set Inform button -----------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        let window = window.clone();
+        let toast_overlay = toast_overlay.clone();
+        ssh_host_detail.set_inform_btn.connect_clicked(move |_| {
+            let host_id = {
+                let s = app_state.lock().expect("lock");
+                match s.selected_ssh_host.clone() {
+                    Some(id) => id,
+                    None => return,
+                }
+            };
+
+            let dialog = adw::AlertDialog::new(
+                Some("Set Inform URL"),
+                Some("Adopt this UniFi device to a controller by running set-inform via SSH."),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("set", "Set Inform");
+            dialog.set_response_appearance("set", adw::ResponseAppearance::Suggested);
+
+            let content = gtk4::Box::builder()
+                .orientation(gtk4::Orientation::Vertical)
+                .spacing(8)
+                .build();
+
+            let url_entry = adw::EntryRow::builder()
+                .title("Controller Inform URL")
+                .text("https://unifi.example.com:8443/inform")
+                .build();
+            let url_group = adw::PreferencesGroup::new();
+            url_group.add(&url_entry);
+            content.append(&url_group);
+
+            dialog.set_extra_child(Some(&content));
+
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let toast_overlay = toast_overlay.clone();
+            dialog.connect_response(Some("set"), move |_dlg, _resp| {
+                let inform_url = url_entry.text().to_string();
+                if inform_url.is_empty() {
+                    toast_overlay.add_toast(adw::Toast::new("Inform URL is required"));
+                    return;
+                }
+                let host_id = host_id.clone();
+                let tx = tx.clone();
+                let toast_overlay = toast_overlay.clone();
+                rt.spawn(async move {
+                    let conn = match zbus::Connection::system().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("D-Bus: {e}")));
+                            return;
+                        }
+                    };
+                    let proxy = match supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("proxy: {e}")));
+                            return;
+                        }
+                    };
+                    match proxy.unifi_set_inform(&host_id, &inform_url).await {
+                        Ok(resp) => {
+                            let _ = tx.send(AppMsg::ShowToast(
+                                format!("set-inform sent successfully"),
+                            ));
+                            tracing::info!("set-inform result: {resp}");
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(
+                                format!("Set Inform failed: {e}"),
+                            ));
+                        }
+                    }
+                });
+            });
+            dialog.present(Some(&window));
+        });
+    }
+
     // --- SSH Host Delete button ---------------------------------------------
     {
         let app_state = Arc::clone(&app_state);

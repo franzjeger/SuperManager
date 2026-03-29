@@ -91,6 +91,8 @@ pub async fn send_message_subscription(
         "mcp__supermgr__fortigate_api",
         "mcp__supermgr__fortigate_set_api_token",
         "mcp__supermgr__fortigate_push_ssh_key",
+        "mcp__supermgr__unifi_set_inform",
+        "mcp__supermgr__unifi_api",
     ].join(",");
 
     let system_with_context = format!(
@@ -333,6 +335,32 @@ fn tools() -> Value {
                     "admin_user": { "type": "string", "description": "FortiGate admin username (e.g. 'admin')" }
                 },
                 "required": ["host_id", "key_id", "admin_user"]
+            }
+        },
+        {
+            "name": "unifi_set_inform",
+            "description": "Execute set-inform on a UniFi device via SSH to adopt it to a controller. The host must be a UniFi device type.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "host_id": { "type": "string", "description": "UUID of the UniFi device host" },
+                    "inform_url": { "type": "string", "description": "Controller inform URL (e.g. https://unifi.example.com:8443/inform)" }
+                },
+                "required": ["host_id", "inform_url"]
+            }
+        },
+        {
+            "name": "unifi_api",
+            "description": "Call the UniFi Controller REST API on a host that has controller credentials configured. Authenticates automatically. Common paths: /proxy/network/api/s/default/stat/device (list devices), /proxy/network/api/s/default/stat/sta (list clients), /proxy/network/api/s/default/rest/setting (settings).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "host_id": { "type": "string", "description": "UUID of the UniFi host with controller configured" },
+                    "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE" },
+                    "path": { "type": "string", "description": "API path, e.g. /proxy/network/api/s/default/stat/device" },
+                    "body": { "type": "string", "description": "Optional JSON request body (for POST/PUT)" }
+                },
+                "required": ["host_id", "method", "path"]
             }
         }
     ])
@@ -733,6 +761,22 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
             let admin_user = args["admin_user"].as_str().context("missing admin_user")?;
             info!("tool fortigate_push_ssh_key: key={key_id} admin={admin_user} host={host_id}");
             let resp = proxy.fortigate_push_ssh_key(host_id, key_id, admin_user).await?;
+            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
+        }
+        "unifi_set_inform" => {
+            let host_id = args["host_id"].as_str().context("missing host_id")?;
+            let inform_url = args["inform_url"].as_str().context("missing inform_url")?;
+            info!("tool unifi_set_inform: host={host_id} url={inform_url}");
+            let resp = proxy.unifi_set_inform(host_id, inform_url).await?;
+            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
+        }
+        "unifi_api" => {
+            let host_id = args["host_id"].as_str().context("missing host_id")?;
+            let method = args["method"].as_str().context("missing method")?;
+            let path = args["path"].as_str().context("missing path")?;
+            let body = args["body"].as_str().unwrap_or("");
+            info!("tool unifi_api: {method} {path} on {host_id}");
+            let resp = proxy.unifi_api(host_id, method, path, body).await?;
             Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
         }
         _ => anyhow::bail!("unknown tool: {name}"),

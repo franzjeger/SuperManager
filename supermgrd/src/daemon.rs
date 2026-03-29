@@ -2494,6 +2494,218 @@ impl DaemonService {
     }
 
     // =======================================================================
+    // UniFi methods
+    // =======================================================================
+
+    /// Execute `set-inform <url>` on a UniFi device via SSH.
+    ///
+    /// The host must be a UniFi device type.  Connects via SSH and runs the
+    /// `set-inform` command, returning the command output.
+    async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let host = {
+            let state = self.state.lock().await;
+            state.ssh_hosts.get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .clone()
+        };
+
+        if host.device_type != supermgr_core::ssh::DeviceType::UniFi {
+            return Err(fdo::Error::Failed("host is not a UniFi device".into()));
+        }
+
+        let cmd = format!("set-inform {inform_url}");
+        info!("unifi_set_inform: {}@{}:{} $ {cmd}", host.username, host.hostname, host.port);
+        crate::audit::log_event("UNIFI_SET_INFORM", &format!("{}@{} url={inform_url}", host.username, host.hostname));
+
+        let state_arc = Arc::clone(&self.state);
+        let session = connect_to_ssh_host(&host, &None, &state_arc).await
+            .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
+
+        let (exit_code, stdout, stderr) = session.exec(&cmd).await
+            .map_err(|e| fdo::Error::Failed(format!("command execution failed: {e}")))?;
+
+        let result = serde_json::json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": exit_code,
+        });
+
+        Ok(result.to_string())
+    }
+
+    /// Call the UniFi Controller REST API.
+    ///
+    /// Authenticates with the stored credentials, then makes the API call.
+    /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
+    /// (e.g. `/proxy/network/api/s/default/stat/device`).  `body` is optional JSON.
+    /// Returns the JSON response body.
+    async fn unifi_api(
+        &self,
+        host_id: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let (controller_url, creds_label) = {
+            let state = self.state.lock().await;
+            let host = state.ssh_hosts.get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+            let url = host.unifi_controller_url.as_ref()
+                .ok_or_else(|| fdo::Error::Failed("no UniFi controller URL configured".into()))?
+                .clone();
+            let label = host.unifi_api_token_ref.as_ref()
+                .ok_or_else(|| fdo::Error::Failed("no UniFi credentials configured".into()))?
+                .label()
+                .to_owned();
+            (url, label)
+        };
+
+        // Retrieve stored credentials (JSON: {"username": "...", "password": "..."}).
+        let creds_bytes = secrets::retrieve_secret(&creds_label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve UniFi credentials: {e}")))?;
+        let creds_str = String::from_utf8(creds_bytes)
+            .map_err(|e| fdo::Error::Failed(format!("invalid credentials encoding: {e}")))?;
+        let creds: serde_json::Value = serde_json::from_str(&creds_str)
+            .map_err(|e| fdo::Error::Failed(format!("parse credentials: {e}")))?;
+        let username = creds["username"].as_str()
+            .ok_or_else(|| fdo::Error::Failed("missing username in credentials".into()))?;
+        let password = creds["password"].as_str()
+            .ok_or_else(|| fdo::Error::Failed("missing password in credentials".into()))?;
+
+        info!("unifi_api: {method} {controller_url}{path}");
+        crate::audit::log_event("UNIFI_API", &format!("{method} {controller_url}{path}"));
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .cookie_store(true)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| fdo::Error::Failed(format!("HTTP client build failed: {e}")))?;
+
+        // Authenticate: POST /api/auth/login.
+        let login_url = format!("{controller_url}/api/auth/login");
+        let login_body = serde_json::json!({
+            "username": username,
+            "password": password,
+        });
+        let login_resp = client.post(&login_url)
+            .json(&login_body)
+            .send()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("UniFi login request failed: {e}")))?;
+
+        let login_status = login_resp.status().as_u16();
+        if login_status >= 400 {
+            let login_body_text = login_resp.text().await.unwrap_or_default();
+            return Err(fdo::Error::Failed(format!(
+                "UniFi login failed ({login_status}): {login_body_text}"
+            )));
+        }
+
+        // Make the actual API call (session cookie is reused by the cookie jar).
+        let url = format!("{controller_url}{path}");
+        let mut req = match method.to_uppercase().as_str() {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            _ => return Err(fdo::Error::InvalidArgs(format!("invalid method: {method}"))),
+        };
+
+        if !body.is_empty() && method.to_uppercase() != "GET" {
+            req = req
+                .header("Content-Type", "application/json")
+                .body(body.to_owned());
+        }
+
+        let resp = req.send().await
+            .map_err(|e| fdo::Error::Failed(format!("UniFi API request failed: {e}")))?;
+
+        let status = resp.status().as_u16();
+        let resp_body = resp.text().await
+            .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
+
+        if status >= 400 {
+            return Err(fdo::Error::Failed(format!(
+                "UniFi API {status}: {resp_body}"
+            )));
+        }
+
+        Ok(resp_body)
+    }
+
+    /// Store UniFi Controller URL and credentials for a host.
+    ///
+    /// Authenticates to verify the credentials are valid, then stores
+    /// the URL on the host and the credentials in the secret service.
+    async fn unifi_set_controller(
+        &self,
+        host_id: &str,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        // Validate the URL by attempting login.
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .map_err(|e| fdo::Error::Failed(format!("HTTP client: {e}")))?;
+
+        let login_url = format!("{url}/api/auth/login");
+        let login_body = serde_json::json!({
+            "username": username,
+            "password": password,
+        });
+        let resp = client.post(&login_url)
+            .json(&login_body)
+            .send()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("UniFi login failed: {e}")))?;
+
+        let status = resp.status().as_u16();
+        if status >= 400 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(fdo::Error::Failed(format!(
+                "UniFi authentication failed ({status}): {body}"
+            )));
+        }
+
+        // Store credentials as JSON in the secret service.
+        let label = format!("supermgr/unifi/{}/credentials", id.simple());
+        let creds = serde_json::json!({
+            "username": username,
+            "password": password,
+        });
+        secrets::store_secret(&label, creds.to_string().as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("store credentials: {e}")))?;
+
+        // Update the host record.
+        let mut state = self.state.lock().await;
+        let host = state.ssh_hosts.get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.unifi_controller_url = Some(url.to_owned());
+        host.unifi_api_token_ref = Some(SecretRef::new(&label));
+        host.updated_at = chrono::Utc::now();
+        state.save_ssh_host(&state.ssh_hosts[&id].clone())
+            .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
+
+        info!("stored UniFi controller credentials for host {id} (url={url})");
+        Ok(())
+    }
+
+    // =======================================================================
     // SSH test connection
     // =======================================================================
 
@@ -2595,6 +2807,101 @@ impl DaemonService {
 
         info!("ssh_test_connection result for {id}: {result}");
         Ok(result.to_string())
+    }
+
+    // =======================================================================
+    // Config versioning
+    // =======================================================================
+
+    /// Save a generated config with a timestamp for later comparison.
+    ///
+    /// Stores the config text to `/etc/supermgrd/configs/{customer}_{timestamp}.conf`
+    /// and returns the filename.
+    async fn save_config_version(
+        &self,
+        customer: &str,
+        device_type: &str,
+        config: &str,
+    ) -> fdo::Result<String> {
+        use std::io::Write;
+
+        let dir = PathBuf::from("/etc/supermgrd/configs");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| fdo::Error::Failed(format!("cannot create config dir: {e}")))?;
+
+        let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+        let sanitized = customer
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .collect::<String>();
+        let filename = format!("{}_{}_{}_.conf", sanitized, device_type.to_lowercase(), ts);
+        let path = dir.join(&filename);
+
+        let mut f = std::fs::File::create(&path)
+            .map_err(|e| fdo::Error::Failed(format!("cannot create config file: {e}")))?;
+        f.write_all(config.as_bytes())
+            .map_err(|e| fdo::Error::Failed(format!("cannot write config file: {e}")))?;
+
+        info!("saved config version: {filename}");
+        Ok(filename)
+    }
+
+    /// List saved config versions for a customer.
+    ///
+    /// Returns a JSON array of objects with `filename` and `timestamp` fields.
+    async fn list_config_versions(&self, customer: &str) -> fdo::Result<String> {
+        let dir = PathBuf::from("/etc/supermgrd/configs");
+        if !dir.exists() {
+            return Ok("[]".into());
+        }
+
+        let sanitized = customer
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            .collect::<String>();
+
+        let mut entries = Vec::new();
+        let read_dir = std::fs::read_dir(&dir)
+            .map_err(|e| fdo::Error::Failed(format!("cannot read config dir: {e}")))?;
+
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&sanitized) && name.ends_with(".conf") {
+                let meta = entry.metadata().ok();
+                let modified = meta
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<chrono::Utc> = t.into();
+                        dt.to_rfc3339()
+                    })
+                    .unwrap_or_default();
+                entries.push(serde_json::json!({
+                    "filename": name,
+                    "timestamp": modified,
+                }));
+            }
+        }
+
+        // Sort newest first
+        entries.sort_by(|a, b| {
+            let ta = a["timestamp"].as_str().unwrap_or("");
+            let tb = b["timestamp"].as_str().unwrap_or("");
+            tb.cmp(ta)
+        });
+
+        serde_json::to_string(&entries)
+            .map_err(|e| fdo::Error::Failed(format!("serialisation failed: {e}")))
+    }
+
+    /// Retrieve a previously saved config version by filename.
+    async fn get_config_version(&self, filename: &str) -> fdo::Result<String> {
+        // Sanitize: only allow simple filenames (no path traversal)
+        if filename.contains('/') || filename.contains("..") {
+            return Err(fdo::Error::InvalidArgs("invalid filename".into()));
+        }
+        let path = PathBuf::from("/etc/supermgrd/configs").join(filename);
+        std::fs::read_to_string(&path)
+            .map_err(|e| fdo::Error::Failed(format!("cannot read config file: {e}")))
     }
 
     // =======================================================================

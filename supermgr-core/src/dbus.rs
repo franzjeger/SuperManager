@@ -114,6 +114,11 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn fortigate_push_ssh_key(&self, host_id: &str, key_id: &str, admin_user: &str) -> fdo::Result<String> { ... }
 //
+//       // --- UniFi methods ---
+//       async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String> { ... }
+//       async fn unifi_api(&self, host_id: &str, method: &str, path: &str, body: &str) -> fdo::Result<String> { ... }
+//       async fn unifi_set_controller(&self, host_id: &str, url: &str, username: &str, password: &str) -> fdo::Result<()> { ... }
+//
 //       #[zbus(signal)]
 //       async fn state_changed(ctx: &zbus::SignalContext<'_>, state_json: String) -> zbus::Result<()>;
 //
@@ -131,6 +136,11 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       // --- Config backup & restore ---
 //       async fn export_all(&self) -> fdo::Result<String> { ... }
 //       async fn import_all(&self, data: &str) -> fdo::Result<String> { ... }
+//
+//       // --- Config versioning ---
+//       async fn save_config_version(&self, customer: &str, device_type: &str, config: &str) -> fdo::Result<String> { ... }
+//       async fn list_config_versions(&self, customer: &str) -> fdo::Result<String> { ... }
+//       async fn get_config_version(&self, filename: &str) -> fdo::Result<String> { ... }
 //
 //       #[zbus(signal)]
 //       async fn host_health_changed(ctx: &zbus::SignalContext<'_>, host_id: String, reachable: bool) -> zbus::Result<()>;
@@ -497,6 +507,40 @@ pub trait Daemon {
     /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
     async fn ssh_execute_command(&self, host_id: &str, command: &str) -> fdo::Result<String>;
 
+    // =======================================================================
+    // UniFi methods
+    // =======================================================================
+
+    /// Execute `set-inform <url>` on a UniFi device via SSH.
+    ///
+    /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
+    async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String>;
+
+    /// Call the UniFi Controller REST API on a host.
+    ///
+    /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
+    /// (e.g. `/proxy/network/api/s/default/stat/device`).  `body` is optional JSON.
+    /// Returns the JSON response body.
+    async fn unifi_api(
+        &self,
+        host_id: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> fdo::Result<String>;
+
+    /// Store UniFi Controller URL and credentials for a host.
+    ///
+    /// Validates the credentials by attempting to log in, then stores the URL
+    /// and credentials securely.
+    async fn unifi_set_controller(
+        &self,
+        host_id: &str,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> fdo::Result<()>;
+
     /// Return the SSH command string for connecting to the given host.
     ///
     /// The returned string is suitable for `std::process::Command` or display
@@ -508,6 +552,29 @@ pub trait Daemon {
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.
     async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String>;
+
+    // =======================================================================
+    // Config versioning
+    // =======================================================================
+
+    /// Save a generated config with a timestamp for later comparison.
+    ///
+    /// Returns the filename under which the config was stored.
+    async fn save_config_version(
+        &self,
+        customer: &str,
+        device_type: &str,
+        config: &str,
+    ) -> fdo::Result<String>;
+
+    /// List saved config versions for a customer.
+    ///
+    /// Returns a JSON array of `{"filename": "...", "timestamp": "..."}` objects,
+    /// newest first.
+    async fn list_config_versions(&self, customer: &str) -> fdo::Result<String>;
+
+    /// Retrieve a previously saved config version by filename.
+    async fn get_config_version(&self, filename: &str) -> fdo::Result<String>;
 
     // =======================================================================
     // Signals
