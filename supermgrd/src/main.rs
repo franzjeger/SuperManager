@@ -116,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     // 3. Stale interface cleanup + kill-switch teardown from any previous crash
     // -----------------------------------------------------------------------
     cleanup_stale_interfaces().await;
+    cleanup_stale_strongswan().await;
     // If a previous daemon run was killed without a clean disconnect the
     // nftables supermgr_killswitch table will still be active in the kernel,
     // blocking all non-VPN traffic.  Remove it unconditionally on startup
@@ -231,6 +232,60 @@ async fn main() -> anyhow::Result<()> {
 ///    gateway after a crash).
 ///
 /// All errors are logged but do not abort startup.
+async fn cleanup_stale_strongswan() {
+    // Terminate any strongSwan IKE SAs left by a previous daemon instance.
+    // Our connections use the naming convention `supermgr-<hex>`.
+    let out = tokio::process::Command::new("swanctl")
+        .args(["--list-sas", "--raw"])
+        .output()
+        .await;
+
+    let stdout = match out {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(ref o) => {
+            // swanctl may not be installed — that's fine.
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if !stderr.contains("command not found") {
+                warn!("swanctl --list-sas: exit={} stderr={:?}", o.status, stderr.trim());
+            }
+            return;
+        }
+        Err(e) => {
+            // swanctl binary not found — no strongSwan SAs to clean.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("swanctl --list-sas: {e}");
+            }
+            return;
+        }
+    };
+
+    // Find our connection names (supermgr-*) and terminate them.
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("supermgr-") && trimmed.contains(':') {
+            let name = trimmed.split(':').next().unwrap_or("").trim();
+            if name.is_empty() {
+                continue;
+            }
+            info!("terminating stale strongSwan SA: {name}");
+            let term = tokio::process::Command::new("swanctl")
+                .args(["--terminate", "--ike", name])
+                .output()
+                .await;
+            match term {
+                Ok(o) if o.status.success() => {
+                    info!("terminated stale SA: {name}");
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    warn!("failed to terminate SA {name}: {}", stderr.trim());
+                }
+                Err(e) => warn!("swanctl --terminate: {e}"),
+            }
+        }
+    }
+}
+
 async fn cleanup_stale_interfaces() {
     let stale = match find_stale_interfaces() {
         Ok(v) => v,
