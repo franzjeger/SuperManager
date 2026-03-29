@@ -210,17 +210,73 @@ pub fn build_console_page(
             let (messages, context) = {
                 let s = app_state.lock().expect("lock app_state");
                 let vpn = match &s.vpn_state {
-                    VpnState::Connected { .. } => "VPN: connected",
-                    VpnState::Disconnected => "VPN: disconnected",
-                    _ => "VPN: transitioning",
+                    VpnState::Connected { profile_id, .. } => {
+                        let name = s.profiles.iter()
+                            .find(|p| p.id == *profile_id)
+                            .map(|p| p.name.as_str())
+                            .unwrap_or("unknown");
+                        format!("VPN: connected to '{name}'")
+                    }
+                    VpnState::Disconnected => "VPN: disconnected".into(),
+                    _ => "VPN: transitioning".into(),
                 };
                 let hosts: Vec<String> = s.ssh_hosts.iter()
-                    .map(|h| format!("- {} ({}@{}:{}, {}, id={})", h.label, h.username, h.hostname, h.port, h.device_type, h.id))
+                    .map(|h| {
+                        let mut info = format!(
+                            "- {} ({}@{}:{}, {}, auth={:?}, id={})",
+                            h.label, h.username, h.hostname, h.port, h.device_type,
+                            h.auth_method, h.id
+                        );
+                        if h.has_api {
+                            info.push_str(&format!(", api_port={}", h.api_port.unwrap_or(443)));
+                        }
+                        if let Some(ref vpn_id) = h.vpn_profile_id {
+                            if let Some(p) = s.profiles.iter().find(|p| p.id.to_string() == vpn_id.to_string()) {
+                                info.push_str(&format!(", auto_vpn='{}'", p.name));
+                            }
+                        }
+                        if h.pinned { info.push_str(", pinned"); }
+                        info
+                    })
                     .collect();
                 let keys: Vec<String> = s.ssh_keys.iter()
-                    .map(|k| format!("- {} ({:?}, {})", k.name, k.key_type, k.fingerprint))
+                    .map(|k| format!("- {} ({:?}, {}, deployed_to={})", k.name, k.key_type, k.fingerprint, k.deployed_count))
                     .collect();
-                let ctx = format!("{vpn}\n\nSSH Hosts:\n{}\n\nSSH Keys:\n{}", hosts.join("\n"), keys.join("\n"));
+                let profiles: Vec<String> = s.profiles.iter()
+                    .map(|p| format!("- {} ({}, id={})", p.name, p.backend, p.id))
+                    .collect();
+                let health: Vec<String> = s.host_health.iter()
+                    .map(|(id, ok)| {
+                        let label = s.ssh_hosts.iter()
+                            .find(|h| h.id.to_string() == *id)
+                            .map(|h| h.label.as_str())
+                            .unwrap_or(id);
+                        format!("- {}: {}", label, if *ok { "reachable" } else { "UNREACHABLE" })
+                    })
+                    .collect();
+                let ctx = format!(
+                    "{vpn}\n\n\
+                     ## Your capabilities\n\
+                     You have DIRECT ACCESS to all these hosts via SSH. You can:\n\
+                     - Execute any shell command on any reachable host (ssh_execute)\n\
+                     - Manage FortiGate via REST API (fortigate_api) for hosts with api_port\n\
+                     - Push SSH keys to FortiGate admins (fortigate_push_ssh_key)\n\
+                     - Generate FortiGate API tokens (fortigate_generate_api_token)\n\
+                     - Run CIS compliance checks (fortigate_compliance_check)\n\
+                     - Backup FortiGate configs (fortigate_backup_config)\n\
+                     - Set UniFi inform URL (unifi_set_inform)\n\
+                     - Connect/disconnect VPN profiles\n\
+                     - Add/edit SSH hosts and keys\n\
+                     Do NOT ask the user for permission — just use the tools directly.\n\n\
+                     ## VPN Profiles\n{}\n\n\
+                     ## SSH Hosts\n{}\n\n\
+                     ## SSH Keys\n{}\n\n\
+                     ## Host Health\n{}",
+                    profiles.join("\n"),
+                    hosts.join("\n"),
+                    keys.join("\n"),
+                    if health.is_empty() { "No health data yet".into() } else { health.join("\n") },
+                );
                 (s.console_messages.clone(), ctx)
             };
             rt.spawn(async move {
