@@ -2046,6 +2046,17 @@ impl DaemonService {
 
         info!("fortigate_generate_api_token: generating for user '{}' on {}", api_user, host.hostname);
 
+        // Retrieve the admin password — FortiGate requires it for generate-key.
+        let admin_password = if let Some(ref pw_ref) = host.auth_password_ref {
+            if let Ok(bytes) = secrets::retrieve_secret(pw_ref.label()).await {
+                String::from_utf8(bytes).ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let state_arc = Arc::clone(&self.state);
         let session = connect_to_ssh_host(&host, &None, &state_arc).await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
@@ -2057,9 +2068,17 @@ impl DaemonService {
         let _ = session.exec(&create_cmd).await;
 
         // Generate the API key.
-        let gen_cmd = format!("execute api-user generate-key {api_user}");
+        // FortiGate prompts "Please enter current administrator password:" so we
+        // pipe the password after the command via newline.
+        let gen_cmd = if let Some(ref pw) = admin_password {
+            format!("execute api-user generate-key {api_user}\n{pw}")
+        } else {
+            format!("execute api-user generate-key {api_user}")
+        };
         let (exit_code, stdout, stderr) = session.exec(&gen_cmd).await
             .map_err(|e| fdo::Error::Failed(format!("command failed: {e}")))?;
+
+        info!("fortigate_generate_api_token: output={}", stdout.trim());
 
         if exit_code != 0 {
             return Err(fdo::Error::Failed(format!(
