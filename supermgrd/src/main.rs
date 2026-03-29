@@ -45,7 +45,7 @@ use supermgr_core::dbus::{DBUS_OBJECT_PATH, DBUS_SERVICE};
 const SYSTEM_PROFILE_DIR: &str = "/etc/supermgrd/profiles";
 
 /// Stats polling interval.
-const STATS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const STATS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

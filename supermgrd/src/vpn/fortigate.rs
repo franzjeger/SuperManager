@@ -111,7 +111,13 @@ impl Default for FortiGateBackend {
 /// Never panics; propagates I/O errors as [`BackendError::Io`].
 async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError> {
     let cmd_str = format!("swanctl {}", args.join(" "));
-    info!("running: {}", cmd_str);
+    let is_stats = args.contains(&"--list-sas");
+
+    if is_stats {
+        debug!("running: {}", cmd_str);
+    } else {
+        info!("running: {}", cmd_str);
+    }
 
     let out = tokio::process::Command::new("swanctl")
         .args(args)
@@ -121,13 +127,17 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    info!(
-        "{} → exit={} stdout={:?} stderr={:?}",
-        cmd_str,
-        out.status,
-        stdout.trim(),
-        stderr.trim()
-    );
+    if is_stats {
+        debug!("{} → exit={}", cmd_str, out.status);
+    } else {
+        info!(
+            "{} → exit={} stdout={:?} stderr={:?}",
+            cmd_str,
+            out.status,
+            stdout.trim(),
+            stderr.trim()
+        );
+    }
     Ok(out)
 }
 
