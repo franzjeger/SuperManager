@@ -255,10 +255,34 @@ impl SshSession {
         wait_for!(&["#", "$"]);
 
         // Send each line and wait for the next prompt or password request.
+        // Clear the output buffer before each send so we only match NEW output.
         for line in lines {
+            let prev_len = output.len();
             let data = format!("{line}\n");
             let _ = channel.data(data.as_bytes()).await;
-            wait_for!(&["# ", "$ ", "password:", "Password:", "New API key:", "API key:"]);
+
+            // Wait until new data arrives that contains a prompt or keyword.
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() { break; }
+                match tokio::time::timeout(remaining, channel.wait()).await {
+                    Ok(Some(russh::ChannelMsg::Data { data })) => {
+                        output.extend_from_slice(&data);
+                        // Only check NEW data (after prev_len).
+                        let new_text = String::from_utf8_lossy(&output[prev_len..]);
+                        let keywords = ["# ", "$ ", "password:", "Password:", "New API key:", "API key:"];
+                        let found = keywords.iter().any(|kw| new_text.contains(kw));
+                        let trimmed = new_text.trim_end();
+                        if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
+                            break;
+                        }
+                    }
+                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
+                    Ok(None) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
         }
 
         let _ = channel.close().await;
