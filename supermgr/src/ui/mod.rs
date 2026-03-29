@@ -2305,7 +2305,8 @@ pub fn build_ui(
                 AppMsg::ConsoleThinking(active) => {
                     rx_console_panel.spinner.set_visible(active);
                     rx_console_panel.spinner.set_spinning(active);
-                    rx_console_panel.send_btn.set_sensitive(!active);
+                    rx_console_panel.send_btn.set_visible(!active);
+                    rx_console_panel.stop_btn.set_visible(active);
                 }
             }
         }

@@ -1,6 +1,6 @@
 //! Console panel — GTK4 chat interface for Claude.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
 
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -19,6 +19,7 @@ pub struct ConsolePanel {
     pub chat_buffer: gtk4::TextBuffer,
     pub input_view: gtk4::TextView,
     pub send_btn: gtk4::Button,
+    pub stop_btn: gtk4::Button,
     pub clear_btn: gtk4::Button,
     pub spinner: gtk4::Spinner,
     pub api_key_banner: adw::Banner,
@@ -93,6 +94,14 @@ pub fn build_console_page(
         .valign(gtk4::Align::End)
         .build();
 
+    let stop_btn = gtk4::Button::builder()
+        .icon_name("process-stop-symbolic")
+        .tooltip_text("Stop current request")
+        .css_classes(["destructive-action", "circular"])
+        .valign(gtk4::Align::End)
+        .visible(false)
+        .build();
+
     let clear_btn = gtk4::Button::builder()
         .icon_name("edit-clear-all-symbolic")
         .tooltip_text("Clear conversation")
@@ -110,6 +119,7 @@ pub fn build_console_page(
         .build();
     input_row.append(&input_scroll);
     input_row.append(&spinner);
+    input_row.append(&stop_btn);
     input_row.append(&send_btn);
     input_row.append(&clear_btn);
 
@@ -154,8 +164,25 @@ pub fn build_console_page(
     }
 
     // =====================================================================
-    // Wire up send
+    // Wire up send + stop
     // =====================================================================
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+
+    // Stop button — kills running claude subprocess and resets UI.
+    {
+        let cancel_flag = Arc::clone(&cancel_flag);
+        let tx = tx.clone();
+        stop_btn.connect_clicked(move |_| {
+            cancel_flag.store(true, Ordering::Relaxed);
+            // Kill any running claude --print subprocess.
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "claude --print"])
+                .status();
+            let _ = tx.send(AppMsg::ConsoleResponse("\n[Stopped]\n".into()));
+            let _ = tx.send(AppMsg::ConsoleThinking(false));
+        });
+    }
+
     {
         let input_view_for_ctrl = input_view.clone();
         let input_view = input_view.clone();
@@ -163,6 +190,7 @@ pub fn build_console_page(
         let tx = tx.clone();
         let rt = rt.clone();
         let app_state = Arc::clone(app_state);
+        let cancel_flag = Arc::clone(&cancel_flag);
         let send = move || {
             let buf = input_view.buffer();
             let text = buf
@@ -173,6 +201,7 @@ pub fn build_console_page(
             }
             buf.set_text("");
 
+            cancel_flag.store(false, Ordering::Relaxed);
             append_tagged(&chat_buffer, &format!("\nYou: {text}\n"), "user");
 
             let tx = tx.clone();
@@ -235,11 +264,14 @@ pub fn build_console_page(
         let send_clone = std::rc::Rc::clone(&send);
         send_btn.connect_clicked(move |_| send_clone());
 
-        let key_ctrl = gtk4::EventControllerKey::new();
+        // Enter sends, Shift+Enter adds newline.
+        let key_ctrl = gtk4::EventControllerKey::builder()
+            .propagation_phase(gtk4::PropagationPhase::Capture)
+            .build();
         let send_clone2 = std::rc::Rc::clone(&send);
         key_ctrl.connect_key_pressed(move |_, key, _, modifier| {
-            if key == gtk4::gdk::Key::Return
-                && modifier.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+            if (key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter)
+                && !modifier.contains(gtk4::gdk::ModifierType::SHIFT_MASK)
             {
                 send_clone2();
                 return gtk4::glib::Propagation::Stop;
@@ -265,6 +297,7 @@ pub fn build_console_page(
         chat_buffer,
         input_view,
         send_btn,
+        stop_btn,
         clear_btn,
         spinner,
         api_key_banner,

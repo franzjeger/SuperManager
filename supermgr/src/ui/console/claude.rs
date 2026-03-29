@@ -91,7 +91,7 @@ pub async fn send_message_subscription(
 
     info!("sending via Claude Code CLI (subscription)");
 
-    let output = tokio::process::Command::new("claude")
+    let child = tokio::process::Command::new("claude")
         .args([
             "--print",
             "--mcp-config", &mcp_config.to_string(),
@@ -99,9 +99,22 @@ pub async fn send_message_subscription(
             "--system-prompt", &system_with_context,
         ])
         .arg(user_text)
-        .output()
-        .await
-        .context("failed to run `claude` CLI — is it installed?")?;
+        .output();
+
+    // 5-minute timeout to prevent hanging forever.
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        child,
+    ).await {
+        Ok(result) => result.context("failed to run `claude` CLI — is it installed?")?,
+        Err(_) => {
+            // Kill any stuck process.
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "claude --print"])
+                .status();
+            anyhow::bail!("claude CLI timed out after 5 minutes");
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
