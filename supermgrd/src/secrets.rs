@@ -152,3 +152,51 @@ pub async fn delete_secret(label: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Combined test for store, retrieve, overwrite, and delete.
+    ///
+    /// Runs as a single test to avoid parallel env-var mutation (the
+    /// `secrets_path()` function reads `XDG_DATA_HOME`).
+    #[tokio::test]
+    async fn store_retrieve_overwrite_delete() {
+        // Use a tmp dir so we don't touch real secrets.
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        // Keep the path alive independently of the TempDir guard so
+        // the directory survives even if TempDir drops early.
+        let dir = tmp.path().to_path_buf();
+        std::env::set_var("XDG_DATA_HOME", &dir);
+
+        // --- Round-trip: store then retrieve ---
+        let label = "supermgr/test/roundtrip_key";
+        let value = b"super-secret-bytes-1234";
+
+        store_secret(label, value).await.expect("store_secret");
+
+        let retrieved = retrieve_secret(label)
+            .await
+            .expect("retrieve_secret");
+        assert_eq!(retrieved, value);
+
+        // --- Overwrite: storing again replaces the value ---
+        store_secret(label, b"new-value").await.expect("overwrite");
+        let retrieved = retrieve_secret(label).await.expect("retrieve after overwrite");
+        assert_eq!(retrieved, b"new-value");
+
+        // --- Delete: label is removed ---
+        delete_secret(label).await.expect("delete_secret");
+        let err = retrieve_secret(label).await;
+        assert!(err.is_err(), "expected error after deletion");
+
+        // --- Delete non-existent: no-op, no error ---
+        delete_secret("supermgr/test/does-not-exist")
+            .await
+            .expect("delete non-existent should be no-op");
+
+        // Restore env
+        std::env::remove_var("XDG_DATA_HOME");
+    }
+}

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc, Mutex};
 
-use gtk4::prelude::*;
+use gtk4::{gio, glib, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::{error, info};
@@ -15,7 +15,7 @@ use tracing::{error, info};
 use supermgr_core::ssh::host::SshHostSummary;
 
 use crate::app::{AppMsg, AppState};
-use crate::dbus_client::dbus_ssh_delete_host;
+use crate::dbus_client::{dbus_ssh_delete_host, dbus_ssh_toggle_pin};
 
 // ---------------------------------------------------------------------------
 // Build
@@ -218,6 +218,206 @@ pub fn populate_ssh_host_list(
 
                 dialog.present(Some(&window_c));
             });
+
+            // ----- Right-click context menu -----
+            {
+                let host_id = host.id.to_string();
+                let host_label = host.label.clone();
+                let is_pinned = host.pinned;
+                let window_ctx = window.clone();
+                let rt_ctx = rt.clone();
+                let tx_ctx = tx.clone();
+
+                // Build gio::Menu model for the popover.
+                let menu_model = gio::Menu::new();
+                menu_model.append(Some("Connect"), Some("host-ctx.connect"));
+                menu_model.append(Some("Test Connection"), Some("host-ctx.test"));
+                menu_model.append(Some("Edit"), Some("host-ctx.edit"));
+                menu_model.append(
+                    Some(if is_pinned { "Unpin" } else { "Pin" }),
+                    Some("host-ctx.toggle-pin"),
+                );
+                menu_model.append(Some("Delete"), Some("host-ctx.delete"));
+
+                let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
+                popover.set_parent(&row);
+                popover.set_has_arrow(true);
+
+                // Action group for this row's context menu.
+                let action_group = gio::SimpleActionGroup::new();
+
+                // Connect action — launch SSH terminal.
+                {
+                    let host_id = host_id.clone();
+                    let tx = tx_ctx.clone();
+                    let rt = rt_ctx.clone();
+                    let action = gio::SimpleAction::new("connect", None);
+                    action.connect_activate(move |_, _| {
+                        let host_id = host_id.clone();
+                        let tx = tx.clone();
+                        rt.spawn(async move {
+                            match crate::dbus_client::dbus_ssh_connect_command(host_id).await {
+                                Ok(ssh_cmd) => {
+                                    glib::idle_add_once(move || {
+                                        crate::ui::ssh::host_detail::launch_ssh_terminal(&ssh_cmd);
+                                    });
+                                }
+                                Err(e) => {
+                                    tx.send(AppMsg::OperationFailed(
+                                        format!("SSH connect failed: {e}"),
+                                    ))
+                                    .ok();
+                                }
+                            }
+                        });
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // Test connection action.
+                {
+                    let host_id = host_id.clone();
+                    let tx = tx_ctx.clone();
+                    let rt = rt_ctx.clone();
+                    let action = gio::SimpleAction::new("test", None);
+                    action.connect_activate(move |_, _| {
+                        let host_id = host_id.clone();
+                        let tx = tx.clone();
+                        tx.send(AppMsg::ShowToast("Testing connection\u{2026}".to_string()))
+                            .ok();
+                        rt.spawn(async move {
+                            let msg = match crate::dbus_client::dbus_ssh_test_connection(
+                                host_id,
+                            )
+                            .await
+                            {
+                                Ok(json) => {
+                                    let v: serde_json::Value =
+                                        serde_json::from_str(&json).unwrap_or_default();
+                                    let ssh_status = v
+                                        .get("ssh")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("unknown");
+                                    if ssh_status == "ok" {
+                                        AppMsg::ShowToast("Connection test passed".to_string())
+                                    } else {
+                                        AppMsg::OperationFailed(format!(
+                                            "Connection test: SSH {ssh_status}"
+                                        ))
+                                    }
+                                }
+                                Err(e) => AppMsg::OperationFailed(format!(
+                                    "Connection test failed: {e}"
+                                )),
+                            };
+                            tx.send(msg).ok();
+                        });
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // Edit action.
+                {
+                    let host_id = host_id.clone();
+                    let tx = tx_ctx.clone();
+                    let action = gio::SimpleAction::new("edit", None);
+                    action.connect_activate(move |_, _| {
+                        // Signal the main loop to select this host and open the edit dialog.
+                        tx.send(AppMsg::ShowToast(format!(
+                            "Select host '{}' and use the Edit button in the detail pane",
+                            host_id
+                        )))
+                        .ok();
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // Pin/Unpin action.
+                {
+                    let host_id = host_id.clone();
+                    let tx = tx_ctx.clone();
+                    let rt = rt_ctx.clone();
+                    let action = gio::SimpleAction::new("toggle-pin", None);
+                    action.connect_activate(move |_, _| {
+                        let host_id = host_id.clone();
+                        let tx = tx.clone();
+                        rt.spawn(async move {
+                            let msg = match dbus_ssh_toggle_pin(host_id).await {
+                                Ok(hosts) => AppMsg::SshHostsRefreshed(hosts),
+                                Err(e) => AppMsg::OperationFailed(e.to_string()),
+                            };
+                            tx.send(msg).ok();
+                        });
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // Delete action.
+                {
+                    let host_id = host_id.clone();
+                    let host_label = host_label.clone();
+                    let window_del = window_ctx.clone();
+                    let rt = rt_ctx.clone();
+                    let tx = tx_ctx.clone();
+                    let action = gio::SimpleAction::new("delete", None);
+                    action.connect_activate(move |_, _| {
+                        let dialog = adw::AlertDialog::new(
+                            Some(&format!("Delete host \"{}\"?", host_label)),
+                            Some("This cannot be undone."),
+                        );
+                        dialog.add_response("cancel", "Cancel");
+                        dialog.add_response("delete", "Delete");
+                        dialog.set_response_appearance(
+                            "delete",
+                            adw::ResponseAppearance::Destructive,
+                        );
+                        dialog.set_default_response(Some("cancel"));
+                        dialog.set_close_response("cancel");
+
+                        let host_id = host_id.clone();
+                        let rt = rt.clone();
+                        let tx = tx.clone();
+                        dialog.connect_response(Some("delete"), move |_dlg, _resp| {
+                            let host_id = host_id.clone();
+                            let tx = tx.clone();
+                            rt.spawn(async move {
+                                let msg = match dbus_ssh_delete_host(host_id.clone()).await {
+                                    Ok(()) => {
+                                        info!("deleted SSH host {}", host_id);
+                                        let hosts = crate::dbus_client::dbus_ssh_list_hosts()
+                                            .await
+                                            .unwrap_or_default();
+                                        AppMsg::SshHostsRefreshed(hosts)
+                                    }
+                                    Err(e) => {
+                                        error!("delete SSH host failed: {:#}", e);
+                                        AppMsg::OperationFailed(e.to_string())
+                                    }
+                                };
+                                tx.send(msg).ok();
+                            });
+                        });
+
+                        dialog.present(Some(&window_del));
+                    });
+                    action_group.add_action(&action);
+                }
+
+                row.insert_action_group("host-ctx", Some(&action_group));
+
+                // Attach right-click gesture to show the popover.
+                let gesture = gtk4::GestureClick::builder()
+                    .button(3) // right-click
+                    .build();
+                let popover_ref = popover.clone();
+                gesture.connect_pressed(move |_gesture, _n, x, y| {
+                    popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
+                        x as i32, y as i32, 1, 1,
+                    )));
+                    popover_ref.popup();
+                });
+                row.add_controller(gesture);
+            }
 
             list_box.append(&row);
             host_row_map.push(Some(host.id.to_string()));

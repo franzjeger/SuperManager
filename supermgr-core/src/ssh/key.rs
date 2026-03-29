@@ -97,3 +97,59 @@ impl From<&SshKey> for SshKeySummary {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    /// Helper to build a minimal `SshKey` for testing.
+    fn sample_key() -> SshKey {
+        SshKey {
+            id: Uuid::nil(),
+            name: "my-key".into(),
+            description: "test key".into(),
+            key_type: SshKeyType::Ed25519,
+            public_key: "ssh-ed25519 AAAA... user@host".into(),
+            private_key_ref: SecretRef::new("supermgr/ssh/00000/privkey"),
+            fingerprint: "SHA256:abc123".into(),
+            tags: vec!["prod".into(), "web".into()],
+            deployed_to: vec![Uuid::nil()],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn key_summary_from_key() {
+        let key = sample_key();
+        let summary = SshKeySummary::from(&key);
+
+        assert_eq!(summary.id, key.id);
+        assert_eq!(summary.name, "my-key");
+        assert_eq!(summary.key_type, SshKeyType::Ed25519);
+        assert_eq!(summary.fingerprint, "SHA256:abc123");
+        assert_eq!(summary.tags, vec!["prod", "web"]);
+        assert_eq!(summary.deployed_count, 1);
+    }
+
+    #[test]
+    fn key_type_serde() {
+        // SshKeyType uses SCREAMING-KEBAB-CASE.
+        let json = serde_json::to_string(&SshKeyType::Ed25519).unwrap();
+        assert_eq!(json, r#""ED25519""#);
+
+        let json = serde_json::to_string(&SshKeyType::Rsa2048).unwrap();
+        assert_eq!(json, r#""RSA2048""#);
+
+        let json = serde_json::to_string(&SshKeyType::Rsa4096).unwrap();
+        assert_eq!(json, r#""RSA4096""#);
+
+        // Round-trip
+        let rt: SshKeyType = serde_json::from_str(r#""ED25519""#).unwrap();
+        assert_eq!(rt, SshKeyType::Ed25519);
+
+        let rt: SshKeyType = serde_json::from_str(r#""RSA4096""#).unwrap();
+        assert_eq!(rt, SshKeyType::Rsa4096);
+    }
+}

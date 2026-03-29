@@ -386,6 +386,8 @@ pub fn build_ui(
     let (vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
+    vpn_split.set_min_sidebar_width(280.0);
+    vpn_split.set_max_sidebar_width(400.0);
     vpn_split.set_sidebar(Some(&vpn_sidebar_page));
     vpn_split.set_content(Some(&vpn_content_page));
 
@@ -424,10 +426,15 @@ pub fn build_ui(
         .label("Hosts")
         .group(&ssh_toggle_keys)
         .build();
+    let ssh_toggle_dashboard = gtk4::ToggleButton::builder()
+        .label("Dashboard")
+        .group(&ssh_toggle_keys)
+        .build();
     let ssh_toggle_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     ssh_toggle_box.add_css_class("linked");
     ssh_toggle_box.append(&ssh_toggle_keys);
     ssh_toggle_box.append(&ssh_toggle_hosts);
+    ssh_toggle_box.append(&ssh_toggle_dashboard);
     ssh_toggle_box.set_halign(gtk4::Align::Center);
     ssh_toggle_box.set_margin_top(8);
     ssh_toggle_box.set_margin_bottom(4);
@@ -448,6 +455,9 @@ pub fn build_ui(
             }
         });
     }
+
+    // Build the multi-device dashboard widget.
+    let dashboard_widget = ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
     // SSH sidebar search entry — filters both key and host lists.
     let ssh_search_entry = gtk4::SearchEntry::builder()
@@ -516,6 +526,7 @@ pub fn build_ui(
     ssh_content_stack.add_named(&ssh_empty_status, Some("empty"));
     ssh_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
     ssh_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
+    ssh_content_stack.add_named(&dashboard_widget, Some("dashboard"));
     ssh_content_stack.set_visible_child_name("empty");
 
     let ssh_content_page = adw::NavigationPage::builder()
@@ -524,6 +535,8 @@ pub fn build_ui(
         .build();
 
     let ssh_split = adw::NavigationSplitView::builder().vexpand(true).build();
+    ssh_split.set_min_sidebar_width(280.0);
+    ssh_split.set_max_sidebar_width(400.0);
     ssh_split.set_sidebar(Some(&ssh_sidebar_page));
     ssh_split.set_content(Some(&ssh_content_page));
 
@@ -2408,6 +2421,8 @@ pub fn build_ui(
                 // the wizard widget; these are reserved for future use.
                 AppMsg::ProvisioningConfigGenerated(_) => {}
                 AppMsg::ProvisioningPushDone => {}
+                AppMsg::DashboardDeviceStatus { .. } => {}
+                AppMsg::FortigateBackupDone { .. } => {}
             }
         }
         glib::ControlFlow::Continue
@@ -2520,15 +2535,20 @@ pub fn build_ui(
         });
     }
 
-    // Allow pressing Enter anywhere on the lock page to trigger unlock/set.
+    // Allow pressing Enter anywhere to trigger unlock/set when the lock page
+    // is visible.  Attach to the *window* so the event is caught even if
+    // PasswordEntryRow consumes it at the widget level.
     {
         let unlock_btn = lock_page.unlock_btn.clone();
         let set_btn = lock_page.set_btn.clone();
+        let outer_stack_enter = outer_stack.clone();
         let key_ctrl = gtk4::EventControllerKey::builder()
             .propagation_phase(gtk4::PropagationPhase::Capture)
             .build();
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+            if (key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter)
+                && outer_stack_enter.visible_child_name().as_deref() == Some("lock")
+            {
                 if unlock_btn.is_visible() {
                     unlock_btn.emit_clicked();
                     return glib::Propagation::Stop;
@@ -2539,7 +2559,105 @@ pub fn build_ui(
             }
             glib::Propagation::Proceed
         });
-        lock_page.container.add_controller(key_ctrl);
+        window.add_controller(key_ctrl);
+    }
+
+    // =========================================================================
+    // Drag-and-drop file import (.conf / .toml / .ovpn)
+    // =========================================================================
+    {
+        let drop_target =
+            gtk4::DropTarget::new(gio::File::static_type(), gtk4::gdk::DragAction::COPY);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        drop_target.connect_drop(move |_, value, _x, _y| {
+            let file = match value.get::<gio::File>() {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            let Some(path) = file.path() else {
+                return false;
+            };
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("imported")
+                .to_string();
+            let path_clone = path.clone();
+            let tx = tx.clone();
+            match ext.as_str() {
+                "conf" => {
+                    rt.spawn(async move {
+                        let msg =
+                            match crate::dbus_client::dbus_import_wireguard(path_clone, name).await
+                            {
+                                Ok(profiles) => AppMsg::ImportSucceeded {
+                                    profiles,
+                                    toast: Some("WireGuard profile imported via drag-and-drop"),
+                                },
+                                Err(e) => {
+                                    AppMsg::OperationFailed(format!("Import failed: {e}"))
+                                }
+                            };
+                        tx.send(msg).ok();
+                    });
+                }
+                "toml" => {
+                    rt.spawn(async move {
+                        let msg = match crate::dbus_client::dbus_import_toml(path_clone).await {
+                            Ok(_result) => {
+                                // Refresh profile list after TOML import.
+                                match crate::dbus_client::dbus_list_profiles().await {
+                                    Ok(profiles) => AppMsg::ImportSucceeded {
+                                        profiles,
+                                        toast: Some("TOML config imported via drag-and-drop"),
+                                    },
+                                    Err(e) => {
+                                        AppMsg::OperationFailed(format!("Import OK but refresh failed: {e}"))
+                                    }
+                                }
+                            }
+                            Err(e) => AppMsg::OperationFailed(format!("Import failed: {e}")),
+                        };
+                        tx.send(msg).ok();
+                    });
+                }
+                "ovpn" => {
+                    // OpenVPN needs username/password; import with empty credentials
+                    // (user can edit them later in the profile detail view).
+                    rt.spawn(async move {
+                        let msg = match crate::dbus_client::dbus_import_openvpn(
+                            path_clone,
+                            name,
+                            String::new(),
+                            String::new(),
+                        )
+                        .await
+                        {
+                            Ok(profiles) => AppMsg::ImportSucceeded {
+                                profiles,
+                                toast: Some("OpenVPN profile imported via drag-and-drop"),
+                            },
+                            Err(e) => AppMsg::OperationFailed(format!("Import failed: {e}")),
+                        };
+                        tx.send(msg).ok();
+                    });
+                }
+                _ => {
+                    tx.send(AppMsg::OperationFailed(format!(
+                        "Unsupported file type: .{ext} (expected .conf, .toml, or .ovpn)"
+                    )))
+                    .ok();
+                }
+            }
+            true
+        });
+        window.add_controller(drop_target);
     }
 
     window.present();

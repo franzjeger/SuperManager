@@ -55,6 +55,7 @@ pub struct SshHostDetail {
     pub fg_cpu_row: adw::ActionRow,
     pub fg_memory_row: adw::ActionRow,
     pub fg_refresh_btn: gtk4::Button,
+    pub fg_backup_btn: gtk4::Button,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,12 +181,23 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     fg_dashboard_group.add(&fg_memory_row);
 
+    let fg_btn_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(4)
+        .build();
     let fg_refresh_btn = gtk4::Button::builder()
         .icon_name("view-refresh-symbolic")
         .tooltip_text("Refresh FortiGate dashboard")
         .css_classes(["flat"])
         .build();
-    fg_dashboard_group.set_header_suffix(Some(&fg_refresh_btn));
+    let fg_backup_btn = gtk4::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Backup FortiGate config")
+        .css_classes(["flat"])
+        .build();
+    fg_btn_box.append(&fg_refresh_btn);
+    fg_btn_box.append(&fg_backup_btn);
+    fg_dashboard_group.set_header_suffix(Some(&fg_btn_box));
 
     // Action buttons.
     let btn_box = gtk4::Box::builder()
@@ -292,6 +304,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         fg_cpu_row,
         fg_memory_row,
         fg_refresh_btn,
+        fg_backup_btn,
     };
 
     (bundle, content_scroll.upcast())

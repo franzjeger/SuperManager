@@ -208,7 +208,7 @@ pub fn build_console_page(
             let text = text.clone();
             let app_state = Arc::clone(&app_state);
             let (messages, context) = {
-                let s = app_state.lock().unwrap();
+                let s = app_state.lock().expect("lock app_state");
                 let vpn = match &s.vpn_state {
                     VpnState::Connected { .. } => "VPN: connected",
                     VpnState::Disconnected => "VPN: disconnected",
@@ -249,7 +249,7 @@ pub fn build_console_page(
 
                     match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
                         Ok(updated_messages) => {
-                            app_state.lock().unwrap().console_messages = updated_messages;
+                            app_state.lock().expect("lock app_state").console_messages = updated_messages;
                         }
                         Err(e) => {
                             let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
@@ -287,7 +287,7 @@ pub fn build_console_page(
         let app_state = Arc::clone(app_state);
         clear_btn.connect_clicked(move |_| {
             chat_buffer.set_text("");
-            app_state.lock().unwrap().console_messages.clear();
+            app_state.lock().expect("lock app_state").console_messages.clear();
             super::claude::reset_session();
             append_system_msg(&chat_buffer, "Conversation cleared.\n");
         });
@@ -405,32 +405,36 @@ fn build_setup_page() -> gtk4::Widget {
 
 fn init_tags(buffer: &gtk4::TextBuffer) {
     let tt = buffer.tag_table();
+
+    // Use weight/style distinctions instead of hardcoded colors so the
+    // console looks correct on both dark and light Adwaita themes.
     tt.add(
         &gtk4::TextTag::builder()
             .name("user")
             .weight(700)
-            .foreground("#62a0ea")
             .build(),
     );
     tt.add(
         &gtk4::TextTag::builder()
             .name("assistant")
-            .foreground("#e0e0e0")
             .build(),
     );
-    tt.add(
-        &gtk4::TextTag::builder()
-            .name("tool")
-            .foreground("#a0a0a0")
-            .style(gtk4::pango::Style::Italic)
-            .family("monospace")
-            .scale(0.9)
-            .build(),
-    );
+
+    // "tool" — italic monospace, dimmed via half-opacity foreground so it
+    // adapts to whatever the current text colour is.
+    let tool_tag = gtk4::TextTag::builder()
+        .name("tool")
+        .style(gtk4::pango::Style::Italic)
+        .family("monospace")
+        .scale(0.9)
+        .build();
+    let dim = gtk4::gdk::RGBA::new(0.5, 0.5, 0.5, 0.7);
+    tool_tag.set_foreground_rgba(Some(&dim));
+    tt.add(&tool_tag);
+
     tt.add(
         &gtk4::TextTag::builder()
             .name("system")
-            .foreground("#f9f06b")
             .style(gtk4::pango::Style::Italic)
             .build(),
     );

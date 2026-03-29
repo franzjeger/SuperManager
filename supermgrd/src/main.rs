@@ -178,6 +178,11 @@ async fn main() -> anyhow::Result<()> {
     daemon::spawn_health_check_task(Arc::clone(&state), conn.clone());
 
     // -----------------------------------------------------------------------
+    // 6d. Scheduled FortiGate config backup task (daily)
+    // -----------------------------------------------------------------------
+    daemon::spawn_backup_scheduler(Arc::clone(&state), conn.clone());
+
+    // -----------------------------------------------------------------------
     // 7. Run until SIGTERM / SIGINT
     // -----------------------------------------------------------------------
     wait_for_signal().await;

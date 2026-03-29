@@ -635,6 +635,17 @@ pub trait Daemon {
     /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "ssh_hosts": N}`.
     async fn import_all(&self, data: &str) -> fdo::Result<String>;
 
+    // =======================================================================
+    // FortiGate config backup
+    // =======================================================================
+
+    /// Download the FortiGate running config and save it to disk.
+    ///
+    /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and writes
+    /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
+    /// Returns the filename on success.
+    async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]
     fn host_health_changed(

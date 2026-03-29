@@ -46,5 +46,8 @@ nix             = { version = "0.29", features = ["user", "net", "signal", "fs"]
 rtnetlink    = "0.14"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

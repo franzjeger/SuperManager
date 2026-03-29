@@ -834,3 +834,103 @@ impl ZeroingKey {
         std::mem::take(&mut self.0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_config_backend_name() {
+        let wg = ProfileConfig::WireGuard(WireGuardConfig {
+            private_key: SecretRef::new("test/privkey"),
+            addresses: vec![],
+            dns: vec![],
+            dns_search: vec![],
+            mtu: None,
+            listen_port: None,
+            peers: vec![],
+            interface_name: None,
+            split_routes: vec![],
+        });
+        assert_eq!(wg.backend_name(), "WireGuard");
+
+        let fg = ProfileConfig::FortiGate(FortiGateConfig {
+            host: "fw.example.com".into(),
+            username: "admin".into(),
+            password: SecretRef::new("pw"),
+            psk: SecretRef::new("psk"),
+            dns_servers: vec![],
+            routes: vec![],
+        });
+        assert_eq!(fg.backend_name(), "FortiGate (IPsec/IKEv2)");
+
+        let ov = ProfileConfig::OpenVpn(OpenVpnConfig {
+            config_file: "/etc/openvpn/client.ovpn".into(),
+            username: None,
+            password: None,
+        });
+        assert_eq!(ov.backend_name(), "OpenVPN3");
+
+        let generic = ProfileConfig::Generic(GenericConfig::default());
+        assert_eq!(generic.backend_name(), "Generic");
+    }
+
+    #[test]
+    fn wireguard_config_roundtrip() {
+        let conf = r#"[Interface]
+PrivateKey = cGhvbnktcHJpdmF0ZS1rZXktYmFzZTY0LXRlc3Q=
+Address = 10.0.0.2/24
+DNS = 1.1.1.1, 8.8.8.8
+MTU = 1420
+
+[Peer]
+PublicKey = cGVlci1wdWJsaWMta2V5LWJhc2U2NC10ZXN0AA==
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+"#;
+        let (cfg, key, psks) =
+            import_wireguard_conf(conf, "test/wg").expect("parse WireGuard conf");
+
+        // Private key is extracted
+        assert_eq!(
+            key.take(),
+            "cGhvbnktcHJpdmF0ZS1rZXktYmFzZTY0LXRlc3Q="
+        );
+
+        // Interface fields
+        assert_eq!(cfg.private_key.label(), "test/wg");
+        assert_eq!(cfg.addresses.len(), 1);
+        assert_eq!(cfg.addresses[0].to_string(), "10.0.0.2/24");
+        assert_eq!(cfg.dns.len(), 2);
+        assert_eq!(cfg.mtu, Some(1420));
+
+        // Peer fields
+        assert_eq!(cfg.peers.len(), 1);
+        let peer = &cfg.peers[0];
+        assert_eq!(
+            peer.public_key,
+            "cGVlci1wdWJsaWMta2V5LWJhc2U2NC10ZXN0AA=="
+        );
+        assert_eq!(peer.endpoint.as_deref(), Some("vpn.example.com:51820"));
+        assert_eq!(peer.allowed_ips.len(), 1);
+        assert_eq!(peer.persistent_keepalive, Some(25));
+
+        // No PSKs in this config
+        assert!(psks.is_empty());
+
+        // The parsed config should round-trip through JSON
+        let json = serde_json::to_string(&cfg).expect("serialize WireGuardConfig");
+        let back: WireGuardConfig =
+            serde_json::from_str(&json).expect("deserialize WireGuardConfig");
+        assert_eq!(back.addresses, cfg.addresses);
+        assert_eq!(back.peers.len(), cfg.peers.len());
+        assert_eq!(back.mtu, cfg.mtu);
+    }
+
+    #[test]
+    fn secret_ref_display() {
+        let sr = SecretRef::new("supermgr/wg/abc123/privkey");
+        assert_eq!(format!("{sr}"), "<secret:supermgr/wg/abc123/privkey>");
+    }
+}

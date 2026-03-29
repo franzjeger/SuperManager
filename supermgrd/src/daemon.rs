@@ -2938,6 +2938,103 @@ impl DaemonService {
         message: String,
     ) -> zbus::Result<()>;
 
+    // =======================================================================
+    // FortiGate config backup
+    // =======================================================================
+
+    /// Download the FortiGate running config and save it to disk.
+    ///
+    /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and
+    /// saves to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
+    async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let (hostname, api_port, token_label) = {
+            let state = self.state.lock().await;
+            let host = state
+                .ssh_hosts
+                .get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+            let label = host
+                .api_token_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    fdo::Error::Failed("no API token configured for this host".into())
+                })?
+                .label()
+                .to_owned();
+            (
+                host.hostname.clone(),
+                host.api_port.unwrap_or(443),
+                label,
+            )
+        };
+
+        let token_bytes = secrets::retrieve_secret(&token_label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve API token: {e}")))?;
+        let token = String::from_utf8(token_bytes)
+            .map_err(|e| fdo::Error::Failed(format!("invalid API token encoding: {e}")))?;
+        let token = token.trim().to_owned();
+
+        let url = format!(
+            "https://{hostname}:{api_port}/api/v2/monitor/system/config/backup?scope=global"
+        );
+        info!("fortigate_backup_config: GET {url}");
+        crate::audit::log_event("FG_BACKUP", &format!("GET {url}"));
+
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| fdo::Error::Failed(format!("HTTP client build failed: {e}")))?;
+
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| {
+                let msg = e.to_string().replace(&token, "***");
+                fdo::Error::Failed(format!("backup request failed: {msg}"))
+            })?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
+
+        if status >= 400 {
+            return Err(fdo::Error::Failed(format!(
+                "FortiGate backup API {status}: {body}"
+            )));
+        }
+
+        // Save to /etc/supermgrd/backups/
+        let backup_dir = PathBuf::from("/etc/supermgrd/backups");
+        tokio::fs::create_dir_all(&backup_dir)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("create backup dir: {e}")))?;
+
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        // Sanitise hostname for use in filename.
+        let safe_host: String = hostname
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+            .collect();
+        let filename = format!("{safe_host}_{ts}.conf");
+        let filepath = backup_dir.join(&filename);
+
+        tokio::fs::write(&filepath, &body)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("write backup: {e}")))?;
+
+        info!("fortigate_backup_config: saved {filepath:?} ({} bytes)", body.len());
+        Ok(filename)
+    }
+
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]
     async fn host_health_changed(
@@ -4012,6 +4109,74 @@ pub fn spawn_monitor_task(
                 }
                 Err(e) => {
                     warn!("status poll error: {}", e);
+                }
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled config backup task
+// ---------------------------------------------------------------------------
+
+/// Default backup interval: 24 hours.
+const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Spawn a background task that periodically backs up all FortiGate hosts
+/// with API tokens configured.
+///
+/// Runs every `BACKUP_INTERVAL` (24 h by default).  Failures for individual
+/// hosts are logged but do not stop the loop.
+pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connection) {
+    tokio::spawn(async move {
+        // Wait a bit after daemon start before the first backup run.
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        let mut ticker = tokio::time::interval(BACKUP_INTERVAL);
+        loop {
+            ticker.tick().await;
+
+            // Collect FortiGate hosts with API tokens.
+            let fg_hosts: Vec<(Uuid, String)> = {
+                let s = state.lock().await;
+                s.ssh_hosts
+                    .values()
+                    .filter(|h| {
+                        h.device_type == supermgr_core::ssh::DeviceType::Fortigate
+                            && h.api_token_ref.is_some()
+                    })
+                    .map(|h| (h.id, h.label.clone()))
+                    .collect()
+            };
+
+            if fg_hosts.is_empty() {
+                debug!("backup scheduler: no FortiGate hosts with API, skipping");
+                continue;
+            }
+
+            info!(
+                "backup scheduler: starting scheduled backup for {} host(s)",
+                fg_hosts.len()
+            );
+
+            for (id, label) in &fg_hosts {
+                let host_id = id.to_string();
+                // Use the D-Bus proxy to call our own backup method — this
+                // reuses the same auth/HTTP logic and avoids code duplication.
+                match async {
+                    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let filename = proxy.fortigate_backup_config(&host_id).await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Ok::<String, anyhow::Error>(filename)
+                }
+                .await
+                {
+                    Ok(filename) => {
+                        info!("backup scheduler: backed up '{label}' -> {filename}");
+                    }
+                    Err(e) => {
+                        warn!("backup scheduler: failed to back up '{label}': {e}");
+                    }
                 }
             }
         }

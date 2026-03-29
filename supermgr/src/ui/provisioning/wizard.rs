@@ -50,6 +50,20 @@ CREDENTIALS:\n\
 - Do NOT use 'CHANGE-ME' for items that already have a generated value.\n\
 - Only use 'CHANGE-ME' for items that genuinely need manual configuration \
   (e.g. S2S remote gateway IP, remote subnets).\n\n\
+WIFI RULES:\n\
+- ONLY include WiFi/FortiAP configuration if the input has a '## WiFi / FortiAP' section.\n\
+- Configure SSIDs on the correct VLAN interfaces.\n\
+- Apply the specified security mode (WPA3-Enterprise, WPA3-Personal, WPA2-Personal).\n\
+- If Guest Portal is Yes, configure a captive portal on the guest SSID.\n\n\
+SD-WAN RULES:\n\
+- ONLY include SD-WAN configuration if the input has a '## SD-WAN' section.\n\
+- Use the specified health check target and load balance mode.\n\
+- Configure performance SLA with ping and HTTP probes.\n\n\
+SNMP RULES:\n\
+- ONLY include SNMP configuration if the input has a '## SNMP' section.\n\
+- Use the specified community string and version.\n\
+- Configure trap targets if provided.\n\
+- For v3, configure USM user with auth (SHA) and priv (AES128).\n\n\
 FORTIGATE SPECIFICS:\n\
 - Use policy IDs in ranges: 100s=Staff, 200s=Guests, 300s=IoT, 400s=Mgmt, 999=deny-all.\n\
 - Always include DoS policy on WAN interface.\n\
@@ -99,6 +113,24 @@ struct WizardState {
     syslog_enabled: bool,
     syslog_target: String,
     admin_https_port: u32,
+
+    // Step 3: WiFi / FortiAP
+    wifi_enabled: bool,
+    wifi_ssid_staff: String,
+    wifi_ssid_guest: String,
+    wifi_security: String,
+    wifi_guest_portal: bool,
+
+    // Step 3: SD-WAN (FortiGate only)
+    sdwan_enabled: bool,
+    sdwan_health_target: String,
+    sdwan_mode: String,
+
+    // Step 3: SNMP
+    snmp_enabled: bool,
+    snmp_community: String,
+    snmp_trap_target: String,
+    snmp_version: String,
 
     // Step 4: Security (FortiGate only)
     default_deny: bool,
@@ -390,7 +422,7 @@ fn build_step1_customer_info(
             }
             host_ids.borrow_mut().clear();
 
-            let s = app_state.lock().unwrap();
+            let s = app_state.lock().expect("lock wizard state");
             let filter = match device_filter {
                 "FortiGate" => "Fortigate",
                 "UniFi" => "UniFi",
@@ -520,6 +552,21 @@ fn build_step1_customer_info(
                     s.enable_ips = true;
                     s.enable_web_filter = true;
                     s.enable_antivirus = true;
+                    // WiFi
+                    s.wifi_enabled = true;
+                    s.wifi_ssid_staff = String::new(); // auto-filled from customer name
+                    s.wifi_ssid_guest = String::new();
+                    s.wifi_security = "WPA3-Enterprise".into();
+                    s.wifi_guest_portal = true;
+                    // SD-WAN
+                    s.sdwan_enabled = false;
+                    s.sdwan_health_target = "8.8.8.8".into();
+                    s.sdwan_mode = "Source IP".into();
+                    // SNMP
+                    s.snmp_enabled = true;
+                    s.snmp_community = String::new(); // auto-generated on enable
+                    s.snmp_trap_target = String::new();
+                    s.snmp_version = "v2c".into();
                 }
                 2 => {
                     // Retail Store — 2 VLANs (POS/Guests), no VPN, strict security
@@ -546,6 +593,21 @@ fn build_step1_customer_info(
                     s.enable_ips = true;
                     s.enable_web_filter = true;
                     s.enable_antivirus = true;
+                    // WiFi
+                    s.wifi_enabled = true;
+                    s.wifi_ssid_staff = String::new();
+                    s.wifi_ssid_guest = String::new();
+                    s.wifi_security = "WPA2-Personal".into();
+                    s.wifi_guest_portal = true;
+                    // SD-WAN
+                    s.sdwan_enabled = false;
+                    s.sdwan_health_target = "8.8.8.8".into();
+                    s.sdwan_mode = "Source IP".into();
+                    // SNMP
+                    s.snmp_enabled = false;
+                    s.snmp_community = String::new();
+                    s.snmp_trap_target = String::new();
+                    s.snmp_version = "v2c".into();
                 }
                 3 => {
                     // Branch Office — 4 VLANs (Staff/Guests/IoT/Mgmt), S2S VPN, remote access
@@ -574,6 +636,21 @@ fn build_step1_customer_info(
                     s.enable_ips = true;
                     s.enable_web_filter = true;
                     s.enable_antivirus = true;
+                    // WiFi
+                    s.wifi_enabled = true;
+                    s.wifi_ssid_staff = String::new();
+                    s.wifi_ssid_guest = String::new();
+                    s.wifi_security = "WPA3-Enterprise".into();
+                    s.wifi_guest_portal = true;
+                    // SD-WAN
+                    s.sdwan_enabled = true;
+                    s.sdwan_health_target = "8.8.8.8".into();
+                    s.sdwan_mode = "Source IP".into();
+                    // SNMP
+                    s.snmp_enabled = true;
+                    s.snmp_community = String::new();
+                    s.snmp_trap_target = String::new();
+                    s.snmp_version = "v2c".into();
                 }
                 4 => {
                     // Home Office — 1 VLAN, remote access VPN, basic security
@@ -599,6 +676,21 @@ fn build_step1_customer_info(
                     s.enable_ips = false;
                     s.enable_web_filter = false;
                     s.enable_antivirus = true;
+                    // WiFi
+                    s.wifi_enabled = true;
+                    s.wifi_ssid_staff = String::new();
+                    s.wifi_ssid_guest = String::new();
+                    s.wifi_security = "WPA3-Personal".into();
+                    s.wifi_guest_portal = false;
+                    // SD-WAN
+                    s.sdwan_enabled = false;
+                    s.sdwan_health_target = "8.8.8.8".into();
+                    s.sdwan_mode = "Source IP".into();
+                    // SNMP
+                    s.snmp_enabled = false;
+                    s.snmp_community = String::new();
+                    s.snmp_trap_target = String::new();
+                    s.snmp_version = "v2c".into();
                 }
                 _ => {
                     // "Custom" (idx 0) — no changes
@@ -660,6 +752,21 @@ fn build_step1_customer_info(
             s.enable_ips = true;
             s.enable_web_filter = true;
             s.enable_antivirus = true;
+            // WiFi
+            s.wifi_enabled = true;
+            s.wifi_ssid_staff = "Acme-Staff".into();
+            s.wifi_ssid_guest = "Acme-Guest".into();
+            s.wifi_security = "WPA3-Enterprise".into();
+            s.wifi_guest_portal = true;
+            // SD-WAN
+            s.sdwan_enabled = true;
+            s.sdwan_health_target = "8.8.8.8".into();
+            s.sdwan_mode = "Source IP".into();
+            // SNMP
+            s.snmp_enabled = true;
+            s.snmp_community = "acme-snmp-demo".into();
+            s.snmp_trap_target = "10.42.99.10".into();
+            s.snmp_version = "v2c".into();
             drop(s);
 
             name_row.set_text("Acme Corporation");
@@ -1074,6 +1181,325 @@ fn build_step3_services(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
     log_group.add(&syslog_target_row);
     page.add(&log_group);
 
+    // WiFi / FortiAP group
+    let wifi_group = adw::PreferencesGroup::builder()
+        .title("Wireless / FortiAP")
+        .description("WiFi SSID and security settings.")
+        .build();
+
+    let wifi_enable_row = adw::SwitchRow::builder()
+        .title("Enable WiFi")
+        .subtitle("Configure wireless access points")
+        .build();
+
+    let wifi_ssid_staff_row = adw::EntryRow::builder()
+        .title("SSID (Staff)")
+        .sensitive(false)
+        .build();
+
+    let wifi_ssid_guest_row = adw::EntryRow::builder()
+        .title("SSID (Guest)")
+        .sensitive(false)
+        .build();
+
+    let wifi_security_model = gtk4::StringList::new(&[
+        "WPA3-Enterprise",
+        "WPA3-Personal",
+        "WPA2-Personal",
+    ]);
+    let wifi_security_row = adw::ComboRow::builder()
+        .title("Security")
+        .model(&wifi_security_model)
+        .sensitive(false)
+        .build();
+
+    let wifi_guest_portal_row = adw::SwitchRow::builder()
+        .title("Guest Portal")
+        .subtitle("Captive portal for guest network")
+        .sensitive(false)
+        .build();
+
+    // Populate initial values from state
+    {
+        let s = state.borrow();
+        if !s.wifi_ssid_staff.is_empty() {
+            wifi_ssid_staff_row.set_text(&s.wifi_ssid_staff);
+        }
+        if !s.wifi_ssid_guest.is_empty() {
+            wifi_ssid_guest_row.set_text(&s.wifi_ssid_guest);
+        }
+        wifi_enable_row.set_active(s.wifi_enabled);
+        wifi_guest_portal_row.set_active(s.wifi_guest_portal);
+        let sec_idx = match s.wifi_security.as_str() {
+            "WPA3-Personal" => 1,
+            "WPA2-Personal" => 2,
+            _ => 0,
+        };
+        wifi_security_row.set_selected(sec_idx);
+        let sensitive = s.wifi_enabled;
+        wifi_ssid_staff_row.set_sensitive(sensitive);
+        wifi_ssid_guest_row.set_sensitive(sensitive);
+        wifi_security_row.set_sensitive(sensitive);
+        wifi_guest_portal_row.set_sensitive(sensitive);
+    }
+
+    {
+        let state = Rc::clone(state);
+        let staff = wifi_ssid_staff_row.clone();
+        let guest = wifi_ssid_guest_row.clone();
+        let sec = wifi_security_row.clone();
+        let portal = wifi_guest_portal_row.clone();
+        wifi_enable_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            staff.set_sensitive(active);
+            guest.set_sensitive(active);
+            sec.set_sensitive(active);
+            portal.set_sensitive(active);
+            state.borrow_mut().wifi_enabled = active;
+            // Auto-fill SSIDs from customer name when enabling
+            if active {
+                let s = state.borrow();
+                let cust = &s.customer_name;
+                if staff.text().is_empty() && !cust.is_empty() {
+                    drop(s);
+                    let cust = state.borrow().customer_name.clone();
+                    staff.set_text(&format!("{}-Staff", cust));
+                    guest.set_text(&format!("{}-Guest", cust));
+                }
+            }
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        wifi_ssid_staff_row.connect_changed(move |row| {
+            state.borrow_mut().wifi_ssid_staff = row.text().to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        wifi_ssid_guest_row.connect_changed(move |row| {
+            state.borrow_mut().wifi_ssid_guest = row.text().to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        wifi_security_row.connect_selected_notify(move |row| {
+            let val = match row.selected() {
+                1 => "WPA3-Personal",
+                2 => "WPA2-Personal",
+                _ => "WPA3-Enterprise",
+            };
+            state.borrow_mut().wifi_security = val.to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        wifi_guest_portal_row.connect_active_notify(move |row| {
+            state.borrow_mut().wifi_guest_portal = row.is_active();
+        });
+    }
+
+    wifi_group.add(&wifi_enable_row);
+    wifi_group.add(&wifi_ssid_staff_row);
+    wifi_group.add(&wifi_ssid_guest_row);
+    wifi_group.add(&wifi_security_row);
+    wifi_group.add(&wifi_guest_portal_row);
+    page.add(&wifi_group);
+
+    // SD-WAN group (FortiGate only)
+    let sdwan_group = adw::PreferencesGroup::builder()
+        .title("SD-WAN")
+        .description("Software-defined WAN path selection and health monitoring.")
+        .build();
+
+    let sdwan_enable_row = adw::SwitchRow::builder()
+        .title("Enable SD-WAN")
+        .subtitle("Intelligent WAN path selection")
+        .build();
+
+    let sdwan_health_row = adw::EntryRow::builder()
+        .title("Health Check Target")
+        .text("8.8.8.8")
+        .sensitive(false)
+        .build();
+
+    let sdwan_mode_model = gtk4::StringList::new(&[
+        "Source IP",
+        "Bandwidth",
+        "Session",
+        "Spillover",
+    ]);
+    let sdwan_mode_row = adw::ComboRow::builder()
+        .title("Load Balance Mode")
+        .model(&sdwan_mode_model)
+        .sensitive(false)
+        .build();
+
+    // Only show SD-WAN for FortiGate
+    {
+        let is_fortigate = state.borrow().device_type == "FortiGate";
+        sdwan_group.set_visible(is_fortigate);
+    }
+
+    // Populate initial values
+    {
+        let s = state.borrow();
+        sdwan_enable_row.set_active(s.sdwan_enabled);
+        if !s.sdwan_health_target.is_empty() {
+            sdwan_health_row.set_text(&s.sdwan_health_target);
+        }
+        let mode_idx = match s.sdwan_mode.as_str() {
+            "Bandwidth" => 1,
+            "Session" => 2,
+            "Spillover" => 3,
+            _ => 0,
+        };
+        sdwan_mode_row.set_selected(mode_idx);
+        let sensitive = s.sdwan_enabled;
+        sdwan_health_row.set_sensitive(sensitive);
+        sdwan_mode_row.set_sensitive(sensitive);
+    }
+
+    {
+        let state = Rc::clone(state);
+        let health = sdwan_health_row.clone();
+        let mode = sdwan_mode_row.clone();
+        sdwan_enable_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            health.set_sensitive(active);
+            mode.set_sensitive(active);
+            state.borrow_mut().sdwan_enabled = active;
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        sdwan_health_row.connect_changed(move |row| {
+            state.borrow_mut().sdwan_health_target = row.text().to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        sdwan_mode_row.connect_selected_notify(move |row| {
+            let val = match row.selected() {
+                1 => "Bandwidth",
+                2 => "Session",
+                3 => "Spillover",
+                _ => "Source IP",
+            };
+            state.borrow_mut().sdwan_mode = val.to_string();
+        });
+    }
+
+    sdwan_group.add(&sdwan_enable_row);
+    sdwan_group.add(&sdwan_health_row);
+    sdwan_group.add(&sdwan_mode_row);
+    page.add(&sdwan_group);
+
+    // SNMP group
+    let snmp_group = adw::PreferencesGroup::builder()
+        .title("SNMP")
+        .description("Simple Network Management Protocol for monitoring.")
+        .build();
+
+    let snmp_enable_row = adw::SwitchRow::builder()
+        .title("Enable SNMP")
+        .subtitle("Allow network monitoring via SNMP")
+        .build();
+
+    let snmp_community_row = adw::EntryRow::builder()
+        .title("Community String")
+        .sensitive(false)
+        .build();
+
+    let snmp_trap_row = adw::EntryRow::builder()
+        .title("Trap Target")
+        .sensitive(false)
+        .build();
+
+    let snmp_version_model = gtk4::StringList::new(&["v2c", "v3"]);
+    let snmp_version_row = adw::ComboRow::builder()
+        .title("SNMP Version")
+        .model(&snmp_version_model)
+        .sensitive(false)
+        .build();
+
+    // Populate initial values
+    {
+        let s = state.borrow();
+        snmp_enable_row.set_active(s.snmp_enabled);
+        if !s.snmp_community.is_empty() {
+            snmp_community_row.set_text(&s.snmp_community);
+        }
+        if !s.snmp_trap_target.is_empty() {
+            snmp_trap_row.set_text(&s.snmp_trap_target);
+        }
+        let ver_idx = match s.snmp_version.as_str() {
+            "v3" => 1,
+            _ => 0,
+        };
+        snmp_version_row.set_selected(ver_idx);
+        let sensitive = s.snmp_enabled;
+        snmp_community_row.set_sensitive(sensitive);
+        snmp_trap_row.set_sensitive(sensitive);
+        snmp_version_row.set_sensitive(sensitive);
+    }
+
+    {
+        let state = Rc::clone(state);
+        let community = snmp_community_row.clone();
+        let trap = snmp_trap_row.clone();
+        let version = snmp_version_row.clone();
+        snmp_enable_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            community.set_sensitive(active);
+            trap.set_sensitive(active);
+            version.set_sensitive(active);
+            state.borrow_mut().snmp_enabled = active;
+            // Auto-generate community string if empty
+            if active && community.text().is_empty() {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .hash(&mut hasher);
+                let hash = hasher.finish();
+                let generated = format!("snmp-{:x}", hash & 0xFFFF_FFFF);
+                community.set_text(&generated);
+            }
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        snmp_community_row.connect_changed(move |row| {
+            state.borrow_mut().snmp_community = row.text().to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        snmp_trap_row.connect_changed(move |row| {
+            state.borrow_mut().snmp_trap_target = row.text().to_string();
+        });
+    }
+    {
+        let state = Rc::clone(state);
+        snmp_version_row.connect_selected_notify(move |row| {
+            let val = match row.selected() {
+                1 => "v3",
+                _ => "v2c",
+            };
+            state.borrow_mut().snmp_version = val.to_string();
+        });
+    }
+
+    snmp_group.add(&snmp_enable_row);
+    snmp_group.add(&snmp_community_row);
+    snmp_group.add(&snmp_trap_row);
+    snmp_group.add(&snmp_version_row);
+    page.add(&snmp_group);
+
     // Admin group
     let admin_group = adw::PreferencesGroup::builder()
         .title("Administration")
@@ -1384,7 +1810,7 @@ fn build_step5_review(
                         Err(e) => format!("# Error generating config: {e}\n"),
                     };
 
-                    *slot.lock().unwrap() = Some(config_text);
+                    *slot.lock().expect("lock wizard state") = Some(config_text);
                 });
             }
 
@@ -1400,7 +1826,7 @@ fn build_step5_review(
             let ws = Rc::clone(&state);
             let rt_poll = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap().take();
+                let maybe = result_slot.lock().expect("lock wizard state").take();
                 if let Some(config_text) = maybe {
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
@@ -1465,13 +1891,13 @@ fn build_step5_review(
                     };
 
                     let _ = tx.send(AppMsg::ShowToast(msg));
-                    *flag.lock().unwrap() = true;
+                    *flag.lock().expect("lock wizard state") = true;
                 });
             }
 
             let btn = btn.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                if *done_flag.lock().unwrap() {
+                if *done_flag.lock().expect("lock wizard state") {
                     btn.set_sensitive(true);
                     btn.set_label("Push Config");
                     return glib::ControlFlow::Break;
@@ -1507,7 +1933,7 @@ fn build_step5_review(
                 let device_type = s.device_type.clone();
                 rt.spawn(async move {
                     let res = fetch_device_config(&host_id, &device_type).await;
-                    *slot.lock().unwrap() = Some(
+                    *slot.lock().expect("lock wizard state") = Some(
                         res.map_err(|e| format!("{e}"))
                     );
                 });
@@ -1517,7 +1943,7 @@ fn build_step5_review(
             let generated = s.generated_config.clone();
             let device_label = s.target_host_label.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap().take();
+                let maybe = result_slot.lock().expect("lock wizard state").take();
                 if let Some(result) = maybe {
                     btn.set_sensitive(true);
                     btn.set_label("Diff with Device");
@@ -1867,15 +2293,15 @@ fn build_step5_review(
                 let customer = customer.clone();
                 rt.spawn(async move {
                     match list_config_versions_dbus(&customer).await {
-                        Ok(json) => *slot.lock().unwrap() = Some(json),
-                        Err(e) => *slot.lock().unwrap() = Some(format!("ERROR:{e}")),
+                        Ok(json) => *slot.lock().expect("lock wizard state") = Some(json),
+                        Err(e) => *slot.lock().expect("lock wizard state") = Some(format!("ERROR:{e}")),
                     }
                 });
             }
             let config_buffer = config_buffer.clone();
             let rt2 = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap().take();
+                let maybe = result_slot.lock().expect("lock wizard state").take();
                 if let Some(json) = maybe {
                     btn.set_sensitive(true);
                     if json.starts_with("ERROR:") {
@@ -2618,6 +3044,42 @@ fn build_generation_prompt(s: &WizardState) -> String {
         }
     }
 
+    // Only include WiFi section if enabled.
+    if s.wifi_enabled {
+        prompt.push_str("\n## WiFi / FortiAP\n");
+        prompt.push_str(&format!("- Staff SSID: {}\n", s.wifi_ssid_staff));
+        prompt.push_str(&format!("- Guest SSID: {}\n", s.wifi_ssid_guest));
+        prompt.push_str(&format!("- Security: {}\n",
+            if s.wifi_security.is_empty() { "WPA3-Enterprise" } else { &s.wifi_security }
+        ));
+        prompt.push_str(&format!("- Guest Portal: {}\n",
+            if s.wifi_guest_portal { "Yes" } else { "No" }
+        ));
+    }
+
+    // Only include SD-WAN section if enabled (FortiGate only).
+    if s.sdwan_enabled && s.device_type == "FortiGate" {
+        prompt.push_str("\n## SD-WAN\n");
+        prompt.push_str(&format!("- Health Check Target: {}\n",
+            if s.sdwan_health_target.is_empty() { "8.8.8.8" } else { &s.sdwan_health_target }
+        ));
+        prompt.push_str(&format!("- Load Balance Mode: {}\n",
+            if s.sdwan_mode.is_empty() { "Source IP" } else { &s.sdwan_mode }
+        ));
+    }
+
+    // Only include SNMP section if enabled.
+    if s.snmp_enabled {
+        prompt.push_str("\n## SNMP\n");
+        prompt.push_str(&format!("- Community String: {}\n", s.snmp_community));
+        if !s.snmp_trap_target.is_empty() {
+            prompt.push_str(&format!("- Trap Target: {}\n", s.snmp_trap_target));
+        }
+        prompt.push_str(&format!("- Version: {}\n",
+            if s.snmp_version.is_empty() { "v2c" } else { &s.snmp_version }
+        ));
+    }
+
     // Auto-generate secure passwords/PSKs for the config.
     use rand::Rng;
     let mut rng = rand::thread_rng();
@@ -2652,6 +3114,9 @@ fn build_generation_prompt(s: &WizardState) -> String {
          - Use the pre-generated credentials above — do NOT use CHANGE-ME placeholders \
            for items that have a generated value.\n\
          - Do NOT include any VPN configuration unless the VPN section above is present.\n\
+         - Do NOT include WiFi/FortiAP config unless the WiFi section above is present.\n\
+         - Do NOT include SD-WAN config unless the SD-WAN section above is present.\n\
+         - Do NOT include SNMP config unless the SNMP section above is present.\n\
          - Do NOT mention SSL-VPN anywhere — not in config, not in comments.\n\
          - Output ONLY the config commands. No markdown, no explanations, no text before or after.\n"
     );
@@ -2911,13 +3376,13 @@ fn show_history_dialog(
                     let slot = Arc::clone(&result_slot);
                     rt.spawn(async move {
                         match get_config_version_dbus(&filename).await {
-                            Ok(config) => *slot.lock().unwrap() = Some(config),
-                            Err(e) => *slot.lock().unwrap() = Some(format!("# Error: {e}")),
+                            Ok(config) => *slot.lock().expect("lock wizard state") = Some(config),
+                            Err(e) => *slot.lock().expect("lock wizard state") = Some(format!("# Error: {e}")),
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().unwrap().take();
+                    let maybe = result_slot.lock().expect("lock wizard state").take();
                     if let Some(config) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&config);
@@ -2945,16 +3410,16 @@ fn show_history_dialog(
                         match get_config_version_dbus(&filename).await {
                             Ok(old_config) => {
                                 let diff = compute_unified_diff(&old_config, &current_text);
-                                *slot.lock().unwrap() = Some(diff);
+                                *slot.lock().expect("lock wizard state") = Some(diff);
                             }
                             Err(e) => {
-                                *slot.lock().unwrap() = Some(format!("# Error: {e}"));
+                                *slot.lock().expect("lock wizard state") = Some(format!("# Error: {e}"));
                             }
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().unwrap().take();
+                    let maybe = result_slot.lock().expect("lock wizard state").take();
                     if let Some(diff_text) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&diff_text);

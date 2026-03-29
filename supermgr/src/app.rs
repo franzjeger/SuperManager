@@ -147,6 +147,21 @@ pub enum AppMsg {
         data: Value,
     },
 
+    /// Dashboard device status data fetched for a FortiGate host.
+    DashboardDeviceStatus {
+        /// UUID string of the host.
+        host_id: String,
+        /// Parsed JSON response (system status + resource + vpn tunnels).
+        data: Value,
+    },
+    /// FortiGate config backup completed.
+    FortigateBackupDone {
+        /// UUID string of the host.
+        host_id: String,
+        /// Filename where the backup was saved, or error message.
+        result: Result<String, String>,
+    },
+
     // Console messages
     /// Append a message to the console chat (role = "assistant" or "tool").
     ConsoleResponse(String),

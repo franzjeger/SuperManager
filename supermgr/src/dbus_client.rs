@@ -844,15 +844,28 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
             }
         }
 
-        // Fetch fresh profiles + state, then notify the GTK thread.
+        // Fetch fresh VPN + SSH state, then notify the GTK thread.
         match fetch_initial_state(&app_state).await {
             Ok(()) => {
+                // Also refresh SSH state so the GUI is fully up-to-date.
+                let _ = fetch_initial_ssh_state(&app_state).await;
+
                 let s = app_state.lock().expect("lock");
                 let msg = AppMsg::DaemonConnected {
                     profiles: s.profiles.clone(),
                     state: s.vpn_state.clone(),
                 };
                 if tx.send(msg).is_err() {
+                    return;
+                }
+                let keys = s.ssh_keys.clone();
+                let hosts = s.ssh_hosts.clone();
+                drop(s);
+                // Send SSH refresh messages so the GUI sidebar updates.
+                if tx.send(AppMsg::SshKeysRefreshed(keys)).is_err() {
+                    return;
+                }
+                if tx.send(AppMsg::SshHostsRefreshed(hosts)).is_err() {
                     return;
                 }
             }

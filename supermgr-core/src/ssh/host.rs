@@ -172,3 +172,98 @@ impl From<&SshHost> for SshHostSummary {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to build a minimal `SshHost` for testing.
+    fn sample_host() -> SshHost {
+        SshHost {
+            id: Uuid::nil(),
+            label: "test-server".into(),
+            hostname: "192.168.1.10".into(),
+            port: 22,
+            username: "admin".into(),
+            group: "web".into(),
+            device_type: DeviceType::Linux,
+            auth_method: AuthMethod::Key,
+            auth_key_id: Some(Uuid::nil()),
+            auth_password_ref: None,
+            vpn_profile_id: None,
+            api_port: Some(443),
+            api_token_ref: Some(SecretRef::new("tok")),
+            api_verify_tls: true,
+            unifi_controller_url: Some("https://unifi.local:8443".into()),
+            unifi_api_token_ref: None,
+            pinned: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn host_summary_from_host() {
+        let host = sample_host();
+        let summary = SshHostSummary::from(&host);
+
+        assert_eq!(summary.id, host.id);
+        assert_eq!(summary.label, "test-server");
+        assert_eq!(summary.hostname, "192.168.1.10");
+        assert_eq!(summary.port, 22);
+        assert_eq!(summary.username, "admin");
+        assert_eq!(summary.group, "web");
+        assert_eq!(summary.device_type, DeviceType::Linux);
+        assert_eq!(summary.auth_method, AuthMethod::Key);
+        assert_eq!(summary.auth_key_id, Some(Uuid::nil()));
+        assert!(summary.has_api, "api_token_ref is Some so has_api should be true");
+        assert_eq!(summary.api_port, Some(443));
+        assert!(summary.has_unifi_controller);
+        assert!(summary.pinned);
+    }
+
+    #[test]
+    fn default_port_is_22() {
+        assert_eq!(default_port(), 22);
+
+        // Also verify via serde: a JSON host without a `port` field gets 22.
+        let json = r#"{
+            "label": "no-port",
+            "hostname": "example.com",
+            "username": "root",
+            "auth_method": "password"
+        }"#;
+        let host: SshHost = serde_json::from_str(json).expect("deserialize host without port");
+        assert_eq!(host.port, 22);
+    }
+
+    #[test]
+    fn auth_method_serde() {
+        // AuthMethod uses snake_case rename.
+        let json = serde_json::to_string(&AuthMethod::Password).unwrap();
+        assert_eq!(json, r#""password""#);
+
+        let json = serde_json::to_string(&AuthMethod::Key).unwrap();
+        assert_eq!(json, r#""key""#);
+
+        // Round-trip
+        let rt: AuthMethod = serde_json::from_str(r#""key""#).unwrap();
+        assert_eq!(rt, AuthMethod::Key);
+    }
+
+    #[test]
+    fn device_type_serde_snake_case() {
+        // DeviceType uses snake_case rename.
+        let json = serde_json::to_string(&DeviceType::Linux).unwrap();
+        assert_eq!(json, r#""linux""#);
+
+        let json = serde_json::to_string(&DeviceType::PfSense).unwrap();
+        assert_eq!(json, r#""pf_sense""#);
+
+        let json = serde_json::to_string(&DeviceType::Fortigate).unwrap();
+        assert_eq!(json, r#""fortigate""#);
+
+        let rt: DeviceType = serde_json::from_str(r#""open_wrt""#).unwrap();
+        assert_eq!(rt, DeviceType::OpenWrt);
+    }
+}

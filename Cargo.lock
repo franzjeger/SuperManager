@@ -3301,6 +3301,7 @@ dependencies = [
  "sha2",
  "ssh-key",
  "supermgr-core",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",

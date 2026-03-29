@@ -1,5 +1,6 @@
 //! SSH page UI components.
 
+pub mod dashboard;
 pub mod dialogs;
 pub mod host_detail;
 pub mod host_tree;
