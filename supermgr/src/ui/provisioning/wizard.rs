@@ -443,11 +443,16 @@ fn build_step1_customer_info(
         let state = Rc::clone(state);
         let name_row = name_row.clone();
         let location_row = location_row.clone();
+        let host_model = host_model.clone();
+        let host_ids = Rc::clone(&host_ids);
+        let host_row = host_row.clone();
         demo_btn.connect_clicked(move |_| {
             let mut s = state.borrow_mut();
             s.customer_name = "Acme Corporation".into();
             s.location = "Oslo HQ".into();
             s.device_type = "FortiGate".into();
+            s.target_host_id = "demo".into();
+            s.target_host_label = "Demo FortiGate (192.168.1.99)".into();
             s.wan_type = "Static".into();
             s.wan_ip = "203.0.113.10".into();
             s.wan_gateway = "203.0.113.1".into();
@@ -477,6 +482,12 @@ fn build_step1_customer_info(
 
             name_row.set_text("Acme Corporation");
             location_row.set_text("Oslo HQ");
+
+            // Add demo host to the dropdown.
+            host_model.append("Demo FortiGate (192.168.1.99)");
+            host_ids.borrow_mut().push("demo".into());
+            host_row.set_selected(host_model.n_items() - 1);
+            host_row.set_sensitive(true);
         });
     }
 
