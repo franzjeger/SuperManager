@@ -2061,17 +2061,17 @@ impl DaemonService {
         let session = connect_to_ssh_host(&host, &None, &state_arc).await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
-        // Use interactive shell — FortiGate's generate-key prompts for password.
-        let mut commands: Vec<&str> = vec![];
-        let create_cmd = format!(
-            "config system api-user\nedit \"{api_user}\"\nset accprofile \"super_admin\"\nset vdom \"root\"\nnext\nend"
-        );
-        let gen_cmd = format!("execute api-user generate-key {api_user}");
-
-        // Build command sequence: create user, generate key, enter password.
+        // Use interactive shell — each CLI line sent separately, waiting
+        // for the FortiGate prompt between each.
+        let api_user_owned = api_user.to_owned();
         let cmd_lines: Vec<String> = vec![
-            create_cmd,
-            gen_cmd,
+            "config system api-user".into(),
+            format!("edit \"{api_user_owned}\""),
+            "set accprofile \"super_admin\"".into(),
+            "set vdom \"root\"".into(),
+            "next".into(),
+            "end".into(),
+            format!("execute api-user generate-key {api_user_owned}"),
         ];
         let mut lines: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
 
@@ -2082,7 +2082,7 @@ impl DaemonService {
             lines.push(&pw_string);
         }
 
-        let stdout = session.shell_interact(&lines, 1000, 15).await
+        let stdout = session.shell_interact(&lines, 1000, 30).await
             .map_err(|e| fdo::Error::Failed(format!("shell interaction failed: {e}")))?;
 
         info!("fortigate_generate_api_token: output={}", stdout.trim());
