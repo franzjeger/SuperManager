@@ -1175,6 +1175,78 @@ pub fn build_ui(
         });
     }
 
+    // --- FortiGate Generate API Token button ----------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let toast_overlay = toast_overlay.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.fg_gen_token_btn.connect_clicked(move |_| {
+            let host_id = {
+                let s = app_state.lock().expect("lock");
+                s.selected_ssh_host.clone()
+            };
+            if let Some(host_id) = host_id {
+                let tx = tx.clone();
+                toast_overlay.add_toast(adw::Toast::new("Generating API token via SSH..."));
+                rt.spawn(async move {
+                    let conn = zbus::Connection::system().await.ok();
+                    let proxy = if let Some(c) = &conn {
+                        supermgr_core::dbus::DaemonProxy::new(c).await.ok()
+                    } else { None };
+                    if let Some(proxy) = proxy {
+                        match proxy.fortigate_generate_api_token(&host_id, "SuperManager", 443).await {
+                            Ok(token) => {
+                                let _ = tx.send(AppMsg::ShowToast(
+                                    format!("API token generated: {}...{}", &token[..6.min(token.len())], &token[token.len().saturating_sub(4)..])
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(format!("Generate token: {e}")));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // --- FortiGate Copy API Token button ------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.fg_copy_token_btn.connect_clicked(move |_| {
+            let host_id = {
+                let s = app_state.lock().expect("lock");
+                s.selected_ssh_host.clone()
+            };
+            if let Some(host_id) = host_id {
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let conn = zbus::Connection::system().await.ok();
+                    let proxy = if let Some(c) = &conn {
+                        supermgr_core::dbus::DaemonProxy::new(c).await.ok()
+                    } else { None };
+                    if let Some(proxy) = proxy {
+                        match proxy.fortigate_get_api_token(&host_id).await {
+                            Ok(token) => {
+                                // Send token as toast — user can copy from there.
+                                // Also copy to clipboard via idle_add.
+                                let _ = tx.send(AppMsg::ShowToast(
+                                    format!("Token: {token}")
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(format!("No token: {e}")));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     // --- VPN Connect / Disconnect button ------------------------------------
     {
         let app_state = Arc::clone(&app_state);

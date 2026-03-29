@@ -655,6 +655,20 @@ pub trait Daemon {
     /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
     async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String>;
 
+    /// Generate a new FortiGate REST API token via SSH.
+    ///
+    /// Creates the API user if needed, generates a key, stores it in the
+    /// secret store, and returns the token string.
+    async fn fortigate_generate_api_token(
+        &self,
+        host_id: &str,
+        api_user: &str,
+        api_port: u16,
+    ) -> fdo::Result<String>;
+
+    /// Retrieve the stored FortiGate API token (for clipboard copy / docs).
+    async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String>;
+
     // =======================================================================
     // Webhook / notification methods
     // =======================================================================

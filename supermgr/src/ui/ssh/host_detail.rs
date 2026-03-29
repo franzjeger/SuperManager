@@ -60,6 +60,8 @@ pub struct SshHostDetail {
 
     // FortiGate compliance check button (only visible for FortiGate hosts).
     pub fg_compliance_btn: gtk4::Button,
+    pub fg_gen_token_btn: gtk4::Button,
+    pub fg_copy_token_btn: gtk4::Button,
 }
 
 // ---------------------------------------------------------------------------
@@ -210,9 +212,21 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .tooltip_text("CIS compliance check")
         .css_classes(["flat"])
         .build();
+    let fg_gen_token_btn = gtk4::Button::builder()
+        .icon_name("emblem-synchronizing-symbolic")
+        .tooltip_text("Generate new API token via SSH")
+        .css_classes(["flat"])
+        .build();
+    let fg_copy_token_btn = gtk4::Button::builder()
+        .icon_name("edit-copy-symbolic")
+        .tooltip_text("Copy API token to clipboard")
+        .css_classes(["flat"])
+        .build();
     fg_btn_box.append(&fg_refresh_btn);
     fg_btn_box.append(&fg_backup_btn);
     fg_btn_box.append(&fg_compliance_btn);
+    fg_btn_box.append(&fg_gen_token_btn);
+    fg_btn_box.append(&fg_copy_token_btn);
     fg_dashboard_group.set_header_suffix(Some(&fg_btn_box));
 
     // Action buttons.
@@ -323,6 +337,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         fg_refresh_btn,
         fg_backup_btn,
         fg_compliance_btn,
+        fg_gen_token_btn,
+        fg_copy_token_btn,
     };
 
     (bundle, content_scroll.upcast())

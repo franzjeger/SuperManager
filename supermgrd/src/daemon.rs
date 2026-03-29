@@ -2024,6 +2024,118 @@ impl DaemonService {
         Ok(())
     }
 
+    /// Generate a new FortiGate REST API token via SSH.
+    ///
+    /// SSHs into the device, creates the API user if needed, generates a key,
+    /// stores it, and returns the token string.
+    async fn fortigate_generate_api_token(
+        &self,
+        host_id: &str,
+        api_user: &str,
+        api_port: u16,
+    ) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let host = {
+            let state = self.state.lock().await;
+            state.ssh_hosts.get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .clone()
+        };
+
+        info!("fortigate_generate_api_token: generating for user '{}' on {}", api_user, host.hostname);
+
+        let state_arc = Arc::clone(&self.state);
+        let session = connect_to_ssh_host(&host, &None, &state_arc).await
+            .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
+
+        // Create API user if it doesn't exist.
+        let create_cmd = format!(
+            "config system api-user\nedit \"{api_user}\"\nset accprofile \"super_admin\"\nset vdom \"root\"\nnext\nend"
+        );
+        let _ = session.exec(&create_cmd).await;
+
+        // Generate the API key.
+        let gen_cmd = format!("execute api-user generate-key {api_user}");
+        let (exit_code, stdout, stderr) = session.exec(&gen_cmd).await
+            .map_err(|e| fdo::Error::Failed(format!("command failed: {e}")))?;
+
+        if exit_code != 0 {
+            return Err(fdo::Error::Failed(format!(
+                "generate-key failed (exit {}): {} {}",
+                exit_code,
+                stdout.trim(),
+                stderr.trim()
+            )));
+        }
+
+        // Parse token from output: "New API key: <token>"
+        let token = stdout.lines()
+            .find_map(|line| {
+                let line = line.trim();
+                if line.contains("New API key:") || line.contains("API key:") {
+                    line.rsplit(':').next().map(|t| t.trim().to_owned())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Some FW versions just output the token on its own line.
+                stdout.lines()
+                    .map(str::trim)
+                    .find(|l| l.len() > 20 && l.chars().all(|c| c.is_alphanumeric()))
+                    .map(String::from)
+            })
+            .ok_or_else(|| fdo::Error::Failed(format!(
+                "could not parse API token from output: {stdout}"
+            )))?;
+
+        // Store the token.
+        let label = format!("supermgr/fg/{}/api_token", id.simple());
+        secrets::store_secret(&label, token.trim().as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("store token: {e}")))?;
+
+        let mut state = self.state.lock().await;
+        let host = state.ssh_hosts.get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.api_token_ref = Some(SecretRef::new(&label));
+        if api_port > 0 {
+            host.api_port = Some(api_port);
+        }
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state.save_ssh_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
+
+        crate::audit::log_event("FG_API_KEYGEN", &format!("user={api_user} host={}", host.hostname));
+        info!("fortigate_generate_api_token: token generated and stored for {}", host.hostname);
+
+        Ok(token)
+    }
+
+    /// Retrieve the stored FortiGate API token for a host (for copying to clipboard).
+    async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let state = self.state.lock().await;
+        let host = state.ssh_hosts.get(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+
+        let label = host.api_token_ref.as_ref()
+            .ok_or_else(|| fdo::Error::Failed("no API token configured".into()))?
+            .label()
+            .to_owned();
+        drop(state);
+
+        let bytes = secrets::retrieve_secret(&label).await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve token: {e}")))?;
+        String::from_utf8(bytes)
+            .map_err(|e| fdo::Error::Failed(format!("invalid token encoding: {e}")))
+    }
+
     /// Call the FortiGate REST API on a host.
     async fn fortigate_api(
         &self,
