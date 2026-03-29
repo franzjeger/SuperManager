@@ -40,6 +40,9 @@ pub struct AppSettings {
     /// Anthropic API key for the built-in Claude console.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub anthropic_api_key: String,
+    /// Whether to use Claude Code CLI (subscription) instead of API key.
+    #[serde(default)]
+    pub use_claude_subscription: bool,
     /// Master password hash stored as `"salt_hex:hash_hex"`.
     /// Empty string means no master password has been set yet.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -63,6 +66,7 @@ impl Default for AppSettings {
             color_scheme: ColorScheme::default(),
             opacity: 1.0,
             anthropic_api_key: String::new(),
+            use_claude_subscription: false,
             password_hash: String::new(),
             auto_lock_minutes: 15,
         }

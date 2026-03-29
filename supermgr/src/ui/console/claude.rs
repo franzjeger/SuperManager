@@ -26,6 +26,96 @@ pub fn load_api_key() -> Option<String> {
     if s.anthropic_api_key.is_empty() { None } else { Some(s.anthropic_api_key) }
 }
 
+/// Check if subscription mode is enabled.
+pub fn use_subscription() -> bool {
+    crate::settings::AppSettings::load().use_claude_subscription
+}
+
+/// Check if Claude Code CLI is available.
+pub fn has_claude_cli() -> bool {
+    std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Path to the MCP server binary (next to the GUI binary, or in /usr/bin).
+fn mcp_binary_path() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name("supermgr-mcp");
+        if sibling.exists() {
+            return sibling.to_string_lossy().to_string();
+        }
+    }
+    "/usr/bin/supermgr-mcp".to_owned()
+}
+
+/// Send a message using Claude Code CLI (subscription-based, no API tokens).
+///
+/// Uses `claude --print` with MCP tools configured inline.
+pub async fn send_message_subscription(
+    user_text: &str,
+    tx: &mpsc::Sender<AppMsg>,
+    context: &str,
+) -> Result<()> {
+    let mcp_path = mcp_binary_path();
+
+    let mcp_config = json!({
+        "mcpServers": {
+            "supermgr": {
+                "command": mcp_path
+            }
+        }
+    });
+
+    let allowed_tools = [
+        "mcp__supermgr__ssh_list_hosts",
+        "mcp__supermgr__ssh_list_keys",
+        "mcp__supermgr__ssh_execute",
+        "mcp__supermgr__vpn_status",
+        "mcp__supermgr__vpn_list_profiles",
+        "mcp__supermgr__vpn_connect",
+        "mcp__supermgr__vpn_disconnect",
+        "mcp__supermgr__ssh_add_host",
+        "mcp__supermgr__fortigate_api",
+        "mcp__supermgr__fortigate_set_api_token",
+        "mcp__supermgr__fortigate_push_ssh_key",
+    ].join(",");
+
+    let system_with_context = format!(
+        "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
+    );
+
+    let full_prompt = format!("{system_with_context}\n\nUser: {user_text}");
+
+    info!("sending via Claude Code CLI (subscription)");
+
+    let output = tokio::process::Command::new("claude")
+        .args([
+            "--print",
+            "--mcp-config", &mcp_config.to_string(),
+            "--allowedTools", &allowed_tools,
+            "--system-prompt", &system_with_context,
+        ])
+        .arg(user_text)
+        .output()
+        .await
+        .context("failed to run `claude` CLI — is it installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("claude CLI failed: {stderr}");
+    }
+
+    let response = String::from_utf8_lossy(&output.stdout);
+    let _ = tx.send(AppMsg::ConsoleResponse(
+        format!("\nClaude: {response}\n"),
+    ));
+
+    Ok(())
+}
+
 /// Tool definitions sent to the Claude API.
 fn tools() -> Value {
     json!([

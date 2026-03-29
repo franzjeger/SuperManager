@@ -1214,19 +1214,42 @@ pub fn show_settings_dialog(
     // --- Claude Console group ---
     let console_group = adw::PreferencesGroup::builder()
         .title("Claude Console")
-        .description("API key for the built-in Claude AI assistant")
+        .description("Choose between Claude subscription (free with Claude Code login) or API key (pay-per-token)")
         .build();
 
+    let sub_row = adw::SwitchRow::builder()
+        .title("Use Claude subscription")
+        .subtitle("Uses `claude` CLI — requires Claude Code login")
+        .build();
+    {
+        let s = app_settings.lock().expect("lock");
+        sub_row.set_active(s.use_claude_subscription);
+    }
+    console_group.add(&sub_row);
+
     let api_key_row = adw::PasswordEntryRow::builder()
-        .title("Anthropic API Key")
+        .title("Anthropic API Key (only if subscription disabled)")
         .build();
     {
         let s = app_settings.lock().expect("lock");
         if !s.anthropic_api_key.is_empty() {
             api_key_row.set_text(&s.anthropic_api_key);
         }
+        api_key_row.set_sensitive(!s.use_claude_subscription);
     }
     console_group.add(&api_key_row);
+
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let api_key_row = api_key_row.clone();
+        sub_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            api_key_row.set_sensitive(!active);
+            let mut s = app_settings.lock().expect("lock");
+            s.use_claude_subscription = active;
+            s.save();
+        });
+    }
 
     {
         let app_settings = Arc::clone(&app_settings);

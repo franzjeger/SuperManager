@@ -134,14 +134,20 @@ pub fn build_console_page(
     setup_stack.add_named(&setup_page, Some("setup"));
     setup_stack.add_named(&chat_page, Some("chat"));
 
-    // Show correct page based on API key state.
-    if super::claude::has_api_key() {
+    // Show correct page based on auth state.
+    let use_sub = super::claude::use_subscription();
+    let has_key = super::claude::has_api_key();
+    if use_sub || has_key {
         setup_stack.set_visible_child_name("chat");
+        let mode = if use_sub { "subscription (Claude Code CLI)" } else { "API key" };
         append_system_msg(
             &chat_buffer,
-            "Claude Console — connected to SuperManager.\n\n\
-             I can manage your SSH connections and VPN profiles.\n\
-             Try: \"list my SSH hosts\" or \"connect to VPN\".\n",
+            &format!(
+                "Claude Console — connected to SuperManager.\n\
+                 Mode: {mode}\n\n\
+                 I can manage your SSH connections and VPN profiles.\n\
+                 Try: \"list my SSH hosts\" or \"connect to VPN\".\n",
+            ),
         );
     } else {
         setup_stack.set_visible_child_name("setup");
@@ -191,22 +197,34 @@ pub fn build_console_page(
             rt.spawn(async move {
                 let _ = tx.send(AppMsg::ConsoleThinking(true));
 
-                let api_key = super::claude::load_api_key();
-                let Some(api_key) = api_key else {
-                    let _ = tx.send(AppMsg::ConsoleResponse(
-                        "\nNo API key configured.\n".into(),
-                    ));
-                    let _ = tx.send(AppMsg::ConsoleThinking(false));
-                    return;
-                };
+                let use_sub = super::claude::use_subscription();
 
-                match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
-                    Ok(updated_messages) => {
-                        app_state.lock().unwrap().console_messages = updated_messages;
+                if use_sub {
+                    // Use Claude Code CLI (subscription — no API tokens).
+                    match super::claude::send_message_subscription(&text, &tx, &context).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
+                        }
                     }
-                    Err(e) => {
-                        let _ =
-                            tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
+                } else {
+                    // Use API key (pay-per-token).
+                    let api_key = super::claude::load_api_key();
+                    let Some(api_key) = api_key else {
+                        let _ = tx.send(AppMsg::ConsoleResponse(
+                            "\nNo API key configured. Go to Settings to add one, or enable 'Use Claude subscription'.\n".into(),
+                        ));
+                        let _ = tx.send(AppMsg::ConsoleThinking(false));
+                        return;
+                    };
+
+                    match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
+                        Ok(updated_messages) => {
+                            app_state.lock().unwrap().console_messages = updated_messages;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
+                        }
                     }
                 }
                 let _ = tx.send(AppMsg::ConsoleThinking(false));
