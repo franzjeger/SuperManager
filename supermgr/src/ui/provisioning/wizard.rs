@@ -1277,11 +1277,536 @@ fn build_step5_review(
         });
     }
 
+    // Export HTML button
+    {
+        let state = Rc::clone(state);
+        let tx = tx.clone();
+        export_html_btn.connect_clicked(move |btn| {
+            let s = state.borrow().clone();
+            if s.generated_config.is_empty() {
+                return;
+            }
+            let html = generate_html_report(&s, &s.generated_config);
+
+            let dialog = gtk4::FileDialog::builder()
+                .title("Export HTML Report")
+                .initial_name(format!(
+                    "{}-{}-report.html",
+                    s.device_type.to_lowercase(),
+                    s.customer_name.to_lowercase().replace(' ', "-")
+                ))
+                .build();
+
+            let btn = btn.clone();
+            let tx = tx.clone();
+            dialog.save(
+                None::<&gtk4::Window>,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(path) = file.path() {
+                            match std::fs::write(&path, &html) {
+                                Ok(()) => {
+                                    btn.set_tooltip_text(Some(&format!(
+                                        "Exported to {}",
+                                        path.display()
+                                    )));
+                                    let _ = tx.send(AppMsg::ShowToast(format!(
+                                        "HTML report saved to {}",
+                                        path.display()
+                                    )));
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to export HTML report: {e}");
+                                }
+                            }
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    // Export PDF button — uses wkhtmltopdf or weasyprint subprocess
+    {
+        let state = Rc::clone(state);
+        let tx = tx.clone();
+        export_pdf_btn.connect_clicked(move |btn| {
+            let s = state.borrow().clone();
+            if s.generated_config.is_empty() {
+                return;
+            }
+            let html = generate_html_report(&s, &s.generated_config);
+
+            let dialog = gtk4::FileDialog::builder()
+                .title("Export PDF Report")
+                .initial_name(format!(
+                    "{}-{}-report.pdf",
+                    s.device_type.to_lowercase(),
+                    s.customer_name.to_lowercase().replace(' ', "-")
+                ))
+                .build();
+
+            let btn = btn.clone();
+            let tx = tx.clone();
+            dialog.save(
+                None::<&gtk4::Window>,
+                None::<&gio::Cancellable>,
+                move |result| {
+                    if let Ok(file) = result {
+                        if let Some(pdf_path) = file.path() {
+                            // Write the HTML to a temp file first
+                            let tmp_html = std::env::temp_dir().join("supermgr-report.html");
+                            if let Err(e) = std::fs::write(&tmp_html, &html) {
+                                tracing::error!("Failed to write temp HTML: {e}");
+                                return;
+                            }
+
+                            // Try wkhtmltopdf first, then weasyprint
+                            let pdf_result = std::process::Command::new("wkhtmltopdf")
+                                .args([
+                                    "--enable-local-file-access",
+                                    "--page-size", "A4",
+                                    "--margin-top", "10mm",
+                                    "--margin-bottom", "10mm",
+                                ])
+                                .arg(&tmp_html)
+                                .arg(&pdf_path)
+                                .output()
+                                .or_else(|_| {
+                                    std::process::Command::new("weasyprint")
+                                        .arg(&tmp_html)
+                                        .arg(&pdf_path)
+                                        .output()
+                                });
+
+                            let _ = std::fs::remove_file(&tmp_html);
+
+                            match pdf_result {
+                                Ok(output) if output.status.success() => {
+                                    btn.set_tooltip_text(Some(&format!(
+                                        "Exported to {}",
+                                        pdf_path.display()
+                                    )));
+                                    let _ = tx.send(AppMsg::ShowToast(format!(
+                                        "PDF report saved to {}",
+                                        pdf_path.display()
+                                    )));
+                                }
+                                Ok(output) => {
+                                    let stderr =
+                                        String::from_utf8_lossy(&output.stderr);
+                                    tracing::error!(
+                                        "PDF converter exited with error: {stderr}"
+                                    );
+                                    // Fall back: save as HTML instead
+                                    let html_fallback =
+                                        pdf_path.with_extension("html");
+                                    let _ = std::fs::write(&html_fallback, &html);
+                                    let _ = tx.send(AppMsg::ShowToast(format!(
+                                        "PDF conversion failed. Saved HTML to {}. \
+                                         Install wkhtmltopdf or weasyprint for PDF export.",
+                                        html_fallback.display()
+                                    )));
+                                }
+                                Err(_) => {
+                                    // No converter available — save as HTML
+                                    let html_fallback =
+                                        pdf_path.with_extension("html");
+                                    let _ = std::fs::write(&html_fallback, &html);
+                                    let _ = tx.send(AppMsg::ShowToast(format!(
+                                        "No PDF converter found. Saved HTML to {}. \
+                                         Install wkhtmltopdf or weasyprint for PDF export.",
+                                        html_fallback.display()
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                },
+            );
+        });
+    }
+
     page.append(&summary_label);
     page.append(&config_scroll);
     page.append(&btn_box);
 
     page.upcast()
+}
+
+// ---------------------------------------------------------------------------
+// HTML report generation
+// ---------------------------------------------------------------------------
+
+/// Generate a professional HTML report from the wizard state and config text.
+fn generate_html_report(state: &WizardState, config: &str) -> String {
+    let now = glib::DateTime::now_local().unwrap();
+    let date_str = now
+        .format("%Y-%m-%d %H:%M")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| "Unknown date".into());
+
+    let yn = |b: bool| if b { "Enabled" } else { "Disabled" };
+    let check = |b: bool| if b { "&#x2705;" } else { "&#x274C;" };
+
+    // Build VLAN rows
+    let vlan_rows = if state.vlans.is_empty() {
+        "<tr><td colspan=\"3\" style=\"text-align:center;color:#888;\">No additional VLANs configured</td></tr>".to_string()
+    } else {
+        let colors = ["#e3f2fd", "#fff3e0", "#e8f5e9", "#fce4ec", "#f3e5f5"];
+        state
+            .vlans
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let bg = colors[i % colors.len()];
+                format!(
+                    "<tr><td style=\"background:{bg};font-weight:bold;\">{id}</td>\
+                     <td style=\"background:{bg};\">{name}</td>\
+                     <td style=\"background:{bg};font-family:monospace;\">{subnet}</td></tr>",
+                    id = v.id,
+                    name = html_escape(&v.name),
+                    subnet = html_escape(&v.subnet),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Security section (FortiGate only)
+    let security_section = if state.device_type == "FortiGate" {
+        format!(
+            r#"<h2 id="security">4. Security Policies</h2>
+<table>
+<thead><tr><th>Policy</th><th>Status</th></tr></thead>
+<tbody>
+<tr><td>Default Deny</td><td>{}</td></tr>
+<tr><td>Allow Outbound Web (80/443)</td><td>{}</td></tr>
+<tr><td>Allow DNS</td><td>{}</td></tr>
+<tr><td>Intrusion Prevention (IPS)</td><td>{}</td></tr>
+<tr><td>Web Filter</td><td>{}</td></tr>
+<tr><td>Antivirus</td><td>{}</td></tr>
+</tbody>
+</table>"#,
+            check(state.default_deny),
+            check(state.allow_outbound_web),
+            check(state.allow_dns),
+            check(state.enable_ips),
+            check(state.enable_web_filter),
+            check(state.enable_antivirus),
+        )
+    } else {
+        String::new()
+    };
+
+    let security_toc = if state.device_type == "FortiGate" {
+        "<li><a href=\"#security\">Security Policies</a></li>"
+    } else {
+        ""
+    };
+
+    let wan_details = if state.wan_type == "Static" {
+        format!(
+            "<tr><td>WAN IP</td><td><code>{}</code></td></tr>\n\
+             <tr><td>Gateway</td><td><code>{}</code></td></tr>\n\
+             <tr><td>WAN DNS</td><td><code>{}</code></td></tr>",
+            html_escape(&state.wan_ip),
+            html_escape(&state.wan_gateway),
+            html_escape(&state.wan_dns),
+        )
+    } else {
+        String::new()
+    };
+
+    let wan_type_display = if state.wan_type.is_empty() {
+        "DHCP"
+    } else {
+        &state.wan_type
+    };
+    let lan_display = if state.lan_subnet.is_empty() {
+        "10.0.0.0/24"
+    } else {
+        &state.lan_subnet
+    };
+
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{customer} &mdash; {device} Deployment Report</title>
+<style>
+  :root {{
+    --navy: #1a237e;
+    --navy-light: #283593;
+    --accent: #1565c0;
+    --bg: #fafafa;
+    --card-bg: #ffffff;
+    --border: #e0e0e0;
+    --text: #212121;
+    --text-muted: #757575;
+  }}
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.6;
+  }}
+  header {{
+    background: linear-gradient(135deg, var(--navy), var(--navy-light));
+    color: #fff;
+    padding: 2rem 2.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  header h1 {{ font-size: 1.6rem; font-weight: 600; }}
+  header .meta {{ text-align: right; font-size: 0.9rem; opacity: 0.9; }}
+  header .meta strong {{ display: block; font-size: 1.1rem; }}
+  .logo-placeholder {{
+    width: 64px; height: 64px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.5rem; font-weight: bold; margin-right: 1.5rem;
+    flex-shrink: 0;
+  }}
+  header .left {{ display: flex; align-items: center; }}
+  main {{ max-width: 960px; margin: 0 auto; padding: 2rem; }}
+  h2 {{
+    color: var(--navy);
+    border-bottom: 2px solid var(--accent);
+    padding-bottom: 0.3rem;
+    margin: 2rem 0 1rem;
+    font-size: 1.3rem;
+  }}
+  h3 {{ margin: 1rem 0 0.5rem; color: var(--navy-light); font-size: 1.05rem; }}
+  nav.toc {{
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1.2rem 1.5rem;
+    margin-bottom: 1.5rem;
+  }}
+  nav.toc h3 {{ margin-bottom: 0.5rem; color: var(--navy); }}
+  nav.toc ol {{ padding-left: 1.2rem; }}
+  nav.toc li {{ margin-bottom: 0.3rem; }}
+  nav.toc a {{ color: var(--accent); text-decoration: none; }}
+  nav.toc a:hover {{ text-decoration: underline; }}
+  table {{
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1.5rem;
+    background: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  }}
+  th {{
+    background: var(--navy);
+    color: #fff;
+    text-align: left;
+    padding: 0.7rem 1rem;
+    font-weight: 600;
+    font-size: 0.9rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }}
+  td {{ padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); }}
+  tbody tr:nth-child(even) {{ background: #f5f7fa; }}
+  tbody tr:hover {{ background: #e8eaf6; }}
+  code {{
+    background: #eceff1;
+    padding: 0.15rem 0.4rem;
+    border-radius: 3px;
+    font-size: 0.9em;
+  }}
+  .config-block {{
+    background: #263238;
+    color: #cfd8dc;
+    padding: 1.2rem 1.5rem;
+    border-radius: 8px;
+    overflow-x: auto;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    margin-bottom: 1.5rem;
+  }}
+  .checklist {{ list-style: none; padding: 0; }}
+  .checklist li {{
+    padding: 0.5rem 0.8rem;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }}
+  .checklist li::before {{ content: '\2610'; font-size: 1.1rem; }}
+  footer {{
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    padding: 2rem 1rem 1rem;
+    border-top: 1px solid var(--border);
+    margin-top: 2rem;
+  }}
+  @media print {{
+    body {{ background: #fff; }}
+    header {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    th {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    .config-block {{ -webkit-print-color-adjust: exact; print-color-adjust: exact; }}
+    main {{ max-width: 100%; padding: 0 1rem; }}
+    h2 {{ page-break-after: avoid; }}
+    table, .config-block {{ page-break-inside: avoid; }}
+  }}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="left">
+    <div class="logo-placeholder">SM</div>
+    <div>
+      <h1>{device} Deployment Report</h1>
+      <div style="opacity:0.85;margin-top:0.2rem;">{location}</div>
+    </div>
+  </div>
+  <div class="meta">
+    <strong>{customer}</strong>
+    {date}
+  </div>
+</header>
+
+<main>
+
+<nav class="toc">
+<h3>Table of Contents</h3>
+<ol>
+  <li><a href="#customer">Customer Information</a></li>
+  <li><a href="#network">Network Design</a></li>
+  <li><a href="#services">Services</a></li>
+  {security_toc}
+  <li><a href="#config">Generated Configuration</a></li>
+  <li><a href="#checklist">Deployment Checklist</a></li>
+</ol>
+</nav>
+
+<h2 id="customer">1. Customer Information</h2>
+<table>
+<thead><tr><th>Field</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Customer Name</td><td><strong>{customer}</strong></td></tr>
+<tr><td>Location</td><td>{location}</td></tr>
+<tr><td>Device Type</td><td>{device}</td></tr>
+<tr><td>Target Host</td><td>{target_host}</td></tr>
+<tr><td>Report Date</td><td>{date}</td></tr>
+</tbody>
+</table>
+
+<h2 id="network">2. Network Design</h2>
+<h3>WAN Configuration</h3>
+<table>
+<thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>WAN Type</td><td>{wan_type}</td></tr>
+{wan_details}
+</tbody>
+</table>
+
+<h3>LAN Configuration</h3>
+<table>
+<thead><tr><th>Parameter</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>LAN Subnet</td><td><code>{lan_subnet}</code></td></tr>
+<tr><td>Management VLAN</td><td>{mgmt_vlan}</td></tr>
+</tbody>
+</table>
+
+<h3>VLANs</h3>
+<table>
+<thead><tr><th>VLAN ID</th><th>Name</th><th>Subnet</th></tr></thead>
+<tbody>
+{vlan_rows}
+</tbody>
+</table>
+
+<h2 id="services">3. Services</h2>
+<table>
+<thead><tr><th>Service</th><th>Configuration</th></tr></thead>
+<tbody>
+<tr><td>Site-to-Site VPN</td><td>{s2s_vpn}</td></tr>
+<tr><td>Remote Access VPN</td><td>{ra_vpn}</td></tr>
+<tr><td>DNS Servers</td><td><code>{dns}</code></td></tr>
+<tr><td>NTP Server</td><td><code>{ntp}</code></td></tr>
+<tr><td>Syslog</td><td>{syslog}</td></tr>
+<tr><td>Admin HTTPS Port</td><td>{admin_port}</td></tr>
+</tbody>
+</table>
+
+{security_section}
+
+<h2 id="config">5. Generated Configuration</h2>
+<div class="config-block">{config_escaped}</div>
+
+<h2 id="checklist">6. Deployment Checklist</h2>
+<ul class="checklist">
+<li>Verify physical connectivity and cabling</li>
+<li>Confirm WAN link is active and IP assigned</li>
+<li>Test LAN connectivity from management workstation</li>
+<li>Verify VLAN segmentation and inter-VLAN routing</li>
+<li>Confirm DNS resolution is working</li>
+<li>Validate NTP synchronization</li>
+<li>Test VPN tunnel establishment (if applicable)</li>
+<li>Verify firewall policies match security requirements</li>
+<li>Run vulnerability scan against device management interface</li>
+<li>Document any deviations from this report</li>
+<li>Obtain customer sign-off</li>
+</ul>
+
+</main>
+
+<footer>
+Generated by SuperManager &mdash; {date}
+</footer>
+
+</body>
+</html>"##,
+        customer = html_escape(&state.customer_name),
+        device = html_escape(&state.device_type),
+        location = html_escape(&state.location),
+        date = html_escape(&date_str),
+        target_host = html_escape(&state.target_host_label),
+        wan_type = html_escape(wan_type_display),
+        wan_details = wan_details,
+        lan_subnet = html_escape(lan_display),
+        mgmt_vlan = if state.management_vlan { "Yes (VLAN 99)" } else { "No" },
+        vlan_rows = vlan_rows,
+        s2s_vpn = yn(state.vpn_site_to_site),
+        ra_vpn = yn(state.vpn_remote_access),
+        dns = html_escape(&state.dns_servers),
+        ntp = html_escape(&state.ntp_server),
+        syslog = if state.syslog_enabled {
+            format!("Enabled (target: <code>{}</code>)", html_escape(&state.syslog_target))
+        } else {
+            "Disabled".to_string()
+        },
+        admin_port = state.admin_https_port,
+        security_toc = security_toc,
+        security_section = security_section,
+        config_escaped = html_escape(config),
+    )
+}
+
+/// Minimal HTML escaping for safe embedding in the report.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 // ---------------------------------------------------------------------------
