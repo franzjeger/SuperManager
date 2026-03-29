@@ -1361,7 +1361,7 @@ async fn send_provisioning_subscription(prompt: &str) -> anyhow::Result<String> 
     );
 
     let output = Command::new("claude")
-        .args(["--print", "--no-input"])
+        .args(["--print"])
         .arg(&full_prompt)
         .output()
         .await?;
