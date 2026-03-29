@@ -39,12 +39,17 @@ CRITICAL RULES — FOLLOW EXACTLY:\n\
 - Mark all placeholder credentials with CHANGE-ME.\n\
 - Add a deployment checklist at the end as CLI comments.\n\n\
 VPN RULES:\n\
-- ONLY generate VPN config if the input says 'Site-to-Site VPN: Yes' or 'Remote Access VPN: Yes'.\n\
-- If VPN is 'No', do NOT include any VPN configuration at all.\n\
-- Do NOT use SSL-VPN — it is deprecated on FortiOS 7.6+. For remote access, use \
-  IPsec IKEv2 with EAP or certificate-based authentication instead.\n\
-- For S2S VPN, use IKEv2 with AES-256-GCM and DH group 20 (ECP384). \
-  Mark remote-gw and dst-subnet as CHANGE-ME placeholders.\n\n\
+- ONLY include VPN configuration if the input has a '## VPN' section.\n\
+- If there is NO '## VPN' section in the input, do NOT generate ANY VPN config — \
+  no phase1, no phase2, no VPN policies, no VPN users, no VPN references at all.\n\
+- NEVER use SSL-VPN. NEVER mention SSL-VPN in config or comments.\n\
+- For remote access, use IPsec IKEv2 with EAP authentication.\n\
+- For S2S VPN, use IKEv2 with AES-256-GCM and DH group 20 (ECP384).\n\n\
+CREDENTIALS:\n\
+- Use the pre-generated credentials from the '## Pre-generated Credentials' section.\n\
+- Do NOT use 'CHANGE-ME' for items that already have a generated value.\n\
+- Only use 'CHANGE-ME' for items that genuinely need manual configuration \
+  (e.g. S2S remote gateway IP, remote subnets).\n\n\
 FORTIGATE SPECIFICS:\n\
 - Use policy IDs in ranges: 100s=Staff, 200s=Guests, 300s=IoT, 400s=Mgmt, 999=deny-all.\n\
 - Always include DoS policy on WAN interface.\n\
@@ -2586,14 +2591,10 @@ fn build_generation_prompt(s: &WizardState) -> String {
 
     prompt.push_str(&format!(
         "\n## Services\n\
-         - Site-to-Site VPN: {}\n\
-         - Remote Access VPN: {}\n\
          - DNS Servers: {}\n\
          - NTP Server: {}\n\
          - Syslog: {}{}\n\
          - Admin HTTPS Port: {}\n",
-        if s.vpn_site_to_site { "Yes" } else { "No" },
-        if s.vpn_remote_access { "Yes" } else { "No" },
         s.dns_servers,
         s.ntp_server,
         if s.syslog_enabled { "Yes" } else { "No" },
@@ -2605,10 +2606,54 @@ fn build_generation_prompt(s: &WizardState) -> String {
         s.admin_https_port,
     ));
 
+    // Only include VPN section if at least one VPN type is enabled.
+    // Do NOT mention VPN at all if disabled — Claude will add it otherwise.
+    if s.vpn_site_to_site || s.vpn_remote_access {
+        prompt.push_str("\n## VPN\n");
+        if s.vpn_site_to_site {
+            prompt.push_str("- Site-to-Site VPN: Yes (IPsec IKEv2)\n");
+        }
+        if s.vpn_remote_access {
+            prompt.push_str("- Remote Access VPN: Yes (IPsec IKEv2 with EAP, NOT SSL-VPN)\n");
+        }
+    }
+
+    // Auto-generate secure passwords/PSKs for the config.
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut gen_pass = |len: usize| -> String {
+        const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*";
+        (0..len).map(|_| CHARS[rng.gen_range(0..CHARS.len())] as char).collect()
+    };
+
+    prompt.push_str(&format!(
+        "\n## Pre-generated Credentials (use these exact values in the config)\n\
+         - Admin password: {}\n\
+         - WiFi PSK (if applicable): {}\n",
+        gen_pass(20),
+        gen_pass(16),
+    ));
+    if s.vpn_site_to_site {
+        prompt.push_str(&format!("- S2S VPN PSK: {}\n", gen_pass(32)));
+    }
+    if s.vpn_remote_access {
+        prompt.push_str(&format!(
+            "- VPN user 'vpnuser1' password: {}\n\
+             - VPN EAP PSK: {}\n",
+            gen_pass(16),
+            gen_pass(32),
+        ));
+    }
+
     prompt.push_str(
-        "\nIMPORTANT: Use the EXACT subnets listed above. The LAN base interface \
-         IP must be the .1 address of the LAN Subnet specified. Do NOT generate \
-         different octets.\n"
+        "\nIMPORTANT RULES:\n\
+         - Use the EXACT subnets listed above. The LAN base interface IP must be \
+           the .1 address of the LAN Subnet.\n\
+         - Use the pre-generated credentials above — do NOT use CHANGE-ME placeholders \
+           for items that have a generated value.\n\
+         - Do NOT include any VPN configuration unless the VPN section above is present.\n\
+         - Do NOT mention SSL-VPN anywhere — not in config, not in comments.\n\
+         - Output ONLY the config commands. No markdown, no explanations, no text before or after.\n"
     );
 
     if s.device_type == "FortiGate" {
