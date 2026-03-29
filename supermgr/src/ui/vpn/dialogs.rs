@@ -1161,7 +1161,8 @@ pub fn show_settings_dialog(
 ) {
     let dialog = adw::Dialog::builder()
         .title("Settings")
-        .content_width(380)
+        .content_width(420)
+        .content_height(600)
         .build();
 
     let appearance_group = adw::PreferencesGroup::builder()

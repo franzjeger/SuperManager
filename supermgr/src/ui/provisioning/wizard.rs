@@ -433,11 +433,72 @@ fn build_step1_customer_info(
     // Set initial device type
     state.borrow_mut().device_type = "FortiGate".to_string();
 
+    // Demo button — fills all wizard steps with test data
+    let demo_btn = gtk4::Button::builder()
+        .label("Load Demo Data")
+        .tooltip_text("Fill all steps with sample data for testing")
+        .css_classes(["flat"])
+        .build();
+    {
+        let state = Rc::clone(state);
+        let name_row = name_row.clone();
+        let location_row = location_row.clone();
+        demo_btn.connect_clicked(move |_| {
+            let mut s = state.borrow_mut();
+            s.customer_name = "Acme Corporation".into();
+            s.location = "Oslo HQ".into();
+            s.device_type = "FortiGate".into();
+            s.wan_type = "Static".into();
+            s.wan_ip = "203.0.113.10".into();
+            s.wan_gateway = "203.0.113.1".into();
+            s.wan_dns = "1.1.1.1".into();
+            s.lan_subnet = "10.42.100.0/24".into();
+            s.management_vlan = true;
+            s.vlans = vec![
+                VlanEntry { id: 10, name: "Staff".into(), subnet: "10.42.10.0/24".into() },
+                VlanEntry { id: 20, name: "Guests".into(), subnet: "10.42.20.0/24".into() },
+                VlanEntry { id: 30, name: "IoT".into(), subnet: "10.42.30.0/24".into() },
+                VlanEntry { id: 99, name: "Management".into(), subnet: "10.42.99.0/24".into() },
+            ];
+            s.vpn_site_to_site = true;
+            s.vpn_remote_access = true;
+            s.dns_servers = "1.1.1.1, 8.8.8.8".into();
+            s.ntp_server = "pool.ntp.org".into();
+            s.syslog_enabled = true;
+            s.syslog_target = "10.42.99.10".into();
+            s.admin_https_port = 8443;
+            s.default_deny = true;
+            s.allow_outbound_web = true;
+            s.allow_dns = true;
+            s.enable_ips = true;
+            s.enable_web_filter = true;
+            s.enable_antivirus = true;
+            drop(s);
+
+            name_row.set_text("Acme Corporation");
+            location_row.set_text("Oslo HQ");
+        });
+    }
+
     customer_group.add(&name_row);
     customer_group.add(&location_row);
     customer_group.add(&device_type_row);
     customer_group.add(&host_row);
+
+    let demo_group = adw::PreferencesGroup::builder()
+        .title("Quick Start")
+        .description("Load sample data to test the wizard without a real device.")
+        .build();
+    let demo_action_row = adw::ActionRow::builder()
+        .title("Demo Mode")
+        .subtitle("Fills all steps with Acme Corporation test data")
+        .activatable_widget(&demo_btn)
+        .build();
+    demo_action_row.add_suffix(&demo_btn);
+    demo_group.add(&demo_action_row);
+
     page.add(&customer_group);
+    page.add(&demo_group);
 
     page.upcast()
 }
