@@ -25,8 +25,18 @@ const TOTAL_STEPS: u32 = 5;
 const PROVISIONING_SYSTEM_PROMPT: &str = "\
 You are an expert network engineer specializing in FortiGate and UniFi device \
 configuration. Generate production-ready configurations following CIS benchmarks \
-and industry best practices. Output FortiGate config as CLI commands. Output \
-UniFi config as controller API JSON.";
+and industry best practices.\n\n\
+IMPORTANT RULES:\n\
+- Output FortiGate config as CLI commands ONLY (no markdown, no explanation before/after the config block).\n\
+- Output UniFi config as controller API JSON.\n\
+- The LAN base subnet MUST match the subnet specified in the wizard input — do not invent a different one.\n\
+- All VLAN subnets must use the exact values from the input — do not change octets.\n\
+- For web filter categories, add a comment with the category name next to each numeric ID \
+  (e.g. set category 2  # Adult/Mature Content).\n\
+- Mark all placeholder credentials with CHANGE-ME and add a deployment checklist at the end \
+  listing every item that must be changed before production use.\n\
+- For S2S VPN, clearly mark remote-gw and dst-subnet as placeholders that MUST be updated.\n\
+- Use IKEv2 with AES-256-GCM or AES-256/SHA-256 and DH group 14+ for all VPN configs.";
 
 // ---------------------------------------------------------------------------
 // Wizard state
@@ -1078,10 +1088,26 @@ fn build_step5_review(
         .tooltip_text("Save configuration to a file")
         .build();
 
+    let export_html_btn = gtk4::Button::builder()
+        .label("Export HTML")
+        .css_classes(["flat", "pill"])
+        .sensitive(false)
+        .tooltip_text("Save a professional HTML report")
+        .build();
+
+    let export_pdf_btn = gtk4::Button::builder()
+        .label("Export PDF")
+        .css_classes(["flat", "pill"])
+        .sensitive(false)
+        .tooltip_text("Save report as PDF (requires wkhtmltopdf or weasyprint)")
+        .build();
+
     btn_box.append(&generate_spinner);
     btn_box.append(&generate_btn);
     btn_box.append(&push_btn);
     btn_box.append(&export_btn);
+    btn_box.append(&export_html_btn);
+    btn_box.append(&export_pdf_btn);
 
     // Generate button — sends wizard state to Claude.
     //
@@ -1093,6 +1119,8 @@ fn build_step5_review(
         let rt = rt.clone();
         let push_btn = push_btn.clone();
         let export_btn = export_btn.clone();
+        let export_html_btn = export_html_btn.clone();
+        let export_pdf_btn = export_pdf_btn.clone();
         let generate_btn_inner = generate_btn.clone();
         let generate_spinner = generate_spinner.clone();
         generate_btn.connect_clicked(move |_| {
@@ -1139,6 +1167,8 @@ fn build_step5_review(
             let buf = config_buffer.clone();
             let pb = push_btn.clone();
             let eb = export_btn.clone();
+            let ehb = export_html_btn.clone();
+            let epb = export_pdf_btn.clone();
             let gb = generate_btn.clone();
             let gs = generate_spinner.clone();
             let ws = Rc::clone(&state);
@@ -1147,8 +1177,11 @@ fn build_step5_review(
                 if let Some(config_text) = maybe {
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
-                    pb.set_sensitive(!config_text.starts_with("# Error"));
-                    eb.set_sensitive(!config_text.starts_with("# Error"));
+                    let ok = !config_text.starts_with("# Error");
+                    pb.set_sensitive(ok);
+                    eb.set_sensitive(ok);
+                    ehb.set_sensitive(ok);
+                    epb.set_sensitive(ok);
                     gb.set_sensitive(true);
                     gs.set_visible(false);
                     gs.set_spinning(false);
@@ -1315,6 +1348,12 @@ fn build_generation_prompt(s: &WizardState) -> String {
         },
         s.admin_https_port,
     ));
+
+    prompt.push_str(
+        "\nIMPORTANT: Use the EXACT subnets listed above. The LAN base interface \
+         IP must be the .1 address of the LAN Subnet specified. Do NOT generate \
+         different octets.\n"
+    );
 
     if s.device_type == "FortiGate" {
         prompt.push_str(&format!(
