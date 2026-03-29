@@ -1231,11 +1231,7 @@ pub fn build_ui(
                     if let Some(proxy) = proxy {
                         match proxy.fortigate_get_api_token(&host_id).await {
                             Ok(token) => {
-                                // Send token as toast — user can copy from there.
-                                // Also copy to clipboard via idle_add.
-                                let _ = tx.send(AppMsg::ShowToast(
-                                    format!("Token: {token}")
-                                ));
+                                let _ = tx.send(AppMsg::CopyToClipboard(token));
                             }
                             Err(e) => {
                                 let _ = tx.send(AppMsg::OperationFailed(format!("No token: {e}")));
@@ -2390,6 +2386,11 @@ pub fn build_ui(
                 }
                 AppMsg::ShowToast(msg) => {
                     rx_toast_overlay.add_toast(adw::Toast::new(&msg));
+                }
+                AppMsg::CopyToClipboard(text) => {
+                    let display = gtk4::prelude::WidgetExt::display(&rx_window);
+                    display.clipboard().set_text(&text);
+                    rx_toast_overlay.add_toast(adw::Toast::new("Copied to clipboard"));
                 }
                 AppMsg::ShowWindow => {
                     rx_window.present();

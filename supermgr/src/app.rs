@@ -101,6 +101,8 @@ pub enum AppMsg {
     DaemonUnavailable,
     /// A user-initiated operation failed; show this message as a toast.
     OperationFailed(String),
+    /// Copy text to clipboard and show a toast.
+    CopyToClipboard(String),
     /// Show a success toast with the given message.
     ShowToast(String),
     /// The tray icon's "Open SuperManager" item was clicked.
