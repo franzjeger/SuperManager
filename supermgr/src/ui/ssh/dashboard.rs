@@ -59,7 +59,6 @@ pub fn build_ssh_dashboard(
         .vexpand(true)
         .child(&flow_box)
         .build();
-    outer_stack.add_named(&scroll, Some("cards"));
 
     // Refresh button in a toolbar at the top.
     let refresh_btn = gtk4::Button::builder()
