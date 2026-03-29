@@ -288,6 +288,7 @@ pub fn build_console_page(
         clear_btn.connect_clicked(move |_| {
             chat_buffer.set_text("");
             app_state.lock().unwrap().console_messages.clear();
+            super::claude::reset_session();
             append_system_msg(&chat_buffer, "Conversation cleared.\n");
         });
     }

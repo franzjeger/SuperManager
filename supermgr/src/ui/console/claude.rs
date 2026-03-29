@@ -51,9 +51,19 @@ fn mcp_binary_path() -> String {
     "/usr/bin/supermgr-mcp".to_owned()
 }
 
+/// Shared session ID for the subscription CLI — reused across messages
+/// for faster responses (warm cache) and conversation memory.
+static SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Reset the Claude CLI session (e.g. on "Clear conversation").
+pub fn reset_session() {
+    *SESSION_ID.lock().unwrap() = None;
+}
+
 /// Send a message using Claude Code CLI (subscription-based, no API tokens).
 ///
-/// Uses `claude --print` with MCP tools configured inline.
+/// Uses `claude --print --output-format stream-json` for streaming output.
+/// Reuses the session ID for faster follow-up messages.
 pub async fn send_message_subscription(
     user_text: &str,
     tx: &mpsc::Sender<AppMsg>,
@@ -87,44 +97,131 @@ pub async fn send_message_subscription(
         "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
     );
 
-    let full_prompt = format!("{system_with_context}\n\nUser: {user_text}");
+    let session_id = SESSION_ID.lock().unwrap().clone();
+
+    let mut cmd = tokio::process::Command::new("claude");
+    cmd.args([
+        "--print",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--mcp-config", &mcp_config.to_string(),
+        "--allowedTools", &allowed_tools,
+        "--system-prompt", &system_with_context,
+    ]);
+
+    // Resume existing session for speed + memory.
+    if let Some(ref sid) = session_id {
+        info!("resuming Claude CLI session {sid}");
+        cmd.args(["--resume", sid]);
+    }
+
+    cmd.arg(user_text);
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
     info!("sending via Claude Code CLI (subscription)");
 
-    let child = tokio::process::Command::new("claude")
-        .args([
-            "--print",
-            "--mcp-config", &mcp_config.to_string(),
-            "--allowedTools", &allowed_tools,
-            "--system-prompt", &system_with_context,
-        ])
-        .arg(user_text)
-        .output();
+    let mut child = cmd.spawn()
+        .context("failed to start `claude` CLI — is it installed?")?;
 
-    // 5-minute timeout to prevent hanging forever.
-    let output = match tokio::time::timeout(
+    let stdout = child.stdout.take()
+        .context("failed to capture claude stdout")?;
+
+    // Read streaming JSON lines from stdout.
+    let tx_stream = tx.clone();
+    let reader_handle = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut new_session_id: Option<String> = None;
+        let mut sent_text = false;
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parsed: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            match parsed.get("type").and_then(|t| t.as_str()) {
+                Some("system") => {
+                    // Capture session_id from init message.
+                    if let Some(sid) = parsed.get("session_id").and_then(|s| s.as_str()) {
+                        new_session_id = Some(sid.to_owned());
+                    }
+                }
+                Some("assistant") => {
+                    // Extract text content from assistant message.
+                    if let Some(msg) = parsed.get("message") {
+                        if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
+                            for block in content {
+                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                        if !sent_text {
+                                            let _ = tx_stream.send(AppMsg::ConsoleResponse(
+                                                "\nClaude: ".into(),
+                                            ));
+                                            sent_text = true;
+                                        }
+                                        let _ = tx_stream.send(AppMsg::ConsoleStreamChunk(
+                                            text.to_owned(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("result") => {
+                    // Final result — extract text if we haven't streamed yet.
+                    if !sent_text {
+                        if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
+                            let _ = tx_stream.send(AppMsg::ConsoleResponse(
+                                format!("\nClaude: {result}\n"),
+                            ));
+                        }
+                    } else {
+                        let _ = tx_stream.send(AppMsg::ConsoleResponse("\n".into()));
+                    }
+                    // Capture session_id from result.
+                    if let Some(sid) = parsed.get("session_id").and_then(|s| s.as_str()) {
+                        new_session_id = Some(sid.to_owned());
+                    }
+                }
+                _ => {} // ignore rate_limit_event etc.
+            }
+        }
+        new_session_id
+    });
+
+    // Wait with timeout.
+    let result = tokio::time::timeout(
         std::time::Duration::from_secs(300),
-        child,
-    ).await {
-        Ok(result) => result.context("failed to run `claude` CLI — is it installed?")?,
+        child.wait(),
+    ).await;
+
+    match result {
+        Ok(Ok(status)) => {
+            if !status.success() {
+                warn!("claude CLI exited with {status}");
+            }
+        }
+        Ok(Err(e)) => {
+            warn!("claude CLI wait error: {e}");
+        }
         Err(_) => {
-            // Kill any stuck process.
-            let _ = std::process::Command::new("pkill")
-                .args(["-f", "claude --print"])
-                .status();
+            let _ = child.kill().await;
             anyhow::bail!("claude CLI timed out after 5 minutes");
         }
-    };
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("claude CLI failed: {stderr}");
     }
 
-    let response = String::from_utf8_lossy(&output.stdout);
-    let _ = tx.send(AppMsg::ConsoleResponse(
-        format!("\nClaude: {response}\n"),
-    ));
+    // Save session ID for next message.
+    if let Ok(Some(sid)) = reader_handle.await {
+        info!("Claude CLI session: {sid}");
+        *SESSION_ID.lock().unwrap() = Some(sid);
+    }
 
     Ok(())
 }
