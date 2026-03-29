@@ -2061,31 +2061,37 @@ impl DaemonService {
         let session = connect_to_ssh_host(&host, &None, &state_arc).await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
-        // Create API user if it doesn't exist.
+        // Use interactive shell — FortiGate's generate-key prompts for password.
+        let mut commands: Vec<&str> = vec![];
         let create_cmd = format!(
             "config system api-user\nedit \"{api_user}\"\nset accprofile \"super_admin\"\nset vdom \"root\"\nnext\nend"
         );
-        let _ = session.exec(&create_cmd).await;
+        let gen_cmd = format!("execute api-user generate-key {api_user}");
 
-        // Generate the API key.
-        // FortiGate prompts "Please enter current administrator password:" so we
-        // pipe the password after the command via newline.
-        let gen_cmd = if let Some(ref pw) = admin_password {
-            format!("execute api-user generate-key {api_user}\n{pw}")
-        } else {
-            format!("execute api-user generate-key {api_user}")
-        };
-        let (exit_code, stdout, stderr) = session.exec(&gen_cmd).await
-            .map_err(|e| fdo::Error::Failed(format!("command failed: {e}")))?;
+        // Build command sequence: create user, generate key, enter password.
+        let cmd_lines: Vec<String> = vec![
+            create_cmd,
+            gen_cmd,
+        ];
+        let mut lines: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
+
+        // Add password if we have it (FortiGate will prompt for it).
+        let pw_string;
+        if let Some(ref pw) = admin_password {
+            pw_string = pw.clone();
+            lines.push(&pw_string);
+        }
+
+        let stdout = session.shell_interact(&lines, 1000, 15).await
+            .map_err(|e| fdo::Error::Failed(format!("shell interaction failed: {e}")))?;
 
         info!("fortigate_generate_api_token: output={}", stdout.trim());
+        let exit_code = 0u32; // shell_interact doesn't return exit code
 
         if exit_code != 0 {
             return Err(fdo::Error::Failed(format!(
-                "generate-key failed (exit {}): {} {}",
-                exit_code,
+                "generate-key failed: {}",
                 stdout.trim(),
-                stderr.trim()
             )));
         }
 

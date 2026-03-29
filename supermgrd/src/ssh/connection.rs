@@ -184,6 +184,89 @@ impl SshSession {
         Ok((exit_status, stdout_str, stderr_str))
     }
 
+    /// Run an interactive shell session, sending lines sequentially with delays.
+    ///
+    /// Used for commands that prompt for input (e.g. FortiGate `generate-key`
+    /// which asks for the admin password).
+    pub async fn shell_interact(
+        &self,
+        lines: &[&str],
+        delay_ms: u64,
+        timeout_secs: u64,
+    ) -> Result<String, SshError> {
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("failed to open session channel: {e}"),
+            })?;
+
+        // Request a PTY so FortiGate treats it as interactive.
+        channel
+            .request_pty(false, "xterm", 80, 24, 0, 0, &[])
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("request_pty failed: {e}"),
+            })?;
+
+        channel
+            .request_shell(true)
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("request_shell failed: {e}"),
+            })?;
+
+        // Small delay to let the shell initialize.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Send each line with a delay between them.
+        for line in lines {
+            let data = format!("{line}\n");
+            channel
+                .data(data.as_bytes())
+                .await
+                .map_err(|e| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("send data failed: {e}"),
+                })?;
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        // Collect output with a timeout.
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, channel.wait()).await {
+                Ok(Some(russh::ChannelMsg::Data { data })) => {
+                    output.extend_from_slice(&data);
+                    // Check if we got a prompt back (FortiGate ends with " # " or " $ ").
+                    let text = String::from_utf8_lossy(&output);
+                    if text.contains("New API key:") || text.ends_with("# ") || text.ends_with("$ ") {
+                        break;
+                    }
+                }
+                Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
+                Ok(None) => break,
+                Ok(_) => {}
+                Err(_) => break, // timeout
+            }
+        }
+
+        let _ = channel.close().await;
+        Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
     // -- SFTP ---------------------------------------------------------------
 
     /// Open an SFTP session over this SSH connection.
