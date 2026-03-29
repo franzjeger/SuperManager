@@ -23,6 +23,7 @@
 
 pub mod console;
 pub mod navigation;
+pub mod provisioning;
 pub mod ssh;
 pub mod vpn;
 
@@ -566,6 +567,16 @@ pub fn build_ui(
     console_page_ref.set_icon_name(Some("utilities-terminal-symbolic"));
 
     // Console setup page is already handled internally by the stack.
+
+    // =========================================================================
+    // Provisioning tab — automated FortiGate/UniFi device setup wizard
+    // =========================================================================
+    let provisioning_widget =
+        provisioning::wizard::build_provisioning_page(&app_state, &tx, &rt);
+
+    view_stack.add_titled(&provisioning_widget, Some("provisioning"), "Provisioning");
+    let provisioning_page_ref = view_stack.page(&provisioning_widget);
+    provisioning_page_ref.set_icon_name(Some("emblem-system-symbolic"));
 
     // =========================================================================
     // Assemble the window
@@ -2308,6 +2319,10 @@ pub fn build_ui(
                     rx_console_panel.send_btn.set_visible(!active);
                     rx_console_panel.stop_btn.set_visible(active);
                 }
+                // Provisioning messages — handled locally via polling in
+                // the wizard widget; these are reserved for future use.
+                AppMsg::ProvisioningConfigGenerated(_) => {}
+                AppMsg::ProvisioningPushDone => {}
             }
         }
         glib::ControlFlow::Continue
@@ -2339,6 +2354,10 @@ pub fn build_ui(
                     gtk4::gdk::Key::_3 => {
                         view_stack.set_visible_child_name("console");
                         console_input.grab_focus();
+                        return glib::Propagation::Stop;
+                    }
+                    gtk4::gdk::Key::_4 => {
+                        view_stack.set_visible_child_name("provisioning");
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::k => {

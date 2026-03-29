@@ -16,6 +16,7 @@ pub enum Section {
     Vpn,
     Ssh,
     Console,
+    Provisioning,
 }
 
 /// Shared application state — plain Rust types only, no GTK objects.
@@ -153,4 +154,10 @@ pub enum AppMsg {
     ConsoleStreamChunk(String),
     /// Claude is thinking / processing.
     ConsoleThinking(bool),
+
+    // Provisioning messages
+    /// Generated config text from Claude for the provisioning wizard.
+    ProvisioningConfigGenerated(String),
+    /// Config push to device completed (success or failure already toasted).
+    ProvisioningPushDone,
 }
