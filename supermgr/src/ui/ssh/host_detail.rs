@@ -375,15 +375,24 @@ pub fn refresh_fortigate_dashboard(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             let mut data: Value = serde_json::from_str(&resp)
                 .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+            info!("FortiGate status top-level: {:?}",
+                data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            if let Some(r) = data.get("results") {
+                info!("FortiGate status results: {r}");
+            }
 
-            // Also fetch resource usage for CPU/memory.
-            if let Ok(res_resp) = proxy
-                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/resource/usage", "")
-                .await
-            {
-                if let Ok(res_data) = serde_json::from_str::<Value>(&res_resp) {
-                    if let Some(results) = res_data.get("results") {
-                        data["resource"] = results.clone();
+            // Try multiple endpoints for CPU/memory (varies by firmware version).
+            for ep in &[
+                "/api/v2/monitor/system/resource/usage",
+                "/api/v2/monitor/system/performance/status",
+            ] {
+                if let Ok(res_resp) = proxy.fortigate_api(&host_id, "GET", ep, "").await {
+                    if let Ok(res_data) = serde_json::from_str::<Value>(&res_resp) {
+                        let res = res_data.get("results").unwrap_or(&res_data);
+                        if res.get("cpu").is_some() || res.get("mem").is_some() {
+                            data["resource"] = res.clone();
+                            break;
+                        }
                     }
                 }
             }

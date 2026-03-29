@@ -2197,13 +2197,15 @@ pub fn build_ui(
                         &health,
                     );
                     if let Some(sel) = &s.selected_ssh_host {
-                        if !s.ssh_hosts.iter().any(|h| h.id.to_string() == *sel) {
+                        if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *sel) {
+                            // Refresh the detail panel with updated data.
+                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host);
+                        } else {
                             drop(s);
                             rx_app_state.lock().expect("lock").selected_ssh_host = None;
                             rx_ssh_content_stack.set_visible_child_name("empty");
                         }
                     }
-                    rx_toast_overlay.add_toast(adw::Toast::new("SSH hosts updated"));
                 }
                 AppMsg::HostHealthChanged { host_id, reachable } => {
                     let was_known_before;
