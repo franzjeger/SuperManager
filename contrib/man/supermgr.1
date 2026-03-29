@@ -1,0 +1,34 @@
+.TH SUPERMGR 1 "March 2026" "SuperManager" "User Commands"
+.SH NAME
+supermgr \- unified SSH, VPN, and network device management GUI
+.SH SYNOPSIS
+.B supermgr
+.SH DESCRIPTION
+.B supermgr
+is a GTK4/Adwaita desktop application for managing SSH connections,
+VPN tunnels (WireGuard, FortiGate IPsec, OpenVPN, Azure VPN), and network device
+provisioning with an integrated Claude AI assistant.
+.PP
+The GUI communicates with a privileged daemon
+.RB ( supermgrd (8))
+over D\-Bus on the system bus.  All privileged operations (creating tunnels,
+managing secrets, device API calls) are performed by the daemon; the GUI
+itself runs as a normal user.
+.SH OPTIONS
+.B supermgr
+takes no command\-line options.  All configuration is managed through the
+graphical Settings dialog.
+.SH FILES
+.TP
+.I ~/.config/supermgr/settings.json
+User preferences: theme, opacity, API key, master password hash,
+auto\-lock timeout, and webhook notification settings.
+.SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+If set, settings are stored under
+.IR $XDG_CONFIG_HOME/supermgr/ .
+.SH SEE ALSO
+.BR supermgrd (8)
+.SH AUTHORS
+Frank\-Andreas Lia

@@ -79,6 +79,16 @@ pub struct DaemonState {
 
     /// Directory where SSH host TOML files are stored.
     pub ssh_host_dir: PathBuf,
+
+    // ---- Webhook notification settings (set via D-Bus) ----
+
+    /// Webhook URL for outgoing notifications (Slack/Teams/Discord).
+    /// Empty string means disabled.
+    pub webhook_url: String,
+    /// Fire a webhook when an SSH host goes down.
+    pub webhook_on_host_down: bool,
+    /// Fire a webhook when a VPN tunnel disconnects unexpectedly.
+    pub webhook_on_vpn_disconnect: bool,
 }
 
 impl DaemonState {
@@ -97,6 +107,9 @@ impl DaemonState {
             host_health: std::collections::HashMap::new(),
             ssh_key_dir: base.join("ssh/keys"),
             ssh_host_dir: base.join("ssh/hosts"),
+            webhook_url: String::new(),
+            webhook_on_host_down: true,
+            webhook_on_vpn_disconnect: false,
         }
     }
 
@@ -384,6 +397,64 @@ impl DaemonService {
     async fn get_logs(&self) -> fdo::Result<Vec<String>> {
         let buf = self.log_buffer.lock().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         Ok(buf.iter().cloned().collect())
+    }
+
+    // =======================================================================
+    // Webhook / notification methods
+    // =======================================================================
+
+    /// Configure webhook notifications.
+    ///
+    /// `url` is the incoming-webhook URL (empty string to disable).
+    /// `on_host_down` and `on_vpn_disconnect` control which events fire.
+    async fn set_webhook(
+        &self,
+        url: String,
+        on_host_down: bool,
+        on_vpn_disconnect: bool,
+    ) -> fdo::Result<()> {
+        let mut state = self.state.lock().await;
+        state.webhook_url = url;
+        state.webhook_on_host_down = on_host_down;
+        state.webhook_on_vpn_disconnect = on_vpn_disconnect;
+        info!(
+            "webhook config updated: url={}, host_down={}, vpn_disconnect={}",
+            if state.webhook_url.is_empty() { "(disabled)" } else { "(set)" },
+            state.webhook_on_host_down,
+            state.webhook_on_vpn_disconnect,
+        );
+        Ok(())
+    }
+
+    /// Return the current webhook configuration as JSON.
+    ///
+    /// ```json
+    /// {"url":"https://...","on_host_down":true,"on_vpn_disconnect":false}
+    /// ```
+    async fn get_webhook_config(&self) -> fdo::Result<String> {
+        let state = self.state.lock().await;
+        let obj = serde_json::json!({
+            "url": state.webhook_url,
+            "on_host_down": state.webhook_on_host_down,
+            "on_vpn_disconnect": state.webhook_on_vpn_disconnect,
+        });
+        serde_json::to_string(&obj)
+            .map_err(|e| fdo::Error::Failed(format!("serialisation failed: {e}")))
+    }
+
+    /// Send a test message to the configured webhook URL.
+    ///
+    /// Returns `"ok"` on success or an error if no URL is configured.
+    async fn test_webhook(&self) -> fdo::Result<String> {
+        let url = {
+            let state = self.state.lock().await;
+            state.webhook_url.clone()
+        };
+        if url.is_empty() {
+            return Err(fdo::Error::Failed("no webhook URL configured".into()));
+        }
+        send_webhook(&url, "SuperManager: webhook test — if you see this, notifications are working!").await;
+        Ok("ok".into())
     }
 
     /// Return live tunnel statistics as a compact JSON object.
@@ -3035,6 +3106,186 @@ impl DaemonService {
         Ok(filename)
     }
 
+    // =======================================================================
+    // FortiGate CIS compliance check
+    // =======================================================================
+
+    /// Run CIS benchmark checks against a FortiGate device via SSH.
+    ///
+    /// SSHes into the device and runs a series of `show` commands, checking the
+    /// output against CIS FortiGate hardening recommendations.
+    ///
+    /// Returns a JSON object with individual check results and a summary score.
+    async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let host = {
+            let state = self.state.lock().await;
+            state
+                .ssh_hosts
+                .get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .clone()
+        };
+
+        info!(
+            "fortigate_compliance_check: {}@{}:{}",
+            host.username, host.hostname, host.port
+        );
+        crate::audit::log_event(
+            "FG_COMPLIANCE",
+            &format!("{}@{}", host.username, host.hostname),
+        );
+
+        let state_arc = Arc::clone(&self.state);
+        let session = connect_to_ssh_host(&host, &None, &state_arc)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
+
+        let mut checks: Vec<serde_json::Value> = Vec::new();
+
+        // --- Check 1: admin-sport (non-default HTTPS port) ---
+        let (_, out, _) = session
+            .exec("show system global | grep admin-sport")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let port_val = out
+            .lines()
+            .find(|l| l.contains("admin-sport"))
+            .and_then(|l| l.split_whitespace().last())
+            .unwrap_or("443");
+        checks.push(serde_json::json!({
+            "name": "Admin HTTPS non-default port",
+            "status": if port_val.trim() != "443" { "pass" } else { "fail" },
+            "detail": format!("Port {}", port_val.trim()),
+        }));
+
+        // --- Check 2: strong-crypto ---
+        let (_, out, _) = session
+            .exec("show system global | grep strong-crypto")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let strong_crypto = out.contains("enable");
+        checks.push(serde_json::json!({
+            "name": "Strong crypto enabled",
+            "status": if strong_crypto { "pass" } else { "fail" },
+            "detail": if strong_crypto { "strong-crypto enabled" } else { "strong-crypto not enabled" },
+        }));
+
+        // --- Check 3: admin-telnet disabled ---
+        let (_, out, _) = session
+            .exec("show system global | grep admin-telnet")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let telnet_disabled = out.contains("disable");
+        checks.push(serde_json::json!({
+            "name": "Telnet disabled",
+            "status": if telnet_disabled { "pass" } else { "fail" },
+            "detail": if telnet_disabled { "admin-telnet disabled" } else { "admin-telnet not disabled" },
+        }));
+
+        // --- Check 4: password-policy min-length >= 14 ---
+        let (_, out, _) = session
+            .exec("show system password-policy | grep min-length")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let min_len: u32 = out
+            .lines()
+            .find(|l| l.contains("min-length"))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        checks.push(serde_json::json!({
+            "name": "Password min-length >= 14",
+            "status": if min_len >= 14 { "pass" } else { "fail" },
+            "detail": format!("min-length {}", min_len),
+        }));
+
+        // --- Check 5: password expiry enabled ---
+        let (_, out, _) = session
+            .exec("show system password-policy | grep expire-status")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let expire_enabled = out.contains("enable");
+        checks.push(serde_json::json!({
+            "name": "Password expiry enabled",
+            "status": if expire_enabled { "pass" } else { "fail" },
+            "detail": if expire_enabled { "expire-status enabled" } else { "expire-status not enabled" },
+        }));
+
+        // --- Check 6: implicit firewall policy logging ---
+        let (_, out, _) = session
+            .exec("show log setting | grep fwpolicy-implicit-log")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let implicit_log = out.contains("enable");
+        checks.push(serde_json::json!({
+            "name": "Implicit policy logging",
+            "status": if implicit_log { "pass" } else { "fail" },
+            "detail": if implicit_log { "fwpolicy-implicit-log enabled" } else { "fwpolicy-implicit-log not enabled" },
+        }));
+
+        // --- Check 7: WAN1 allowaccess has no https ---
+        let (_, out, _) = session
+            .exec("show system interface wan1 | grep allowaccess")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let wan_has_https = out.to_lowercase().contains("https");
+        checks.push(serde_json::json!({
+            "name": "WAN1 no HTTPS management",
+            "status": if !wan_has_https { "pass" } else { "fail" },
+            "detail": if wan_has_https { "https found in WAN1 allowaccess" } else { "https not in WAN1 allowaccess" },
+        }));
+
+        // --- Check 8: WAN1 allowaccess has no ssh ---
+        let wan_has_ssh = out.to_lowercase().contains("ssh");
+        checks.push(serde_json::json!({
+            "name": "WAN1 no SSH management",
+            "status": if !wan_has_ssh { "pass" } else { "fail" },
+            "detail": if wan_has_ssh { "ssh found in WAN1 allowaccess" } else { "ssh not in WAN1 allowaccess" },
+        }));
+
+        // --- Check 9: DoS policy exists ---
+        let (_, out, _) = session
+            .exec("show firewall DoS-policy")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_dos_policy = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "DoS policy configured",
+            "status": if has_dos_policy { "pass" } else { "fail" },
+            "detail": if has_dos_policy { "DoS policy entries found" } else { "no DoS policy entries" },
+        }));
+
+        // --- Check 10: admin-maintainer disabled ---
+        let (_, out, _) = session
+            .exec("show system global | grep admin-maintainer")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let maintainer_disabled = out.contains("disable");
+        checks.push(serde_json::json!({
+            "name": "Admin maintainer disabled",
+            "status": if maintainer_disabled { "pass" } else { "fail" },
+            "detail": if maintainer_disabled { "admin-maintainer disabled" } else { "admin-maintainer not disabled" },
+        }));
+
+        // Summarise.
+        let passed = checks.iter().filter(|c| c["status"] == "pass").count();
+        let total = checks.len();
+        let failed = total - passed;
+
+        let result = serde_json::json!({
+            "checks": checks,
+            "score": format!("{passed}/{total}"),
+            "passed": passed,
+            "failed": failed,
+            "total": total,
+        });
+
+        Ok(result.to_string())
+    }
+
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]
     async fn host_health_changed(
@@ -3903,6 +4154,33 @@ fn parse_azure_xml(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// Webhook notification helper
+// ---------------------------------------------------------------------------
+
+/// Fire-and-forget POST to a webhook URL.
+///
+/// The payload includes both `text` (Slack/Teams) and `content` (Discord) keys
+/// so it works with all three platforms out of the box.
+async fn send_webhook(url: &str, message: &str) {
+    if url.is_empty() {
+        return;
+    }
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "text": message,
+        "content": message,
+    });
+    match client.post(url).json(&body).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                warn!("webhook returned HTTP {}", resp.status());
+            }
+        }
+        Err(e) => warn!("webhook POST failed: {e}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SSH host health-check background task
 // ---------------------------------------------------------------------------
 
@@ -3956,11 +4234,14 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
 
             // Compare with previous state, update, and emit signals.
             let mut state_guard = state.lock().await;
+
+            // Snapshot webhook config once per cycle.
+            let wh_url = state_guard.webhook_url.clone();
+            let wh_on_host_down = state_guard.webhook_on_host_down;
+
             for (id, reachable) in &results {
-                let changed = state_guard
-                    .host_health
-                    .get(id)
-                    .map_or(true, |prev| prev != reachable);
+                let prev_reachable = state_guard.host_health.get(id).copied();
+                let changed = prev_reachable.map_or(true, |prev| prev != *reachable);
                 state_guard.host_health.insert(*id, *reachable);
                 if changed {
                     let object_path = zbus::zvariant::ObjectPath::try_from(
@@ -3974,6 +4255,20 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
                             *reachable,
                         )
                         .await;
+                    }
+
+                    // Webhook: host went DOWN (was reachable or first-time unreachable).
+                    if !reachable && wh_on_host_down && !wh_url.is_empty() {
+                        let host_label = state_guard
+                            .ssh_hosts
+                            .get(id)
+                            .map(|h| format!("{} ({}:{})", h.label, h.hostname, h.port))
+                            .unwrap_or_else(|| id.to_string());
+                        let msg = format!(
+                            "\u{26a0}\u{fe0f} SuperManager: SSH host **{host_label}** is unreachable"
+                        );
+                        let url = wh_url.clone();
+                        tokio::spawn(async move { send_webhook(&url, &msg).await });
                     }
                 }
             }
@@ -4055,6 +4350,31 @@ pub fn spawn_monitor_task(
                         info!("VPN dropped unexpectedly — running backend cleanup");
                         if let Err(e) = backend.disconnect().await {
                             warn!("cleanup after unexpected VPN drop: {e}");
+                        }
+
+                        // Webhook: VPN disconnected unexpectedly.
+                        {
+                            let s = state.lock().await;
+                            if s.webhook_on_vpn_disconnect && !s.webhook_url.is_empty() {
+                                let profile_name = if let VpnState::Connected {
+                                    profile_id, ..
+                                } = &current_state
+                                {
+                                    s.profiles
+                                        .get(profile_id)
+                                        .map(|p| p.name.clone())
+                                        .unwrap_or_else(|| profile_id.to_string())
+                                } else {
+                                    "unknown".to_string()
+                                };
+                                let msg = format!(
+                                    "\u{26a0}\u{fe0f} SuperManager: VPN profile **{profile_name}** disconnected unexpectedly"
+                                );
+                                let url = s.webhook_url.clone();
+                                tokio::spawn(
+                                    async move { send_webhook(&url, &msg).await },
+                                );
+                            }
                         }
 
                         let profile_kill_switch = {

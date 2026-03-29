@@ -1337,6 +1337,146 @@ pub fn show_settings_dialog(
         });
     }
 
+    // --- Notifications group (webhook) ---
+    let notify_group = adw::PreferencesGroup::builder()
+        .title("Notifications")
+        .description("Send alerts to Slack, Teams, or Discord via webhook")
+        .build();
+
+    let webhook_url_row = adw::EntryRow::builder()
+        .title("Webhook URL")
+        .build();
+    {
+        let s = app_settings.lock().expect("lock");
+        if !s.webhook_url.is_empty() {
+            webhook_url_row.set_text(&s.webhook_url);
+        }
+    }
+    notify_group.add(&webhook_url_row);
+
+    let host_down_toggle = adw::SwitchRow::builder()
+        .title("Host down alerts")
+        .subtitle("Notify when an SSH host becomes unreachable")
+        .build();
+    host_down_toggle.set_active(app_settings.lock().expect("lock").webhook_on_host_down);
+    notify_group.add(&host_down_toggle);
+
+    let vpn_disconnect_toggle = adw::SwitchRow::builder()
+        .title("VPN disconnect alerts")
+        .subtitle("Notify when a VPN tunnel drops unexpectedly")
+        .build();
+    vpn_disconnect_toggle.set_active(app_settings.lock().expect("lock").webhook_on_vpn_disconnect);
+    notify_group.add(&vpn_disconnect_toggle);
+
+    let test_webhook_row = adw::ActionRow::builder()
+        .title("Test Webhook")
+        .subtitle("Send a test message to verify the URL works")
+        .build();
+    let test_webhook_btn = gtk4::Button::builder()
+        .label("Test")
+        .valign(gtk4::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    test_webhook_row.add_suffix(&test_webhook_btn);
+    notify_group.add(&test_webhook_row);
+
+    // Helper: push the current webhook settings to the daemon over D-Bus so
+    // the daemon's in-memory state stays in sync with the GUI settings file.
+    fn push_webhook_to_daemon(
+        rt: &tokio::runtime::Handle,
+        url: String,
+        on_host_down: bool,
+        on_vpn_disconnect: bool,
+    ) {
+        rt.spawn(async move {
+            use supermgr_core::dbus::DaemonProxy;
+            if let Ok(conn) = zbus::Connection::system().await {
+                if let Ok(proxy) = DaemonProxy::new(&conn).await {
+                    let _ = proxy.set_webhook(url, on_host_down, on_vpn_disconnect).await;
+                }
+            }
+        });
+    }
+
+    // Save webhook URL on change.
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let rt = rt.clone();
+        let host_down_toggle = host_down_toggle.clone();
+        let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
+        webhook_url_row.connect_changed(move |row| {
+            let url = row.text().to_string();
+            let on_host_down = host_down_toggle.is_active();
+            let on_vpn_disconnect = vpn_disconnect_toggle.is_active();
+            let mut s = app_settings.lock().expect("lock");
+            s.webhook_url = url.clone();
+            s.save();
+            push_webhook_to_daemon(&rt, url, on_host_down, on_vpn_disconnect);
+        });
+    }
+
+    // Save host-down toggle on change.
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let rt = rt.clone();
+        let webhook_url_row = webhook_url_row.clone();
+        let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
+        host_down_toggle.connect_active_notify(move |row| {
+            let active = row.is_active();
+            let mut s = app_settings.lock().expect("lock");
+            s.webhook_on_host_down = active;
+            s.save();
+            let url = webhook_url_row.text().to_string();
+            let on_vpn = vpn_disconnect_toggle.is_active();
+            push_webhook_to_daemon(&rt, url, active, on_vpn);
+        });
+    }
+
+    // Save VPN-disconnect toggle on change.
+    {
+        let app_settings = Arc::clone(&app_settings);
+        let rt = rt.clone();
+        let webhook_url_row = webhook_url_row.clone();
+        let host_down_toggle = host_down_toggle.clone();
+        vpn_disconnect_toggle.connect_active_notify(move |row| {
+            let active = row.is_active();
+            let mut s = app_settings.lock().expect("lock");
+            s.webhook_on_vpn_disconnect = active;
+            s.save();
+            let url = webhook_url_row.text().to_string();
+            let on_host = host_down_toggle.is_active();
+            push_webhook_to_daemon(&rt, url, on_host, active);
+        });
+    }
+
+    // Test Webhook button.
+    {
+        let rt = rt.clone();
+        let tx = tx.clone();
+        test_webhook_btn.connect_clicked(move |_| {
+            let tx = tx.clone();
+            rt.spawn(async move {
+                use supermgr_core::dbus::DaemonProxy;
+                if let Ok(conn) = zbus::Connection::system().await {
+                    if let Ok(proxy) = DaemonProxy::new(&conn).await {
+                        match proxy.test_webhook().await {
+                            Ok(_) => {
+                                let _ = tx.send(crate::app::AppMsg::ShowToast(
+                                    "Webhook test sent successfully".into(),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(crate::app::AppMsg::OperationFailed(
+                                    format!("Webhook test failed: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // --- Backup & Restore group ---
     let backup_group = adw::PreferencesGroup::builder()
         .title("Backup & Restore")
@@ -1505,6 +1645,7 @@ pub fn show_settings_dialog(
     prefs_page.add(&appearance_group);
     prefs_page.add(&console_group);
     prefs_page.add(&security_group);
+    prefs_page.add(&notify_group);
     prefs_page.add(&backup_group);
 
     let header = adw::HeaderBar::new();

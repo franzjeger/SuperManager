@@ -147,6 +147,14 @@ pub enum AppMsg {
         data: Value,
     },
 
+    /// FortiGate CIS compliance check results.
+    FortigateCompliance {
+        /// UUID string of the host.
+        host_id: String,
+        /// Parsed JSON compliance report.
+        data: Value,
+    },
+
     /// Dashboard device status data fetched for a FortiGate host.
     DashboardDeviceStatus {
         /// UUID string of the host.

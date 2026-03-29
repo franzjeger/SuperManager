@@ -49,6 +49,7 @@ pub struct SshHostDetail {
     // FortiGate dashboard widgets (only visible for FortiGate hosts with API).
     pub fg_dashboard_group: adw::PreferencesGroup,
     pub fg_firmware_row: adw::ActionRow,
+    pub fg_update_badge: gtk4::Label,
     pub fg_hostname_row: adw::ActionRow,
     pub fg_serial_row: adw::ActionRow,
     pub fg_ha_row: adw::ActionRow,
@@ -56,6 +57,9 @@ pub struct SshHostDetail {
     pub fg_memory_row: adw::ActionRow,
     pub fg_refresh_btn: gtk4::Button,
     pub fg_backup_btn: gtk4::Button,
+
+    // FortiGate compliance check button (only visible for FortiGate hosts).
+    pub fg_compliance_btn: gtk4::Button,
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +148,12 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .subtitle("--")
         .activatable(false)
         .build();
+    let fg_update_badge = gtk4::Label::builder()
+        .label("Update available")
+        .css_classes(["caption", "accent"])
+        .visible(false)
+        .build();
+    fg_firmware_row.add_suffix(&fg_update_badge);
     fg_dashboard_group.add(&fg_firmware_row);
 
     let fg_hostname_row = adw::ActionRow::builder()
@@ -195,8 +205,14 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .tooltip_text("Backup FortiGate config")
         .css_classes(["flat"])
         .build();
+    let fg_compliance_btn = gtk4::Button::builder()
+        .icon_name("shield-safe-symbolic")
+        .tooltip_text("CIS compliance check")
+        .css_classes(["flat"])
+        .build();
     fg_btn_box.append(&fg_refresh_btn);
     fg_btn_box.append(&fg_backup_btn);
+    fg_btn_box.append(&fg_compliance_btn);
     fg_dashboard_group.set_header_suffix(Some(&fg_btn_box));
 
     // Action buttons.
@@ -298,6 +314,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         pin_btn,
         fg_dashboard_group,
         fg_firmware_row,
+        fg_update_badge,
         fg_hostname_row,
         fg_serial_row,
         fg_ha_row,
@@ -305,6 +322,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         fg_memory_row,
         fg_refresh_btn,
         fg_backup_btn,
+        fg_compliance_btn,
     };
 
     (bundle, content_scroll.upcast())
@@ -349,6 +367,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
     if is_fortigate_api {
         // Reset dashboard rows to loading placeholders.
         detail.fg_firmware_row.set_subtitle("Loading\u{2026}");
+        detail.fg_update_badge.set_visible(false);
         detail.fg_hostname_row.set_subtitle("Loading\u{2026}");
         detail.fg_serial_row.set_subtitle("Loading\u{2026}");
         detail.fg_ha_row.set_subtitle("Loading\u{2026}");
@@ -409,6 +428,7 @@ pub fn refresh_fortigate_dashboard(
             }
 
             // Try multiple endpoints for CPU/memory (varies by firmware version).
+            let mut found_resource = false;
             for ep in &[
                 "/api/v2/monitor/system/resource/usage",
                 "/api/v2/monitor/system/performance/status",
@@ -418,7 +438,48 @@ pub fn refresh_fortigate_dashboard(
                         let res = res_data.get("results").unwrap_or(&res_data);
                         if res.get("cpu").is_some() || res.get("mem").is_some() {
                             data["resource"] = res.clone();
+                            found_resource = true;
                             break;
+                        }
+                    }
+                }
+            }
+
+            // Fallback: some FortiGate versions include cpu/ram directly in the
+            // main status response under "results".
+            if !found_resource {
+                if let Some(results) = data.get("results") {
+                    let has_cpu = results.get("cpu").is_some();
+                    let has_mem = results.get("mem").is_some()
+                        || results.get("ram").is_some();
+                    if has_cpu || has_mem {
+                        data["resource"] = results.clone();
+                    }
+                }
+            }
+
+            // Fetch firmware upgrade availability (informational only).
+            if let Ok(fw_resp) = proxy
+                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/firmware", "")
+                .await
+            {
+                if let Ok(fw_data) = serde_json::from_str::<Value>(&fw_resp) {
+                    let results = fw_data.get("results").unwrap_or(&fw_data);
+                    // The firmware endpoint returns "available" array when updates exist.
+                    let has_update = results
+                        .get("available")
+                        .and_then(|a| a.as_array())
+                        .map(|a| !a.is_empty())
+                        .unwrap_or(false);
+                    if has_update {
+                        data["firmware_update_available"] = Value::Bool(true);
+                        // Include the latest available version for display.
+                        if let Some(latest) = results
+                            .get("available")
+                            .and_then(|a| a.as_array())
+                            .and_then(|a| a.first())
+                        {
+                            data["firmware_update_version"] = latest.clone();
                         }
                     }
                 }
@@ -453,6 +514,7 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
     if data.get("error").is_some() {
         let msg = "Unreachable";
         detail.fg_firmware_row.set_subtitle(msg);
+        detail.fg_update_badge.set_visible(false);
         detail.fg_hostname_row.set_subtitle(msg);
         detail.fg_serial_row.set_subtitle(msg);
         detail.fg_ha_row.set_subtitle(msg);
@@ -481,25 +543,47 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
         version.to_string()
     };
     detail.fg_firmware_row.set_subtitle(&firmware);
+
+    // Show "Update available" badge if firmware update info is present.
+    let has_fw_update = data
+        .get("firmware_update_available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    detail.fg_update_badge.set_visible(has_fw_update);
+    if has_fw_update {
+        if let Some(ver) = data.get("firmware_update_version") {
+            let ver_str = ver
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("new version");
+            detail
+                .fg_update_badge
+                .set_tooltip_text(Some(&format!("Available: {ver_str}")));
+        }
+    }
+
     detail.fg_hostname_row.set_subtitle(get_str("hostname"));
     detail.fg_serial_row.set_subtitle(get_str("serial"));
     detail.fg_ha_row.set_subtitle(get_str("ha_mode"));
 
-    // CPU/Memory from /api/v2/monitor/system/resource/usage.
+    // CPU/Memory — check multiple locations (varies by firmware version).
     let resource = data.get("resource");
     let cpu = resource
         .and_then(|r| r.get("cpu"))
         .and_then(|v| v.as_u64())
         .or_else(|| results.get("cpu").and_then(|v| v.as_u64()))
+        .or_else(|| data.get("cpu").and_then(|v| v.as_u64()))
         .map(|v| format!("{v}%"))
         .unwrap_or_else(|| "--".to_owned());
     detail.fg_cpu_row.set_subtitle(&cpu);
 
-    // Memory usage from resource endpoint.
+    // Memory — also check "ram" key used by some firmware versions.
     let mem = resource
-        .and_then(|r| r.get("mem"))
+        .and_then(|r| r.get("mem").or_else(|| r.get("ram")))
         .and_then(|v| v.as_u64())
         .or_else(|| results.get("mem").and_then(|v| v.as_u64()))
+        .or_else(|| results.get("ram").and_then(|v| v.as_u64()))
+        .or_else(|| data.get("mem").and_then(|v| v.as_u64()))
         .map(|v| format!("{v}%"))
         .unwrap_or_else(|| "--".to_owned());
     detail.fg_memory_row.set_subtitle(&mem);
@@ -572,4 +656,87 @@ fn which_exists(name: &str) -> bool {
                 .any(|dir| dir.join(name).is_file())
         })
         .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// FortiGate CIS compliance check
+// ---------------------------------------------------------------------------
+
+/// Kick off an async CIS compliance check and send the result back to the
+/// GTK main thread via `AppMsg::FortigateCompliance`.
+pub fn run_fortigate_compliance(
+    host_id: String,
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+) {
+    let tx = tx.clone();
+    rt.spawn(async move {
+        let result = async {
+            let conn = zbus::Connection::system().await?;
+            let proxy = DaemonProxy::new(&conn).await?;
+            let resp = proxy
+                .fortigate_compliance_check(&host_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let data: Value = serde_json::from_str(&resp)
+                .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+            Ok::<Value, anyhow::Error>(data)
+        }
+        .await;
+
+        match result {
+            Ok(data) => {
+                let _ = tx.send(AppMsg::FortigateCompliance {
+                    host_id,
+                    data,
+                });
+            }
+            Err(e) => {
+                warn!("FortiGate compliance check failed for {host_id}: {e}");
+                let _ = tx.send(AppMsg::FortigateCompliance {
+                    host_id,
+                    data: serde_json::json!({ "error": e.to_string() }),
+                });
+            }
+        }
+    });
+}
+
+/// Show a dialog with CIS compliance check results.
+pub fn show_compliance_dialog(parent: &adw::ApplicationWindow, data: &Value) {
+    let dialog = adw::AlertDialog::builder()
+        .heading("CIS Compliance Check")
+        .build();
+
+    if let Some(err) = data.get("error").and_then(|v| v.as_str()) {
+        dialog.set_body(&format!("Compliance check failed: {err}"));
+        dialog.add_response("close", "Close");
+        dialog.present(Some(parent));
+        return;
+    }
+
+    let score = data.get("score").and_then(|v| v.as_str()).unwrap_or("--");
+    let passed = data.get("passed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed = data.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut body = format!("Score: {score}  ({passed} passed, {failed} failed, {total} total)\n\n");
+
+    if let Some(checks) = data.get("checks").and_then(|v| v.as_array()) {
+        for check in checks {
+            let name = check.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let status = check.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let detail = check.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+            let icon = if status == "pass" { "[PASS]" } else { "[FAIL]" };
+            if detail.is_empty() {
+                body.push_str(&format!("{icon} {name}\n"));
+            } else {
+                body.push_str(&format!("{icon} {name} - {detail}\n"));
+            }
+        }
+    }
+
+    dialog.set_body(&body);
+    dialog.add_response("close", "Close");
+    dialog.present(Some(parent));
 }

@@ -1,0 +1,63 @@
+.TH SUPERMGRD 8 "March 2026" "SuperManager" "System Administration"
+.SH NAME
+supermgrd \- SuperManager privileged daemon
+.SH SYNOPSIS
+.B supermgrd
+.SH DESCRIPTION
+.B supermgrd
+is the privileged daemon for SuperManager.  It runs as root via systemd
+and manages VPN connections, SSH sessions, secret storage, webhook
+notifications, and network device APIs.
+.PP
+Communication happens over D\-Bus on the system bus at the well\-known
+name
+.B org.supermgr.Daemon
+with object path
+.BR /org/supermgr/Daemon .
+The D\-Bus interface is
+.BR org.supermgr.Daemon1 .
+.SH OPTIONS
+.B supermgrd
+takes no command\-line options.  It is intended to be started by systemd
+via the provided unit file.
+.SH D\-BUS INTERFACE
+Selected methods on
+.BR org.supermgr.Daemon1 :
+.TP
+.B ListProfiles() \(-> String
+JSON array of VPN profile summaries.
+.TP
+.B Connect(profile_id: String)
+Start a VPN connection for the given profile UUID.
+.TP
+.B Disconnect()
+Tear down the active VPN tunnel and restore routing.
+.TP
+.B SetWebhook(url: String, on_host_down: bool, on_vpn_disconnect: bool)
+Configure outgoing webhook notifications (Slack, Teams, Discord).
+.TP
+.B TestWebhook() \(-> String
+Send a test message to the configured webhook URL.
+.SH FILES
+.TP
+.I /etc/supermgrd/profiles/
+VPN profile TOML files.
+.TP
+.I /etc/supermgrd/ssh/keys/
+SSH key metadata (TOML).
+.TP
+.I /etc/supermgrd/ssh/hosts/
+SSH host configurations (TOML).
+.TP
+.I /etc/supermgrd/secrets.json
+Encrypted credentials (mode 0600).
+.TP
+.I /etc/supermgrd/backups/
+FortiGate configuration backups.
+.TP
+.I /var/log/supermgrd/audit.log
+Operation audit trail.
+.SH SEE ALSO
+.BR supermgr (1)
+.SH AUTHORS
+Frank\-Andreas Lia

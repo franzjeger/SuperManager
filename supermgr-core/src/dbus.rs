@@ -142,6 +142,9 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn list_config_versions(&self, customer: &str) -> fdo::Result<String> { ... }
 //       async fn get_config_version(&self, filename: &str) -> fdo::Result<String> { ... }
 //
+//       // --- FortiGate CIS compliance ---
+//       async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String> { ... }
+//
 //       #[zbus(signal)]
 //       async fn host_health_changed(ctx: &zbus::SignalContext<'_>, host_id: String, reachable: bool) -> zbus::Result<()>;
 //   }
@@ -645,6 +648,39 @@ pub trait Daemon {
     /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
     /// Returns the filename on success.
     async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
+    /// Run CIS benchmark compliance checks against a FortiGate device via SSH.
+    ///
+    /// Returns a JSON object with individual check results and a summary score:
+    /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
+    async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String>;
+
+    // =======================================================================
+    // Webhook / notification methods
+    // =======================================================================
+
+    /// Configure outgoing webhook notifications.
+    ///
+    /// `url` is the incoming-webhook URL (empty string to disable).
+    /// `on_host_down` and `on_vpn_disconnect` control which events fire.
+    async fn set_webhook(
+        &self,
+        url: String,
+        on_host_down: bool,
+        on_vpn_disconnect: bool,
+    ) -> fdo::Result<()>;
+
+    /// Return the current webhook configuration as JSON.
+    ///
+    /// Shape: `{"url":"...","on_host_down":true,"on_vpn_disconnect":false}`
+    async fn get_webhook_config(&self) -> fdo::Result<String>;
+
+    /// Send a test message to the configured webhook URL.
+    async fn test_webhook(&self) -> fdo::Result<String>;
+
+    // =======================================================================
+    // Signals
+    // =======================================================================
 
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]

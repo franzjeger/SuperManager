@@ -93,6 +93,7 @@ pub async fn send_message_subscription(
         "mcp__supermgr__fortigate_push_ssh_key",
         "mcp__supermgr__unifi_set_inform",
         "mcp__supermgr__unifi_api",
+        "mcp__supermgr__fortigate_compliance_check",
     ].join(",");
 
     let system_with_context = format!(
@@ -361,6 +362,17 @@ fn tools() -> Value {
                     "body": { "type": "string", "description": "Optional JSON request body (for POST/PUT)" }
                 },
                 "required": ["host_id", "method", "path"]
+            }
+        },
+        {
+            "name": "fortigate_compliance_check",
+            "description": "Run CIS benchmark compliance checks against a FortiGate device via SSH. Checks admin port, strong crypto, telnet, password policy, logging, WAN interface access, DoS policy, and admin-maintainer settings. Returns a JSON report with pass/fail for each check and an overall score.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "host_id": { "type": "string", "description": "UUID of the FortiGate host to check" }
+                },
+                "required": ["host_id"]
             }
         }
     ])
@@ -777,6 +789,12 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
             let body = args["body"].as_str().unwrap_or("");
             info!("tool unifi_api: {method} {path} on {host_id}");
             let resp = proxy.unifi_api(host_id, method, path, body).await?;
+            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
+        }
+        "fortigate_compliance_check" => {
+            let host_id = args["host_id"].as_str().context("missing host_id")?;
+            info!("tool fortigate_compliance_check: host={host_id}");
+            let resp = proxy.fortigate_compliance_check(host_id).await?;
             Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
         }
         _ => anyhow::bail!("unknown tool: {name}"),

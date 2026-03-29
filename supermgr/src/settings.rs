@@ -50,6 +50,19 @@ pub struct AppSettings {
     /// Minutes of inactivity before the session auto-locks.
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u64,
+
+    // ---- Webhook / notification settings ----
+
+    /// Webhook URL for outgoing notifications (Slack, Teams, Discord).
+    /// Empty string means disabled.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub webhook_url: String,
+    /// Send a webhook notification when an SSH host goes down.
+    #[serde(default = "default_true")]
+    pub webhook_on_host_down: bool,
+    /// Send a webhook notification when a VPN tunnel disconnects unexpectedly.
+    #[serde(default)]
+    pub webhook_on_vpn_disconnect: bool,
 }
 
 fn default_opacity() -> f64 {
@@ -58,6 +71,10 @@ fn default_opacity() -> f64 {
 
 fn default_auto_lock_minutes() -> u64 {
     15
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -69,6 +86,9 @@ impl Default for AppSettings {
             use_claude_subscription: false,
             password_hash: String::new(),
             auto_lock_minutes: 15,
+            webhook_url: String::new(),
+            webhook_on_host_down: true,
+            webhook_on_vpn_disconnect: false,
         }
     }
 }

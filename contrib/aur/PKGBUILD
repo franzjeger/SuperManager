@@ -56,6 +56,10 @@ package() {
     install -Dm644 contrib/desktop/org.supermgr.SuperManager.desktop \
         "$pkgdir/usr/share/applications/org.supermgr.SuperManager.desktop"
 
+    # Application icon (scalable SVG)
+    install -Dm644 contrib/icons/org.supermgr.SuperManager.svg \
+        "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg"
+
     # Config directory
     install -dm750 "$pkgdir/etc/supermgrd"
 

@@ -9,7 +9,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use serde_json::Value;
-use tracing::{info, warn};
+use tracing::warn;
 
 use supermgr_core::dbus::DaemonProxy;
 use supermgr_core::ssh::host::SshHostSummary;
@@ -23,12 +23,13 @@ use crate::app::{AppMsg, AppState};
 
 /// Build the multi-device SSH dashboard widget.
 ///
-/// Returns a widget suitable for embedding in the SSH content stack.
+/// Returns `(flow_box, widget)` — the flow_box is needed by the drain loop
+/// to apply per-device status updates.
 pub fn build_ssh_dashboard(
     app_state: &Arc<Mutex<AppState>>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
-) -> gtk4::Widget {
+) -> (gtk4::FlowBox, gtk4::Widget) {
     let outer_stack = gtk4::Stack::new();
 
     // Empty state when no FortiGate hosts have API configured.
@@ -104,7 +105,7 @@ pub fn build_ssh_dashboard(
         });
     }
 
-    outer_stack.upcast()
+    (flow_box.clone(), outer_stack.upcast())
 }
 
 // ---------------------------------------------------------------------------

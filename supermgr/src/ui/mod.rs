@@ -358,6 +358,17 @@ pub fn build_ui(
         .tooltip_text("Settings")
         .build();
 
+    // --- Primary (hamburger) menu with About action --------------------------
+    let primary_menu = gio::Menu::new();
+    primary_menu.append(Some("About SuperManager"), Some("win.about"));
+
+    let hamburger_btn = gtk4::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main menu")
+        .menu_model(&primary_menu)
+        .primary(true)
+        .build();
+
     // =========================================================================
     // View stack: VPN + SSH pages
     // =========================================================================
@@ -366,6 +377,7 @@ pub fn build_ui(
 
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&view_switcher));
+    header.pack_end(&hamburger_btn);
     header.pack_end(&add_menu_btn);
     header.pack_end(&logs_btn);
     header.pack_end(&settings_btn);
@@ -457,7 +469,8 @@ pub fn build_ui(
     }
 
     // Build the multi-device dashboard widget.
-    let dashboard_widget = ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
+    let (dashboard_flow_box, dashboard_widget) =
+        ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
     // SSH sidebar search entry — filters both key and host lists.
     let ssh_search_entry = gtk4::SearchEntry::builder()
@@ -533,6 +546,16 @@ pub fn build_ui(
         .title("Details")
         .child(&ssh_content_stack)
         .build();
+
+    // Wire the "Dashboard" toggle to show the dashboard content.
+    {
+        let ssh_content_stack = ssh_content_stack.clone();
+        ssh_toggle_dashboard.connect_toggled(move |btn| {
+            if btn.is_active() {
+                ssh_content_stack.set_visible_child_name("dashboard");
+            }
+        });
+    }
 
     let ssh_split = adw::NavigationSplitView::builder().vexpand(true).build();
     ssh_split.set_min_sidebar_width(280.0);
@@ -728,6 +751,16 @@ pub fn build_ui(
                 &rt,
             );
         });
+    }
+
+    // --- About action (hamburger menu) ----------------------------------------
+    {
+        let window_for_about = window.clone();
+        let about_action = gio::SimpleAction::new("about", None);
+        about_action.connect_activate(move |_, _| {
+            show_about_dialog(&window_for_about);
+        });
+        window.add_action(&about_action);
     }
 
     // --- Logs button --------------------------------------------------------
@@ -1086,6 +1119,58 @@ pub fn build_ui(
                         &tx,
                     );
                 }
+            }
+        });
+    }
+
+    // --- FortiGate backup config button -----------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.fg_backup_btn.connect_clicked(move |_| {
+            let s = app_state.lock().expect("lock");
+            if let Some(host_id) = &s.selected_ssh_host {
+                let host_id = host_id.clone();
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let result = async {
+                        let conn = zbus::Connection::system().await?;
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await?;
+                        let filename = proxy.fortigate_backup_config(&host_id).await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        Ok::<String, anyhow::Error>(filename)
+                    }
+                    .await;
+                    let msg = match result {
+                        Ok(filename) => AppMsg::FortigateBackupDone {
+                            host_id,
+                            result: Ok(filename),
+                        },
+                        Err(e) => AppMsg::FortigateBackupDone {
+                            host_id,
+                            result: Err(e.to_string()),
+                        },
+                    };
+                    let _ = tx.send(msg);
+                });
+            }
+        });
+    }
+
+    // --- FortiGate compliance check button -----------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.fg_compliance_btn.connect_clicked(move |_| {
+            let s = app_state.lock().expect("lock");
+            if let Some(host_id) = &s.selected_ssh_host {
+                ssh::host_detail::run_fortigate_compliance(
+                    host_id.clone(),
+                    &rt,
+                    &tx,
+                );
             }
         });
     }
@@ -1943,6 +2028,7 @@ pub fn build_ui(
     let rx_ssh_key_pubkey_view = ssh_key_detail.public_key_view.clone();
     let rx_console_panel = console_panel.clone();
     let rx_ssh_host_detail = ssh_host_detail.clone();
+    let rx_dashboard_flow_box = dashboard_flow_box.clone();
 
     let prev_state_init: VpnState = {
         let s = rx_app_state.lock().expect("lock");
@@ -2384,6 +2470,34 @@ pub fn build_ui(
                         );
                     }
                 }
+                AppMsg::FortigateCompliance { host_id: _, data } => {
+                    let win = rx_window.clone();
+                    ssh::host_detail::show_compliance_dialog(
+                        &win,
+                        &data,
+                    );
+                }
+                AppMsg::DashboardDeviceStatus { host_id, data } => {
+                    ssh::dashboard::apply_dashboard_status(
+                        &rx_dashboard_flow_box,
+                        &host_id,
+                        &data,
+                    );
+                }
+                AppMsg::FortigateBackupDone { host_id: _, result } => {
+                    match result {
+                        Ok(filename) => {
+                            rx_toast_overlay.add_toast(
+                                adw::Toast::new(&format!("Backup saved: {filename}")),
+                            );
+                        }
+                        Err(e) => {
+                            rx_toast_overlay.add_toast(
+                                adw::Toast::new(&format!("Backup failed: {e}")),
+                            );
+                        }
+                    }
+                }
                 // === Console messages =========================================
                 AppMsg::ConsoleResponse(text) => {
                     let tag = if text.starts_with("\n[tool:") {
@@ -2661,6 +2775,26 @@ pub fn build_ui(
     }
 
     window.present();
+}
+
+// ---------------------------------------------------------------------------
+// About dialog
+// ---------------------------------------------------------------------------
+
+/// Show the application About dialog.
+fn show_about_dialog(window: &adw::ApplicationWindow) {
+    let dialog = adw::AboutDialog::builder()
+        .application_name("SuperManager")
+        .application_icon("org.supermgr.SuperManager")
+        .version(env!("CARGO_PKG_VERSION"))
+        .developer_name("Sybr AS")
+        .website("https://github.com/franzjeger/SuperManager")
+        .issue_url("https://github.com/franzjeger/SuperManager/issues")
+        .license_type(gtk4::License::Gpl30)
+        .developers(vec!["Frank-Andreas Lia"])
+        .comments("Unified SSH, VPN, and network device management with AI assistant")
+        .build();
+    dialog.present(Some(window));
 }
 
 // ---------------------------------------------------------------------------

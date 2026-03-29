@@ -674,6 +674,12 @@ impl VpnBackend for FortiGateBackend {
         }
 
         // ── Step 5: Initiate IKE SA ──────────────────────────────────────────
+        // Clean up any existing SA before connecting — prevents "duplicate
+        // CHILD_SA" errors when strongSwan rekeys or a previous session was
+        // not cleanly torn down.  Safe: if no SA exists, --terminate is a
+        // no-op (returns an error which we ignore).
+        let _ = run_swanctl(&["--terminate", "--ike", &conn_name]).await;
+
         // strongSwan installs XFRM policies and the tunnel default route upon
         // CHILD_SA establishment.  We do not touch the default route.
         let out = run_swanctl(&[

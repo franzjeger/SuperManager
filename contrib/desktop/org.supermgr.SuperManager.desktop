@@ -2,7 +2,7 @@
 Name=SuperManager
 Comment=Unified SSH key and VPN connection manager
 Exec=supermgr
-Icon=network-server
+Icon=org.supermgr.SuperManager
 Terminal=false
 Type=Application
 Categories=Network;System;
