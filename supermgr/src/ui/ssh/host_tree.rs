@@ -240,8 +240,16 @@ pub fn populate_ssh_host_list(
                 menu_model.append(Some("Delete"), Some("host-ctx.delete"));
 
                 let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
-                popover.set_parent(&row);
                 popover.set_has_arrow(true);
+                // Attach popover as child of the row so it positions correctly.
+                // Use set_parent + connect to row's destroy to unparent cleanly.
+                popover.set_parent(&row);
+                {
+                    let popover = popover.clone();
+                    row.connect_destroy(move |_| {
+                        popover.unparent();
+                    });
+                }
 
                 // Action group for this row's context menu.
                 let action_group = gio::SimpleActionGroup::new();
