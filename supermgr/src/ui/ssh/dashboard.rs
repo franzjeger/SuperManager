@@ -126,7 +126,7 @@ fn populate_dashboard(
     }
 
     let fg_hosts: Vec<SshHostSummary> = {
-        let s = app_state.lock().expect("lock");
+        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         s.ssh_hosts
             .iter()
             .filter(|h| h.device_type == DeviceType::Fortigate && h.has_api)

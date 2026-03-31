@@ -230,7 +230,9 @@ async fn pkce_auth_code_flow(
     .await
     .map_err(|_| {
         BackendError::ConnectionFailed(
-            "browser authentication timed out — please reconnect and authenticate promptly"
+            "Entra ID browser authentication timed out after 20 minutes — \
+             please reconnect and complete the sign-in promptly when the \
+             browser window opens"
                 .into(),
         )
     })?
@@ -697,7 +699,14 @@ impl VpnBackend for AzureBackend {
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
-                    BackendError::Interface("openvpn not found — please install openvpn".into())
+                    BackendError::Interface(
+                        "openvpn not found — install the 'openvpn' package \
+                         (Azure VPN requires the classic openvpn binary, not openvpn3)".into(),
+                    )
+                } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    BackendError::Interface(
+                        "permission denied running openvpn — the daemon must run as root".into(),
+                    )
                 } else {
                     BackendError::Io(e)
                 }
@@ -747,7 +756,9 @@ impl VpnBackend for AzureBackend {
                             }
                             if line.contains("AUTH_FAILED") || line.contains("auth-failure") {
                                 return Err(BackendError::ConnectionFailed(
-                                    "OpenVPN authentication failed — check Entra ID token".into(),
+                                    "Azure VPN authentication failed — your Entra ID session \
+                                     may have expired or been revoked; try reconnecting to \
+                                     re-authenticate in the browser".into(),
                                 ));
                             }
                         }
@@ -761,7 +772,9 @@ impl VpnBackend for AzureBackend {
                     }
                 }
                 Err(BackendError::ConnectionFailed(
-                    "openvpn exited before tunnel was established".into(),
+                    "openvpn process exited before the tunnel was established — \
+                     check that the Azure VPN gateway is reachable and the \
+                     configuration (CA cert, gateway FQDN) is correct".into(),
                 ))
             },
         )
@@ -780,7 +793,9 @@ impl VpnBackend for AzureBackend {
                 drop(child);
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
                 return Err(BackendError::ConnectionFailed(
-                    "openvpn timed out waiting for tunnel to come up".into(),
+                    "Azure VPN connection timed out after 60 s — the gateway \
+                     may be unreachable or firewalled; verify your network \
+                     connection and the gateway address".into(),
                 ));
             }
         }

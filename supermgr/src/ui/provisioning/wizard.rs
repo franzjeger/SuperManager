@@ -422,7 +422,7 @@ fn build_step1_customer_info(
             }
             host_ids.borrow_mut().clear();
 
-            let s = app_state.lock().expect("lock wizard state");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             let filter = match device_filter {
                 "FortiGate" => "Fortigate",
                 "UniFi" => "UniFi",
@@ -1810,7 +1810,7 @@ fn build_step5_review(
                         Err(e) => format!("# Error generating config: {e}\n"),
                     };
 
-                    *slot.lock().expect("lock wizard state") = Some(config_text);
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config_text);
                 });
             }
 
@@ -1826,7 +1826,7 @@ fn build_step5_review(
             let ws = Rc::clone(&state);
             let rt_poll = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().expect("lock wizard state").take();
+                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(config_text) = maybe {
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
@@ -1891,13 +1891,13 @@ fn build_step5_review(
                     };
 
                     let _ = tx.send(AppMsg::ShowToast(msg));
-                    *flag.lock().expect("lock wizard state") = true;
+                    *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
                 });
             }
 
             let btn = btn.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                if *done_flag.lock().expect("lock wizard state") {
+                if *done_flag.lock().unwrap_or_else(|e| e.into_inner()) {
                     btn.set_sensitive(true);
                     btn.set_label("Push Config");
                     return glib::ControlFlow::Break;
@@ -1933,7 +1933,7 @@ fn build_step5_review(
                 let device_type = s.device_type.clone();
                 rt.spawn(async move {
                     let res = fetch_device_config(&host_id, &device_type).await;
-                    *slot.lock().expect("lock wizard state") = Some(
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(
                         res.map_err(|e| format!("{e}"))
                     );
                 });
@@ -1943,7 +1943,7 @@ fn build_step5_review(
             let generated = s.generated_config.clone();
             let device_label = s.target_host_label.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().expect("lock wizard state").take();
+                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(result) = maybe {
                     btn.set_sensitive(true);
                     btn.set_label("Diff with Device");
@@ -2293,15 +2293,15 @@ fn build_step5_review(
                 let customer = customer.clone();
                 rt.spawn(async move {
                     match list_config_versions_dbus(&customer).await {
-                        Ok(json) => *slot.lock().expect("lock wizard state") = Some(json),
-                        Err(e) => *slot.lock().expect("lock wizard state") = Some(format!("ERROR:{e}")),
+                        Ok(json) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(json),
+                        Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("ERROR:{e}")),
                     }
                 });
             }
             let config_buffer = config_buffer.clone();
             let rt2 = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().expect("lock wizard state").take();
+                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(json) = maybe {
                     btn.set_sensitive(true);
                     if json.starts_with("ERROR:") {
@@ -3376,13 +3376,13 @@ fn show_history_dialog(
                     let slot = Arc::clone(&result_slot);
                     rt.spawn(async move {
                         match get_config_version_dbus(&filename).await {
-                            Ok(config) => *slot.lock().expect("lock wizard state") = Some(config),
-                            Err(e) => *slot.lock().expect("lock wizard state") = Some(format!("# Error: {e}")),
+                            Ok(config) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config),
+                            Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}")),
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().expect("lock wizard state").take();
+                    let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                     if let Some(config) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&config);
@@ -3410,16 +3410,16 @@ fn show_history_dialog(
                         match get_config_version_dbus(&filename).await {
                             Ok(old_config) => {
                                 let diff = compute_unified_diff(&old_config, &current_text);
-                                *slot.lock().expect("lock wizard state") = Some(diff);
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(diff);
                             }
                             Err(e) => {
-                                *slot.lock().expect("lock wizard state") = Some(format!("# Error: {e}"));
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}"));
                             }
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().expect("lock wizard state").take();
+                    let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                     if let Some(diff_text) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&diff_text);

@@ -2232,7 +2232,19 @@ impl DaemonService {
                 error!("fortigate_api: send failed: {msg}");
                 error!("fortigate_api: is_connect={} is_timeout={} is_request={}",
                     e.is_connect(), e.is_timeout(), e.is_request());
-                fdo::Error::Failed(format!("API request failed: {msg}"))
+                if e.is_timeout() {
+                    fdo::Error::Failed(format!(
+                        "FortiGate API request timed out: the device at {hostname}:{api_port} \
+                         did not respond within 30 s — verify the host is reachable"
+                    ))
+                } else if e.is_connect() {
+                    fdo::Error::Failed(format!(
+                        "cannot connect to FortiGate at {hostname}:{api_port}: {msg} — \
+                         check that the device is online and the API port is correct"
+                    ))
+                } else {
+                    fdo::Error::Failed(format!("FortiGate API request failed: {msg}"))
+                }
             })?;
 
         let status = resp.status().as_u16();
@@ -2240,9 +2252,16 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
 
         if status >= 400 {
-            return Err(fdo::Error::Failed(format!(
-                "FortiGate API {status}: {resp_body}"
-            )));
+            let detail = match status {
+                401 => "authentication failed: invalid or expired API token".to_owned(),
+                403 => "permission denied: the API token lacks required privileges for this operation".to_owned(),
+                404 => "API endpoint not found: check the FortiGate firmware version and API path".to_owned(),
+                405 => "method not allowed: this API endpoint does not support the requested HTTP method".to_owned(),
+                424 => format!("failed dependency: a prerequisite was not met — {}", &resp_body[..resp_body.len().min(200)]),
+                s if s >= 500 => format!("FortiGate internal error ({s}): try again later"),
+                _ => format!("HTTP {status}: {}", &resp_body[..resp_body.len().min(300)]),
+            };
+            return Err(fdo::Error::Failed(detail));
         }
 
         Ok(resp_body)
@@ -3207,7 +3226,19 @@ impl DaemonService {
             .map_err(|e| {
                 let msg = e.to_string().replace(&token, "***");
                 error!("fortigate_backup_config: request failed: {msg}");
-                fdo::Error::Failed(format!("backup request failed: {msg}"))
+                if e.is_timeout() {
+                    fdo::Error::Failed(format!(
+                        "backup request timed out: the FortiGate at {hostname}:{api_port} \
+                         did not respond within 60 s — the device may be under heavy load"
+                    ))
+                } else if e.is_connect() {
+                    fdo::Error::Failed(format!(
+                        "cannot connect to FortiGate at {hostname}:{api_port}: {msg} — \
+                         check that the device is online and the API port is correct"
+                    ))
+                } else {
+                    fdo::Error::Failed(format!("backup request failed: {msg}"))
+                }
             })?;
 
         let status = resp.status().as_u16();
@@ -3219,9 +3250,18 @@ impl DaemonService {
 
         if status >= 400 {
             error!("fortigate_backup_config: API error {status}: {}", &body[..body.len().min(200)]);
-            return Err(fdo::Error::Failed(format!(
-                "FortiGate backup API {status}: {body}"
-            )));
+            let detail = match status {
+                401 => "authentication failed: invalid or expired API token",
+                403 => "permission denied: the API token lacks backup privileges",
+                404 => "backup endpoint not found: check FortiGate firmware version",
+                _ if status >= 500 => "FortiGate internal error: try again later",
+                _ => "",
+            };
+            return Err(fdo::Error::Failed(if detail.is_empty() {
+                format!("FortiGate backup API error (HTTP {status}): {}", &body[..body.len().min(200)])
+            } else {
+                format!("FortiGate backup failed: {detail} (HTTP {status})")
+            }));
         }
 
         // Save to /etc/supermgrd/backups/

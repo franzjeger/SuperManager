@@ -208,7 +208,7 @@ pub fn build_console_page(
             let text = text.clone();
             let app_state = Arc::clone(&app_state);
             let (messages, context) = {
-                let s = app_state.lock().expect("lock app_state");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let vpn = match &s.vpn_state {
                     VpnState::Connected { profile_id, .. } => {
                         let name = s.profiles.iter()
@@ -305,7 +305,7 @@ pub fn build_console_page(
 
                     match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
                         Ok(updated_messages) => {
-                            app_state.lock().expect("lock app_state").console_messages = updated_messages;
+                            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages = updated_messages;
                         }
                         Err(e) => {
                             let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
@@ -343,7 +343,7 @@ pub fn build_console_page(
         let app_state = Arc::clone(app_state);
         clear_btn.connect_clicked(move |_| {
             chat_buffer.set_text("");
-            app_state.lock().expect("lock app_state").console_messages.clear();
+            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages.clear();
             super::claude::reset_session();
             append_system_msg(&chat_buffer, "Conversation cleared.\n");
         });

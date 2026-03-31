@@ -135,7 +135,7 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
         info!("state after stale disconnect: {:?}", vpn_state);
     }
 
-    let mut s = app_state.lock().expect("app_state poisoned");
+    let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
     s.profiles = profiles;
     s.vpn_state = vpn_state;
     s.daemon_available = true;
@@ -153,7 +153,7 @@ pub async fn fetch_initial_ssh_state(app_state: &Arc<Mutex<AppState>>) -> anyhow
     let hosts_json = proxy.ssh_list_hosts().await.context("SshListHosts")?;
     let hosts: Vec<SshHostSummary> = serde_json::from_str(&hosts_json).context("parse SSH hosts")?;
 
-    let mut s = app_state.lock().expect("lock");
+    let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
     s.ssh_keys = keys;
     s.ssh_hosts = hosts;
     Ok(())
@@ -850,7 +850,7 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                 // Also refresh SSH state so the GUI is fully up-to-date.
                 let _ = fetch_initial_ssh_state(&app_state).await;
 
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let msg = AppMsg::DaemonConnected {
                     profiles: s.profiles.clone(),
                     state: s.vpn_state.clone(),

@@ -47,6 +47,8 @@ pub struct AppState {
     pub active_section: Section,
     /// Current SSH sidebar search/filter text.
     pub ssh_filter: String,
+    /// Current VPN sidebar search/filter text.
+    pub vpn_filter: String,
     /// SSH host reachability map: host UUID string → reachable.
     pub host_health: std::collections::HashMap<String, bool>,
     /// Conversation history for the Claude Console (multi-turn memory).

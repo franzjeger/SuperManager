@@ -100,7 +100,7 @@ fn push_tray_update(
     new_profiles: Vec<ProfileSummary>,
     rt: &tokio::runtime::Handle,
 ) {
-    let handle = match tray_handle.lock().expect("tray_handle poisoned").as_ref() {
+    let handle = match tray_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         Some(h) => h.clone(),
         None => return,
     };
@@ -214,7 +214,7 @@ pub fn build_ui(
 ) {
     // Apply persisted colour scheme.
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         adw::StyleManager::default().set_color_scheme(s.adw_color_scheme());
     }
 
@@ -227,7 +227,7 @@ pub fn build_ui(
 
     // Apply persisted opacity.
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         window.set_opacity(s.opacity);
     }
 
@@ -240,7 +240,7 @@ pub fn build_ui(
     let tray_handle: Arc<Mutex<Option<ksni::Handle<VpnTray>>>> = Arc::new(Mutex::new(None));
     {
         let (initial_state, initial_profiles) = {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             (s.vpn_state.clone(), s.profiles.clone())
         };
         let vpn_tray = VpnTray {
@@ -253,7 +253,7 @@ pub fn build_ui(
         rt.spawn(async move {
             match vpn_tray.spawn().await {
                 Ok(handle) => {
-                    *tray_handle_slot.lock().expect("tray_handle poisoned") = Some(handle);
+                    *tray_handle_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
                     info!("system tray registered");
                 }
                 Err(e) => {
@@ -402,15 +402,40 @@ pub fn build_ui(
     let banner = adw::Banner::new("Daemon not running");
     banner.set_button_label(Some("Retry"));
     {
-        let available = app_state.lock().expect("lock").daemon_available;
+        let available = app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available;
         banner.set_revealed(!available);
     }
 
     // =========================================================================
     // VPN page
     // =========================================================================
-    let (vpn_profile_list, vpn_sidebar_page) =
+    let (vpn_profile_list, vpn_search_entry, vpn_sidebar_page) =
         vpn::sidebar::build_vpn_sidebar(&app_state, &tx, &rt, &window);
+
+    // VPN sidebar search entry — filters profiles by name as the user types.
+    {
+        let vpn_profile_list = vpn_profile_list.clone();
+        let app_state = app_state.clone();
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        vpn_search_entry.connect_search_changed(move |entry| {
+            let text = entry.text().to_string();
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            populate_vpn_sidebar(
+                &vpn_profile_list,
+                &s.profiles,
+                &s.vpn_state,
+                s.selected_profile.as_deref(),
+                &window,
+                &rt,
+                &tx,
+                &text,
+            );
+            drop(s);
+            app_state.lock().unwrap_or_else(|e| e.into_inner()).vpn_filter = text;
+        });
+    }
     let (vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
@@ -524,7 +549,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_search_entry.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             populate_ssh_key_list(
                 &ssh_key_list,
                 &s.ssh_keys,
@@ -546,7 +571,7 @@ pub fn build_ui(
                 &health,
             );
             drop(s);
-            app_state.lock().expect("lock").ssh_filter = text;
+            app_state.lock().unwrap_or_else(|e| e.into_inner()).ssh_filter = text;
         });
     }
 
@@ -605,7 +630,7 @@ pub fn build_ui(
 
     // Populate SSH lists with initial state.
     {
-        let s = app_state.lock().expect("lock");
+        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         populate_ssh_key_list(
             &ssh_key_list,
             &s.ssh_keys,
@@ -715,7 +740,7 @@ pub fn build_ui(
 
     // Determine initial page: locked if password is set, otherwise app.
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         if s.has_password() {
             outer_stack.set_visible_child_name("lock");
             lock_page.status_label.set_text("Enter your master password to unlock.");
@@ -776,7 +801,7 @@ pub fn build_ui(
             if outer_stack.visible_child_name().as_deref() == Some("app") {
                 let cur = ctr.get() + 1;
                 ctr.set(cur);
-                let s = app_settings.lock().expect("lock");
+                let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
                 if s.has_password() && s.auto_lock_minutes > 0 {
                     let limit = s.auto_lock_minutes * 60;
                     if cur >= limit {
@@ -792,7 +817,7 @@ pub fn build_ui(
 
     // Paint initial VPN state.
     {
-        let s = app_state.lock().expect("lock");
+        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         if s.selected_profile.is_some() {
             vpn_detail.detail_stack.set_visible_child_name("detail");
         }
@@ -941,7 +966,7 @@ pub fn build_ui(
         let window = window.clone();
         ssh_add_host_btn.connect_clicked(move |_| {
             popover.popdown();
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             ssh::dialogs::show_add_host_dialog(&window, &s.ssh_keys, &rt, &tx);
         });
     }
@@ -986,7 +1011,7 @@ pub fn build_ui(
         vpn_profile_list.connect_row_activated(move |list, row| {
             let idx = row.index() as usize;
             let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg) = {
-                let mut s = app_state.lock().expect("lock");
+                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let mut sorted: Vec<&ProfileSummary> = s.profiles.iter().collect();
                 sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                 let entry = sorted.get(idx).copied();
@@ -1040,7 +1065,7 @@ pub fn build_ui(
                 list.select_row(Some(&r));
             }
 
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             rename_btn.set_sensitive(s.selected_profile.is_some());
             apply_vpn_state(&connect_btn, &rename_btn, &status_label, &stats_box, &s);
         });
@@ -1062,7 +1087,7 @@ pub fn build_ui(
         let tx_for_key = tx.clone();
         ssh_key_list.connect_row_activated(move |_list, row| {
             let idx = row.index() as usize;
-            let mut s = app_state.lock().expect("lock");
+            let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             let mut sorted: Vec<SshKeySummary> = s.ssh_keys.clone();
             sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             if let Some(key) = sorted.get(idx) {
@@ -1130,7 +1155,7 @@ pub fn build_ui(
                 return;
             }
             let idx = row.index();
-            let mut s = app_state.lock().expect("lock");
+            let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             // Reconstruct the grouped order to find which host this row maps to.
             let mut groups: std::collections::BTreeMap<String, Vec<SshHostSummary>> =
                 std::collections::BTreeMap::new();
@@ -1180,7 +1205,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::host_detail::refresh_fortigate_dashboard(
@@ -1201,7 +1226,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_backup_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
                 let host_id = host_id.clone();
                 let tx = tx.clone();
@@ -1236,7 +1261,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_compliance_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
                 ssh::host_detail::run_fortigate_compliance(
                     host_id.clone(),
@@ -1255,7 +1280,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.fg_gen_token_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1290,7 +1315,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.fg_copy_token_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1322,7 +1347,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.connect_btn.connect_clicked(move |_| {
             let (should_disconnect, selected) = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 (!s.vpn_state.is_idle(), s.selected_profile.clone())
             };
             let tx = tx.clone();
@@ -1360,7 +1385,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.rename_btn.connect_clicked(move |_| {
             let profile_id = {
-                app_state.lock().expect("lock").selected_profile.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else { return };
             vpn::dialogs::show_rename_dialog(&window, profile_id, &rt, &tx);
@@ -1375,7 +1400,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.edit_creds_btn.connect_clicked(move |_| {
             let (profile_id, backend, name, host, username) = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let idx = pid.as_deref().and_then(|id| {
                     s.profiles.iter().position(|p| p.id.to_string() == id)
@@ -1411,7 +1436,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.auto_connect_switch.connect_state_set(move |_sw, new_state| {
             let profile_id = {
-                app_state.lock().expect("lock").selected_profile.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else {
                 return glib::Propagation::Proceed;
@@ -1440,7 +1465,7 @@ pub fn build_ui(
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_detail.full_tunnel_switch.connect_state_set(move |_sw, new_state| {
             let (profile_id, supports_split, split_routes) = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let idx = s.profiles.iter().position(|p| Some(p.id.to_string()) == pid);
                 let supports = idx.map_or(false, |i| {
@@ -1484,7 +1509,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.kill_switch_switch.connect_state_set(move |_sw, new_state| {
             let profile_id = {
-                app_state.lock().expect("lock").selected_profile.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else {
                 return glib::Propagation::Proceed;
@@ -1512,7 +1537,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.rotate_key_btn.connect_clicked(move |_| {
             let profile_id = {
-                app_state.lock().expect("lock").selected_profile.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else { return };
             vpn::dialogs::rotate_wireguard_key(&window, profile_id, &rt, &tx);
@@ -1527,7 +1552,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.export_btn.connect_clicked(move |_| {
             let (profile_id, profile_name) = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let name = pid.as_deref()
                     .and_then(|id| s.profiles.iter().find(|p| p.id.to_string() == id))
@@ -1592,7 +1617,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.split_routes_edit_btn.connect_clicked(move |_| {
             let (profile_id, current_routes) = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone().unwrap_or_default();
                 let idx = s.profiles.iter().position(|p| p.id.to_string() == pid);
                 let routes = idx
@@ -1672,7 +1697,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.connect_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1705,7 +1730,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.test_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1752,7 +1777,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.edit_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::dialogs::show_edit_host_dialog(
@@ -1770,7 +1795,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         ssh_key_detail.push_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
@@ -1791,7 +1816,7 @@ pub fn build_ui(
         let ssh_content_stack = ssh_content_stack.clone();
         ssh_key_detail.delete_btn.connect_clicked(move |_| {
             let key_id = {
-                app_state.lock().expect("lock").selected_ssh_key.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key.clone()
             };
             let Some(key_id) = key_id else { return };
             let dialog = adw::AlertDialog::new(
@@ -1833,7 +1858,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         ssh_host_detail.push_key_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
@@ -1853,7 +1878,7 @@ pub fn build_ui(
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
         ssh_host_detail.push_key_api_btn.connect_clicked(move |_| {
-            let s = app_state.lock().expect("lock");
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             let host_id = match s.selected_ssh_host.clone() {
                 Some(id) => id,
                 None => return,
@@ -1963,7 +1988,7 @@ pub fn build_ui(
         let toast_overlay = toast_overlay.clone();
         ssh_host_detail.set_inform_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().expect("lock");
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 match s.selected_ssh_host.clone() {
                     Some(id) => id,
                     None => return,
@@ -2048,7 +2073,7 @@ pub fn build_ui(
         let ssh_content_stack = ssh_content_stack.clone();
         ssh_host_detail.delete_btn.connect_clicked(move |_| {
             let host_id = {
-                app_state.lock().expect("lock").selected_ssh_host.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host.clone()
             };
             let Some(host_id) = host_id else { return };
             let dialog = adw::AlertDialog::new(
@@ -2089,7 +2114,7 @@ pub fn build_ui(
         let rt = rt.clone();
         ssh_host_detail.pin_btn.connect_clicked(move |_btn| {
             let host_id = {
-                app_state.lock().expect("lock").selected_ssh_host.clone()
+                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host.clone()
             };
             let Some(host_id) = host_id else { return };
             let tx = tx.clone();
@@ -2115,7 +2140,7 @@ pub fn build_ui(
                 let msg = match fetch_initial_state(&app_state).await {
                     Ok(()) => {
                         let _ = fetch_initial_ssh_state(&app_state).await;
-                        let s = app_state.lock().expect("lock");
+                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                         AppMsg::DaemonConnected {
                             profiles: s.profiles.clone(),
                             state: s.vpn_state.clone(),
@@ -2171,7 +2196,7 @@ pub fn build_ui(
     let rx_dashboard_flow_box = dashboard_flow_box.clone();
 
     let prev_state_init: VpnState = {
-        let s = rx_app_state.lock().expect("lock");
+        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
         s.vpn_state.clone()
     };
     let mut rx_prev_state = prev_state_init;
@@ -2182,13 +2207,13 @@ pub fn build_ui(
                 // === VPN messages =========================================
                 AppMsg::DaemonConnected { profiles, state } => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.profiles = profiles;
                         s.vpn_state = state;
                         s.daemon_available = true;
                     }
                     rx_banner.set_revealed(false);
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -2197,6 +2222,7 @@ pub fn build_ui(
                         &rx_window,
                         &rx_rt,
                         &rx_tx,
+                        &s.vpn_filter,
                     );
                     apply_vpn_state(
                         &rx_connect_btn,
@@ -2214,10 +2240,10 @@ pub fn build_ui(
                 }
                 AppMsg::ImportSucceeded { profiles, toast } => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.profiles = profiles;
                     }
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -2226,6 +2252,7 @@ pub fn build_ui(
                         &rx_window,
                         &rx_rt,
                         &rx_tx,
+                        &s.vpn_filter,
                     );
                     if let Some(msg) = toast {
                         rx_toast_overlay.add_toast(adw::Toast::new(msg));
@@ -2239,12 +2266,12 @@ pub fn build_ui(
                 }
                 AppMsg::StateUpdated(state) => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.vpn_state = state;
                         s.daemon_available = true;
                     }
                     rx_banner.set_revealed(false);
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     // Desktop notifications on state transitions.
                     match &s.vpn_state {
                         VpnState::Connected { profile_id, .. } => {
@@ -2301,6 +2328,7 @@ pub fn build_ui(
                         &rx_window,
                         &rx_rt,
                         &rx_tx,
+                        &s.vpn_filter,
                     );
                     apply_vpn_state(
                         &rx_connect_btn,
@@ -2373,13 +2401,13 @@ pub fn build_ui(
                 }
                 AppMsg::ProfileDeleted(deleted_id) => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.profiles.retain(|p| p.id.to_string() != deleted_id);
                         if s.selected_profile.as_deref() == Some(deleted_id.as_str()) {
                             s.selected_profile = None;
                         }
                     }
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -2388,6 +2416,7 @@ pub fn build_ui(
                         &rx_window,
                         &rx_rt,
                         &rx_tx,
+                        &s.vpn_filter,
                     );
                     if s.selected_profile.is_none() {
                         rx_vpn_detail_stack.set_visible_child_name("empty");
@@ -2409,7 +2438,7 @@ pub fn build_ui(
                     );
                 }
                 AppMsg::DaemonUnavailable => {
-                    rx_app_state.lock().expect("lock").daemon_available = false;
+                    rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available = false;
                     rx_banner.set_revealed(true);
                 }
                 AppMsg::OperationFailed(msg) => {
@@ -2494,10 +2523,10 @@ pub fn build_ui(
                 }
                 AppMsg::SshKeysRefreshed(keys) => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.ssh_keys = keys;
                     }
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     let filter = s.ssh_filter.clone();
                     populate_ssh_key_list(
                         &rx_ssh_key_list,
@@ -2512,7 +2541,7 @@ pub fn build_ui(
                     if let Some(sel) = &s.selected_ssh_key {
                         if !s.ssh_keys.iter().any(|k| k.id.to_string() == *sel) {
                             drop(s);
-                            rx_app_state.lock().expect("lock").selected_ssh_key = None;
+                            rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key = None;
                             rx_ssh_content_stack.set_visible_child_name("empty");
                         }
                     }
@@ -2520,10 +2549,10 @@ pub fn build_ui(
                 }
                 AppMsg::SshHostsRefreshed(hosts) => {
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         s.ssh_hosts = hosts;
                     }
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     let filter = s.ssh_filter.clone();
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
@@ -2542,7 +2571,7 @@ pub fn build_ui(
                             ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host);
                         } else {
                             drop(s);
-                            rx_app_state.lock().expect("lock").selected_ssh_host = None;
+                            rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
                             rx_ssh_content_stack.set_visible_child_name("empty");
                         }
                     }
@@ -2551,14 +2580,14 @@ pub fn build_ui(
                     let was_known_before;
                     let old_reachable;
                     {
-                        let mut s = rx_app_state.lock().expect("lock");
+                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         old_reachable = s.host_health.get(&host_id).copied();
                         was_known_before = old_reachable.is_some();
                         s.host_health.insert(host_id.clone(), reachable);
                     }
                     // Desktop notification on state *change* (not initial discovery).
                     if was_known_before && old_reachable != Some(reachable) {
-                        let s = rx_app_state.lock().expect("lock");
+                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                         let host_label = s.ssh_hosts.iter()
                             .find(|h| h.id.to_string() == host_id)
                             .map(|h| h.label.clone())
@@ -2582,7 +2611,7 @@ pub fn build_ui(
                             app.send_notification(Some(&notif_id), &notif);
                         }
                     }
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     let filter = s.ssh_filter.clone();
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
@@ -2605,7 +2634,7 @@ pub fn build_ui(
                         .add_toast(adw::Toast::new(&format!("{host_label}: {message}")));
                 }
                 AppMsg::EditSshHost(host_id) => {
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == host_id) {
                         ssh::dialogs::show_edit_host_dialog(
                             &rx_window, host, &s.ssh_keys, &s.profiles, &rx_rt, &rx_tx,
@@ -2613,7 +2642,7 @@ pub fn build_ui(
                     }
                 }
                 AppMsg::EditVpnProfile(profile_id) => {
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(p) = s.profiles.iter().find(|p| p.id.to_string() == profile_id) {
                         let backend = p.backend.clone();
                         let name = p.name.clone();
@@ -2632,7 +2661,7 @@ pub fn build_ui(
                     }
                 }
                 AppMsg::PushSshKey(key_id) => {
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     ssh::dialogs::show_push_key_dialog(
                         &rx_window,
                         &s.ssh_keys,
@@ -2645,7 +2674,7 @@ pub fn build_ui(
                 // === FortiGate messages =======================================
                 AppMsg::FortigateStatus { host_id, data } => {
                     // Only apply if this host is still the selected one.
-                    let s = rx_app_state.lock().expect("lock");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     if s.selected_ssh_host.as_deref() == Some(&host_id) {
                         ssh::host_detail::apply_fortigate_status(
                             &rx_ssh_host_detail,
@@ -2764,7 +2793,7 @@ pub fn build_ui(
                     }
                     // Ctrl+L: manually lock the session.
                     gtk4::gdk::Key::l => {
-                        let s = app_settings_k.lock().expect("lock");
+                        let s = app_settings_k.lock().unwrap_or_else(|e| e.into_inner());
                         if s.has_password() {
                             lock_session(&outer_stack_k, &lock_page_k);
                         }
@@ -2790,7 +2819,7 @@ pub fn build_ui(
         let inactivity_counter = inactivity_counter.clone();
         lock_page.unlock_btn.connect_clicked(move |_| {
             let password = lock_page.password_row.text().to_string();
-            let s = app_settings.lock().expect("lock");
+            let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             if s.verify_password(&password) {
                 lock_page.password_row.set_text("");
                 lock_page.status_label.set_text("");
@@ -2821,7 +2850,7 @@ pub fn build_ui(
                 return;
             }
             {
-                let mut s = app_settings.lock().expect("lock");
+                let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
                 s.set_password(&pw);
             }
             lock_page.password_row.set_text("");
@@ -2955,6 +2984,117 @@ pub fn build_ui(
             true
         });
         window.add_controller(drop_target);
+    }
+
+    // =========================================================================
+    // Keyboard shortcuts (actions + accelerators)
+    // =========================================================================
+
+    // --- Ctrl+Q: Quit -------------------------------------------------------
+    {
+        let quit_action = gio::SimpleAction::new("quit", None);
+        let tx = tx.clone();
+        quit_action.connect_activate(move |_, _| {
+            tx.send(AppMsg::Quit).ok();
+        });
+        window.add_action(&quit_action);
+        app.set_accels_for_action("win.quit", &["<Control>q"]);
+    }
+
+    // --- Ctrl+F: Focus search entry -----------------------------------------
+    {
+        let focus_search_action = gio::SimpleAction::new("focus-search", None);
+        let view_stack = view_stack.clone();
+        let ssh_search_entry = ssh_search_entry.clone();
+        focus_search_action.connect_activate(move |_, _| {
+            let page = view_stack.visible_child_name();
+            match page.as_deref() {
+                // SSH section has a search entry — focus it.
+                Some("ssh") => {
+                    ssh_search_entry.grab_focus();
+                }
+                // VPN section has no search entry; do nothing for now.
+                _ => {}
+            }
+        });
+        window.add_action(&focus_search_action);
+        app.set_accels_for_action("win.focus-search", &["<Control>f"]);
+    }
+
+    // --- Ctrl+N: Open the "Add" popover ------------------------------------
+    {
+        let open_add_action = gio::SimpleAction::new("open-add", None);
+        let add_menu_btn = add_menu_btn.clone();
+        let popover = popover.clone();
+        open_add_action.connect_activate(move |_, _| {
+            if add_menu_btn.is_visible() {
+                popover.popup();
+            }
+        });
+        window.add_action(&open_add_action);
+        app.set_accels_for_action("win.open-add", &["<Control>n"]);
+    }
+
+    // --- Escape: Clear search / close popover -------------------------------
+    {
+        let escape_action = gio::SimpleAction::new("escape", None);
+        let ssh_search_entry = ssh_search_entry.clone();
+        let popover = popover.clone();
+        let view_stack = view_stack.clone();
+        escape_action.connect_activate(move |_, _| {
+            // If the popover is open, close it first.
+            if popover.is_visible() {
+                popover.popdown();
+                return;
+            }
+            // Otherwise, clear search in the active section.
+            if view_stack.visible_child_name().as_deref() == Some("ssh") {
+                let text = ssh_search_entry.text();
+                if !text.is_empty() {
+                    ssh_search_entry.set_text("");
+                }
+            }
+        });
+        window.add_action(&escape_action);
+        app.set_accels_for_action("win.escape", &["Escape"]);
+    }
+
+    // --- F5: Refresh current view -------------------------------------------
+    {
+        let refresh_action = gio::SimpleAction::new("refresh", None);
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        refresh_action.connect_activate(move |_, _| {
+            let app_state = Arc::clone(&app_state);
+            let tx = tx.clone();
+            rt.spawn(async move {
+                // Re-fetch VPN state.
+                match fetch_initial_state(&app_state).await {
+                    Ok(()) => {
+                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        tx.send(AppMsg::DaemonConnected {
+                            profiles: s.profiles.clone(),
+                            state: s.vpn_state.clone(),
+                        }).ok();
+                    }
+                    Err(_) => {
+                        tx.send(AppMsg::DaemonUnavailable).ok();
+                    }
+                }
+                // Re-fetch SSH state.
+                match fetch_initial_ssh_state(&app_state).await {
+                    Ok(()) => {
+                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        tx.send(AppMsg::SshKeysRefreshed(s.ssh_keys.clone())).ok();
+                        tx.send(AppMsg::SshHostsRefreshed(s.ssh_hosts.clone())).ok();
+                    }
+                    Err(_) => {}
+                }
+            });
+        });
+        window.add_action(&refresh_action);
+        app.set_accels_for_action("win.refresh", &["F5"]);
     }
 
     window.present();

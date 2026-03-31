@@ -22,17 +22,25 @@ use crate::dbus_client::{dbus_connect, dbus_delete_profile, dbus_disconnect};
 
 /// Build the VPN sidebar widgets.
 ///
-/// Returns the [`gtk4::ListBox`] that holds profile rows and the enclosing
+/// Returns the [`gtk4::ListBox`] that holds profile rows, the
+/// [`gtk4::SearchEntry`] for filtering, and the enclosing
 /// [`adw::NavigationPage`] ready to be placed in a split view.
 pub fn build_vpn_sidebar(
     app_state: &Arc<Mutex<AppState>>,
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
     window: &adw::ApplicationWindow,
-) -> (gtk4::ListBox, adw::NavigationPage) {
+) -> (gtk4::ListBox, gtk4::SearchEntry, adw::NavigationPage) {
     let profile_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
+        .build();
+
+    let search_entry = gtk4::SearchEntry::builder()
+        .placeholder_text("Search profiles\u{2026}")
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
         .build();
 
     let sidebar_scroll = gtk4::ScrolledWindow::builder()
@@ -41,14 +49,20 @@ pub fn build_vpn_sidebar(
         .child(&profile_list)
         .build();
 
+    let sidebar_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    sidebar_box.append(&search_entry);
+    sidebar_box.append(&sidebar_scroll);
+
     let sidebar_page = adw::NavigationPage::builder()
         .title("Profiles")
-        .child(&sidebar_scroll)
+        .child(&sidebar_box)
         .build();
 
     // Paint the initial state.
     {
-        let s = app_state.lock().expect("lock");
+        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         populate_vpn_sidebar(
             &profile_list,
             &s.profiles,
@@ -57,10 +71,11 @@ pub fn build_vpn_sidebar(
             window,
             rt,
             tx,
+            "",
         );
     }
 
-    (profile_list, sidebar_page)
+    (profile_list, search_entry, sidebar_page)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,16 +97,39 @@ pub fn populate_vpn_sidebar(
     window: &adw::ApplicationWindow,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
+    filter: &str,
 ) {
     // Clear all children.
     while let Some(child) = list_box.first_child() {
         list_box.remove(&child);
     }
 
-    if profiles.is_empty() {
+    // Apply search filter.
+    let filter_lower = filter.to_lowercase();
+    let filtered: Vec<&ProfileSummary> = if filter.is_empty() {
+        profiles.iter().collect()
+    } else {
+        profiles
+            .iter()
+            .filter(|p| {
+                p.name.to_lowercase().contains(&filter_lower)
+                    || p.backend.as_str().to_lowercase().contains(&filter_lower)
+            })
+            .collect()
+    };
+
+    if filtered.is_empty() {
         let placeholder = adw::ActionRow::builder()
-            .title("No profiles yet")
-            .subtitle("Use the + button to add one")
+            .title(if filter.is_empty() {
+                "No profiles yet"
+            } else {
+                "No matching profiles"
+            })
+            .subtitle(if filter.is_empty() {
+                "Use the + button to add one"
+            } else {
+                "Try a different search term"
+            })
             .activatable(false)
             .build();
         list_box.append(&placeholder);
@@ -101,7 +139,7 @@ pub fn populate_vpn_sidebar(
     let active_id = vpn_state.profile_id().map(|id| id.to_string());
 
     // Display alphabetically so the list is stable.
-    let mut sorted: Vec<&ProfileSummary> = profiles.iter().collect();
+    let mut sorted: Vec<&ProfileSummary> = filtered;
     sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     for profile in &sorted {

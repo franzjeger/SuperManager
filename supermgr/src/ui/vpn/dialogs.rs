@@ -33,7 +33,7 @@ pub fn import_wireguard(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().expect("lock").daemon_available {
+    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -109,7 +109,7 @@ pub fn import_toml_config(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().expect("lock").daemon_available {
+    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -205,7 +205,7 @@ pub fn import_openvpn(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().expect("lock").daemon_available {
+    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -1029,7 +1029,7 @@ pub fn show_logs_dialog(
         .default_height(600)
         .transient_for(window)
         .build();
-    log_window.set_opacity(app_settings.lock().expect("lock").opacity);
+    log_window.set_opacity(app_settings.lock().unwrap_or_else(|e| e.into_inner()).opacity);
 
     let text_view = gtk4::TextView::builder()
         .editable(false)
@@ -1175,7 +1175,7 @@ pub fn show_settings_dialog(
         .model(&theme_model)
         .build();
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         let idx = match s.color_scheme {
             ColorScheme::Default => 0,
             ColorScheme::Light => 1,
@@ -1190,7 +1190,7 @@ pub fn show_settings_dialog(
         .subtitle("Window transparency")
         .build();
     let opacity_adj = gtk4::Adjustment::new(
-        app_settings.lock().expect("lock").opacity * 100.0,
+        app_settings.lock().unwrap_or_else(|e| e.into_inner()).opacity * 100.0,
         10.0,
         100.0,
         1.0,
@@ -1223,7 +1223,7 @@ pub fn show_settings_dialog(
         .subtitle("Uses `claude` CLI — requires Claude Code login")
         .build();
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         sub_row.set_active(s.use_claude_subscription);
     }
     console_group.add(&sub_row);
@@ -1232,7 +1232,7 @@ pub fn show_settings_dialog(
         .title("Anthropic API Key (only if subscription disabled)")
         .build();
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         if !s.anthropic_api_key.is_empty() {
             api_key_row.set_text(&s.anthropic_api_key);
         }
@@ -1246,7 +1246,7 @@ pub fn show_settings_dialog(
         sub_row.connect_active_notify(move |row| {
             let active = row.is_active();
             api_key_row.set_sensitive(!active);
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.use_claude_subscription = active;
             s.save();
         });
@@ -1256,7 +1256,7 @@ pub fn show_settings_dialog(
         let app_settings = Arc::clone(&app_settings);
         api_key_row.connect_changed(move |row| {
             let key = row.text().to_string();
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.anthropic_api_key = key;
             s.save();
         });
@@ -1268,7 +1268,7 @@ pub fn show_settings_dialog(
         .description("Master password and session lock")
         .build();
 
-    let has_pw = app_settings.lock().expect("lock").has_password();
+    let has_pw = app_settings.lock().unwrap_or_else(|e| e.into_inner()).has_password();
 
     let pw_status_row = adw::ActionRow::builder()
         .title("Master Password")
@@ -1293,7 +1293,7 @@ pub fn show_settings_dialog(
         let app_settings_rm = Arc::clone(&app_settings);
         let pw_status_row_rm = pw_status_row.clone();
         remove_pw_btn.connect_clicked(move |btn| {
-            let mut s = app_settings_rm.lock().expect("lock");
+            let mut s = app_settings_rm.lock().unwrap_or_else(|e| e.into_inner());
             s.clear_password();
             pw_status_row_rm.set_subtitle("Not set");
             btn.set_visible(false);
@@ -1315,7 +1315,7 @@ pub fn show_settings_dialog(
         .title("Auto-lock timeout")
         .subtitle("Minutes of inactivity (0 = disabled)")
         .adjustment(&gtk4::Adjustment::new(
-            app_settings.lock().expect("lock").auto_lock_minutes as f64,
+            app_settings.lock().unwrap_or_else(|e| e.into_inner()).auto_lock_minutes as f64,
             0.0,
             120.0,
             1.0,
@@ -1328,7 +1328,7 @@ pub fn show_settings_dialog(
     {
         let app_settings = Arc::clone(&app_settings);
         auto_lock_row.connect_value_notify(move |row| {
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             {
                 s.auto_lock_minutes = row.value() as u64;
@@ -1347,7 +1347,7 @@ pub fn show_settings_dialog(
         .title("Webhook URL")
         .build();
     {
-        let s = app_settings.lock().expect("lock");
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         if !s.webhook_url.is_empty() {
             webhook_url_row.set_text(&s.webhook_url);
         }
@@ -1358,14 +1358,14 @@ pub fn show_settings_dialog(
         .title("Host down alerts")
         .subtitle("Notify when an SSH host becomes unreachable")
         .build();
-    host_down_toggle.set_active(app_settings.lock().expect("lock").webhook_on_host_down);
+    host_down_toggle.set_active(app_settings.lock().unwrap_or_else(|e| e.into_inner()).webhook_on_host_down);
     notify_group.add(&host_down_toggle);
 
     let vpn_disconnect_toggle = adw::SwitchRow::builder()
         .title("VPN disconnect alerts")
         .subtitle("Notify when a VPN tunnel drops unexpectedly")
         .build();
-    vpn_disconnect_toggle.set_active(app_settings.lock().expect("lock").webhook_on_vpn_disconnect);
+    vpn_disconnect_toggle.set_active(app_settings.lock().unwrap_or_else(|e| e.into_inner()).webhook_on_vpn_disconnect);
     notify_group.add(&vpn_disconnect_toggle);
 
     let test_webhook_row = adw::ActionRow::builder()
@@ -1408,7 +1408,7 @@ pub fn show_settings_dialog(
             let url = row.text().to_string();
             let on_host_down = host_down_toggle.is_active();
             let on_vpn_disconnect = vpn_disconnect_toggle.is_active();
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.webhook_url = url.clone();
             s.save();
             push_webhook_to_daemon(&rt, url, on_host_down, on_vpn_disconnect);
@@ -1423,7 +1423,7 @@ pub fn show_settings_dialog(
         let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
         host_down_toggle.connect_active_notify(move |row| {
             let active = row.is_active();
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.webhook_on_host_down = active;
             s.save();
             let url = webhook_url_row.text().to_string();
@@ -1440,7 +1440,7 @@ pub fn show_settings_dialog(
         let host_down_toggle = host_down_toggle.clone();
         vpn_disconnect_toggle.connect_active_notify(move |row| {
             let active = row.is_active();
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.webhook_on_vpn_disconnect = active;
             s.save();
             let url = webhook_url_row.text().to_string();
@@ -1670,7 +1670,7 @@ pub fn show_settings_dialog(
                 ColorScheme::Dark => adw::ColorScheme::ForceDark,
             };
             adw::StyleManager::default().set_color_scheme(adw_scheme);
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.color_scheme = scheme;
             s.save();
         });
@@ -1682,7 +1682,7 @@ pub fn show_settings_dialog(
         opacity_scale.connect_value_changed(move |scale| {
             let val = scale.value() / 100.0;
             window.set_opacity(val);
-            let mut s = app_settings.lock().expect("lock");
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             s.opacity = val;
             s.save();
         });
@@ -1696,7 +1696,7 @@ fn show_change_password_dialog(
     window: &adw::ApplicationWindow,
     app_settings: Arc<Mutex<AppSettings>>,
 ) {
-    let has_pw = app_settings.lock().expect("lock").has_password();
+    let has_pw = app_settings.lock().unwrap_or_else(|e| e.into_inner()).has_password();
 
     let dialog = adw::Dialog::builder()
         .title(if has_pw { "Change Password" } else { "Set Password" })
@@ -1757,7 +1757,7 @@ fn show_change_password_dialog(
         let status = status.clone();
         let dialog = dialog.clone();
         save_btn.connect_clicked(move |_| {
-            let s = app_settings.lock().expect("lock");
+            let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             let has = s.has_password();
             if has {
                 let cur = current_row.text().to_string();
@@ -1782,7 +1782,7 @@ fn show_change_password_dialog(
                 return;
             }
             {
-                let mut s = app_settings.lock().expect("lock");
+                let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
                 s.set_password(&new_pw);
             }
             dialog.close();

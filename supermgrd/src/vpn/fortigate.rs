@@ -123,7 +123,19 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
         .args(args)
         .output()
         .await
-        .map_err(BackendError::Io)?;
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                BackendError::Interface(
+                    "swanctl not found — install strongswan and strongswan-swanctl".into(),
+                )
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                BackendError::Interface(
+                    "permission denied running swanctl — the daemon must run as root".into(),
+                )
+            } else {
+                BackendError::Io(e)
+            }
+        })?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -579,9 +591,16 @@ impl VpnBackend for FortiGateBackend {
 
         info!("writing swanctl config to {}", config_path.display());
         tokio::fs::write(&config_path, &config_text).await.map_err(|e| {
+            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                " — the daemon must run as root to write to /etc/swanctl/conf.d/"
+            } else if e.kind() == std::io::ErrorKind::NotFound {
+                " — /etc/swanctl/conf.d/ does not exist; install strongswan-swanctl"
+            } else {
+                ""
+            };
             BackendError::Subprocess {
                 command: "write swanctl config".into(),
-                message: format!("{}: {e}", config_path.display()),
+                message: format!("{}: {e}{hint}", config_path.display()),
             }
         })?;
 
@@ -608,15 +627,23 @@ impl VpnBackend for FortiGateBackend {
                     None => {
                         let _ = tokio::fs::remove_file(&config_path).await;
                         return Err(BackendError::Interface(format!(
-                            "hostname '{}' resolved to zero addresses",
+                            "FortiGate hostname '{}' resolved to zero addresses — \
+                             verify the hostname in the profile configuration",
                             fg_cfg.host
                         )));
                     }
                 },
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&config_path).await;
+                    let hint = if format!("{e}").contains("Name or service not known") {
+                        " — check that the hostname is correct and DNS is working"
+                    } else if format!("{e}").contains("Temporary failure") {
+                        " — DNS server is unreachable; check your network connection"
+                    } else {
+                        ""
+                    };
                     return Err(BackendError::Interface(format!(
-                        "resolve '{}': {e}",
+                        "cannot resolve FortiGate host '{}': {e}{hint}",
                         fg_cfg.host
                     )));
                 }
@@ -717,9 +744,24 @@ impl VpnBackend for FortiGateBackend {
             } else {
                 meaningful.join("\n")
             };
+            let hint = if message.contains("EAP_FAILURE") || message.contains("AUTHENTICATION_FAILED") || message.contains("AUTH_FAILED") {
+                "authentication failed — verify your username and password in the profile"
+            } else if message.contains("TIMEOUT") || message.contains("timed out") || message.contains("establishing connection") {
+                "connection timed out — the FortiGate gateway may be unreachable; \
+                 check your network connection and verify the gateway hostname"
+            } else if message.contains("NO_PROPOSAL_CHOSEN") || message.contains("no matching proposal") {
+                "IKE negotiation failed (no matching proposal) — the FortiGate may not \
+                 support the configured cipher suites; check VPN settings on the firewall"
+            } else if message.contains("Permission denied") || message.contains("EPERM") {
+                "permission denied — the daemon must run as root to initiate IPsec tunnels"
+            } else if message.contains("connection not found") {
+                "strongSwan configuration not loaded — ensure charon is running \
+                 (systemctl start strongswan)"
+            } else {
+                "IKE/IPsec negotiation failed"
+            };
             return Err(BackendError::ConnectionFailed(format!(
-                "swanctl --initiate failed: {}",
-                message
+                "{hint}: {message}",
             )));
         }
 

@@ -310,9 +310,15 @@ impl WireGuardBackend {
             if let Some(ref ep) = peer.endpoint {
                 let addr = tokio::net::lookup_host(ep)
                     .await
-                    .map_err(|e| BackendError::Interface(format!("resolve {ep}: {e}")))?
+                    .map_err(|e| BackendError::Interface(format!(
+                        "cannot resolve peer endpoint '{ep}': {e} — \
+                         check that the hostname is correct and DNS is working"
+                    )))?
                     .next()
-                    .ok_or_else(|| BackendError::Interface(format!("no addresses for {ep}")))?;
+                    .ok_or_else(|| BackendError::Interface(format!(
+                        "peer endpoint '{ep}' resolved to zero addresses — \
+                         verify the hostname in your WireGuard configuration"
+                    )))?;
                 peer_builder = peer_builder.set_endpoint(addr);
             }
 
@@ -356,7 +362,22 @@ impl WireGuardBackend {
         debug!("applying WireGuard config to {}", iface_name);
         update
             .apply(&iface, Backend::Kernel)
-            .map_err(|e| BackendError::Interface(format!("DeviceUpdate failed: {e}")))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("Permission denied") || msg.contains("EPERM") || msg.contains("Operation not permitted") {
+                    BackendError::Interface(format!(
+                        "permission denied creating WireGuard interface '{iface_name}': \
+                         the daemon must run as root (or with CAP_NET_ADMIN) — {e}"
+                    ))
+                } else if msg.contains("not supported") || msg.contains("ENOTSUP") || msg.contains("No such device") {
+                    BackendError::Interface(format!(
+                        "WireGuard kernel module not loaded or not available: \
+                         ensure CONFIG_WIREGUARD is enabled in your kernel — {e}"
+                    ))
+                } else {
+                    BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
+                }
+            })?;
 
         // Tell NetworkManager not to manage this interface so it does not
         // appear as a new network adapter in the system tray / network applet.
@@ -613,13 +634,22 @@ impl WireGuardBackend {
                     cidr, iface_name, out.status, stdout.trim(), stderr.trim()
                 );
                 if !out.status.success() {
+                    let stderr_str = stderr.trim();
                     error!(
                         "ip route add {cidr} dev {iface_name} failed: exit={} stderr={:?}",
-                        out.status, stderr.trim()
+                        out.status, stderr_str
                     );
+                    let hint = if stderr_str.contains("Permission denied") || stderr_str.contains("RTNETLINK answers: Operation not permitted") {
+                        " — the daemon must run as root to manage routes"
+                    } else if stderr_str.contains("File exists") {
+                        " — a conflicting route already exists; disconnect any other VPN first"
+                    } else if stderr_str.contains("No such device") {
+                        " — the WireGuard interface disappeared unexpectedly"
+                    } else {
+                        ""
+                    };
                     return Err(BackendError::Interface(format!(
-                        "ip route add {cidr} dev {iface_name} failed: {} — {}",
-                        out.status, stderr.trim()
+                        "failed to add route {cidr} via {iface_name}: {stderr_str}{hint}",
                     )));
                 }
 

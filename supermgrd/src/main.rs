@@ -472,7 +472,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
             line.push_str(&v.extras.join(" "));
         }
 
-        let mut buf = self.buf.lock().unwrap();
+        let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         if buf.len() >= self.cap {
             buf.pop_front();
         }

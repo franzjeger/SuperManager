@@ -273,9 +273,18 @@ impl VpnBackend for OpenVpnBackend {
         }
 
         if !ok {
-            return Err(BackendError::Interface(format!(
-                "openvpn3 config-import failed: {}",
-                stderr.trim()
+            let stderr_str = stderr.trim();
+            let hint = if stderr_str.contains("already exists") {
+                " — a config with this name already exists; try disconnecting first"
+            } else if stderr_str.contains("No such file") || stderr_str.contains("not found") {
+                " — the .ovpn config file is missing or unreadable"
+            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed") {
+                " — permission denied; ensure the daemon has access to the openvpn3 config manager"
+            } else {
+                ""
+            };
+            return Err(BackendError::Config(format!(
+                "openvpn3 config-import failed: {stderr_str}{hint}",
             )));
         }
         info!("OpenVPN3: config imported as '{}': {}", config_name, stdout.trim());
@@ -305,9 +314,18 @@ impl VpnBackend for OpenVpnBackend {
             // Best-effort cleanup of the imported config.
             let _ =
                 run_openvpn3(&["config-remove", "--config", &config_name, "--force"]).await;
+            let stderr_str = stderr.trim();
+            let hint = if stderr_str.contains("AUTH_FAILED") || stderr_str.contains("auth-failure") {
+                "authentication failed — check your username and password"
+            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed") {
+                "permission denied — ensure the daemon has access to the openvpn3 session bus"
+            } else if stderr_str.contains("TLS") || stderr_str.contains("certificate") {
+                "TLS/certificate error — verify the server certificate and CA configuration"
+            } else {
+                "session failed to start"
+            };
             return Err(BackendError::Interface(format!(
-                "openvpn3 session-start failed: {}",
-                stderr.trim()
+                "openvpn3 session-start: {hint}: {stderr_str}",
             )));
         }
 
@@ -449,9 +467,16 @@ impl VpnBackend for OpenVpnBackend {
                  (last status: '{poll_last_status}') — cleaning up"
             );
             let _ = self.disconnect().await;
-            return Err(BackendError::Interface(format!(
-                "OpenVPN3 session failed to connect within 60 s \
-                 (last status: '{poll_last_status}')"
+            let hint = if poll_last_status.contains("AUTH_FAILED") {
+                "authentication failed — check your credentials (username/password or certificate)"
+            } else if poll_last_status.contains("DISCONNECTED") || poll_last_status.contains("FAILED") {
+                "connection was rejected by the server — check VPN server logs for details"
+            } else {
+                "connection timed out after 60 s — the server may be unreachable or \
+                 not responding; check your network and the server address"
+            };
+            return Err(BackendError::ConnectionFailed(format!(
+                "{hint} (last status: '{poll_last_status}')"
             )));
         }
 

@@ -57,7 +57,7 @@ static SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None
 
 /// Reset the Claude CLI session (e.g. on "Clear conversation").
 pub fn reset_session() {
-    *SESSION_ID.lock().unwrap() = None;
+    *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Send a message using Claude Code CLI (subscription-based, no API tokens).
@@ -100,7 +100,7 @@ pub async fn send_message_subscription(
         "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
     );
 
-    let session_id = SESSION_ID.lock().unwrap().clone();
+    let session_id = SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     let mut cmd = tokio::process::Command::new("claude");
     cmd.args([
@@ -223,7 +223,7 @@ pub async fn send_message_subscription(
     // Save session ID for next message.
     if let Ok(Some(sid)) = reader_handle.await {
         info!("Claude CLI session: {sid}");
-        *SESSION_ID.lock().unwrap() = Some(sid);
+        *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid);
     }
 
     Ok(())
