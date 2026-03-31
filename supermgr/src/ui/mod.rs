@@ -334,9 +334,15 @@ pub fn build_ui(
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
+    let ssh_export_all_btn = gtk4::Button::builder()
+        .label("Export All to ~/.ssh/")
+        .has_frame(false)
+        .halign(gtk4::Align::Fill)
+        .build();
     ssh_keys_add_group.append(&ssh_gen_key_btn);
     ssh_keys_add_group.append(&ssh_import_keys_btn);
     ssh_keys_add_group.append(&ssh_audit_btn);
+    ssh_keys_add_group.append(&ssh_export_all_btn);
 
     // SSH Hosts buttons (shown when SSH > Hosts sub-tab is active).
     let ssh_hosts_add_group = gtk4::Box::builder()
@@ -987,6 +993,17 @@ pub fn build_ui(
         ssh_audit_btn.connect_clicked(move |_| {
             popover.popdown();
             ssh::dialogs::show_audit_log_dialog(&window, &rt);
+        });
+    }
+    {
+        let popover = popover.clone();
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_export_all_btn.connect_clicked(move |_| {
+            popover.popdown();
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            ssh::key_list::export_all_keys_to_ssh_dir(&s.ssh_keys, &rt, &tx);
         });
     }
 

@@ -940,8 +940,9 @@ pub fn show_edit_host_dialog(
         .visible(auth_idx == 0)
         .build();
 
+    let pass_title = if host.has_password { "Password (configured — leave empty to keep)" } else { "Password" };
     let pass_row = adw::PasswordEntryRow::builder()
-        .title("Password")
+        .title(pass_title)
         .visible(auth_idx == 1)
         .build();
 
@@ -1055,21 +1056,31 @@ pub fn show_edit_host_dialog(
     toolbar_view.set_content(Some(&content_box));
     dialog.set_child(Some(&toolbar_view));
 
+    let has_password = host.has_password;
     let validate: Rc<dyn Fn()> = {
         let label_row = label_row.clone();
         let hostname_row = hostname_row.clone();
         let username_row = username_row.clone();
+        let auth_row = auth_row.clone();
+        let pass_row = pass_row.clone();
         let save_btn = save_btn.clone();
         Rc::new(move || {
-            let ok = !label_row.text().is_empty()
+            let basic_ok = !label_row.text().is_empty()
                 && !hostname_row.text().is_empty()
                 && !username_row.text().is_empty();
-            save_btn.set_sensitive(ok);
+            // When auth method is Password and no password is stored yet,
+            // require the user to enter one.
+            let pass_ok = auth_row.selected() == 0 // key auth — no password needed
+                || has_password                      // already has a stored password
+                || !pass_row.text().is_empty();      // user entered a new password
+            save_btn.set_sensitive(basic_ok && pass_ok);
         })
     };
     { let v = Rc::clone(&validate); label_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); hostname_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); username_row.connect_changed(move |_| v()); }
+    { let v = Rc::clone(&validate); pass_row.connect_changed(move |_| v()); }
+    { let v = Rc::clone(&validate); auth_row.connect_selected_notify(move |_| v()); }
 
     {
         let dialog = dialog.clone();

@@ -1653,7 +1653,18 @@ impl DaemonService {
             }
         }
         if let Some(v) = updates.get("auth_method").and_then(|v| v.as_str()) {
-            if let Ok(am) = serde_json::from_value(serde_json::Value::String(v.to_owned())) {
+            if let Ok(am) = serde_json::from_value::<AuthMethod>(serde_json::Value::String(v.to_owned())) {
+                if am != host.auth_method {
+                    // Clean up stale fields when switching auth method.
+                    match am {
+                        AuthMethod::Password => {
+                            host.auth_key_id = None;
+                        }
+                        AuthMethod::Key => {
+                            host.auth_password_ref = None;
+                        }
+                    }
+                }
                 host.auth_method = am;
             }
         }

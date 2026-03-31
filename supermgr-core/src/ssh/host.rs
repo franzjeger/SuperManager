@@ -157,6 +157,10 @@ pub struct SshHostSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vpn_profile_id: Option<Uuid>,
 
+    /// Whether a password is stored for this host.
+    #[serde(default)]
+    pub has_password: bool,
+
     /// Whether a FortiGate REST API token is configured for this host.
     #[serde(default)]
     pub has_api: bool,
@@ -195,6 +199,7 @@ impl From<&SshHost> for SshHostSummary {
             auth_method: host.auth_method,
             auth_key_id: host.auth_key_id,
             vpn_profile_id: host.vpn_profile_id,
+            has_password: host.auth_password_ref.is_some(),
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
             has_unifi_controller: host.unifi_controller_url.is_some(),
