@@ -42,6 +42,25 @@ use crate::vpn::backend_for_profile;
 
 
 // ---------------------------------------------------------------------------
+// Port forward tracking
+// ---------------------------------------------------------------------------
+
+/// Metadata and handle for an active port forward.
+pub struct PortForwardEntry {
+    /// UUID of the SSH host this forward belongs to.
+    pub host_id: String,
+    /// Local TCP port being listened on.
+    pub local_port: u16,
+    /// Remote host being forwarded to.
+    pub remote_host: String,
+    /// Remote port being forwarded to.
+    pub remote_port: u16,
+    /// Handle to the background task running the listener loop.
+    /// Aborting this handle tears down the forward.
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+// ---------------------------------------------------------------------------
 // Daemon-internal state (not exposed over D-Bus directly)
 // ---------------------------------------------------------------------------
 
@@ -80,6 +99,13 @@ pub struct DaemonState {
     /// Directory where SSH host TOML files are stored.
     pub ssh_host_dir: PathBuf,
 
+    // ---- Active port forwards ----
+
+    /// Active SSH port forwards, keyed by forward ID.
+    /// The `JoinHandle` runs the local TCP listener + forwarding loop;
+    /// dropping or aborting it tears down the forward.
+    pub port_forwards: std::collections::HashMap<String, PortForwardEntry>,
+
     // ---- Webhook notification settings (set via D-Bus) ----
 
     /// Webhook URL for outgoing notifications (Slack/Teams/Discord).
@@ -107,6 +133,7 @@ impl DaemonState {
             host_health: std::collections::HashMap::new(),
             ssh_key_dir: base.join("ssh/keys"),
             ssh_host_dir: base.join("ssh/hosts"),
+            port_forwards: std::collections::HashMap::new(),
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
@@ -254,6 +281,10 @@ impl DaemonState {
 // D-Bus service object
 // ---------------------------------------------------------------------------
 
+/// Callback type for dynamically changing the daemon's tracing log level at
+/// runtime via the `reload` layer.
+pub type LogLevelSetter = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 /// The D-Bus service object.  Registered at `/org/supermgr/Daemon`.
 pub struct DaemonService {
     /// Shared mutable state.
@@ -262,6 +293,8 @@ pub struct DaemonService {
     pub shutdown_tx: watch::Sender<bool>,
     /// Ring buffer of recent log lines (filled by the `RingLayer` tracing layer).
     pub log_buffer: Arc<std::sync::Mutex<VecDeque<String>>>,
+    /// Callback to dynamically change the tracing `EnvFilter` log level.
+    pub set_log_level: LogLevelSetter,
 }
 
 #[interface(name = "org.supermgr.Daemon1")]
@@ -397,6 +430,15 @@ impl DaemonService {
     async fn get_logs(&self) -> fdo::Result<Vec<String>> {
         let buf = self.log_buffer.lock().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         Ok(buf.iter().cloned().collect())
+    }
+
+    /// Dynamically change the daemon's tracing log level at runtime.
+    ///
+    /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
+    /// `"info"`, `"debug"`, or `"trace"`.
+    async fn set_log_level(&self, level: &str) -> fdo::Result<()> {
+        info!("set_log_level: changing to '{level}'");
+        (self.set_log_level)(level).map_err(|e| fdo::Error::Failed(e))
     }
 
     // =======================================================================
@@ -1621,11 +1663,19 @@ impl DaemonService {
         if let Some(v) = updates.get("vpn_profile_id") {
             host.vpn_profile_id = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         }
+        if let Some(v) = updates.get("proxy_jump") {
+            host.proxy_jump = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
+        }
         if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
             host.api_port = Some(v as u16);
         }
         if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
             host.pinned = v;
+        }
+        if let Some(v) = updates.get("port_forwards") {
+            if let Ok(pf) = serde_json::from_value(v.clone()) {
+                host.port_forwards = pf;
+            }
         }
         host.updated_at = chrono::Utc::now();
 
@@ -2416,7 +2466,7 @@ impl DaemonService {
         }
 
         // Extract all needed data under the lock, then drop it before async I/O.
-        let (port, username, hostname, auth_method, secret_label, password_label) = {
+        let (port, username, hostname, auth_method, secret_label, password_label, proxy_jump_str) = {
             let state = self.state.lock().await;
             let host = state.ssh_hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
@@ -2432,7 +2482,10 @@ impl DaemonService {
 
             let pw_label = host.auth_password_ref.as_ref().map(|r| r.label().to_owned());
 
-            (host.port, host.username.clone(), host.hostname.clone(), host.auth_method, key_label, pw_label)
+            // Build ProxyJump chain string for -J flag (e.g. "user1@jump1:22,user2@jump2:22").
+            let jump_str = build_proxy_jump_chain(host.proxy_jump, &state.ssh_hosts);
+
+            (host.port, host.username.clone(), host.hostname.clone(), host.auth_method, key_label, pw_label, jump_str)
         };
 
         crate::audit::log_event("SSH_CONNECT", &format!("{username}@{hostname}:{port}"));
@@ -2476,12 +2529,14 @@ impl DaemonService {
                     }
                 }
             }
+            let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
             format!(
-                "{pw_cmd}ssh -p {port} -o PreferredAuthentications=password \
+                "{pw_cmd}ssh -p {port}{jump_flag} -o PreferredAuthentications=password \
                  -o PubkeyAuthentication=no {username}@{hostname}"
             )
         } else {
-            format!("ssh -p {port} {username}@{hostname}")
+            let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
+            format!("ssh -p {port}{jump_flag} {username}@{hostname}")
         };
 
         if auth_method == AuthMethod::Key {
@@ -2504,8 +2559,9 @@ impl DaemonService {
                         // root, so we wrap the command: copy the key to a
                         // user-owned temp file with correct permissions, then ssh.
                         let user_key = format!("/tmp/.supermgr_key_{}", id.simple());
+                        let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
                         cmd = format!(
-                            "cp {src} {dst} && chmod 600 {dst} && ssh -p {port} -i {dst} -o IdentitiesOnly=yes {username}@{hostname}; rm -f {dst}",
+                            "cp {src} {dst} && chmod 600 {dst} && ssh -p {port}{jump_flag} -i {dst} -o IdentitiesOnly=yes {username}@{hostname}; rm -f {dst}",
                             src = src_path.display(),
                             dst = user_key,
                         );
@@ -3467,6 +3523,143 @@ impl DaemonService {
         Ok(result.to_string())
     }
 
+    // ===================================================================
+    // SSH port forwarding
+    // ===================================================================
+
+    /// Start a local TCP port forward through an SSH tunnel.
+    ///
+    /// Returns a unique forward ID string.
+    async fn ssh_start_port_forward(
+        &self,
+        host_id: &str,
+        local_port: u16,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> fdo::Result<String> {
+        let hid = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        // Clone the data we need before starting the background task.
+        let state = self.state.lock().await;
+        let host = state
+            .ssh_hosts
+            .get(&hid)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+            .clone();
+        drop(state);
+
+        // Bind the local TCP listener first so we fail fast on port conflicts.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("bind 127.0.0.1:{local_port}: {e}")))?;
+
+        let forward_id = Uuid::new_v4().to_string();
+        let fwd_id_for_task = forward_id.clone();
+        let remote_host_owned = remote_host.to_owned();
+        let state_arc = Arc::clone(&self.state);
+
+        let task = tokio::spawn(async move {
+            let forward_id = fwd_id_for_task;
+            info!(
+                "port forward {}: listening on 127.0.0.1:{} → {}:{}",
+                forward_id, local_port, remote_host_owned, remote_port
+            );
+
+            // Establish one SSH session for this forward's lifetime.
+            let session = match connect_to_ssh_host(&host, &None, &state_arc).await {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    error!("port forward: SSH connect failed: {e}");
+                    return;
+                }
+            };
+
+            loop {
+                let (tcp_stream, _peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("port forward: accept failed: {e}");
+                        break;
+                    }
+                };
+
+                let session = Arc::clone(&session);
+                let rhost = remote_host_owned.clone();
+
+                tokio::spawn(async move {
+                    let channel = match session
+                        .channel_open_direct_tcpip(&rhost, remote_port)
+                        .await
+                    {
+                        Ok(ch) => ch,
+                        Err(e) => {
+                            error!("port forward: direct-tcpip open failed: {e}");
+                            return;
+                        }
+                    };
+
+                    let mut stream = channel.into_stream();
+                    let (mut tcp_read, mut tcp_write) = tokio::io::split(tcp_stream);
+                    let (mut ch_read, mut ch_write) = tokio::io::split(&mut stream);
+
+                    let _ = tokio::select! {
+                        r = tokio::io::copy(&mut tcp_read, &mut ch_write) => r,
+                        r = tokio::io::copy(&mut ch_read, &mut tcp_write) => r,
+                    };
+                });
+            }
+        });
+
+        let fwd_id = forward_id.clone();
+        let mut state = self.state.lock().await;
+        state.port_forwards.insert(
+            fwd_id.clone(),
+            PortForwardEntry {
+                host_id: host_id.to_owned(),
+                local_port,
+                remote_host: remote_host.to_owned(),
+                remote_port,
+                task,
+            },
+        );
+
+        info!("started port forward {fwd_id}: 127.0.0.1:{local_port} → {remote_host}:{remote_port} via {host_id}");
+        Ok(fwd_id)
+    }
+
+    /// Stop an active port forward.
+    async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()> {
+        let mut state = self.state.lock().await;
+        let entry = state
+            .port_forwards
+            .remove(forward_id)
+            .ok_or_else(|| fdo::Error::UnknownObject("forward not found".into()))?;
+        entry.task.abort();
+        info!("stopped port forward {forward_id}");
+        Ok(())
+    }
+
+    /// List active port forwards as a JSON array.
+    async fn ssh_list_port_forwards(&self) -> fdo::Result<String> {
+        let state = self.state.lock().await;
+        let list: Vec<serde_json::Value> = state
+            .port_forwards
+            .iter()
+            .map(|(id, entry)| {
+                serde_json::json!({
+                    "forward_id": id,
+                    "host_id": entry.host_id,
+                    "local_port": entry.local_port,
+                    "remote_host": entry.remote_host,
+                    "remote_port": entry.remote_port,
+                })
+            })
+            .collect();
+        Ok(serde_json::to_string(&list)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?)
+    }
+
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]
     async fn host_health_changed(
@@ -3484,7 +3677,24 @@ impl DaemonService {
 ///
 /// Tries the key being pushed first (if available), then falls back to the
 /// host's own auth key or password.
+///
+/// If the host has a `proxy_jump` configured, the connection is tunnelled
+/// through the jump host (recursively, to support chaining).
 async fn connect_to_ssh_host(
+    host: &SshHost,
+    push_key_pem: &Option<String>,
+    state_arc: &Arc<Mutex<DaemonState>>,
+) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
+    // If a jump host is configured, connect through it.
+    if let Some(jump_id) = host.proxy_jump {
+        return connect_via_jump(host, jump_id, push_key_pem, state_arc, 0).await;
+    }
+
+    connect_direct(host, push_key_pem, state_arc).await
+}
+
+/// Connect directly to a host (no jump host).
+async fn connect_direct(
     host: &SshHost,
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
@@ -3523,6 +3733,122 @@ async fn connect_to_ssh_host(
             }
         }
         Err(supermgr_core::error::SshError::AuthFailed("no password configured".into()))
+    }
+}
+
+/// Build a ProxyJump chain string for the `-J` flag of the `ssh` CLI.
+///
+/// Walks the chain of jump hosts and returns something like
+/// `"user1@host1:22,user2@host2:22"`, or `None` if no jump host is set.
+fn build_proxy_jump_chain(
+    proxy_jump: Option<uuid::Uuid>,
+    hosts: &std::collections::HashMap<uuid::Uuid, SshHost>,
+) -> Option<String> {
+    let mut current = proxy_jump?;
+    let mut parts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for _ in 0..MAX_PROXY_JUMP_DEPTH {
+        if !seen.insert(current) {
+            break; // cycle detected
+        }
+        let host = hosts.get(&current)?;
+        parts.push(format!("{}@{}:{}", host.username, host.hostname, host.port));
+        match host.proxy_jump {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+
+    // Reverse so the outermost jump host is first (SSH -J expects this order).
+    parts.reverse();
+    Some(parts.join(","))
+}
+
+/// Maximum proxy jump chain depth to prevent infinite loops.
+const MAX_PROXY_JUMP_DEPTH: u8 = 10;
+
+/// Connect to a host by first establishing a tunnel through a jump host.
+///
+/// Supports recursive chaining: if the jump host itself has a `proxy_jump`,
+/// we connect through that chain first.
+async fn connect_via_jump(
+    target: &SshHost,
+    jump_id: uuid::Uuid,
+    push_key_pem: &Option<String>,
+    state_arc: &Arc<Mutex<DaemonState>>,
+    depth: u8,
+) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
+    use supermgr_core::error::SshError;
+
+    if depth >= MAX_PROXY_JUMP_DEPTH {
+        return Err(SshError::ConnectionFailed {
+            host: target.hostname.clone(),
+            reason: "proxy jump chain too deep (possible loop)".into(),
+        });
+    }
+
+    // Look up the jump host.
+    let jump_host = {
+        let state = state_arc.lock().await;
+        state.ssh_hosts.get(&jump_id).cloned().ok_or_else(|| SshError::ConnectionFailed {
+            host: target.hostname.clone(),
+            reason: format!("jump host {jump_id} not found"),
+        })?
+    };
+
+    info!(
+        "ProxyJump: connecting to {} via jump host {} (depth {depth})",
+        target.hostname, jump_host.hostname,
+    );
+
+    // Connect to the jump host (recursively if it also has a proxy_jump).
+    let jump_session = if let Some(next_jump_id) = jump_host.proxy_jump {
+        Box::pin(connect_via_jump(&jump_host, next_jump_id, push_key_pem, state_arc, depth + 1)).await?
+    } else {
+        connect_direct(&jump_host, push_key_pem, state_arc).await?
+    };
+
+    // Open a tunnel through the jump host to the target.
+    let tunnel_stream = jump_session
+        .open_tunnel(&target.hostname, target.port)
+        .await?;
+
+    let target_addr = format!("{}:{}", target.hostname, target.port);
+
+    // Authenticate through the tunnel to the target host.
+    if target.auth_method == AuthMethod::Key {
+        if let Some(ref pem) = push_key_pem {
+            return crate::ssh::connection::SshSession::connect_key_stream(
+                tunnel_stream, &target_addr, &target.username, pem,
+            ).await;
+        }
+        if let Some(auth_key_id) = target.auth_key_id {
+            let state = state_arc.lock().await;
+            if let Some(auth_key) = state.ssh_keys.get(&auth_key_id) {
+                let label = auth_key.private_key_ref.label().to_owned();
+                drop(state);
+                if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
+                    if let Ok(pem) = String::from_utf8(bytes) {
+                        return crate::ssh::connection::SshSession::connect_key_stream(
+                            tunnel_stream, &target_addr, &target.username, &pem,
+                        ).await;
+                    }
+                }
+            }
+        }
+        Err(SshError::AuthFailed("no auth key available for target host".into()))
+    } else {
+        if let Some(ref pw_ref) = target.auth_password_ref {
+            if let Ok(bytes) = crate::secrets::retrieve_secret(pw_ref.label()).await {
+                if let Ok(pw) = String::from_utf8(bytes) {
+                    return crate::ssh::connection::SshSession::connect_password_stream(
+                        tunnel_stream, &target_addr, &target.username, &pw,
+                    ).await;
+                }
+            }
+        }
+        Err(SshError::AuthFailed("no password configured for target host".into()))
     }
 }
 

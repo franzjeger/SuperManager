@@ -91,6 +91,7 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn rename_profile(&self, profile_id: &str, new_name: &str) -> fdo::Result<()>;
 //       async fn set_full_tunnel(&self, profile_id: &str, full_tunnel: bool) -> fdo::Result<()>;
 //       async fn get_logs(&self) -> fdo::Result<Vec<String>> { ... }
+//       async fn set_log_level(&self, level: &str) -> fdo::Result<()> { ... }
 //
 //       // --- SSH methods ---
 //       async fn ssh_generate_key(&self, key_type: &str, name: &str, description: &str, tags_json: &str) -> fdo::Result<String> { ... }
@@ -113,6 +114,9 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn fortigate_push_ssh_key(&self, host_id: &str, key_id: &str, admin_user: &str) -> fdo::Result<String> { ... }
+//       async fn ssh_start_port_forward(&self, host_id: &str, local_port: u16, remote_host: &str, remote_port: u16) -> fdo::Result<String> { ... }
+//       async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()> { ... }
+//       async fn ssh_list_port_forwards(&self) -> fdo::Result<String> { ... }
 //
 //       // --- UniFi methods ---
 //       async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String> { ... }
@@ -204,6 +208,12 @@ pub trait Daemon {
     /// Each element is a pre-formatted string `[HH:MM:SS] LEVEL target: message`.
     /// Returns up to 500 lines, oldest first.
     async fn get_logs(&self) -> fdo::Result<Vec<String>>;
+
+    /// Dynamically change the daemon's tracing log level at runtime.
+    ///
+    /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
+    /// `"info"`, `"debug"`, or `"trace"`.
+    async fn set_log_level(&self, level: &str) -> fdo::Result<()>;
 
     /// Return live tunnel statistics as a compact JSON object.
     ///
@@ -543,6 +553,32 @@ pub trait Daemon {
         username: &str,
         password: &str,
     ) -> fdo::Result<()>;
+
+    // =======================================================================
+    // SSH port forwarding
+    // =======================================================================
+
+    /// Start a local TCP port forward through an SSH tunnel.
+    ///
+    /// Binds `local_port` on localhost, and for each accepted connection opens
+    /// an SSH direct-tcpip channel to `remote_host:remote_port`.
+    /// Returns a unique forward ID string that can be passed to
+    /// [`Self::ssh_stop_port_forward`] to tear it down.
+    async fn ssh_start_port_forward(
+        &self,
+        host_id: &str,
+        local_port: u16,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> fdo::Result<String>;
+
+    /// Stop an active port forward by its forward ID.
+    async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()>;
+
+    /// List all active port forwards as a JSON array.
+    ///
+    /// Each element: `{"forward_id":"...","host_id":"...","local_port":N,"remote_host":"...","remote_port":N}`
+    async fn ssh_list_port_forwards(&self) -> fdo::Result<String>;
 
     /// Return the SSH command string for connecting to the given host.
     ///

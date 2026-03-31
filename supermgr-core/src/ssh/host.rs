@@ -17,6 +17,20 @@ pub enum AuthMethod {
     Key,
 }
 
+/// A saved port-forwarding rule (local → remote via SSH tunnel).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortForward {
+    /// Local TCP port to listen on.
+    pub local_port: u16,
+    /// Remote host to forward to (as seen from the SSH server).
+    pub remote_host: String,
+    /// Remote TCP port to forward to.
+    pub remote_port: u16,
+    /// Optional human-readable description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Default SSH port (22).
 fn default_port() -> u16 {
     22
@@ -87,6 +101,14 @@ pub struct SshHost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unifi_api_token_ref: Option<SecretRef>,
 
+    /// Saved port-forwarding rules for this host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<PortForward>,
+
+    /// UUID of another SSH host to use as a jump/bastion host (ProxyJump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_jump: Option<Uuid>,
+
     /// Whether this host is pinned/favourited (appears at the top of lists).
     #[serde(default)]
     pub pinned: bool,
@@ -147,6 +169,14 @@ pub struct SshHostSummary {
     #[serde(default)]
     pub has_unifi_controller: bool,
 
+    /// Saved port-forwarding rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_forwards: Vec<PortForward>,
+
+    /// UUID of another SSH host to use as a jump/bastion host (ProxyJump).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_jump: Option<Uuid>,
+
     /// Whether this host is pinned/favourited.
     #[serde(default)]
     pub pinned: bool,
@@ -168,6 +198,8 @@ impl From<&SshHost> for SshHostSummary {
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
             has_unifi_controller: host.unifi_controller_url.is_some(),
+            port_forwards: host.port_forwards.clone(),
+            proxy_jump: host.proxy_jump,
             pinned: host.pinned,
         }
     }
@@ -196,6 +228,8 @@ mod tests {
             api_verify_tls: true,
             unifi_controller_url: Some("https://unifi.local:8443".into()),
             unifi_api_token_ref: None,
+            port_forwards: vec![],
+            proxy_jump: None,
             pinned: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

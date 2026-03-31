@@ -36,7 +36,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use anyhow::Context;
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info, warn};
-use tracing_subscriber::{fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _};
+use tracing_subscriber::{
+    fmt, layer::SubscriberExt as _, reload, util::SubscriberInitExt as _, EnvFilter, Layer as _,
+};
 
 use daemon::{DaemonService, DaemonState};
 use supermgr_core::dbus::{DBUS_OBJECT_PATH, DBUS_SERVICE};
@@ -50,18 +52,53 @@ const STATS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
-    // 1. Logging — fmt layer (stdout) + ring-buffer layer (in-memory)
+    // 1. Logging — fmt layer (stdout) + file layer + ring-buffer layer
     // -----------------------------------------------------------------------
     let log_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
         Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(500)));
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter, filter_reload_handle) = reload::Layer::new(filter);
+
+    // Persistent log file: /var/log/supermgrd/ when root, else $XDG_STATE_HOME/supermgrd/
+    let log_dir = if nix::unistd::getuid().is_root() {
+        PathBuf::from("/var/log/supermgrd")
+    } else {
+        let base = std::env::var("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+                PathBuf::from(home).join(".local/state")
+            });
+        base.join("supermgrd")
+    };
+
+    let log_path = log_dir.join("supermgrd.log");
+    let file_layer = match setup_file_layer(&log_dir, &log_path) {
+        Ok(layer) => Some(layer),
+        Err(e) => {
+            eprintln!("warning: could not set up log file at {}: {e}", log_path.display());
+            None
+        }
+    };
 
     tracing_subscriber::registry()
         .with(fmt::layer())
         .with(filter)
+        .with(file_layer)
         .with(RingLayer { buf: Arc::clone(&log_buffer), cap: 500 })
         .init();
+
+    // Wrap the reload handle in a closure so DaemonService doesn't need the full generic type.
+    let filter_reload_handle = Arc::new(filter_reload_handle);
+    let set_log_level: daemon::LogLevelSetter = {
+        let handle = Arc::clone(&filter_reload_handle);
+        Arc::new(move |level: &str| {
+            let new_filter = EnvFilter::try_new(level)
+                .map_err(|e| format!("invalid log level '{level}': {e}"))?;
+            handle.reload(new_filter).map_err(|e| format!("reload failed: {e}"))
+        })
+    };
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -144,6 +181,7 @@ async fn main() -> anyhow::Result<()> {
         state: Arc::clone(&state),
         shutdown_tx,
         log_buffer,
+        set_log_level,
     };
 
     conn.object_server()
@@ -411,6 +449,59 @@ async fn check_default_route_after_cleanup() {
         }
         Err(e) => warn!("could not check default route after cleanup: {e}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent file logging
+// ---------------------------------------------------------------------------
+
+/// Maximum log file size before rotation (10 MB).
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Maximum number of rotated log files to keep.
+const LOG_ROTATE_KEEP: u32 = 3;
+
+/// Rotate `supermgrd.log` → `.log.1` → `.log.2` → `.log.3`, removing the oldest.
+fn rotate_log_file(log_path: &std::path::Path) {
+    for i in (1..LOG_ROTATE_KEEP).rev() {
+        let src = log_path.with_extension(format!("log.{i}"));
+        let dst = log_path.with_extension(format!("log.{}", i + 1));
+        let _ = std::fs::rename(&src, &dst);
+    }
+    let dst = log_path.with_extension("log.1");
+    let _ = std::fs::rename(log_path, &dst);
+}
+
+/// Create the log directory, rotate if the file is too large, and return a
+/// `tracing_subscriber` layer that writes to the file.
+fn setup_file_layer<S>(
+    log_dir: &std::path::Path,
+    log_path: &std::path::Path,
+) -> anyhow::Result<fmt::Layer<S, fmt::format::DefaultFields, fmt::format::Format, std::sync::Arc<std::fs::File>>>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    std::fs::create_dir_all(log_dir)
+        .with_context(|| format!("create log dir {}", log_dir.display()))?;
+
+    // Rotate on startup if the file exceeds the size limit.
+    if let Ok(meta) = std::fs::metadata(log_path) {
+        if meta.len() >= LOG_MAX_BYTES {
+            rotate_log_file(log_path);
+        }
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("open log file {}", log_path.display()))?;
+
+    let file = std::sync::Arc::new(file);
+
+    Ok(fmt::layer()
+        .with_writer(file)
+        .with_ansi(false))
 }
 
 // ---------------------------------------------------------------------------

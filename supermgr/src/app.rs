@@ -180,6 +180,10 @@ pub enum AppMsg {
         result: Result<String, String>,
     },
 
+    // Port forwarding messages
+    /// Active port forwards list was refreshed (JSON array).
+    PortForwardsRefreshed(String),
+
     // Console messages
     /// Append a message to the console chat (role = "assistant" or "tool").
     ConsoleResponse(String),

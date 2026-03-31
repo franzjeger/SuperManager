@@ -883,6 +883,7 @@ pub fn show_edit_host_dialog(
     window: &adw::ApplicationWindow,
     host: &SshHostSummary,
     keys: &[SshKeySummary],
+    all_hosts: &[SshHostSummary],
     vpn_profiles: &[ProfileSummary],
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -969,6 +970,25 @@ pub fn show_edit_host_dialog(
         .selected(vpn_idx)
         .build();
 
+    // Jump Host (ProxyJump) combo — "None / Direct" plus all other SSH hosts.
+    let other_hosts: Vec<&SshHostSummary> = all_hosts.iter()
+        .filter(|h| h.id != host.id)
+        .collect();
+    let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
+    jump_names.extend(other_hosts.iter().map(|h| format!("{} ({})", h.label, h.hostname)));
+    let jump_name_refs: Vec<&str> = jump_names.iter().map(|s| s.as_str()).collect();
+    let jump_model = gtk4::StringList::new(&jump_name_refs);
+    let jump_idx = host.proxy_jump
+        .and_then(|jid| other_hosts.iter().position(|h| h.id == jid))
+        .map(|i| (i + 1) as u32)
+        .unwrap_or(0);
+    let jump_row = adw::ComboRow::builder()
+        .title("Jump Host")
+        .subtitle("Connect via bastion/jump host (ProxyJump)")
+        .model(&jump_model)
+        .selected(jump_idx)
+        .build();
+
     let conn_group = adw::PreferencesGroup::builder().title("Connection").build();
     conn_group.add(&label_row);
     conn_group.add(&hostname_row);
@@ -976,6 +996,7 @@ pub fn show_edit_host_dialog(
     conn_group.add(&username_row);
     conn_group.add(&group_row);
     conn_group.add(&device_row);
+    conn_group.add(&jump_row);
 
     let auth_group = adw::PreferencesGroup::builder().title("Authentication").margin_top(12).build();
     auth_group.add(&auth_row);
@@ -1057,6 +1078,7 @@ pub fn show_edit_host_dialog(
 
     let key_ids: Vec<String> = keys.iter().map(|k| k.id.to_string()).collect();
     let vpn_profile_ids: Vec<String> = vpn_profiles.iter().map(|p| p.id.to_string()).collect();
+    let jump_host_ids: Vec<String> = other_hosts.iter().map(|h| h.id.to_string()).collect();
     let host_id = host.id.to_string();
 
     {
@@ -1090,6 +1112,12 @@ pub fn show_edit_host_dialog(
                 if sel > 0 { vpn_profile_ids.get(sel - 1).cloned() } else { None }
             };
 
+            // Jump host: index 0 = None, 1.. = jump_host_ids[i-1]
+            let jump_id = {
+                let sel = jump_row.selected() as usize;
+                if sel > 0 { jump_host_ids.get(sel - 1).cloned() } else { None }
+            };
+
             dialog.close();
             let host_id = host_id.clone();
             let tx = tx.clone();
@@ -1104,6 +1132,7 @@ pub fn show_edit_host_dialog(
                     "auth_method": auth_method,
                     "auth_key_id": key_id,
                     "vpn_profile_id": vpn_id,
+                    "proxy_jump": jump_id,
                 });
                 let msg = match crate::dbus_client::dbus_ssh_update_host(host_id.clone(), host_data.to_string()).await {
                     Ok(()) => {

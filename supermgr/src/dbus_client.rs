@@ -336,6 +336,13 @@ pub async fn dbus_get_logs() -> anyhow::Result<Vec<String>> {
     proxy.get_logs().await.context("GetLogs")
 }
 
+/// Dynamically change the daemon's tracing log level at runtime.
+pub async fn dbus_set_log_level(level: String) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.set_log_level(&level).await.context("SetLogLevel")
+}
+
 /// Call `ListProfiles` on the daemon and return the deserialized list.
 pub async fn dbus_list_profiles() -> anyhow::Result<Vec<ProfileSummary>> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
@@ -619,6 +626,36 @@ pub async fn dbus_ssh_get_host(host_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     Ok(proxy.ssh_get_host(&host_id).await?)
+}
+
+// ---------------------------------------------------------------------------
+// SSH port forwarding
+// ---------------------------------------------------------------------------
+
+pub async fn dbus_ssh_start_port_forward(
+    host_id: String,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy
+        .ssh_start_port_forward(&host_id, local_port, &remote_host, remote_port)
+        .await?)
+}
+
+pub async fn dbus_ssh_stop_port_forward(forward_id: String) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    proxy.ssh_stop_port_forward(&forward_id).await?;
+    Ok(())
+}
+
+pub async fn dbus_ssh_list_port_forwards() -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy.ssh_list_port_forwards().await?)
 }
 
 // ---------------------------------------------------------------------------

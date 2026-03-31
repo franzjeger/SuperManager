@@ -1180,7 +1180,7 @@ pub fn build_ui(
             }
 
             if let Some(Some(host)) = flat.get(idx as usize) {
-                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host);
+                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.ssh_hosts);
                 ssh_content_stack.set_visible_child_name("host-detail");
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
@@ -1194,6 +1194,16 @@ pub fn build_ui(
                         &rt_sel,
                         &tx_sel,
                     );
+                }
+
+                // Refresh port forward active status.
+                if !host.port_forwards.is_empty() {
+                    let tx = tx_sel.clone();
+                    rt_sel.spawn(async move {
+                        if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                            let _ = tx.send(AppMsg::PortForwardsRefreshed(json));
+                        }
+                    });
                 }
             }
         });
@@ -1337,6 +1347,123 @@ pub fn build_ui(
                     }
                 });
             }
+        });
+    }
+
+    // --- Port Forward: "Add Forward" button ----------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.pf_add_btn.connect_clicked(move |_| {
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(host_id) = &s.selected_ssh_host {
+                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                    let host = host.clone();
+                    drop(s);
+                    ssh::host_detail::show_add_port_forward_dialog(
+                        &window, &host, &rt, &tx,
+                    );
+                }
+            }
+        });
+    }
+
+    // --- Port Forward: Start / Stop via listbox row activation ---------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        let pf_listbox = ssh_host_detail.pf_listbox.clone();
+        pf_listbox.connect_row_activated(move |_list, row| {
+            let key = row.widget_name().to_string();
+            if key.is_empty() {
+                return;
+            }
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let host_id = match &s.selected_ssh_host {
+                Some(id) => id.clone(),
+                None => return,
+            };
+            drop(s);
+
+            // Parse the key to get local_port, remote_host, remote_port.
+            let parts: Vec<&str> = key.splitn(3, ':').collect();
+            if parts.len() < 3 {
+                return;
+            }
+            let local_port: u16 = match parts[0].parse() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+            let remote_host = parts[1].to_owned();
+            let remote_port: u16 = match parts[2].parse() {
+                Ok(p) => p,
+                Err(_) => return,
+            };
+
+            let tx = tx.clone();
+            // Toggle: if forward is active (check via list_port_forwards), stop it;
+            // otherwise start it.
+            rt.spawn(async move {
+                // Check if this forward is already active.
+                let active_fwd_id = match crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                    Ok(json) => {
+                        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                            arr.iter().find_map(|entry| {
+                                let eid = entry["host_id"].as_str()?;
+                                let elp = entry["local_port"].as_u64()? as u16;
+                                let erh = entry["remote_host"].as_str()?;
+                                let erp = entry["remote_port"].as_u64()? as u16;
+                                if eid == host_id && elp == local_port && erh == remote_host && erp == remote_port {
+                                    Some(entry["forward_id"].as_str()?.to_owned())
+                                } else {
+                                    None
+                                }
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => None,
+                };
+
+                if let Some(fwd_id) = active_fwd_id {
+                    // Stop the forward.
+                    match crate::dbus_client::dbus_ssh_stop_port_forward(fwd_id).await {
+                        Ok(()) => {
+                            let _ = tx.send(AppMsg::ShowToast("Port forward stopped".into()));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("stop forward: {e}")));
+                        }
+                    }
+                } else {
+                    // Start the forward.
+                    match crate::dbus_client::dbus_ssh_start_port_forward(
+                        host_id.clone(),
+                        local_port,
+                        remote_host.clone(),
+                        remote_port,
+                    ).await {
+                        Ok(_fwd_id) => {
+                            let _ = tx.send(AppMsg::ShowToast(
+                                format!("Port forward started: :{local_port} \u{2192} {remote_host}:{remote_port}")
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("start forward: {e}")));
+                        }
+                    }
+                }
+
+                // Refresh port forwards status.
+                match crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                    Ok(json) => { let _ = tx.send(AppMsg::PortForwardsRefreshed(json)); }
+                    Err(_) => {}
+                }
+            });
         });
     }
 
@@ -1781,7 +1908,7 @@ pub fn build_ui(
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::dialogs::show_edit_host_dialog(
-                        &window, host, &s.ssh_keys, &s.profiles, &rt, &tx,
+                        &window, host, &s.ssh_keys, &s.ssh_hosts, &s.profiles, &rt, &tx,
                     );
                 }
             }
@@ -2568,7 +2695,7 @@ pub fn build_ui(
                     if let Some(sel) = &s.selected_ssh_host {
                         if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *sel) {
                             // Refresh the detail panel with updated data.
-                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host);
+                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.ssh_hosts);
                         } else {
                             drop(s);
                             rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
@@ -2637,7 +2764,7 @@ pub fn build_ui(
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == host_id) {
                         ssh::dialogs::show_edit_host_dialog(
-                            &rx_window, host, &s.ssh_keys, &s.profiles, &rx_rt, &rx_tx,
+                            &rx_window, host, &s.ssh_keys, &s.ssh_hosts, &s.profiles, &rx_rt, &rx_tx,
                         );
                     }
                 }
@@ -2672,6 +2799,29 @@ pub fn build_ui(
                     );
                 }
                 // === FortiGate messages =======================================
+                AppMsg::PortForwardsRefreshed(json) => {
+                    // Build active map: "local_port:remote_host:remote_port" → forward_id
+                    let mut active_map = std::collections::HashMap::new();
+                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+                        for entry in &arr {
+                            let fid = entry["forward_id"].as_str().unwrap_or_default().to_owned();
+                            let lp = entry["local_port"].as_u64().unwrap_or(0);
+                            let rh = entry["remote_host"].as_str().unwrap_or_default();
+                            let rp = entry["remote_port"].as_u64().unwrap_or(0);
+                            active_map.insert(format!("{lp}:{rh}:{rp}"), fid);
+                        }
+                    }
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(sel) = &s.selected_ssh_host {
+                        if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *sel) {
+                            ssh::host_detail::populate_port_forwards_list(
+                                &rx_ssh_host_detail.pf_listbox,
+                                &host.port_forwards,
+                                Some(&active_map),
+                            );
+                        }
+                    }
+                }
                 AppMsg::FortigateStatus { host_id, data } => {
                     // Only apply if this host is still the selected one.
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());

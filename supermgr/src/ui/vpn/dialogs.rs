@@ -17,7 +17,8 @@ use crate::app::{AppMsg, AppState};
 use crate::dbus_client::{
     dbus_get_logs, dbus_import_azure_vpn, dbus_import_fortigate, dbus_import_openvpn,
     dbus_import_toml, dbus_import_wireguard, dbus_list_profiles, dbus_rename_profile,
-    dbus_rotate_wireguard_key, dbus_update_fortigate, dbus_update_openvpn_credentials,
+    dbus_rotate_wireguard_key, dbus_set_log_level, dbus_update_fortigate,
+    dbus_update_openvpn_credentials,
 };
 use crate::settings::{AppSettings, ColorScheme};
 
@@ -1067,12 +1068,47 @@ pub fn show_logs_dialog(
         });
     }
 
+    // Daemon log level dropdown — controls what the daemon *generates*
+    // (separate from the display filter which controls what is *shown*).
+    let level_model = gtk4::StringList::new(&["ERROR", "WARN", "INFO", "DEBUG", "TRACE"]);
+    let level_dropdown = gtk4::DropDown::builder()
+        .model(&level_model)
+        .selected(2) // default: INFO
+        .tooltip_text("Daemon log level (what the daemon generates)")
+        .build();
+    {
+        let rt = rt.clone();
+        level_dropdown.connect_selected_notify(move |dd| {
+            let idx = dd.selected();
+            let level = match idx {
+                0 => "error",
+                1 => "warn",
+                2 => "info",
+                3 => "debug",
+                4 => "trace",
+                _ => "info",
+            };
+            let level = level.to_owned();
+            rt.spawn(async move {
+                if let Err(e) = dbus_set_log_level(level).await {
+                    tracing::error!("failed to set daemon log level: {e}");
+                }
+            });
+        });
+    }
+
     let header = adw::HeaderBar::new();
     let toggle_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     toggle_box.add_css_class("linked");
     toggle_box.append(&toggle_all);
     toggle_box.append(&toggle_conn);
     header.pack_start(&toggle_box);
+
+    let level_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    let level_label = gtk4::Label::new(Some("Daemon Level:"));
+    level_box.append(&level_label);
+    level_box.append(&level_dropdown);
+    header.pack_end(&level_box);
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);

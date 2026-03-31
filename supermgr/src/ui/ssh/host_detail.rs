@@ -12,7 +12,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use supermgr_core::dbus::DaemonProxy;
-use supermgr_core::ssh::host::{AuthMethod, SshHostSummary};
+use supermgr_core::ssh::host::{AuthMethod, PortForward, SshHostSummary};
 use supermgr_core::ssh::DeviceType;
 
 use crate::app::{AppMsg, AppState};
@@ -34,6 +34,7 @@ pub struct SshHostDetail {
     pub username_row: adw::ActionRow,
     pub device_type_row: adw::ActionRow,
     pub auth_method_row: adw::ActionRow,
+    pub jump_host_row: adw::ActionRow,
 
     pub connect_btn: gtk4::Button,
     pub test_btn: gtk4::Button,
@@ -62,6 +63,11 @@ pub struct SshHostDetail {
     pub fg_compliance_btn: gtk4::Button,
     pub fg_gen_token_btn: gtk4::Button,
     pub fg_copy_token_btn: gtk4::Button,
+
+    // Port forwards section.
+    pub pf_group: adw::PreferencesGroup,
+    pub pf_listbox: gtk4::ListBox,
+    pub pf_add_btn: gtk4::Button,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +143,14 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .activatable(false)
         .build();
     details_group.add(&auth_method_row);
+
+    let jump_host_row = adw::ActionRow::builder()
+        .title("Jump Host")
+        .subtitle("None")
+        .activatable(false)
+        .visible(false)
+        .build();
+    details_group.add(&jump_host_row);
 
     // FortiGate dashboard (hidden by default).
     let fg_dashboard_group = adw::PreferencesGroup::builder()
@@ -284,6 +298,24 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     btn_box.append(&edit_btn);
     btn_box.append(&delete_btn);
 
+    // Port Forwards section.
+    let pf_group = adw::PreferencesGroup::builder()
+        .title("Port Forwards")
+        .margin_top(12)
+        .build();
+    let pf_add_btn = gtk4::Button::builder()
+        .icon_name("list-add-symbolic")
+        .tooltip_text("Add port forward")
+        .css_classes(["flat"])
+        .build();
+    pf_group.set_header_suffix(Some(&pf_add_btn));
+
+    let pf_listbox = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    pf_group.add(&pf_listbox);
+
     // Assemble.
     let detail_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -299,6 +331,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     detail_box.append(&details_group);
     detail_box.append(&btn_box);
     detail_box.append(&fg_dashboard_group);
+    detail_box.append(&pf_group);
 
     detail_stack.add_named(&detail_box, Some("detail"));
     detail_stack.set_visible_child_name("empty");
@@ -318,6 +351,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         username_row,
         device_type_row,
         auth_method_row,
+        jump_host_row,
         connect_btn,
         test_btn,
         push_key_btn,
@@ -339,6 +373,9 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         fg_compliance_btn,
         fg_gen_token_btn,
         fg_copy_token_btn,
+        pf_group,
+        pf_listbox,
+        pf_add_btn,
     };
 
     (bundle, content_scroll.upcast())
@@ -349,7 +386,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 // ---------------------------------------------------------------------------
 
 /// Update the host detail panel to show the given host.
-pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
+pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all_hosts: &[SshHostSummary]) {
     detail.host_label_lbl.set_label(&host.label);
 
     if host.group.is_empty() {
@@ -369,6 +406,18 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
         AuthMethod::Key => "Public Key",
     };
     detail.auth_method_row.set_subtitle(auth_str);
+
+    // Show jump host name if configured.
+    if let Some(jump_id) = host.proxy_jump {
+        let jump_name = all_hosts.iter()
+            .find(|h| h.id == jump_id)
+            .map(|h| format!("{} ({})", h.label, h.hostname))
+            .unwrap_or_else(|| jump_id.to_string());
+        detail.jump_host_row.set_subtitle(&jump_name);
+        detail.jump_host_row.set_visible(true);
+    } else {
+        detail.jump_host_row.set_visible(false);
+    }
 
     detail.pin_btn.set_active(host.pinned);
 
@@ -391,7 +440,222 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary) {
         detail.fg_memory_row.set_subtitle("Loading\u{2026}");
     }
 
+    // Populate port forwards listbox.
+    populate_port_forwards_list(&detail.pf_listbox, &host.port_forwards, None);
+
     detail.detail_stack.set_visible_child_name("detail");
+}
+
+// ---------------------------------------------------------------------------
+// Port forwards helpers
+// ---------------------------------------------------------------------------
+
+/// Populate the port forwards listbox with saved entries.
+///
+/// `active_ids` is a set of forward_ids currently active (from daemon), keyed
+/// by `"local_port:remote_host:remote_port"` → `forward_id`.
+pub fn populate_port_forwards_list(
+    listbox: &gtk4::ListBox,
+    forwards: &[PortForward],
+    active_map: Option<&std::collections::HashMap<String, String>>,
+) {
+    // Remove all existing rows.
+    while let Some(child) = listbox.first_child() {
+        listbox.remove(&child);
+    }
+
+    if forwards.is_empty() {
+        let placeholder = adw::ActionRow::builder()
+            .title("No port forwards configured")
+            .activatable(false)
+            .build();
+        placeholder.add_css_class("dim-label");
+        listbox.append(&placeholder);
+        return;
+    }
+
+    for pf in forwards {
+        let key = format!("{}:{}:{}", pf.local_port, pf.remote_host, pf.remote_port);
+        let active_fwd_id = active_map.and_then(|m| m.get(&key));
+        let is_active = active_fwd_id.is_some();
+
+        let title = if let Some(ref desc) = pf.description {
+            format!("{desc}  (:{} \u{2192} {}:{})", pf.local_port, pf.remote_host, pf.remote_port)
+        } else {
+            format!(":{} \u{2192} {}:{}", pf.local_port, pf.remote_host, pf.remote_port)
+        };
+
+        let row = adw::ActionRow::builder()
+            .title(&title)
+            .activatable(false)
+            .build();
+
+        // Status dot.
+        let dot = gtk4::Label::builder()
+            .label(if is_active { "\u{25cf}" } else { "\u{25cb}" })
+            .tooltip_text(if is_active { "Active" } else { "Stopped" })
+            .build();
+        if is_active {
+            dot.add_css_class("success");
+        } else {
+            dot.add_css_class("dim-label");
+        }
+        row.add_prefix(&dot);
+
+        // Store the forward_id and forward key as widget names for later use.
+        row.set_widget_name(&key);
+
+        listbox.append(&row);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Add Port Forward dialog
+// ---------------------------------------------------------------------------
+
+/// Show the "Add Port Forward" dialog.
+///
+/// On submit, saves the forward to the host's `port_forwards` list via
+/// `ssh_update_host` and sends `SshHostsRefreshed`.
+pub fn show_add_port_forward_dialog(
+    window: &adw::ApplicationWindow,
+    host: &SshHostSummary,
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+) {
+    use std::rc::Rc;
+
+    let dialog = adw::Dialog::builder()
+        .title("Add Port Forward")
+        .content_width(400)
+        .build();
+
+    let local_port_row = adw::EntryRow::builder().title("Local port").build();
+    let remote_host_row = adw::EntryRow::builder()
+        .title("Remote host")
+        .text("127.0.0.1")
+        .build();
+    let remote_port_row = adw::EntryRow::builder().title("Remote port").build();
+    let desc_row = adw::EntryRow::builder()
+        .title("Description (optional)")
+        .build();
+
+    let group = adw::PreferencesGroup::new();
+    group.add(&local_port_row);
+    group.add(&remote_host_row);
+    group.add(&remote_port_row);
+    group.add(&desc_row);
+
+    let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+    let add_btn = gtk4::Button::builder()
+        .label("Add")
+        .css_classes(["suggested-action"])
+        .sensitive(false)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    header.pack_start(&cancel_btn);
+    header.pack_end(&add_btn);
+    header.set_show_end_title_buttons(false);
+    header.set_show_start_title_buttons(false);
+
+    let content_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .margin_top(12)
+        .margin_bottom(24)
+        .margin_start(24)
+        .margin_end(24)
+        .build();
+    content_box.append(&group);
+
+    let toolbar_view = adw::ToolbarView::new();
+    toolbar_view.add_top_bar(&header);
+    toolbar_view.set_content(Some(&content_box));
+    dialog.set_child(Some(&toolbar_view));
+
+    // Validate: local port and remote port must be valid non-zero numbers.
+    let validate: Rc<dyn Fn()> = {
+        let local_port_row = local_port_row.clone();
+        let remote_port_row = remote_port_row.clone();
+        let remote_host_row = remote_host_row.clone();
+        let add_btn = add_btn.clone();
+        Rc::new(move || {
+            let lp_ok = local_port_row.text().parse::<u16>().is_ok();
+            let rp_ok = remote_port_row.text().parse::<u16>().is_ok();
+            let rh_ok = !remote_host_row.text().is_empty();
+            add_btn.set_sensitive(lp_ok && rp_ok && rh_ok);
+        })
+    };
+    {
+        let v = Rc::clone(&validate);
+        local_port_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        remote_port_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        remote_host_row.connect_changed(move |_| v());
+    }
+
+    // Cancel.
+    {
+        let dialog = dialog.clone();
+        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+    }
+
+    // Submit.
+    {
+        let dialog = dialog.clone();
+        let host_id = host.id.to_string();
+        let existing_forwards = std::cell::RefCell::new(host.port_forwards.clone());
+        let rt = rt.clone();
+        let tx = tx.clone();
+        add_btn.connect_clicked(move |_| {
+            let local_port: u16 = local_port_row.text().parse().unwrap_or(0);
+            let remote_host = remote_host_row.text().to_string();
+            let remote_port: u16 = remote_port_row.text().parse().unwrap_or(0);
+            let desc = {
+                let t = desc_row.text().to_string();
+                if t.is_empty() { None } else { Some(t) }
+            };
+
+            existing_forwards.borrow_mut().push(PortForward {
+                local_port,
+                remote_host,
+                remote_port,
+                description: desc,
+            });
+
+            let host_id = host_id.clone();
+            let pf_json = serde_json::to_value(&*existing_forwards.borrow()).unwrap_or_default();
+            let update = serde_json::json!({ "port_forwards": pf_json });
+            let tx = tx.clone();
+
+            rt.spawn(async move {
+                let result = crate::dbus_client::dbus_ssh_update_host(
+                    host_id,
+                    update.to_string(),
+                ).await;
+                match result {
+                    Ok(()) => {
+                        match crate::dbus_client::dbus_ssh_list_hosts().await {
+                            Ok(hosts) => { let _ = tx.send(AppMsg::SshHostsRefreshed(hosts)); }
+                            Err(e) => { let _ = tx.send(AppMsg::OperationFailed(format!("refresh hosts: {e}"))); }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::OperationFailed(format!("add forward: {e}")));
+                    }
+                }
+            });
+
+            dialog.close();
+        });
+    }
+
+    dialog.present(Some(window));
 }
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ use russh::client::{self, Handle, Msg};
 use russh::Channel;
 use russh_keys::key::PublicKey;
 use supermgr_core::error::SshError;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::ToSocketAddrs;
 
 // ---------------------------------------------------------------------------
@@ -127,6 +127,103 @@ impl SshSession {
         }
 
         Ok(Self { handle })
+    }
+
+    /// Connect to a remote host using password authentication over an
+    /// existing stream (e.g. a tunnel from a jump host).
+    pub async fn connect_password_stream<S>(
+        stream: S,
+        target_addr: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<Self, SshError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let config = Arc::new(client::Config::default());
+
+        let mut handle = client::connect_stream(config, stream, SshClientHandler)
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: target_addr.to_owned(),
+                reason: format!("stream connect failed: {e}"),
+            })?;
+
+        let auth_ok = handle
+            .authenticate_password(username, password)
+            .await
+            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+
+        if !auth_ok {
+            return Err(SshError::AuthFailed(
+                "password authentication rejected by server (via tunnel)".into(),
+            ));
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// Connect to a remote host using private-key authentication over an
+    /// existing stream (e.g. a tunnel from a jump host).
+    pub async fn connect_key_stream<S>(
+        stream: S,
+        target_addr: &str,
+        username: &str,
+        private_key_pem: &str,
+    ) -> Result<Self, SshError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
+            .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
+
+        let config = Arc::new(client::Config::default());
+
+        let mut handle = client::connect_stream(config, stream, SshClientHandler)
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: target_addr.to_owned(),
+                reason: format!("stream connect failed: {e}"),
+            })?;
+
+        let auth_ok = handle
+            .authenticate_publickey(username, Arc::new(key_pair))
+            .await
+            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+
+        if !auth_ok {
+            return Err(SshError::AuthFailed(
+                "public-key authentication rejected by server (via tunnel)".into(),
+            ));
+        }
+
+        Ok(Self { handle })
+    }
+
+    /// Open a direct-tcpip tunnel through this session to a target host:port.
+    ///
+    /// Returns a `ChannelStream` that implements `AsyncRead + AsyncWrite` and
+    /// can be passed to `connect_password_stream` / `connect_key_stream`.
+    pub async fn open_tunnel(
+        &self,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<russh::ChannelStream<Msg>, SshError> {
+        let channel = self
+            .handle
+            .channel_open_direct_tcpip(
+                target_host,
+                target_port as u32,
+                "127.0.0.1",
+                0,
+            )
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: format!("{target_host}:{target_port}"),
+                reason: format!("failed to open tunnel: {e}"),
+            })?;
+
+        Ok(channel.into_stream())
     }
 
     // -- command execution --------------------------------------------------
@@ -320,6 +417,31 @@ impl SshSession {
             })?;
 
         Ok(sftp)
+    }
+
+    // -- port forwarding ----------------------------------------------------
+
+    /// Open a direct-tcpip channel to `remote_host:remote_port`.
+    ///
+    /// Returns a russh `Channel` that can be used to shuttle data between a
+    /// local TCP connection and the remote endpoint through the SSH tunnel.
+    pub async fn channel_open_direct_tcpip(
+        &self,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> Result<Channel<Msg>, SshError> {
+        self.handle
+            .channel_open_direct_tcpip(
+                remote_host,
+                remote_port as u32,
+                "127.0.0.1",
+                0u32,
+            )
+            .await
+            .map_err(|e| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("direct-tcpip channel open failed: {e}"),
+            })
     }
 
     // -- lifecycle ----------------------------------------------------------
