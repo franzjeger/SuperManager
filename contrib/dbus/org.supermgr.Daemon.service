@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.supermgr.Daemon
+Exec=/usr/bin/supermgrd
+User=root
+SystemdService=supermgrd.service

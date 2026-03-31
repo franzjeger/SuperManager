@@ -267,7 +267,7 @@ pub fn build_ui(
     // Header bar
     // =========================================================================
 
-    // -- "Add" popover with VPN + SSH actions --------------------------------
+    // -- "Add" popover — contextual per section ------------------------------
     let popover = gtk4::Popover::new();
     let pop_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -278,7 +278,11 @@ pub fn build_ui(
         .spacing(2)
         .build();
 
-    // VPN import buttons.
+    // VPN import buttons (shown when VPN section is active).
+    let vpn_add_group = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .build();
     let import_wg_btn = gtk4::Button::builder()
         .label("Import WireGuard .conf")
         .has_frame(false)
@@ -304,18 +308,19 @@ pub fn build_ui(
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
+    vpn_add_group.append(&import_wg_btn);
+    vpn_add_group.append(&add_fg_btn);
+    vpn_add_group.append(&import_ov_btn);
+    vpn_add_group.append(&import_az_btn);
+    vpn_add_group.append(&import_toml_btn);
 
-    // Separator.
-    let sep = gtk4::Separator::new(gtk4::Orientation::Horizontal);
-
-    // SSH action buttons.
+    // SSH Keys buttons (shown when SSH > Keys sub-tab is active).
+    let ssh_keys_add_group = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .build();
     let ssh_gen_key_btn = gtk4::Button::builder()
         .label("Generate SSH Key")
-        .has_frame(false)
-        .halign(gtk4::Align::Fill)
-        .build();
-    let ssh_add_host_btn = gtk4::Button::builder()
-        .label("Add SSH Host")
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
@@ -324,27 +329,38 @@ pub fn build_ui(
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
-
-    pop_box.append(&import_wg_btn);
-    pop_box.append(&add_fg_btn);
-    pop_box.append(&import_ov_btn);
-    pop_box.append(&import_az_btn);
-    pop_box.append(&import_toml_btn);
-    pop_box.append(&sep);
     let ssh_audit_btn = gtk4::Button::builder()
         .label("SSH Audit Log\u{2026}")
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
-    pop_box.append(&ssh_gen_key_btn);
-    pop_box.append(&ssh_add_host_btn);
-    pop_box.append(&ssh_import_keys_btn);
-    pop_box.append(&ssh_audit_btn);
+    ssh_keys_add_group.append(&ssh_gen_key_btn);
+    ssh_keys_add_group.append(&ssh_import_keys_btn);
+    ssh_keys_add_group.append(&ssh_audit_btn);
+
+    // SSH Hosts buttons (shown when SSH > Hosts sub-tab is active).
+    let ssh_hosts_add_group = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .build();
+    let ssh_add_host_btn = gtk4::Button::builder()
+        .label("Add SSH Host")
+        .has_frame(false)
+        .halign(gtk4::Align::Fill)
+        .build();
+    ssh_hosts_add_group.append(&ssh_add_host_btn);
+
+    pop_box.append(&vpn_add_group);
+    pop_box.append(&ssh_keys_add_group);
+    pop_box.append(&ssh_hosts_add_group);
+    // Start with only VPN group visible.
+    ssh_keys_add_group.set_visible(false);
+    ssh_hosts_add_group.set_visible(false);
     popover.set_child(Some(&pop_box));
 
     let add_menu_btn = gtk4::MenuButton::builder()
         .icon_name("list-add-symbolic")
-        .tooltip_text("Add profile / key / host")
+        .tooltip_text("Add")
         .popover(&popover)
         .build();
 
@@ -453,17 +469,37 @@ pub fn build_ui(
 
     {
         let ssh_sidebar_stack = ssh_sidebar_stack.clone();
+        let ssh_keys_add_group = ssh_keys_add_group.clone();
+        let ssh_hosts_add_group = ssh_hosts_add_group.clone();
+        let add_menu_btn = add_menu_btn.clone();
         ssh_toggle_keys.connect_toggled(move |btn| {
             if btn.is_active() {
                 ssh_sidebar_stack.set_visible_child_name("keys");
+                ssh_keys_add_group.set_visible(true);
+                ssh_hosts_add_group.set_visible(false);
+                add_menu_btn.set_visible(true);
             }
         });
     }
     {
         let ssh_sidebar_stack = ssh_sidebar_stack.clone();
+        let ssh_keys_add_group = ssh_keys_add_group.clone();
+        let ssh_hosts_add_group = ssh_hosts_add_group.clone();
+        let add_menu_btn = add_menu_btn.clone();
         ssh_toggle_hosts.connect_toggled(move |btn| {
             if btn.is_active() {
                 ssh_sidebar_stack.set_visible_child_name("hosts");
+                ssh_keys_add_group.set_visible(false);
+                ssh_hosts_add_group.set_visible(true);
+                add_menu_btn.set_visible(true);
+            }
+        });
+    }
+    {
+        let add_menu_btn = add_menu_btn.clone();
+        ssh_toggle_dashboard.connect_toggled(move |btn| {
+            if btn.is_active() {
+                add_menu_btn.set_visible(false);
             }
         });
     }
@@ -622,6 +658,42 @@ pub fn build_ui(
         .build();
     root_box.append(&banner);
     root_box.append(&view_stack);
+
+    // Update the "+" popover contents when switching sections.
+    {
+        let vpn_add_group = vpn_add_group.clone();
+        let ssh_keys_add_group = ssh_keys_add_group.clone();
+        let ssh_hosts_add_group = ssh_hosts_add_group.clone();
+        let add_menu_btn = add_menu_btn.clone();
+        let ssh_toggle_keys = ssh_toggle_keys.clone();
+        let ssh_toggle_dashboard = ssh_toggle_dashboard.clone();
+        view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
+            let page = stack.visible_child_name();
+            let page = page.as_deref().unwrap_or("vpn");
+            match page {
+                "vpn" => {
+                    vpn_add_group.set_visible(true);
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(false);
+                    add_menu_btn.set_visible(true);
+                }
+                "ssh" => {
+                    vpn_add_group.set_visible(false);
+                    if ssh_toggle_dashboard.is_active() {
+                        add_menu_btn.set_visible(false);
+                    } else {
+                        add_menu_btn.set_visible(true);
+                        ssh_keys_add_group.set_visible(ssh_toggle_keys.is_active());
+                        ssh_hosts_add_group.set_visible(!ssh_toggle_keys.is_active());
+                    }
+                }
+                _ => {
+                    // Console, Provisioning — no add actions.
+                    add_menu_btn.set_visible(false);
+                }
+            }
+        });
+    }
 
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root_box));
@@ -2531,6 +2603,44 @@ pub fn build_ui(
                 } => {
                     rx_toast_overlay
                         .add_toast(adw::Toast::new(&format!("{host_label}: {message}")));
+                }
+                AppMsg::EditSshHost(host_id) => {
+                    let s = rx_app_state.lock().expect("lock");
+                    if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == host_id) {
+                        ssh::dialogs::show_edit_host_dialog(
+                            &rx_window, host, &s.ssh_keys, &s.profiles, &rx_rt, &rx_tx,
+                        );
+                    }
+                }
+                AppMsg::EditVpnProfile(profile_id) => {
+                    let s = rx_app_state.lock().expect("lock");
+                    if let Some(p) = s.profiles.iter().find(|p| p.id.to_string() == profile_id) {
+                        let backend = p.backend.clone();
+                        let name = p.name.clone();
+                        let host = p.host.clone().unwrap_or_default();
+                        let username = p.username.clone().unwrap_or_default();
+                        drop(s);
+                        if backend.starts_with("FortiGate") {
+                            vpn::dialogs::show_edit_fortigate_dialog(
+                                &rx_window, profile_id, name, host, username, &rx_rt, &rx_tx,
+                            );
+                        } else if backend == "OpenVPN3" {
+                            vpn::dialogs::show_edit_openvpn_dialog(
+                                &rx_window, profile_id, username, &rx_rt, &rx_tx,
+                            );
+                        }
+                    }
+                }
+                AppMsg::PushSshKey(key_id) => {
+                    let s = rx_app_state.lock().expect("lock");
+                    ssh::dialogs::show_push_key_dialog(
+                        &rx_window,
+                        &s.ssh_keys,
+                        &s.ssh_hosts,
+                        Some(&key_id),
+                        &rx_rt,
+                        &rx_tx,
+                    );
                 }
                 // === FortiGate messages =======================================
                 AppMsg::FortigateStatus { host_id, data } => {

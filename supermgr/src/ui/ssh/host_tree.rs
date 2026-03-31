@@ -330,12 +330,7 @@ pub fn populate_ssh_host_list(
                     let tx = tx_ctx.clone();
                     let action = gio::SimpleAction::new("edit", None);
                     action.connect_activate(move |_, _| {
-                        // Signal the main loop to select this host and open the edit dialog.
-                        tx.send(AppMsg::ShowToast(format!(
-                            "Select host '{}' and use the Edit button in the detail pane",
-                            host_id
-                        )))
-                        .ok();
+                        tx.send(AppMsg::EditSshHost(host_id.clone())).ok();
                     });
                     action_group.add_action(&action);
                 }

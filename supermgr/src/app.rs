@@ -124,6 +124,12 @@ pub enum AppMsg {
     SshKeysRefreshed(Vec<SshKeySummary>),
     /// SSH host list was refreshed from the daemon.
     SshHostsRefreshed(Vec<SshHostSummary>),
+    /// Right-click "Edit" on an SSH host row — select it and open the edit dialog.
+    EditSshHost(String),
+    /// Right-click "Edit" on a VPN profile row — select it and open the edit dialog.
+    EditVpnProfile(String),
+    /// Right-click "Push" on an SSH key row — open the push-key dialog for this key.
+    PushSshKey(String),
     /// Progress update for an SSH operation (push, revoke, etc.).
     SshOperationProgress {
         /// Unique identifier for the operation.

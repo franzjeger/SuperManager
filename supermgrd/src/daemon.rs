@@ -3189,8 +3189,8 @@ impl DaemonService {
         let url = format!(
             "https://{hostname}:{api_port}/api/v2/monitor/system/config/backup?scope=global"
         );
-        info!("fortigate_backup_config: GET {url}");
-        crate::audit::log_event("FG_BACKUP", &format!("GET {url}"));
+        info!("fortigate_backup_config: POST {url}");
+        crate::audit::log_event("FG_BACKUP", &format!("POST {url}"));
 
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -3199,22 +3199,26 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("HTTP client build failed: {e}")))?;
 
         let resp = client
-            .get(&url)
+            .post(&url)
             .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Length", "0")
             .send()
             .await
             .map_err(|e| {
                 let msg = e.to_string().replace(&token, "***");
+                error!("fortigate_backup_config: request failed: {msg}");
                 fdo::Error::Failed(format!("backup request failed: {msg}"))
             })?;
 
         let status = resp.status().as_u16();
+        info!("fortigate_backup_config: HTTP {status}");
         let body = resp
             .text()
             .await
             .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
 
         if status >= 400 {
+            error!("fortigate_backup_config: API error {status}: {}", &body[..body.len().min(200)]);
             return Err(fdo::Error::Failed(format!(
                 "FortiGate backup API {status}: {body}"
             )));

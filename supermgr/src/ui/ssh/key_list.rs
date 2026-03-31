@@ -4,16 +4,16 @@
 //! key name, type, and truncated fingerprint.  Context menu offers Push,
 //! Revoke, Export, and Delete.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
-use gtk4::{gio, glib, prelude::*};
+use gtk4::{gio, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::{error, info};
 
 use supermgr_core::ssh::key::SshKeySummary;
 
-use crate::app::{AppMsg, AppState};
+use crate::app::AppMsg;
 use crate::dbus_client::dbus_ssh_delete_key;
 
 // ---------------------------------------------------------------------------
@@ -123,6 +123,12 @@ pub fn populate_ssh_key_list(
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
+        {
+        let key_id = key_id.clone();
+        let key_name = key_name.clone();
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
         delete_btn.connect_clicked(move |_| {
             let dialog = adw::AlertDialog::new(
                 Some(&format!("Delete key \"{}\"?", key_name)),
@@ -158,6 +164,108 @@ pub fn populate_ssh_key_list(
 
             dialog.present(Some(&window));
         });
+        }
+
+        // ----- Right-click context menu -----
+        {
+            let key_id = key.id.to_string();
+            let key_name = key.name.clone();
+            let window_ctx = window.clone();
+            let rt_ctx = rt.clone();
+            let tx_ctx = tx.clone();
+
+            let menu_model = gio::Menu::new();
+            menu_model.append(Some("Push to Hosts"), Some("key-ctx.push"));
+            menu_model.append(Some("Delete"), Some("key-ctx.delete"));
+
+            let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
+            popover.set_has_arrow(true);
+            popover.set_parent(&row);
+            {
+                let popover = popover.clone();
+                row.connect_destroy(move |_| {
+                    popover.unparent();
+                });
+            }
+
+            let action_group = gio::SimpleActionGroup::new();
+
+            // Push action.
+            {
+                let key_id = key_id.clone();
+                let tx = tx_ctx.clone();
+                let action = gio::SimpleAction::new("push", None);
+                action.connect_activate(move |_, _| {
+                    tx.send(AppMsg::PushSshKey(key_id.clone())).ok();
+                });
+                action_group.add_action(&action);
+            }
+
+            // Delete action.
+            {
+                let key_id = key_id.clone();
+                let key_name = key_name.clone();
+                let window_del = window_ctx.clone();
+                let rt = rt_ctx.clone();
+                let tx = tx_ctx.clone();
+                let action = gio::SimpleAction::new("delete", None);
+                action.connect_activate(move |_, _| {
+                    let dialog = adw::AlertDialog::new(
+                        Some(&format!("Delete key \"{}\"?", key_name)),
+                        Some("The private key will be removed from the keyring. This cannot be undone."),
+                    );
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("delete", "Delete");
+                    dialog.set_response_appearance(
+                        "delete",
+                        adw::ResponseAppearance::Destructive,
+                    );
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+
+                    let key_id = key_id.clone();
+                    let rt = rt.clone();
+                    let tx = tx.clone();
+                    dialog.connect_response(Some("delete"), move |_dlg, _resp| {
+                        let key_id = key_id.clone();
+                        let tx = tx.clone();
+                        rt.spawn(async move {
+                            let msg = match dbus_ssh_delete_key(key_id.clone()).await {
+                                Ok(()) => {
+                                    info!("deleted SSH key {}", key_id);
+                                    let keys = crate::dbus_client::dbus_ssh_list_keys()
+                                        .await
+                                        .unwrap_or_default();
+                                    AppMsg::SshKeysRefreshed(keys)
+                                }
+                                Err(e) => {
+                                    error!("delete SSH key failed: {:#}", e);
+                                    AppMsg::OperationFailed(e.to_string())
+                                }
+                            };
+                            tx.send(msg).ok();
+                        });
+                    });
+
+                    dialog.present(Some(&window_del));
+                });
+                action_group.add_action(&action);
+            }
+
+            row.insert_action_group("key-ctx", Some(&action_group));
+
+            let gesture = gtk4::GestureClick::builder()
+                .button(3)
+                .build();
+            let popover_ref = popover.clone();
+            gesture.connect_pressed(move |_gesture, _n, x, y| {
+                popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
+                    x as i32, y as i32, 1, 1,
+                )));
+                popover_ref.popup();
+            });
+            row.add_controller(gesture);
+        }
 
         list_box.append(&row);
     }

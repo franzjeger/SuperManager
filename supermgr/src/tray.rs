@@ -33,11 +33,16 @@ impl ksni::Tray for VpnTray {
     }
 
     fn icon_name(&self) -> String {
-        if self.vpn_state.is_connected() {
-            "network-vpn".into()
-        } else {
-            "network-vpn-symbolic".into()
-        }
+        "org.supermgr.SuperManager".into()
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        static ARGB32: &[u8] = include_bytes!("../../contrib/icons/tray-icon-64.argb32");
+        vec![ksni::Icon {
+            width: 64,
+            height: 64,
+            data: ARGB32.to_vec(),
+        }]
     }
 
     fn title(&self) -> String {

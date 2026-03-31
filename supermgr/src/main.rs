@@ -103,7 +103,7 @@ fn main() -> anyhow::Result<()> {
 
     let rt_handle = rt.handle().clone();
     let app = adw::Application::builder()
-        .application_id("org.supermgr.App")
+        .application_id("org.supermgr.SuperManager")
         .build();
 
     let app_state_for_activate = Arc::clone(&app_state);

@@ -6,7 +6,7 @@
 
 use std::sync::{mpsc, Arc, Mutex};
 
-use gtk4::prelude::*;
+use gtk4::{gio, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::{error, info};
@@ -14,7 +14,7 @@ use tracing::{error, info};
 use supermgr_core::vpn::{profile::ProfileSummary, state::VpnState};
 
 use crate::app::{AppMsg, AppState};
-use crate::dbus_client::dbus_delete_profile;
+use crate::dbus_client::{dbus_connect, dbus_delete_profile, dbus_disconnect};
 
 // ---------------------------------------------------------------------------
 // Build
@@ -177,6 +177,12 @@ pub fn populate_vpn_sidebar(
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
+        {
+        let profile_id = profile_id.clone();
+        let profile_name = profile_name.clone();
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
         delete_btn.connect_clicked(move |_btn| {
             let dialog = adw::AlertDialog::new(
                 Some(&format!("Delete \"{}\"?", profile_name)),
@@ -211,6 +217,162 @@ pub fn populate_vpn_sidebar(
 
             dialog.present(Some(&window));
         });
+        }
+
+        // ----- Right-click context menu -----
+        {
+            let profile_id = profile.id.to_string();
+            let profile_name = profile.name.clone();
+            let backend = profile.backend.clone();
+            let is_connected = matches!(row_state, RowState::Connected);
+            let window_ctx = window.clone();
+            let rt_ctx = rt.clone();
+            let tx_ctx = tx.clone();
+
+            let menu_model = gio::Menu::new();
+            if is_connected {
+                menu_model.append(Some("Disconnect"), Some("vpn-ctx.disconnect"));
+            } else {
+                menu_model.append(Some("Connect"), Some("vpn-ctx.connect"));
+            }
+            menu_model.append(Some("Rename"), Some("vpn-ctx.rename"));
+            if backend.starts_with("FortiGate") || backend == "OpenVPN3" {
+                menu_model.append(Some("Edit Credentials"), Some("vpn-ctx.edit-creds"));
+            }
+            menu_model.append(Some("Delete"), Some("vpn-ctx.delete"));
+
+            let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
+            popover.set_has_arrow(true);
+            popover.set_parent(&row);
+            {
+                let popover = popover.clone();
+                row.connect_destroy(move |_| {
+                    popover.unparent();
+                });
+            }
+
+            let action_group = gio::SimpleActionGroup::new();
+
+            // Connect action.
+            {
+                let profile_id = profile_id.clone();
+                let tx = tx_ctx.clone();
+                let rt = rt_ctx.clone();
+                let action = gio::SimpleAction::new("connect", None);
+                action.connect_activate(move |_, _| {
+                    let profile_id = profile_id.clone();
+                    let tx = tx.clone();
+                    rt.spawn(async move {
+                        if let Err(e) = dbus_connect(profile_id).await {
+                            tx.send(AppMsg::OperationFailed(format!("Connect failed: {e}"))).ok();
+                        }
+                    });
+                });
+                action_group.add_action(&action);
+            }
+
+            // Disconnect action.
+            {
+                let tx = tx_ctx.clone();
+                let rt = rt_ctx.clone();
+                let action = gio::SimpleAction::new("disconnect", None);
+                action.connect_activate(move |_, _| {
+                    let tx = tx.clone();
+                    rt.spawn(async move {
+                        if let Err(e) = dbus_disconnect().await {
+                            tx.send(AppMsg::OperationFailed(format!("Disconnect failed: {e}"))).ok();
+                        }
+                    });
+                });
+                action_group.add_action(&action);
+            }
+
+            // Rename action.
+            {
+                let profile_id = profile_id.clone();
+                let tx = tx_ctx.clone();
+                let rt = rt_ctx.clone();
+                let window_r = window_ctx.clone();
+                let action = gio::SimpleAction::new("rename", None);
+                action.connect_activate(move |_, _| {
+                    super::dialogs::show_rename_dialog(&window_r, profile_id.clone(), &rt, &tx);
+                });
+                action_group.add_action(&action);
+            }
+
+            // Edit credentials action.
+            {
+                let profile_id = profile_id.clone();
+                let tx = tx_ctx.clone();
+                let action = gio::SimpleAction::new("edit-creds", None);
+                action.connect_activate(move |_, _| {
+                    tx.send(AppMsg::EditVpnProfile(profile_id.clone())).ok();
+                });
+                action_group.add_action(&action);
+            }
+
+            // Delete action.
+            {
+                let profile_id = profile_id.clone();
+                let profile_name = profile_name.clone();
+                let window_del = window_ctx.clone();
+                let rt = rt_ctx.clone();
+                let tx = tx_ctx.clone();
+                let action = gio::SimpleAction::new("delete", None);
+                action.connect_activate(move |_, _| {
+                    let dialog = adw::AlertDialog::new(
+                        Some(&format!("Delete \"{}\"?", profile_name)),
+                        Some("This cannot be undone."),
+                    );
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("delete", "Delete");
+                    dialog.set_response_appearance(
+                        "delete",
+                        adw::ResponseAppearance::Destructive,
+                    );
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+
+                    let profile_id = profile_id.clone();
+                    let rt = rt.clone();
+                    let tx = tx.clone();
+                    dialog.connect_response(Some("delete"), move |_dlg, _resp| {
+                        let profile_id = profile_id.clone();
+                        let tx = tx.clone();
+                        rt.spawn(async move {
+                            let msg = match dbus_delete_profile(profile_id.clone()).await {
+                                Ok(()) => {
+                                    info!("deleted profile {}", profile_id);
+                                    AppMsg::ProfileDeleted(profile_id)
+                                }
+                                Err(e) => {
+                                    error!("delete_profile failed: {:#}", e);
+                                    AppMsg::OperationFailed(e.to_string())
+                                }
+                            };
+                            tx.send(msg).ok();
+                        });
+                    });
+
+                    dialog.present(Some(&window_del));
+                });
+                action_group.add_action(&action);
+            }
+
+            row.insert_action_group("vpn-ctx", Some(&action_group));
+
+            let gesture = gtk4::GestureClick::builder()
+                .button(3)
+                .build();
+            let popover_ref = popover.clone();
+            gesture.connect_pressed(move |_gesture, _n, x, y| {
+                popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
+                    x as i32, y as i32, 1, 1,
+                )));
+                popover_ref.popup();
+            });
+            row.add_controller(gesture);
+        }
 
         list_box.append(&row);
     }
