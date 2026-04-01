@@ -376,7 +376,7 @@ pub fn populate_ssh_key_list(
                     let rt = rt.clone();
                     let tx = tx.clone();
                     let window_exp = window_exp.clone();
-                    let pub_name_display = pub_name.clone();
+                    let _pub_name_display = pub_name.clone();
 
                     // Check if files exist; if so, confirm overwrite.
                     if priv_path.exists() || pub_path.exists() {

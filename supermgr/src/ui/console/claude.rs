@@ -32,6 +32,7 @@ pub fn use_subscription() -> bool {
 }
 
 /// Check if Claude Code CLI is available.
+#[allow(dead_code)]
 pub fn has_claude_cli() -> bool {
     std::process::Command::new("claude")
         .arg("--version")

@@ -540,6 +540,7 @@ pub async fn dbus_ssh_push_key(
     Ok(proxy.ssh_push_key(&key_id, &hosts_json, use_sudo).await?)
 }
 
+#[allow(dead_code)]
 pub async fn dbus_ssh_revoke_key(
     key_id: String, host_ids: Vec<String>, use_sudo: bool,
 ) -> anyhow::Result<String> {
@@ -616,12 +617,14 @@ pub async fn dbus_ssh_update_host(host_id: String, host_json: String) -> anyhow:
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn dbus_ssh_get_key(key_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     Ok(proxy.ssh_get_key(&key_id).await?)
 }
 
+#[allow(dead_code)]
 pub async fn dbus_ssh_get_host(host_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;

@@ -3,16 +3,13 @@
 //! Shows the selected key's metadata, public key, tags, and deployed hosts.
 //! Provides action buttons for pushing keys and deleting.
 
-use std::sync::{mpsc, Arc, Mutex};
-
-use gtk4::{glib, prelude::*};
+use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use supermgr_core::ssh::key::SshKeySummary;
 use supermgr_core::ssh::host::SshHostSummary;
 
-use crate::app::{AppMsg, AppState};
 
 // ---------------------------------------------------------------------------
 // Widget bundle
@@ -90,7 +87,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
     // Copy fingerprint to clipboard.
     {
         let fingerprint_label = fingerprint_label.clone();
-        fp_copy_btn.connect_clicked(move |btn| {
+        fp_copy_btn.connect_clicked(move |_btn| {
             let text = fingerprint_label.label();
             if let Some(display) = gtk4::gdk::Display::default() {
                 display.clipboard().set_text(&text);
@@ -99,7 +96,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
     }
 
     // Public key viewer.
-    let pubkey_group = adw::PreferencesGroup::builder()
+    let _pubkey_group = adw::PreferencesGroup::builder()
         .title("Public Key")
         .margin_top(12)
         .build();
@@ -239,6 +236,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
 // ---------------------------------------------------------------------------
 
 /// Update the key detail panel to show the given key.
+#[allow(dead_code)]
 pub fn update_ssh_key_detail(
     detail: &SshKeyDetail,
     key: &SshKeySummary,

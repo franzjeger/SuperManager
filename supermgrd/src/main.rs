@@ -37,7 +37,7 @@ use anyhow::Context;
 use tokio::sync::{watch, Mutex};
 use tracing::{error, info, warn};
 use tracing_subscriber::{
-    fmt, layer::SubscriberExt as _, reload, util::SubscriberInitExt as _, EnvFilter, Layer as _,
+    fmt, layer::SubscriberExt as _, reload, util::SubscriberInitExt as _, EnvFilter,
 };
 
 use daemon::{DaemonService, DaemonState};

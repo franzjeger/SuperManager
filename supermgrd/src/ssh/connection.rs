@@ -9,8 +9,7 @@ use russh::client::{self, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::Channel;
 use russh_keys::key::PublicKey;
 use supermgr_core::error::SshError;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::ToSocketAddrs;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 // ---------------------------------------------------------------------------
 // Client handler
@@ -125,11 +124,40 @@ impl SshSession {
     }
 
     /// Connect to a remote host using private-key authentication.
+    ///
+    /// If `cert_pem` is provided, attempts OpenSSH certificate authentication
+    /// first, then falls back to plain public-key authentication.
     pub async fn connect_key(
         hostname: &str,
         port: u16,
         username: &str,
         private_key_pem: &str,
+        timeout_secs: u64,
+    ) -> Result<Self, SshError> {
+        Self::connect_key_with_cert(hostname, port, username, private_key_pem, None, timeout_secs).await
+    }
+
+    /// Connect to a remote host using OpenSSH certificate authentication.
+    ///
+    /// The certificate must correspond to the given private key.
+    pub async fn connect_certificate(
+        hostname: &str,
+        port: u16,
+        username: &str,
+        private_key_pem: &str,
+        cert_pem: &str,
+        timeout_secs: u64,
+    ) -> Result<Self, SshError> {
+        Self::connect_key_with_cert(hostname, port, username, private_key_pem, Some(cert_pem), timeout_secs).await
+    }
+
+    /// Internal: connect with optional certificate.
+    async fn connect_key_with_cert(
+        hostname: &str,
+        port: u16,
+        username: &str,
+        private_key_pem: &str,
+        cert_pem: Option<&str>,
         timeout_secs: u64,
     ) -> Result<Self, SshError> {
         let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
@@ -152,8 +180,35 @@ impl SshSession {
             reason: e.to_string(),
         })?;
 
+        let key_pair = Arc::new(key_pair);
+
+        // Try certificate auth first if a certificate is provided.
+        if let Some(cert_data) = cert_pem {
+            match ssh_key::Certificate::from_openssh(cert_data) {
+                Ok(cert) => {
+                    match handle
+                        .authenticate_openssh_cert(username, key_pair.clone(), cert)
+                        .await
+                    {
+                        Ok(true) => return Ok(Self { handle }),
+                        Ok(false) => {
+                            // Certificate rejected — fall through to plain pubkey.
+                        }
+                        Err(e) => {
+                            // Protocol error — fall through to plain pubkey.
+                            tracing::warn!("certificate auth failed, trying plain pubkey: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to parse SSH certificate, trying plain pubkey: {e}");
+                }
+            }
+        }
+
+        // Plain public-key authentication.
         let auth_ok = handle
-            .authenticate_publickey(username, Arc::new(key_pair))
+            .authenticate_publickey(username, key_pair)
             .await
             .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
@@ -481,6 +536,7 @@ impl SshSession {
     // -- lifecycle ----------------------------------------------------------
 
     /// Gracefully disconnect from the remote host.
+    #[allow(dead_code)]
     pub async fn disconnect(&self) -> Result<(), SshError> {
         self.handle
             .disconnect(russh::Disconnect::ByApplication, "done", "")

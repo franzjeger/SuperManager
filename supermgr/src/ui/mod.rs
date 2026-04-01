@@ -46,10 +46,10 @@ use crate::dbus_client::{
     dbus_set_kill_switch, dbus_set_split_routes,
     fetch_initial_state, fetch_initial_ssh_state, run_signal_listener,
 };
-use crate::settings::{AppSettings, ColorScheme};
+use crate::settings::AppSettings;
 use crate::tray::VpnTray;
 
-use self::vpn::detail::{apply_vpn_state, VpnDetail};
+use self::vpn::detail::apply_vpn_state;
 use self::vpn::sidebar::populate_vpn_sidebar;
 use self::ssh::key_list::populate_ssh_key_list;
 use self::ssh::host_tree::populate_ssh_host_list;
@@ -1096,7 +1096,7 @@ pub fn build_ui(
         let key_name_label = ssh_key_detail.key_name_label.clone();
         let key_type_badge = ssh_key_detail.key_type_badge.clone();
         let fingerprint_label = ssh_key_detail.fingerprint_label.clone();
-        let public_key_view = ssh_key_detail.public_key_view.clone();
+        let _public_key_view = ssh_key_detail.public_key_view.clone();
         let tags_label = ssh_key_detail.tags_label.clone();
         let deployed_list = ssh_key_detail.deployed_list.clone();
         let key_detail_stack = ssh_key_detail.detail_stack.clone();
@@ -1155,14 +1155,14 @@ pub fn build_ui(
         let app_state = Arc::clone(&app_state);
         let ssh_content_stack = ssh_content_stack.clone();
         let host_detail = ssh_host_detail.clone();
-        let host_label_lbl = host_detail.host_label_lbl.clone();
-        let group_badge = host_detail.group_badge.clone();
-        let hostname_row = host_detail.hostname_row.clone();
-        let port_row = host_detail.port_row.clone();
-        let username_row = host_detail.username_row.clone();
-        let device_type_row = host_detail.device_type_row.clone();
-        let auth_method_row = host_detail.auth_method_row.clone();
-        let host_detail_stack = host_detail.detail_stack.clone();
+        let _host_label_lbl = host_detail.host_label_lbl.clone();
+        let _group_badge = host_detail.group_badge.clone();
+        let _hostname_row = host_detail.hostname_row.clone();
+        let _port_row = host_detail.port_row.clone();
+        let _username_row = host_detail.username_row.clone();
+        let _device_type_row = host_detail.device_type_row.clone();
+        let _auth_method_row = host_detail.auth_method_row.clone();
+        let _host_detail_stack = host_detail.detail_stack.clone();
         let ssh_host_detail_for_closure = ssh_host_detail.clone();
         let rt_sel = rt.clone();
         let tx_sel = tx.clone();
@@ -2089,7 +2089,7 @@ pub fn build_ui(
                 };
                 let host_id = host_id.clone();
                 let tx = tx.clone();
-                let toast_overlay = toast_overlay.clone();
+                let _toast_overlay = toast_overlay.clone();
                 rt.spawn(async move {
                     let conn = match zbus::Connection::system().await {
                         Ok(c) => c,
@@ -2173,7 +2173,7 @@ pub fn build_ui(
                 }
                 let host_id = host_id.clone();
                 let tx = tx.clone();
-                let toast_overlay = toast_overlay.clone();
+                let _toast_overlay = toast_overlay.clone();
                 rt.spawn(async move {
                     let conn = match zbus::Connection::system().await {
                         Ok(c) => c,
@@ -2648,11 +2648,8 @@ pub fn build_ui(
                     verification_url,
                 } => {
                     if user_code.is_empty() {
-                        gtk4::show_uri(
-                            Some(&rx_window),
-                            &verification_url,
-                            gtk4::gdk::CURRENT_TIME,
-                        );
+                        let launcher = gtk4::UriLauncher::new(&verification_url);
+                        launcher.launch(Some(&rx_window), gio::Cancellable::NONE, |_| {});
                     } else {
                         vpn::dialogs::show_auth_challenge_dialog(
                             &rx_window,
@@ -2914,8 +2911,6 @@ pub fn build_ui(
                 // the wizard widget; these are reserved for future use.
                 AppMsg::ProvisioningConfigGenerated(_) => {}
                 AppMsg::ProvisioningPushDone => {}
-                AppMsg::DashboardDeviceStatus { .. } => {}
-                AppMsg::FortigateBackupDone { .. } => {}
             }
         }
         glib::ControlFlow::Continue

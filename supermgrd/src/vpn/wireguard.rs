@@ -45,9 +45,12 @@
 //! - `PeerStats` has `tx_bytes: u64`, `rx_bytes: u64`, `last_handshake_time: Option<SystemTime>`
 //! - Interface deletion is NOT in the crate API; we use rtnetlink directly.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures_util::TryStreamExt as _;
+use netlink_packet_route::route::{RouteAttribute, RouteMessage};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 use wireguard_control::{Backend, DeviceUpdate, InterfaceName, Key, PeerConfigBuilder};
@@ -72,14 +75,13 @@ struct WgState {
     /// The kernel interface name if a tunnel is up.
     interface: Option<String>,
 
-    /// The first line of `ip route show exact 0.0.0.0/0` captured before we
-    /// displaced the IPv4 default route.  `None` if AllowedIPs did not
-    /// include `0.0.0.0/0` or no pre-existing default was found.
-    saved_default_v4: Option<String>,
+    /// The full default IPv4 route message captured before we displaced it.
+    /// `None` if AllowedIPs did not include `0.0.0.0/0` or no pre-existing
+    /// default was found.
+    saved_default_v4: Option<RouteMessage>,
 
-    /// The first line of `ip -6 route show exact ::/0` captured before we
-    /// displaced the IPv6 default route.
-    saved_default_v6: Option<String>,
+    /// The full default IPv6 route message captured before we displaced it.
+    saved_default_v6: Option<RouteMessage>,
 
     /// Host routes (`<ip>/32` or `<ip>/128`) added for peer endpoints before
     /// displacing the default route.  These are installed on the *physical*
@@ -107,124 +109,272 @@ struct WgState {
 // Module-level route helpers (no &self needed)
 // ---------------------------------------------------------------------------
 
-/// Parse the gateway IP and physical interface name from a captured default
-/// route line.
-///
-/// Handles the `ip route show` output format, e.g.:
-/// ```text
-/// default via 192.168.200.1 dev enp14s0 proto dhcp src 192.168.200.10 metric 100
-/// ```
-/// Returns `(gateway_ip, dev_name)` or `None` if `via` or `dev` tokens are
-/// missing (e.g. an on-link default with no gateway).
-fn parse_gateway(route_line: &str) -> Option<(String, String)> {
-    let mut tokens = route_line.split_whitespace().peekable();
-    let mut gw: Option<String> = None;
-    let mut dev: Option<String> = None;
-    while let Some(tok) = tokens.next() {
-        match tok {
-            "via" => gw = tokens.next().map(str::to_owned),
-            "dev" => dev = tokens.next().map(str::to_owned),
+// ---------------------------------------------------------------------------
+// rtnetlink route helpers
+// ---------------------------------------------------------------------------
+
+/// Extract gateway IP and output interface index from a RouteMessage.
+fn route_gateway_and_oif(msg: &RouteMessage) -> Option<(IpAddr, u32)> {
+    let mut gw: Option<IpAddr> = None;
+    let mut oif: Option<u32> = None;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::Gateway(addr) => {
+                gw = match addr {
+                    netlink_packet_route::route::RouteAddress::Inet(v4) => Some(IpAddr::V4(*v4)),
+                    netlink_packet_route::route::RouteAddress::Inet6(v6) => Some(IpAddr::V6(*v6)),
+                    _ => None,
+                };
+            }
+            RouteAttribute::Oif(idx) => oif = Some(*idx),
             _ => {}
         }
     }
-    match (gw, dev) {
-        (Some(g), Some(d)) => Some((g, d)),
+    match (gw, oif) {
+        (Some(g), Some(o)) => Some((g, o)),
         _ => None,
     }
 }
 
-/// Capture the first line of the current default route for later restoration.
-///
-/// Returns `None` if no default route is configured (output is empty).
-async fn capture_default_route(ipv6: bool) -> Result<Option<String>, BackendError> {
-    let argv: &[&str] = if ipv6 {
-        &["-6", "route", "show", "exact", "::/0"]
-    } else {
-        &["route", "show", "exact", "0.0.0.0/0"]
-    };
-    info!("running: ip {}", argv.join(" "));
+/// Resolve an interface name to its index via rtnetlink.
+async fn ifname_to_index(name: &str) -> Result<u32, BackendError> {
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
 
-    let out = tokio::process::Command::new("ip")
-        .args(argv)
-        .output()
+    let mut links = handle.link().get().match_name(name.to_owned()).execute();
+    let link = links
+        .try_next()
         .await
-        .map_err(BackendError::Io)?;
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    info!(
-        "ip {} → exit={} stdout={:?} stderr={:?}",
-        argv.join(" "), out.status, stdout.trim(), stderr.trim()
-    );
-
-    // Take only the first line; ECMP multi-path setups can have several.
-    let first = stdout.lines().next().map(str::trim).filter(|s| !s.is_empty());
-    Ok(first.map(str::to_owned))
+        .map_err(|e| BackendError::Interface(format!("rtnetlink link get '{name}': {e}")))?
+        .ok_or_else(|| BackendError::Interface(format!("interface '{name}' not found")))?;
+    Ok(link.header.index)
 }
 
-/// Delete the current default IPv4 or IPv6 route.
+/// Resolve an interface index to its name via rtnetlink.
+async fn ifindex_to_name(idx: u32) -> Option<String> {
+    let (conn, handle, _) = rtnetlink::new_connection().ok()?;
+    tokio::spawn(conn);
+    let mut links = handle.link().get().match_index(idx).execute();
+    let link = links.try_next().await.ok()??;
+    use netlink_packet_route::link::LinkAttribute;
+    link.attributes.iter().find_map(|a| {
+        if let LinkAttribute::IfName(name) = a { Some(name.clone()) } else { None }
+    })
+}
+
+/// Capture the current default route for the given address family.
 ///
-/// A non-zero exit is logged as a warning but is not fatal — the route may
-/// simply not exist.
-async fn delete_default_route(ipv6: bool) -> Result<(), BackendError> {
-    let argv: &[&str] = if ipv6 {
-        &["-6", "route", "del", "default"]
-    } else {
-        &["route", "del", "default"]
-    };
-    info!("running: ip {}", argv.join(" "));
+/// Returns `None` if no default route exists. Only the first (lowest metric)
+/// default is captured; ECMP setups will have the primary restored.
+async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, BackendError> {
+    let family = if ipv6 { rtnetlink::IpVersion::V6 } else { rtnetlink::IpVersion::V4 };
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
 
-    let out = tokio::process::Command::new("ip")
-        .args(argv)
-        .output()
+    let mut routes = handle.route().get(family).execute();
+    let mut best: Option<RouteMessage> = None;
+
+    while let Some(route) = routes
+        .try_next()
         .await
-        .map_err(BackendError::Io)?;
+        .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
+    {
+        // Default route has destination prefix length 0.
+        if route.header.destination_prefix_length != 0 {
+            continue;
+        }
+        // Only consider unicast routes in the main table.
+        use netlink_packet_route::route::{RouteType, RouteHeader};
+        if route.header.kind != RouteType::Unicast {
+            continue;
+        }
+        if route.header.table != RouteHeader::RT_TABLE_MAIN
+            && !route.attributes.iter().any(|a| matches!(a, RouteAttribute::Table(254)))
+        {
+            continue;
+        }
+        // Take the first (lowest metric) match.
+        if best.is_none() {
+            let gw_info = route_gateway_and_oif(&route);
+            if let Some((gw, oif)) = gw_info {
+                let dev_name = ifindex_to_name(oif).await.unwrap_or_else(|| format!("ifindex:{oif}"));
+                info!("captured {} default route: via {} dev {}", if ipv6 { "IPv6" } else { "IPv4" }, gw, dev_name);
+            }
+            best = Some(route);
+        }
+    }
+    Ok(best)
+}
 
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        warn!(
-            "ip {} exited {} stderr={:?} (may be harmless if no default existed)",
-            argv.join(" "), out.status, stderr.trim()
-        );
-    } else {
-        info!("ip {} → ok", argv.join(" "));
+/// Delete a default route captured by `capture_default_route`.
+///
+/// Logged as a warning if deletion fails — the route may not exist.
+async fn delete_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
+    let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
+    info!("deleting {} default route via rtnetlink", if ipv6 { "IPv6" } else { "IPv4" });
+
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
+
+    match handle.route().del(saved.clone()).execute().await {
+        Ok(()) => {
+            info!("deleted {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
+        }
+        Err(e) => {
+            warn!("delete {} default route failed: {e} (may be harmless)", if ipv6 { "IPv6" } else { "IPv4" });
+        }
     }
     Ok(())
 }
 
 /// Restore a previously captured default route.
 ///
-/// `saved` is a line from `ip route show exact`, e.g.:
-/// ```text
-/// default via 192.168.1.1 dev eth0 proto dhcp src 192.168.1.10 metric 100
-/// ```
-/// The words are passed directly to `ip [−6] route add`.  A non-zero exit is
-/// logged as a warning; we do not fail `disconnect` over a restore error since
-/// the tunnel itself is already torn down.
-async fn restore_default_route(saved: &str, ipv6: bool) -> Result<(), BackendError> {
-    let prefix = if ipv6 { "ip -6" } else { "ip" };
-    info!("running: {} route add {}", prefix, saved);
+/// A failure is logged as a warning; we do not fail `disconnect` over a
+/// restore error since the tunnel itself is already torn down.
+async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
+    let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
+    info!("restoring {} default route via rtnetlink", if ipv6 { "IPv6" } else { "IPv4" });
 
-    let mut cmd = tokio::process::Command::new("ip");
-    if ipv6 {
-        cmd.arg("-6");
-    }
-    cmd.arg("route").arg("add");
-    for word in saved.split_whitespace() {
-        cmd.arg(word);
-    }
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
 
-    let out = cmd.output().await.map_err(BackendError::Io)?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        warn!(
-            "{} route add {} → exit={} stderr={:?}",
-            prefix, saved, out.status, stderr.trim()
-        );
-    } else {
-        info!("{} route add {} → ok", prefix, saved);
+    // Rebuild the route via the add API using the saved message.
+    let mut req = handle.route().add();
+    *req.message_mut() = saved.clone();
+    // Ensure NLM_F_CREATE is set.
+    match req.execute().await {
+        Ok(()) => {
+            info!("restored {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
+        }
+        Err(e) => {
+            warn!("restore {} default route failed: {e}", if ipv6 { "IPv6" } else { "IPv4" });
+        }
     }
     Ok(())
+}
+
+/// Add a host route for a specific IP via a gateway and output interface.
+async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), BackendError> {
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
+
+    let result = match (ip, gateway) {
+        (IpAddr::V4(dst), IpAddr::V4(gw)) => {
+            handle.route().add()
+                .v4()
+                .destination_prefix(dst, 32)
+                .gateway(gw)
+                .output_interface(oif)
+                .execute()
+                .await
+        }
+        (IpAddr::V6(dst), IpAddr::V6(gw)) => {
+            handle.route().add()
+                .v6()
+                .destination_prefix(dst, 128)
+                .gateway(gw)
+                .output_interface(oif)
+                .execute()
+                .await
+        }
+        _ => return Err(BackendError::Interface("mixed IPv4/IPv6 gateway mismatch".into())),
+    };
+
+    result.map_err(|e| BackendError::Interface(format!("add host route for {ip}: {e}")))
+}
+
+/// Delete a host route (endpoint route added during connect).
+async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
+    let (ip, prefix) = parse_cidr(cidr)?;
+
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
+
+    // Find the matching route.
+    let family = if ip.is_ipv4() { rtnetlink::IpVersion::V4 } else { rtnetlink::IpVersion::V6 };
+    let mut routes = handle.route().get(family).execute();
+    while let Some(route) = routes.try_next().await
+        .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
+    {
+        if route.header.destination_prefix_length != prefix {
+            continue;
+        }
+        let matches_dst = route.attributes.iter().any(|a| match a {
+            RouteAttribute::Destination(addr) => match (addr, ip) {
+                (netlink_packet_route::route::RouteAddress::Inet(v4), IpAddr::V4(want)) => *v4 == want,
+                (netlink_packet_route::route::RouteAddress::Inet6(v6), IpAddr::V6(want)) => *v6 == want,
+                _ => false,
+            },
+            _ => false,
+        });
+        if matches_dst {
+            let (conn2, handle2, _) = rtnetlink::new_connection()
+                .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+            tokio::spawn(conn2);
+            match handle2.route().del(route).execute().await {
+                Ok(()) => info!("deleted host route {cidr} — ok"),
+                Err(e) => warn!("delete host route {cidr} failed: {e} (may already be gone)"),
+            }
+            return Ok(());
+        }
+    }
+    warn!("host route {cidr} not found for deletion (may already be gone)");
+    Ok(())
+}
+
+/// Add a route for an AllowedIP CIDR via a WireGuard interface.
+async fn add_allowed_ip_route(cidr: &str, iface_index: u32, metric: Option<u32>) -> Result<(), BackendError> {
+    let (ip, prefix) = parse_cidr(cidr)?;
+
+    let (conn, handle, _) = rtnetlink::new_connection()
+        .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
+    tokio::spawn(conn);
+
+    let result = match ip {
+        IpAddr::V4(v4) => {
+            let mut req = handle.route().add()
+                .v4()
+                .destination_prefix(v4, prefix)
+                .output_interface(iface_index);
+            if let Some(m) = metric { req = req.priority(m); }
+            req.execute().await
+        }
+        IpAddr::V6(v6) => {
+            let mut req = handle.route().add()
+                .v6()
+                .destination_prefix(v6, prefix)
+                .output_interface(iface_index);
+            if let Some(m) = metric { req = req.priority(m); }
+            req.execute().await
+        }
+    };
+
+    result.map_err(|e| {
+        let msg = e.to_string();
+        let hint = if msg.contains("Permission denied") || msg.contains("Operation not permitted") {
+            " — the daemon must run as root to manage routes"
+        } else if msg.contains("File exists") {
+            " — a conflicting route already exists; disconnect any other VPN first"
+        } else if msg.contains("No such device") {
+            " — the WireGuard interface disappeared unexpectedly"
+        } else {
+            ""
+        };
+        BackendError::Interface(format!("failed to add route {cidr}: {msg}{hint}"))
+    })
+}
+
+/// Parse a CIDR string like "10.0.0.1/32" into (IpAddr, prefix_len).
+fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
+    let net: ipnet::IpNet = cidr.parse()
+        .map_err(|e| BackendError::Interface(format!("invalid CIDR '{cidr}': {e}")))?;
+    Ok((net.addr(), net.prefix_len()))
 }
 
 // ---------------------------------------------------------------------------
@@ -271,12 +421,23 @@ impl WireGuardBackend {
                 ))
             })?;
 
-        // The secret is stored as base64-encoded UTF-8 (WireGuard .conf format).
-        let raw_str = std::str::from_utf8(&raw_bytes)
-            .map_err(|_| BackendError::Key("private key bytes are not valid UTF-8".into()))?;
-
-        Key::from_base64(raw_str.trim())
-            .map_err(|e| BackendError::Key(format!("base64 decode failed: {e}")))
+        // The secret is normally stored as base64-encoded UTF-8 (WireGuard .conf
+        // format).  However, older imports or TOML backup restores may have stored
+        // the raw 32-byte key directly.  Handle both cases gracefully.
+        match std::str::from_utf8(&raw_bytes) {
+            Ok(raw_str) => Key::from_base64(raw_str.trim())
+                .map_err(|e| BackendError::Key(format!("base64 decode failed: {e}"))),
+            Err(_) if raw_bytes.len() == 32 => {
+                // Raw 32-byte WireGuard key — use directly.
+                let arr: [u8; 32] = raw_bytes.try_into().unwrap();
+                Ok(Key(arr))
+            }
+            Err(_) => Err(BackendError::Key(format!(
+                "private key bytes are neither valid UTF-8 base64 nor a raw 32-byte key \
+                 (got {} bytes)",
+                raw_bytes.len()
+            ))),
+        }
     }
 
     /// Apply WireGuard configuration to the kernel interface.
@@ -338,17 +499,23 @@ impl WireGuardBackend {
             if let Some(ref psk_ref) = peer.preshared_key {
                 match secrets::retrieve_secret(psk_ref.label()).await {
                     Ok(raw_bytes) => {
-                        match std::str::from_utf8(&raw_bytes) {
-                            Ok(raw_str) => {
-                                match Key::from_base64(raw_str.trim()) {
-                                    Ok(psk_key) => {
-                                        peer_builder = peer_builder.set_preshared_key(psk_key);
-                                        debug!("applied PSK for peer {}", &peer.public_key[..8]);
-                                    }
-                                    Err(e) => warn!("PSK base64 decode failed for peer {}: {}", &peer.public_key[..8], e),
-                                }
+                        let psk_result = match std::str::from_utf8(&raw_bytes) {
+                            Ok(raw_str) => Key::from_base64(raw_str.trim()),
+                            Err(_) if raw_bytes.len() == 32 => {
+                                let arr: [u8; 32] = raw_bytes.try_into().unwrap();
+                                Ok(Key(arr))
                             }
-                            Err(_) => warn!("PSK bytes not UTF-8 for peer {}", &peer.public_key[..8]),
+                            Err(_) => {
+                                warn!("PSK bytes not UTF-8 and not 32 bytes for peer {}", &peer.public_key[..8]);
+                                Err(wireguard_control::InvalidKey)
+                            }
+                        };
+                        match psk_result {
+                            Ok(psk_key) => {
+                                peer_builder = peer_builder.set_preshared_key(psk_key);
+                                debug!("applied PSK for peer {}", &peer.public_key[..8]);
+                            }
+                            Err(e) => warn!("PSK decode failed for peer {}: {}", &peer.public_key[..8], e),
                         }
                     }
                     Err(e) => warn!("PSK not found in keyring for peer {}: {}", &peer.public_key[..8], e),
@@ -408,8 +575,6 @@ impl WireGuardBackend {
         iface_name: &str,
         wg_cfg: &WireGuardConfig,
     ) -> Result<(), BackendError> {
-        use futures_util::TryStreamExt as _;
-
         let (conn, handle, _) = rtnetlink::new_connection()
             .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
         tokio::spawn(conn);
@@ -455,8 +620,7 @@ impl WireGuardBackend {
     ///
     /// For full-tunnel configs (`0.0.0.0/0` or `::/0` in AllowedIPs) the
     /// sequence is:
-    /// 1. Capture the current default route to get the gateway IP and
-    ///    physical interface name.
+    /// 1. Capture the current default route via rtnetlink.
     /// 2. Add a `/32` (IPv4) or `/128` (IPv6) host route for **every** peer
     ///    endpoint via the original gateway, so WireGuard UDP traffic continues
     ///    to reach the server after the default is replaced.
@@ -465,16 +629,14 @@ impl WireGuardBackend {
     ///
     /// Returns `(saved_v4, saved_v6, endpoint_host_routes)` for storage in
     /// `WgState` so `disconnect` can reverse the changes.
-    ///
-    /// TODO(rtnetlink): Replace `ip route add` subprocess with rtnetlink calls.
     #[instrument(skip(self, wg_cfg), fields(iface = %iface_name))]
     async fn add_routes(
         &self,
         iface_name: &str,
         wg_cfg: &WireGuardConfig,
-    ) -> Result<(Option<String>, Option<String>, Vec<String>), BackendError> {
-        let mut saved_v4: Option<String> = None;
-        let mut saved_v6: Option<String> = None;
+    ) -> Result<(Option<RouteMessage>, Option<RouteMessage>, Vec<String>), BackendError> {
+        let mut saved_v4: Option<RouteMessage> = None;
+        let mut saved_v6: Option<RouteMessage> = None;
         let mut endpoint_host_routes: Vec<String> = Vec::new();
 
         // Determine whether full-tunnel routing is needed for each family.
@@ -486,38 +648,25 @@ impl WireGuardBackend {
         });
 
         // ----------------------------------------------------------------
-        // Phase 1: Capture default routes (needed to find the gateway for
-        //          endpoint host routes).
+        // Phase 1: Capture default routes via rtnetlink.
         // ----------------------------------------------------------------
         if needs_full_tunnel_v4 {
             saved_v4 = capture_default_route(false).await?;
-            if let Some(ref s) = saved_v4 {
-                info!("captured IPv4 default route for restoration: {}", s);
-            }
         }
         if needs_full_tunnel_v6 {
             saved_v6 = capture_default_route(true).await?;
-            if let Some(ref s) = saved_v6 {
-                info!("captured IPv6 default route for restoration: {}", s);
-            }
         }
 
         // ----------------------------------------------------------------
         // Phase 2: Add endpoint host routes BEFORE displacing the default.
-        //
-        // If full-tunnel is active, after we replace the default route all
-        // traffic — including WireGuard's own UDP handshake packets — would
-        // be routed into the not-yet-established tunnel.  A specific /32 (or
-        // /128) host route via the original gateway prevents this black-hole.
         // ----------------------------------------------------------------
-        let gw_v4 = saved_v4.as_deref().and_then(parse_gateway);
-        let gw_v6 = saved_v6.as_deref().and_then(parse_gateway);
+        let gw_v4 = saved_v4.as_ref().and_then(route_gateway_and_oif);
+        let gw_v6 = saved_v6.as_ref().and_then(route_gateway_and_oif);
 
         if needs_full_tunnel_v4 || needs_full_tunnel_v6 {
             for peer in &wg_cfg.peers {
                 let Some(ref ep) = peer.endpoint else { continue };
 
-                // Resolve the endpoint to a concrete IP address.
                 let ep_ip = match tokio::net::lookup_host(ep.as_str()).await {
                     Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
                         Some(ip) => ip,
@@ -539,41 +688,25 @@ impl WireGuardBackend {
                 };
 
                 if !family_active {
-                    // The default for this address family is not being replaced;
-                    // no host route needed.
                     continue;
                 }
 
                 match gw_info {
-                    Some((gw, dev)) => {
-                        info!(
-                            "adding endpoint host route: ip route add {} via {} dev {}",
-                            host_cidr, gw, dev
-                        );
-                        let out = tokio::process::Command::new("ip")
-                            .args(["route", "add", &host_cidr, "via", gw, "dev", dev])
-                            .output()
-                            .await
-                            .map_err(BackendError::Io)?;
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        info!(
-                            "ip route add {} via {} dev {} → exit={} stderr={:?}",
-                            host_cidr, gw, dev, out.status, stderr.trim()
-                        );
-                        if out.status.success() {
-                            endpoint_host_routes.push(host_cidr);
-                        } else {
-                            // Non-fatal: log and continue.  The route may
-                            // already exist from a previous partial connect.
-                            warn!(
-                                "failed to add endpoint host route for {}: {}",
-                                ep, stderr.trim()
-                            );
+                    Some((gw, oif)) => {
+                        info!("adding endpoint host route: {} via {} oif {}", host_cidr, gw, oif);
+                        match add_host_route(ep_ip, *gw, *oif).await {
+                            Ok(()) => {
+                                info!("endpoint host route {} — ok", host_cidr);
+                                endpoint_host_routes.push(host_cidr);
+                            }
+                            Err(e) => {
+                                warn!("failed to add endpoint host route for {}: {e}", ep);
+                            }
                         }
                     }
                     None => {
                         warn!(
-                            "full-tunnel active but could not parse gateway from default route \
+                            "full-tunnel active but could not extract gateway from default route \
                              — endpoint host route for {} not added; WireGuard UDP may be lost",
                             ep
                         );
@@ -582,11 +715,7 @@ impl WireGuardBackend {
             }
 
             // ----------------------------------------------------------------
-            // Phase 2b: Persist saved routes and endpoint host routes in
-            //           backend state BEFORE deleting the defaults.  This
-            //           ensures that if anything goes wrong from here on
-            //           (Phase 3 or Phase 4), `disconnect()` can still find
-            //           and restore the original routes.
+            // Phase 2b: Persist state BEFORE deleting defaults.
             // ----------------------------------------------------------------
             {
                 let mut st = self.state.lock().await;
@@ -597,62 +726,32 @@ impl WireGuardBackend {
             }
 
             // ----------------------------------------------------------------
-            // Phase 3: Now that endpoint host routes are in place, displace the
-            //          original default routes.
+            // Phase 3: Displace the original default routes.
             // ----------------------------------------------------------------
-            if saved_v4.is_some() {
-                delete_default_route(false).await?;
+            if let Some(ref saved) = saved_v4 {
+                delete_default_route(saved).await?;
             }
-            if saved_v6.is_some() {
-                delete_default_route(true).await?;
+            if let Some(ref saved) = saved_v6 {
+                delete_default_route(saved).await?;
             }
         }
 
         // ----------------------------------------------------------------
-        // Phase 4: Add all AllowedIPs routes.
+        // Phase 4: Add all AllowedIPs routes via rtnetlink.
         // ----------------------------------------------------------------
+        let iface_index = ifname_to_index(iface_name).await?;
+
         for peer in &wg_cfg.peers {
             for allowed_ip in &peer.allowed_ips {
                 let cidr = allowed_ip.to_string();
                 let is_default_v4 = cidr == "0.0.0.0/0";
                 let is_default_v6 = cidr == "::/0";
 
-                let mut cmd = tokio::process::Command::new("ip");
-                cmd.args(["route", "add", &cidr, "dev", iface_name]);
-                if is_default_v4 || is_default_v6 {
-                    cmd.args(["metric", "100"]);
-                    info!("running: ip route add {} dev {} metric 100", cidr, iface_name);
-                } else {
-                    info!("running: ip route add {} dev {}", cidr, iface_name);
-                }
+                let metric = if is_default_v4 || is_default_v6 { Some(100) } else { None };
+                info!("adding route {} dev {}{}", cidr, iface_name,
+                    metric.map(|m| format!(" metric {m}")).unwrap_or_default());
 
-                let out = cmd.output().await.map_err(BackendError::Io)?;
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                info!(
-                    "ip route add {} dev {} → exit={} stdout={:?} stderr={:?}",
-                    cidr, iface_name, out.status, stdout.trim(), stderr.trim()
-                );
-                if !out.status.success() {
-                    let stderr_str = stderr.trim();
-                    error!(
-                        "ip route add {cidr} dev {iface_name} failed: exit={} stderr={:?}",
-                        out.status, stderr_str
-                    );
-                    let hint = if stderr_str.contains("Permission denied") || stderr_str.contains("RTNETLINK answers: Operation not permitted") {
-                        " — the daemon must run as root to manage routes"
-                    } else if stderr_str.contains("File exists") {
-                        " — a conflicting route already exists; disconnect any other VPN first"
-                    } else if stderr_str.contains("No such device") {
-                        " — the WireGuard interface disappeared unexpectedly"
-                    } else {
-                        ""
-                    };
-                    return Err(BackendError::Interface(format!(
-                        "failed to add route {cidr} via {iface_name}: {stderr_str}{hint}",
-                    )));
-                }
-
+                add_allowed_ip_route(&cidr, iface_index, metric).await?;
                 debug!("added route {} dev {}", cidr, iface_name);
             }
         }
@@ -882,8 +981,6 @@ impl WireGuardBackend {
 /// the interface does not exist (already gone — treat as warning, not error).
 #[instrument(fields(iface = %iface_name))]
 async fn delete_interface(iface_name: &str) -> Result<(), BackendError> {
-    use futures_util::TryStreamExt as _;
-
     let (conn, handle, _) = rtnetlink::new_connection()
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
@@ -1102,37 +1199,21 @@ impl VpnBackend for WireGuardBackend {
             Err(e) => return Err(e),
         }
 
-        // Step 2: Remove endpoint host routes.  These were installed on the
-        // physical interface and survive interface deletion, so they must be
-        // cleaned up manually before restoring the default route.
+        // Step 2: Remove endpoint host routes via rtnetlink.  These were
+        // installed on the physical interface and survive interface deletion.
         for cidr in &endpoint_host_routes {
-            info!("removing endpoint host route: ip route del {}", cidr);
-            let out = tokio::process::Command::new("ip")
-                .args(["route", "del", cidr])
-                .output()
-                .await
-                .map_err(BackendError::Io)?;
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                warn!(
-                    "ip route del {} → exit={} stderr={:?} (may already be gone)",
-                    cidr, out.status, stderr.trim()
-                );
-            } else {
-                info!("ip route del {} → ok", cidr);
+            info!("removing endpoint host route: {}", cidr);
+            if let Err(e) = delete_host_route(cidr).await {
+                warn!("delete endpoint host route {}: {e}", cidr);
             }
         }
 
-        // Step 3: Restore the original default routes.  We do this after the
-        // WG interface is gone so there is no stale tunnel default competing
-        // with the restored one.
+        // Step 3: Restore the original default routes via rtnetlink.
         if let Some(ref saved) = saved_v4 {
-            info!("restoring original default IPv4 route: {}", saved);
-            restore_default_route(saved, false).await?;
+            restore_default_route(saved).await?;
         }
         if let Some(ref saved) = saved_v6 {
-            info!("restoring original default IPv6 route: {}", saved);
-            restore_default_route(saved, true).await?;
+            restore_default_route(saved).await?;
         }
 
         {

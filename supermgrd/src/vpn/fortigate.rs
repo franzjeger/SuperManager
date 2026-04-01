@@ -75,6 +75,16 @@ struct FgState {
     /// `org.freedesktop.resolve1` interface index stored after a successful
     /// `SetLinkDNS` call; used to call `RevertLink` on disconnect.
     dns_configured_ifindex: Option<i32>,
+
+    /// Tunnel routes added after SA establishment.  For full-tunnel this
+    /// includes the default route; for split-tunnel the individual remote TS
+    /// CIDRs.  These are added with `src <VIP>` so the XFRM policy matches.
+    /// Must be removed explicitly on disconnect.
+    tunnel_routes: Vec<String>,
+
+    /// The original default route line captured before installing a full-tunnel
+    /// default, so it can be restored on disconnect.  `None` for split-tunnel.
+    saved_default_route: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +783,100 @@ impl VpnBackend for FortiGateBackend {
             None => info!("no virtual IP in --list-sas output (split-tunnel or parse miss)"),
         }
 
+        // ── Step 6b: Install tunnel routes ──────────────────────────────────
+        // strongSwan's XFRM policies only match traffic with src=VIP.  The
+        // kernel needs explicit routes that force traffic to use the VIP as
+        // source address, otherwise packets leave with the physical IP and
+        // bypass the tunnel entirely.
+        let mut tunnel_routes: Vec<String> = Vec::new();
+        let mut saved_default_route: Option<String> = None;
+
+        // Parse VIP from the initiate output (already confirmed above).
+        let stdout_str = String::from_utf8_lossy(&out.stdout);
+        let vip: Option<std::net::IpAddr> = stdout_str
+            .lines()
+            .find(|l| l.contains("installing new virtual IP"))
+            .and_then(|l| {
+                l.split("installing new virtual IP")
+                    .nth(1)
+                    .and_then(|s| s.trim().parse().ok())
+            });
+
+        if let Some(vip) = vip {
+            let outbound_dev = outbound_iface.as_deref().unwrap_or("enp129s0");
+
+            if profile.full_tunnel {
+                // Full-tunnel: capture old default, then add a new one with src=VIP.
+                let cap = tokio::process::Command::new("ip")
+                    .args(["route", "show", "exact", "0.0.0.0/0"])
+                    .output()
+                    .await
+                    .map_err(BackendError::Io)?;
+                let cap_out = String::from_utf8_lossy(&cap.stdout);
+                saved_default_route = cap_out.lines().next().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+
+                // Delete old default and add new one with src=VIP via the same gateway.
+                if let Some(ref saved) = saved_default_route {
+                    if let Some((gw, _dev)) = parse_gateway(saved) {
+                        info!("installing full-tunnel default: via {gw} dev {outbound_dev} src {vip}");
+
+                        // Delete existing defaults.
+                        let _ = tokio::process::Command::new("ip")
+                            .args(["route", "del", "default"])
+                            .output()
+                            .await;
+
+                        // Add new default with src=VIP so XFRM policy matches.
+                        let add_out = tokio::process::Command::new("ip")
+                            .args([
+                                "route", "add", "default",
+                                "via", &gw,
+                                "dev", outbound_dev,
+                                "src", &vip.to_string(),
+                                "metric", "50",
+                            ])
+                            .output()
+                            .await
+                            .map_err(BackendError::Io)?;
+
+                        if add_out.status.success() {
+                            tunnel_routes.push("default".to_owned());
+                            info!("full-tunnel default route installed — ok");
+                        } else {
+                            let stderr = String::from_utf8_lossy(&add_out.stderr);
+                            warn!("failed to install full-tunnel default: {}", stderr.trim());
+                        }
+                    }
+                }
+            } else {
+                // Split-tunnel: add a route for each remote traffic selector with src=VIP.
+                for route_cidr in &fg_cfg.routes {
+                    let cidr = route_cidr.to_string();
+                    info!("installing split-tunnel route: {cidr} dev {outbound_dev} src {vip}");
+
+                    let add_out = tokio::process::Command::new("ip")
+                        .args([
+                            "route", "add", &cidr,
+                            "dev", outbound_dev,
+                            "src", &vip.to_string(),
+                        ])
+                        .output()
+                        .await
+                        .map_err(BackendError::Io)?;
+
+                    if add_out.status.success() {
+                        tunnel_routes.push(cidr.clone());
+                        info!("split-tunnel route {cidr} — ok");
+                    } else {
+                        let stderr = String::from_utf8_lossy(&add_out.stderr);
+                        warn!("failed to add split-tunnel route {cidr}: {}", stderr.trim());
+                    }
+                }
+            }
+        } else {
+            warn!("could not parse virtual IP from swanctl output — tunnel routes not installed");
+        }
+
         // ── Step 7: Configure DNS ────────────────────────────────────────────
         // Prefer DNS servers from the profile config.  If none are set,
         // parse the IKE negotiation output for servers pushed by the server
@@ -821,6 +925,8 @@ impl VpnBackend for FortiGateBackend {
             state.config_path = Some(config_path);
             state.endpoint_host_routes = endpoint_host_routes;
             state.dns_configured_ifindex = dns_configured_ifindex;
+            state.tunnel_routes = tunnel_routes;
+            state.saved_default_route = saved_default_route;
         }
 
         info!("FortiGate SA '{}' established", conn_name);
@@ -829,7 +935,7 @@ impl VpnBackend for FortiGateBackend {
 
     #[instrument(skip(self))]
     async fn disconnect(&self) -> Result<(), BackendError> {
-        let (conn_name, config_path, endpoint_host_routes, dns_ifindex) = {
+        let (conn_name, config_path, endpoint_host_routes, dns_ifindex, tunnel_routes, saved_default_route) = {
             let state = self.state.lock().await;
             match state.connection_name.clone() {
                 Some(name) => (
@@ -837,6 +943,8 @@ impl VpnBackend for FortiGateBackend {
                     state.config_path.clone(),
                     state.endpoint_host_routes.clone(),
                     state.dns_configured_ifindex,
+                    state.tunnel_routes.clone(),
+                    state.saved_default_route.clone(),
                 ),
                 None => {
                     debug!("disconnect called but no SA is active — no-op");
@@ -884,6 +992,38 @@ impl VpnBackend for FortiGateBackend {
             );
         }
 
+        // Step 3b: Remove tunnel routes we added and restore original default.
+        for cidr in &tunnel_routes {
+            info!("removing tunnel route: {cidr}");
+            let out = tokio::process::Command::new("ip")
+                .args(["route", "del", cidr])
+                .output()
+                .await
+                .map_err(BackendError::Io)?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!("ip route del {cidr} → {} (may already be gone)", stderr.trim());
+            }
+        }
+
+        // Restore original default route if we displaced it for full-tunnel.
+        if let Some(ref saved) = saved_default_route {
+            info!("restoring original default route: {saved}");
+            let mut cmd = tokio::process::Command::new("ip");
+            cmd.arg("route").arg("add");
+            for word in saved.split_whitespace() {
+                cmd.arg(word);
+            }
+            match cmd.output().await {
+                Ok(out) if !out.status.success() => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    warn!("restore default route failed: {}", stderr.trim());
+                }
+                Err(e) => warn!("restore default route failed: {e}"),
+                _ => info!("default route restored — ok"),
+            }
+        }
+
         // Step 4: Delete endpoint host routes.
         // These were added manually before the IKE SA and are not managed by
         // charon, so we must remove them explicitly.
@@ -914,6 +1054,8 @@ impl VpnBackend for FortiGateBackend {
             state.config_path = None;
             state.endpoint_host_routes = Vec::new();
             state.dns_configured_ifindex = None;
+            state.tunnel_routes = Vec::new();
+            state.saved_default_route = None;
         }
 
         info!("FortiGate SA '{}' torn down", conn_name);

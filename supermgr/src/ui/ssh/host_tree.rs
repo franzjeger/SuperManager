@@ -5,7 +5,7 @@
 //! hostname:port as subtitle.
 
 use std::collections::BTreeMap;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
 use gtk4::{gio, glib, prelude::*};
 use libadwaita as adw;
@@ -14,7 +14,7 @@ use tracing::{error, info};
 
 use supermgr_core::ssh::host::SshHostSummary;
 
-use crate::app::{AppMsg, AppState};
+use crate::app::AppMsg;
 use crate::dbus_client::{dbus_ssh_delete_host, dbus_ssh_toggle_pin};
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ pub fn populate_ssh_host_list(
 
     // Track row indices to map selection back to host IDs.
     // We need to remember which indices are group headers (non-selectable).
-    let mut row_idx: i32 = 0;
+    let mut _row_idx: i32 = 0;
     let mut host_row_map: Vec<Option<String>> = Vec::new(); // None = group header
 
     for (group_name, hosts_in_group) in &groups {
@@ -122,7 +122,7 @@ pub fn populate_ssh_host_list(
         header_row.set_child(Some(&header_label));
         list_box.append(&header_row);
         host_row_map.push(None);
-        row_idx += 1;
+        _row_idx += 1;
 
         for host in hosts_in_group {
             let port_str = if host.port == 22 {
@@ -424,7 +424,7 @@ pub fn populate_ssh_host_list(
 
             list_box.append(&row);
             host_row_map.push(Some(host.id.to_string()));
-            row_idx += 1;
+            _row_idx += 1;
         }
     }
 

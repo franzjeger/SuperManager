@@ -1,6 +1,5 @@
 //! Navigation helpers — [`AdwViewStack`] and [`AdwViewSwitcher`] builders.
 
-use gtk4::prelude::*;
 use libadwaita as adw;
 
 /// Build an empty [`adw::ViewStack`] to hold the top-level VPN and SSH pages.

@@ -15,6 +15,8 @@ pub enum AuthMethod {
     Password,
     /// Public-key authentication.
     Key,
+    /// OpenSSH certificate authentication (key + CA-signed certificate).
+    Certificate,
 }
 
 /// A saved port-forwarding rule (local → remote via SSH tunnel).
@@ -74,6 +76,11 @@ pub struct SshHost {
     /// Reference to the password stored in the secret service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_password_ref: Option<SecretRef>,
+
+    /// Reference to the OpenSSH certificate stored in the secret service.
+    /// Used when `auth_method` is [`AuthMethod::Certificate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_cert_ref: Option<SecretRef>,
 
     /// Optional VPN profile to auto-connect before opening this SSH session.
     #[serde(default, skip_serializing_if = "Option::is_none")]

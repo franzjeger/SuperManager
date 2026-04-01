@@ -11,6 +11,7 @@ use supermgr_core::{
 
 /// Which top-level section is active in the UI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Section {
     #[default]
     Vpn,
@@ -44,6 +45,7 @@ pub struct AppState {
     /// UUID string of the SSH host selected in the sidebar, if any.
     pub selected_ssh_host: Option<String>,
     /// Which top-level section is currently active.
+    #[allow(dead_code)]
     pub active_section: Section,
     /// Current SSH sidebar search/filter text.
     pub ssh_filter: String,
@@ -63,6 +65,7 @@ pub struct AppState {
 ///
 /// All variants are `Send`; GTK widget references live only on the main thread
 /// and are updated by the `glib::timeout_add_local` drain loop.
+#[allow(dead_code)]
 pub enum AppMsg {
     /// Daemon responded; carry the refreshed profiles and current state.
     DaemonConnected {

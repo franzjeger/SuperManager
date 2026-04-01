@@ -290,6 +290,8 @@ pub struct DaemonService {
     /// Shared mutable state.
     pub state: Arc<tokio::sync::Mutex<DaemonState>>,
     /// Channel the monitoring task uses to receive a termination signal.
+    /// Held here to keep the sender alive; the receiver is passed to the monitor task.
+    #[allow(dead_code)]
     pub shutdown_tx: watch::Sender<bool>,
     /// Ring buffer of recent log lines (filled by the `RingLayer` tracing layer).
     pub log_buffer: Arc<std::sync::Mutex<VecDeque<String>>>,
@@ -1659,8 +1661,13 @@ impl DaemonService {
                     match am {
                         AuthMethod::Password => {
                             host.auth_key_id = None;
+                            host.auth_cert_ref = None;
                         }
                         AuthMethod::Key => {
+                            host.auth_password_ref = None;
+                            host.auth_cert_ref = None;
+                        }
+                        AuthMethod::Certificate => {
                             host.auth_password_ref = None;
                         }
                     }
@@ -2233,7 +2240,7 @@ impl DaemonService {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
-        let (hostname, api_port, api_verify_tls, token_label) = {
+        let (hostname, api_port, _api_verify_tls, token_label) = {
             let state = self.state.lock().await;
             let host = state.ssh_hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
@@ -3518,6 +3525,131 @@ impl DaemonService {
             "detail": if maintainer_disabled { "admin-maintainer disabled" } else { "admin-maintainer not disabled" },
         }));
 
+        // --- Check 11: NTP configured ---
+        let (_, out, _) = session
+            .exec("show system ntp | grep ntpsync")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let ntp_enabled = out.contains("enable");
+        checks.push(serde_json::json!({
+            "name": "NTP synchronisation enabled",
+            "status": if ntp_enabled { "pass" } else { "fail" },
+            "detail": if ntp_enabled { "ntpsync enabled" } else { "ntpsync not enabled" },
+        }));
+
+        // --- Check 12: Idle timeout <= 15 minutes ---
+        let (_, out, _) = session
+            .exec("show system global | grep admintimeout")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let timeout: u32 = out
+            .lines()
+            .find(|l| l.contains("admintimeout"))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        checks.push(serde_json::json!({
+            "name": "Admin idle timeout <= 15 min",
+            "status": if timeout > 0 && timeout <= 15 { "pass" } else { "fail" },
+            "detail": format!("admintimeout {}", timeout),
+        }));
+
+        // --- Check 13: Local-in policy present ---
+        let (_, out, _) = session
+            .exec("show firewall local-in-policy")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_local_in = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "Local-in policy configured",
+            "status": if has_local_in { "pass" } else { "fail" },
+            "detail": if has_local_in { "local-in-policy entries found" } else { "no local-in-policy entries" },
+        }));
+
+        // --- Check 14: SSL/SSH inspection profile exists ---
+        let (_, out, _) = session
+            .exec("show firewall ssl-ssh-profile")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_ssl_profile = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "SSL/SSH inspection profile",
+            "status": if has_ssl_profile { "pass" } else { "fail" },
+            "detail": if has_ssl_profile { "SSL/SSH inspection profiles found" } else { "no custom SSL/SSH profiles" },
+        }));
+
+        // --- Check 15: USB auto-install disabled ---
+        let (_, out, _) = session
+            .exec("show system auto-install | grep auto-install-config")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let usb_disabled = out.contains("disable");
+        checks.push(serde_json::json!({
+            "name": "USB auto-install disabled",
+            "status": if usb_disabled { "pass" } else { "fail" },
+            "detail": if usb_disabled { "auto-install-config disabled" } else { "auto-install-config not disabled" },
+        }));
+
+        // --- Check 16: Antivirus profile configured ---
+        let (_, out, _) = session
+            .exec("show antivirus profile")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_av = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "Antivirus profile configured",
+            "status": if has_av { "pass" } else { "fail" },
+            "detail": if has_av { "antivirus profiles found" } else { "no custom antivirus profiles" },
+        }));
+
+        // --- Check 17: IPS sensor configured ---
+        let (_, out, _) = session
+            .exec("show ips sensor")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_ips = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "IPS sensor configured",
+            "status": if has_ips { "pass" } else { "fail" },
+            "detail": if has_ips { "IPS sensors found" } else { "no IPS sensors configured" },
+        }));
+
+        // --- Check 18: HA configured (if applicable) ---
+        let (_, out, _) = session
+            .exec("show system ha | grep mode")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let ha_active = !out.contains("standalone");
+        checks.push(serde_json::json!({
+            "name": "High availability mode",
+            "status": if ha_active { "pass" } else { "info" },
+            "detail": if ha_active { "HA configured" } else { "standalone mode" },
+        }));
+
+        // --- Check 19: Logging to remote syslog ---
+        let (_, out, _) = session
+            .exec("show log syslogd setting | grep status")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let syslog_enabled = out.contains("enable");
+        checks.push(serde_json::json!({
+            "name": "Remote syslog enabled",
+            "status": if syslog_enabled { "pass" } else { "fail" },
+            "detail": if syslog_enabled { "syslog logging enabled" } else { "syslog logging not enabled" },
+        }));
+
+        // --- Check 20: DNS filtering configured ---
+        let (_, out, _) = session
+            .exec("show dnsfilter profile")
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("exec failed: {e}")))?;
+        let has_dns_filter = out.contains("edit ");
+        checks.push(serde_json::json!({
+            "name": "DNS filter profile",
+            "status": if has_dns_filter { "pass" } else { "fail" },
+            "detail": if has_dns_filter { "DNS filter profiles found" } else { "no DNS filter profiles" },
+        }));
+
         // Summarise.
         let passed = checks.iter().filter(|c| c["status"] == "pass").count();
         let total = checks.len();
@@ -3710,40 +3842,60 @@ async fn connect_direct(
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
-    if host.auth_method == AuthMethod::Key {
-        if let Some(ref pem) = push_key_pem {
-            return crate::ssh::connection::SshSession::connect_key(
-                &host.hostname, host.port, &host.username, pem, 30,
-            ).await;
+    match host.auth_method {
+        AuthMethod::Key | AuthMethod::Certificate => {
+            // Resolve the private key PEM.
+            let pem = if let Some(ref p) = push_key_pem {
+                Some(p.clone())
+            } else if let Some(auth_key_id) = host.auth_key_id {
+                let state = state_arc.lock().await;
+                if let Some(auth_key) = state.ssh_keys.get(&auth_key_id) {
+                    let label = auth_key.private_key_ref.label().to_owned();
+                    drop(state);
+                    crate::secrets::retrieve_secret(&label).await.ok()
+                        .and_then(|b| String::from_utf8(b).ok())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let pem = pem.ok_or_else(|| {
+                supermgr_core::error::SshError::AuthFailed("no auth key available".into())
+            })?;
+
+            // For certificate auth, also retrieve the certificate.
+            if host.auth_method == AuthMethod::Certificate {
+                if let Some(ref cert_ref) = host.auth_cert_ref {
+                    if let Ok(cert_bytes) = crate::secrets::retrieve_secret(cert_ref.label()).await {
+                        if let Ok(cert_str) = String::from_utf8(cert_bytes) {
+                            return crate::ssh::connection::SshSession::connect_certificate(
+                                &host.hostname, host.port, &host.username, &pem, &cert_str, 30,
+                            ).await;
+                        }
+                    }
+                }
+                // Fall through to plain key auth if cert unavailable.
+                warn!("certificate not found for host {}, falling back to key auth", host.hostname);
+            }
+
+            crate::ssh::connection::SshSession::connect_key(
+                &host.hostname, host.port, &host.username, &pem, 30,
+            ).await
         }
-        // Try to use the host's own auth key
-        if let Some(auth_key_id) = host.auth_key_id {
-            let state = state_arc.lock().await;
-            if let Some(auth_key) = state.ssh_keys.get(&auth_key_id) {
-                let label = auth_key.private_key_ref.label().to_owned();
-                drop(state);
-                if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
-                    if let Ok(pem) = String::from_utf8(bytes) {
-                        return crate::ssh::connection::SshSession::connect_key(
-                            &host.hostname, host.port, &host.username, &pem, 30,
+        AuthMethod::Password => {
+            if let Some(ref pw_ref) = host.auth_password_ref {
+                if let Ok(bytes) = crate::secrets::retrieve_secret(pw_ref.label()).await {
+                    if let Ok(pw) = String::from_utf8(bytes) {
+                        return crate::ssh::connection::SshSession::connect_password(
+                            &host.hostname, host.port, &host.username, &pw, 30,
                         ).await;
                     }
                 }
             }
+            Err(supermgr_core::error::SshError::AuthFailed("no password configured".into()))
         }
-        Err(supermgr_core::error::SshError::AuthFailed("no auth key available".into()))
-    } else {
-        // Password auth
-        if let Some(ref pw_ref) = host.auth_password_ref {
-            if let Ok(bytes) = crate::secrets::retrieve_secret(pw_ref.label()).await {
-                if let Ok(pw) = String::from_utf8(bytes) {
-                    return crate::ssh::connection::SshSession::connect_password(
-                        &host.hostname, host.port, &host.username, &pw, 30,
-                    ).await;
-                }
-            }
-        }
-        Err(supermgr_core::error::SshError::AuthFailed("no password configured".into()))
     }
 }
 
@@ -3828,7 +3980,7 @@ async fn connect_via_jump(
     let target_addr = format!("{}:{}", target.hostname, target.port);
 
     // Authenticate through the tunnel to the target host.
-    if target.auth_method == AuthMethod::Key {
+    if target.auth_method == AuthMethod::Key || target.auth_method == AuthMethod::Certificate {
         if let Some(ref pem) = push_key_pem {
             return crate::ssh::connection::SshSession::connect_key_stream(
                 tunnel_stream, &target_addr, &target.username, pem,
@@ -3869,7 +4021,7 @@ async fn connect_via_jump(
 
 /// How the kill switch should allow VPN traffic through.
 #[derive(Clone)]
-enum KillSwitchMode {
+pub(crate) enum KillSwitchMode {
     /// Traffic goes through a named virtual NIC (WireGuard, OpenVPN tun).
     ///
     /// `allowed_ips` contains additional server/endpoint IPs whose traffic
@@ -4161,7 +4313,6 @@ pub async fn connect_profile(
     tokio::spawn(async move {
         // Feature 4: retry transient errors up to 3 times.
         let result = 'retry: {
-            let mut last_err = None;
             for attempt in 0..3u32 {
                 match backend.connect(&profile).await {
                     Ok(()) => break 'retry Ok(()),
@@ -4177,10 +4328,8 @@ pub async fn connect_profile(
                             "connect attempt {} failed: {e}, retrying...",
                             attempt + 1
                         );
-                        last_err = Some(e);
                         let delay = std::time::Duration::from_secs(2u64.pow(attempt + 1));
                         tokio::time::sleep(delay).await;
-                        let _ = last_err; // avoid unused warning
                     }
                 }
             }

@@ -3,19 +3,18 @@
 //! All dialogs follow the same pattern as the VPN dialogs: build widgets,
 //! validate input, on submit close the dialog and spawn a tokio D-Bus call.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
-use gtk4::{gio, glib, prelude::*};
+use gtk4::{glib, prelude::*};
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::error;
 
-use supermgr_core::ssh::key::{SshKeySummary, SshKeyType};
-use supermgr_core::ssh::host::{AuthMethod, SshHostSummary};
-use supermgr_core::ssh::DeviceType;
+use supermgr_core::ssh::key::SshKeySummary;
+use supermgr_core::ssh::host::SshHostSummary;
 use supermgr_core::vpn::profile::ProfileSummary;
 
-use crate::app::{AppMsg, AppState};
+use crate::app::AppMsg;
 use crate::dbus_client::{
     dbus_ssh_generate_key, dbus_ssh_add_host, dbus_ssh_import_scan,
     dbus_ssh_import_key, dbus_ssh_push_key, dbus_ssh_revoke_key,
@@ -358,7 +357,16 @@ pub fn show_add_host_dialog(
                     "auth_key_id": key_id,
                 });
                 let msg = match dbus_ssh_add_host(host_data.to_string()).await {
-                    Ok((hosts, _uuid)) => AppMsg::SshHostsRefreshed(hosts),
+                    Ok((hosts, uuid)) => {
+                        if let Some(pw) = password {
+                            if !pw.is_empty() {
+                                if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid, pw).await {
+                                    error!("store SSH password: {e:#}");
+                                }
+                            }
+                        }
+                        AppMsg::SshHostsRefreshed(hosts)
+                    }
                     Err(e) => {
                         error!("add SSH host: {e:#}");
                         AppMsg::OperationFailed(e.to_string())
@@ -515,7 +523,7 @@ pub fn show_import_keys_dialog(
             let paths = scan_results.borrow();
             let mut selected_paths: Vec<String> = Vec::new();
             for (i, path) in paths.iter().enumerate() {
-                if let Some(row) = results_list.row_at_index(i as i32) {
+                if let Some(_row) = results_list.row_at_index(i as i32) {
                     // The check button is the prefix of the ActionRow child.
                     // Since we always add all of them as active, default to including.
                     selected_paths.push(path.clone());
@@ -585,8 +593,6 @@ pub fn show_push_key_dialog(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    use std::rc::Rc;
-
     let dialog = adw::Dialog::builder()
         .title("Push Key to Hosts")
         .content_width(450)
@@ -736,6 +742,7 @@ pub fn show_push_key_dialog(
 /// Show the "Revoke Key from Hosts" dialog.
 ///
 /// Similar to push but removes the key instead of adding it.
+#[allow(dead_code)]
 pub fn show_revoke_key_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
@@ -744,8 +751,6 @@ pub fn show_revoke_key_dialog(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    use std::rc::Rc;
-
     let dialog = adw::Dialog::builder()
         .title("Revoke Key from Hosts")
         .content_width(450)

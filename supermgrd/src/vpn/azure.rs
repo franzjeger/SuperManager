@@ -481,7 +481,7 @@ fn hex_to_openvpn_key(hex: &str) -> String {
 /// Assemble the `.ovpn` configuration text.
 fn build_ovpn_config(
     cfg: &AzureVpnConfig,
-    ca_path: &str,
+    _ca_path: &str,
     key_path: &str,
     auth_path: &str,
     full_tunnel: bool,

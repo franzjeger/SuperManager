@@ -14,6 +14,7 @@ const API_KEY_URL: &str = "https://console.anthropic.com/settings/keys";
 
 /// Widget bundle for the console panel.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ConsolePanel {
     pub chat_view: gtk4::TextView,
     pub chat_buffer: gtk4::TextBuffer,

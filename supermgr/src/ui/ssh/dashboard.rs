@@ -7,7 +7,6 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use gtk4::prelude::*;
 use libadwaita as adw;
-use libadwaita::prelude::*;
 use serde_json::Value;
 use tracing::warn;
 
@@ -150,7 +149,7 @@ fn populate_dashboard(
         let hostname = host.hostname.clone();
         let api_port = host.api_port.unwrap_or(443);
         let tx = tx.clone();
-        let flow_box_clone = flow_box.clone();
+        let _flow_box_clone = flow_box.clone();
         let host_id_for_card = host_id.clone();
 
         rt.spawn(async move {
@@ -240,7 +239,7 @@ fn populate_dashboard(
 // ---------------------------------------------------------------------------
 
 /// Build a single device card for the flow box.
-fn build_device_card(host: &SshHostSummary, app_state: &Arc<Mutex<AppState>>) -> gtk4::FlowBoxChild {
+fn build_device_card(host: &SshHostSummary, _app_state: &Arc<Mutex<AppState>>) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(8)

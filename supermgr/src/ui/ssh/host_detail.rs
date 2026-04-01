@@ -3,9 +3,9 @@
 //! Shows the selected host's connection details, device type, and auth method.
 //! Provides action buttons: Connect (terminal), Push Key, Edit, Delete.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 
-use gtk4::{glib, prelude::*};
+use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 use serde_json::Value;
@@ -15,7 +15,7 @@ use supermgr_core::dbus::DaemonProxy;
 use supermgr_core::ssh::host::{AuthMethod, PortForward, SshHostSummary};
 use supermgr_core::ssh::DeviceType;
 
-use crate::app::{AppMsg, AppState};
+use crate::app::AppMsg;
 
 // ---------------------------------------------------------------------------
 // Widget bundle
@@ -23,6 +23,7 @@ use crate::app::{AppMsg, AppState};
 
 /// All the widgets in the SSH host detail panel that need updating.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct SshHostDetail {
     /// Outer stack: "empty" vs "detail".
     pub detail_stack: gtk4::Stack,
@@ -404,6 +405,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all
     let auth_str = match host.auth_method {
         AuthMethod::Password => "Password",
         AuthMethod::Key => "Public Key",
+        AuthMethod::Certificate => "Certificate",
     };
     detail.auth_method_row.set_subtitle(auth_str);
 

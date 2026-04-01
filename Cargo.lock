@@ -3225,7 +3225,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "supermgr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -3247,7 +3247,7 @@ dependencies = [
 
 [[package]]
 name = "supermgr-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3266,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "supermgr-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -3280,7 +3280,7 @@ dependencies = [
 
 [[package]]
 name = "supermgrd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3288,6 +3288,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "ipnet",
+ "netlink-packet-route 0.19.0",
  "nix 0.29.0",
  "rand",
  "reqwest",
