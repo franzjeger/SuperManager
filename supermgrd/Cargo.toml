@@ -1,6 +1,6 @@
 [package]
 name        = "supermgrd"
-version     = "0.1.0"
+version     = "0.1.1"
 edition     = "2021"
 description = "Privileged SuperManager daemon — systemd service with a D-Bus interface"
 license     = "GPL-3.0-or-later"

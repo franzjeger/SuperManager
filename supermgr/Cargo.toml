@@ -1,6 +1,6 @@
 [package]
 name        = "supermgr"
-version     = "0.1.0"
+version     = "0.1.1"
 edition     = "2021"
 description = "GTK4/Adwaita GUI for the SuperManager SSH + VPN manager"
 license     = "GPL-3.0-or-later"

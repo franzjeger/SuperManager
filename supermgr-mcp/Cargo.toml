@@ -1,6 +1,6 @@
 [package]
 name = "supermgr-mcp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "MCP (Model Context Protocol) server for SuperManager — exposes SSH/VPN operations as tools for Claude Code."
 
