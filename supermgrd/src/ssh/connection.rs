@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use russh::client::{self, Handle, Msg};
+use russh::client::{self, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::Channel;
 use russh_keys::key::PublicKey;
 use supermgr_core::error::SshError;
@@ -48,6 +48,46 @@ pub struct SshSession {
 impl SshSession {
     // -- constructors -------------------------------------------------------
 
+    /// Try `password` auth first, then fall back to `keyboard-interactive`.
+    ///
+    /// macOS (and some other servers) only accept keyboard-interactive, not
+    /// the plain SSH `password` method, so we must try both.
+    async fn auth_password_or_keyboard(
+        handle: &mut Handle<SshClientHandler>,
+        username: &str,
+        password: &str,
+    ) -> Result<bool, SshError> {
+        // 1. Try plain password auth.
+        match handle.authenticate_password(username, password).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {} // server rejected – try keyboard-interactive
+            Err(_) => {}    // protocol error – try keyboard-interactive
+        }
+
+        // 2. Try keyboard-interactive (macOS, some Linux PAM setups).
+        match handle
+            .authenticate_keyboard_interactive_start(username, None::<String>)
+            .await
+        {
+            Ok(KeyboardInteractiveAuthResponse::Success) => Ok(true),
+            Ok(KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. }) => {
+                // Respond with the password for every prompt (typically one
+                // "Password:" prompt).
+                let responses: Vec<String> = prompts.iter().map(|_| password.to_owned()).collect();
+                match handle
+                    .authenticate_keyboard_interactive_respond(responses)
+                    .await
+                {
+                    Ok(KeyboardInteractiveAuthResponse::Success) => Ok(true),
+                    Ok(_) => Ok(false),
+                    Err(e) => Err(SshError::AuthFailed(e.to_string())),
+                }
+            }
+            Ok(KeyboardInteractiveAuthResponse::Failure) => Ok(false),
+            Err(e) => Err(SshError::AuthFailed(e.to_string())),
+        }
+    }
+
     /// Connect to a remote host using password authentication.
     pub async fn connect_password(
         hostname: &str,
@@ -73,10 +113,7 @@ impl SshSession {
             reason: e.to_string(),
         })?;
 
-        let auth_ok = handle
-            .authenticate_password(username, password)
-            .await
-            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+        let auth_ok = Self::auth_password_or_keyboard(&mut handle, username, password).await?;
 
         if !auth_ok {
             return Err(SshError::AuthFailed(
@@ -149,10 +186,7 @@ impl SshSession {
                 reason: format!("stream connect failed: {e}"),
             })?;
 
-        let auth_ok = handle
-            .authenticate_password(username, password)
-            .await
-            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+        let auth_ok = Self::auth_password_or_keyboard(&mut handle, username, password).await?;
 
         if !auth_ok {
             return Err(SshError::AuthFailed(
