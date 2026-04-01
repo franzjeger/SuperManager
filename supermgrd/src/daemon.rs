@@ -2698,13 +2698,64 @@ impl DaemonService {
                 }
             };
 
+        // GUI settings (theme, API keys, RDP preference, etc.).
+        let gui_settings = {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let path = if home.is_empty() {
+                std::path::PathBuf::from("/etc/supermgrd/gui-settings.json")
+            } else {
+                // Try common config paths for all users.
+                let mut p = std::path::PathBuf::from(&home);
+                p.push(".config/supermgr/settings.json");
+                p
+            };
+            // Also check XDG_CONFIG_HOME.
+            let paths = [
+                std::env::var("XDG_CONFIG_HOME")
+                    .map(|d| std::path::PathBuf::from(d).join("supermgr/settings.json"))
+                    .ok(),
+                Some(std::path::PathBuf::from(format!("{}/.config/supermgr/settings.json", home))),
+            ];
+            let mut settings_json = serde_json::Value::Null;
+            for p in paths.iter().flatten() {
+                if let Ok(text) = std::fs::read_to_string(p) {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                        settings_json = val;
+                        break;
+                    }
+                }
+            }
+            let _ = path; // suppress warning
+            settings_json
+        };
+
+        // FortiGate config backups.
+        let mut config_backups: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let backup_dir = std::path::Path::new("/etc/supermgrd/backups");
+        if backup_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(backup_dir) {
+                for entry in entries.flatten() {
+                    if let Ok(name) = entry.file_name().into_string() {
+                        if name.ends_with(".conf") {
+                            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                                config_backups.insert(name, content);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let backup = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "exported_at": chrono::Utc::now().to_rfc3339(),
             "profiles": profiles,
             "ssh_keys": ssh_keys,
             "ssh_hosts": ssh_hosts,
             "secrets": all_secrets,
+            "gui_settings": gui_settings,
+            "config_backups": config_backups,
         });
 
         serde_json::to_string_pretty(&backup)
@@ -2834,17 +2885,60 @@ impl DaemonService {
             info!("import_all: restored {imported_secrets} secret(s)");
         }
 
+        // --- GUI settings ---
+        let mut restored_settings = false;
+        if let Some(settings_val) = backup.get("gui_settings") {
+            if !settings_val.is_null() {
+                // Write to all likely config paths.
+                let home = std::env::var("HOME").unwrap_or_default();
+                let config_dir = std::env::var("XDG_CONFIG_HOME")
+                    .unwrap_or_else(|_| format!("{home}/.config"));
+                let settings_dir = format!("{config_dir}/supermgr");
+                let _ = std::fs::create_dir_all(&settings_dir);
+                let path = format!("{settings_dir}/settings.json");
+                if let Ok(text) = serde_json::to_string_pretty(settings_val) {
+                    if std::fs::write(&path, &text).is_ok() {
+                        info!("import_all: restored GUI settings to {path}");
+                        restored_settings = true;
+                    }
+                }
+            }
+        }
+
+        // --- FortiGate config backups ---
+        let mut restored_backups: u32 = 0;
+        if let Some(obj) = backup.get("config_backups").and_then(|v| v.as_object()) {
+            let backup_dir = std::path::Path::new("/etc/supermgrd/backups");
+            let _ = std::fs::create_dir_all(backup_dir);
+            for (filename, content) in obj {
+                if let Some(text) = content.as_str() {
+                    let path = backup_dir.join(filename);
+                    if !path.exists() {
+                        if std::fs::write(&path, text).is_ok() {
+                            restored_backups += 1;
+                        }
+                    }
+                }
+            }
+            if restored_backups > 0 {
+                info!("import_all: restored {restored_backups} config backup(s)");
+            }
+        }
+
         let summary = serde_json::json!({
             "profiles": imported_profiles,
             "ssh_keys": imported_keys,
             "ssh_hosts": imported_hosts,
             "secrets": imported_secrets,
+            "settings": restored_settings,
+            "config_backups": restored_backups,
         });
 
         info!(
             "import_all: imported {imported_profiles} profile(s), \
              {imported_keys} SSH key(s), {imported_hosts} SSH host(s), \
-             {imported_secrets} secret(s)"
+             {imported_secrets} secret(s), settings={restored_settings}, \
+             {restored_backups} config backup(s)"
         );
 
         Ok(summary.to_string())

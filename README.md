@@ -104,7 +104,11 @@ The GUI communicates with the daemon over D-Bus on the system bus. The daemon ha
 
 ```bash
 # Dependencies (Arch Linux)
-sudo pacman -S gtk4 libadwaita vte4 sshpass wireguard-tools strongswan openvpn freerdp
+sudo pacman -S gtk4 libadwaita vte4 openssl sshpass wireguard-tools strongswan openvpn freerdp remmina
+
+# Optional
+sudo pacman -S openvpn  # Azure VPN (classic openvpn, not openvpn3)
+sudo pacman -S networkmanager  # auto-connect on network change
 
 # Build
 cargo build --release
