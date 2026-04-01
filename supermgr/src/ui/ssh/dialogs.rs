@@ -162,7 +162,7 @@ pub fn show_add_host_dialog(
     use std::rc::Rc;
 
     let dialog = adw::Dialog::builder()
-        .title("Add SSH Host")
+        .title("Add Host")
         .content_width(420)
         .build();
 
@@ -183,14 +183,14 @@ pub fn show_add_host_dialog(
         .selected(0)
         .build();
 
-    let auth_model = gtk4::StringList::new(&["Public Key", "Password"]);
+    let auth_model = gtk4::StringList::new(&["Public Key", "Password", "Certificate"]);
     let auth_row = adw::ComboRow::builder()
         .title("Authentication")
         .model(&auth_model)
         .selected(0)
         .build();
 
-    // Key selector (visible when auth = key).
+    // Key selector (visible when auth = key or certificate).
     let key_names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
     let key_model = gtk4::StringList::new(&key_names);
     let key_row = adw::ComboRow::builder()
@@ -205,14 +205,22 @@ pub fn show_add_host_dialog(
         .visible(false)
         .build();
 
-    // Toggle key/password visibility based on auth method selection.
+    // Certificate row (visible when auth = certificate).
+    let cert_row = adw::EntryRow::builder()
+        .title("Certificate (paste OpenSSH cert)")
+        .visible(false)
+        .build();
+
+    // Toggle key/password/cert visibility based on auth method selection.
     {
         let key_row = key_row.clone();
         let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
         auth_row.connect_selected_notify(move |row| {
-            let is_key = row.selected() == 0;
-            key_row.set_visible(is_key);
-            pass_row.set_visible(!is_key);
+            let sel = row.selected();
+            key_row.set_visible(sel == 0 || sel == 2); // key or certificate
+            pass_row.set_visible(sel == 1);             // password
+            cert_row.set_visible(sel == 2);             // certificate
         });
     }
 
@@ -233,6 +241,7 @@ pub fn show_add_host_dialog(
     auth_group.add(&auth_row);
     auth_group.add(&key_row);
     auth_group.add(&pass_row);
+    auth_group.add(&cert_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let add_btn = gtk4::Button::builder()
@@ -308,6 +317,7 @@ pub fn show_add_host_dialog(
         let auth_row = auth_row.clone();
         let key_row = key_row.clone();
         let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
         let key_ids = key_ids.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -327,18 +337,24 @@ pub fn show_add_host_dialog(
                 _ => "linux",
             }
             .to_owned();
-            let auth_method = if auth_row.selected() == 0 {
-                "key".to_owned()
-            } else {
-                "password".to_owned()
-            };
-            let key_id = if auth_row.selected() == 0 {
+            let auth_method = match auth_row.selected() {
+                1 => "password",
+                2 => "certificate",
+                _ => "key",
+            }.to_owned();
+            let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
                 key_ids.get(key_row.selected() as usize).cloned()
             } else {
                 None
             };
             let password = if auth_row.selected() == 1 {
                 Some(pass_row.text().to_string())
+            } else {
+                None
+            };
+            let certificate = if auth_row.selected() == 2 {
+                let c = cert_row.text().to_string();
+                if c.is_empty() { None } else { Some(c) }
             } else {
                 None
             };
@@ -360,9 +376,14 @@ pub fn show_add_host_dialog(
                     Ok((hosts, uuid)) => {
                         if let Some(pw) = password {
                             if !pw.is_empty() {
-                                if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid, pw).await {
+                                if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid.clone(), pw).await {
                                     error!("store SSH password: {e:#}");
                                 }
+                            }
+                        }
+                        if let Some(cert) = certificate {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(uuid, cert).await {
+                                error!("store SSH certificate: {e:#}");
                             }
                         }
                         AppMsg::SshHostsRefreshed(hosts)
@@ -924,8 +945,12 @@ pub fn show_edit_host_dialog(
         .selected(device_idx)
         .build();
 
-    let auth_model = gtk4::StringList::new(&["Public Key", "Password"]);
-    let auth_idx = if host.auth_method == supermgr_core::AuthMethod::Key { 0u32 } else { 1 };
+    let auth_model = gtk4::StringList::new(&["Public Key", "Password", "Certificate"]);
+    let auth_idx = match host.auth_method {
+        supermgr_core::AuthMethod::Key => 0u32,
+        supermgr_core::AuthMethod::Password => 1,
+        supermgr_core::AuthMethod::Certificate => 2,
+    };
     let auth_row = adw::ComboRow::builder()
         .title("Authentication")
         .model(&auth_model)
@@ -942,7 +967,7 @@ pub fn show_edit_host_dialog(
         .title("SSH Key")
         .model(&key_model)
         .selected(current_key_idx)
-        .visible(auth_idx == 0)
+        .visible(auth_idx == 0 || auth_idx == 2)
         .build();
 
     let pass_title = if host.has_password { "Password (configured — leave empty to keep)" } else { "Password" };
@@ -951,13 +976,21 @@ pub fn show_edit_host_dialog(
         .visible(auth_idx == 1)
         .build();
 
+    let cert_title = if host.has_certificate { "Certificate (configured — leave empty to keep)" } else { "Certificate (paste OpenSSH cert)" };
+    let cert_row = adw::EntryRow::builder()
+        .title(cert_title)
+        .visible(auth_idx == 2)
+        .build();
+
     {
         let key_row = key_row.clone();
         let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
         auth_row.connect_selected_notify(move |row| {
-            let is_key = row.selected() == 0;
-            key_row.set_visible(is_key);
-            pass_row.set_visible(!is_key);
+            let sel = row.selected();
+            key_row.set_visible(sel == 0 || sel == 2);
+            pass_row.set_visible(sel == 1);
+            cert_row.set_visible(sel == 2);
         });
     }
 
@@ -1008,6 +1041,7 @@ pub fn show_edit_host_dialog(
     auth_group.add(&auth_row);
     auth_group.add(&key_row);
     auth_group.add(&pass_row);
+    auth_group.add(&cert_row);
     auth_group.add(&vpn_row);
 
     // FortiGate REST API group (only visible for fortigate device type).
@@ -1027,10 +1061,32 @@ pub fn show_edit_host_dialog(
     api_group.add(&api_token_row);
     api_group.add(&api_port_row);
 
+    // UniFi Controller group (only visible for UniFi device type).
+    let unifi_group = adw::PreferencesGroup::builder()
+        .title("UniFi Controller")
+        .margin_top(12)
+        .visible(host.device_type == supermgr_core::DeviceType::UniFi)
+        .build();
+    let unifi_url_row = adw::EntryRow::builder()
+        .title("Controller URL")
+        .text(host.unifi_controller_url.as_deref().unwrap_or(""))
+        .build();
+    let unifi_user_row = adw::EntryRow::builder()
+        .title("Username")
+        .build();
+    let unifi_pass_row = adw::PasswordEntryRow::builder()
+        .title(if host.has_unifi_controller { "Password (configured — leave empty to keep)" } else { "Password" })
+        .build();
+    unifi_group.add(&unifi_url_row);
+    unifi_group.add(&unifi_user_row);
+    unifi_group.add(&unifi_pass_row);
+
     {
         let api_group = api_group.clone();
+        let unifi_group = unifi_group.clone();
         device_row.connect_selected_notify(move |row| {
-            api_group.set_visible(row.selected() == 4); // index 4 = fortigate
+            api_group.set_visible(row.selected() == 4);   // index 4 = fortigate
+            unifi_group.set_visible(row.selected() == 1); // index 1 = unifi
         });
     }
 
@@ -1055,36 +1111,65 @@ pub fn show_edit_host_dialog(
     content_box.append(&conn_group);
     content_box.append(&auth_group);
     content_box.append(&api_group);
+    content_box.append(&unifi_group);
+
+    // Remote Desktop group (RDP / VNC ports).
+    let remote_group = adw::PreferencesGroup::builder()
+        .title("Remote Desktop")
+        .margin_top(12)
+        .build();
+    let rdp_port_row = adw::EntryRow::builder()
+        .title("RDP Port (leave empty to disable)")
+        .text(&host.rdp_port.map(|p| p.to_string()).unwrap_or_default())
+        .build();
+    let vnc_port_row = adw::EntryRow::builder()
+        .title("VNC Port (leave empty to disable)")
+        .text(&host.vnc_port.map(|p| p.to_string()).unwrap_or_default())
+        .build();
+    remote_group.add(&rdp_port_row);
+    remote_group.add(&vnc_port_row);
+    content_box.append(&remote_group);
+
+    let scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vexpand(true)
+        .child(&content_box)
+        .build();
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&content_box));
+    toolbar_view.set_content(Some(&scroll));
     dialog.set_child(Some(&toolbar_view));
+    dialog.set_content_height(600);
 
     let has_password = host.has_password;
+    let has_certificate = host.has_certificate;
     let validate: Rc<dyn Fn()> = {
         let label_row = label_row.clone();
         let hostname_row = hostname_row.clone();
         let username_row = username_row.clone();
         let auth_row = auth_row.clone();
         let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
         let save_btn = save_btn.clone();
         Rc::new(move || {
             let basic_ok = !label_row.text().is_empty()
                 && !hostname_row.text().is_empty()
                 && !username_row.text().is_empty();
-            // When auth method is Password and no password is stored yet,
-            // require the user to enter one.
-            let pass_ok = auth_row.selected() == 0 // key auth — no password needed
-                || has_password                      // already has a stored password
-                || !pass_row.text().is_empty();      // user entered a new password
-            save_btn.set_sensitive(basic_ok && pass_ok);
+            let auth_ok = match auth_row.selected() {
+                0 => true,                                           // key — always ok
+                1 => has_password || !pass_row.text().is_empty(),    // password
+                2 => has_certificate || !cert_row.text().is_empty(), // certificate
+                _ => true,
+            };
+            save_btn.set_sensitive(basic_ok && auth_ok);
         })
     };
     { let v = Rc::clone(&validate); label_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); hostname_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); username_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); pass_row.connect_changed(move |_| v()); }
+    { let v = Rc::clone(&validate); cert_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); auth_row.connect_selected_notify(move |_| v()); }
 
     {
@@ -1111,16 +1196,24 @@ pub fn show_edit_host_dialog(
                 1 => "uni_fi", 2 => "pf_sense", 3 => "open_wrt",
                 4 => "fortigate", 5 => "windows", 6 => "custom", _ => "linux",
             }.to_owned();
-            let auth_method = if auth_row.selected() == 0 { "key" } else { "password" }.to_owned();
-            let key_id = if auth_row.selected() == 0 {
+            let auth_method = match auth_row.selected() {
+                1 => "password", 2 => "certificate", _ => "key",
+            }.to_owned();
+            let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
                 key_ids.get(key_row.selected() as usize).cloned()
             } else {
                 None
             };
 
             let password = pass_row.text().to_string();
+            let certificate = cert_row.text().to_string();
             let api_token = api_token_row.text().to_string();
             let api_port: u16 = api_port_row.text().parse().unwrap_or(443);
+            let unifi_url = unifi_url_row.text().to_string();
+            let unifi_user = unifi_user_row.text().to_string();
+            let unifi_pass = unifi_pass_row.text().to_string();
+            let rdp_port: Option<u16> = rdp_port_row.text().parse().ok().filter(|&p: &u16| p > 0);
+            let vnc_port: Option<u16> = vnc_port_row.text().parse().ok().filter(|&p: &u16| p > 0);
 
             // VPN profile: index 0 = None, 1.. = vpn_profile_ids[i-1]
             let vpn_id = {
@@ -1149,6 +1242,8 @@ pub fn show_edit_host_dialog(
                     "auth_key_id": key_id,
                     "vpn_profile_id": vpn_id,
                     "proxy_jump": jump_id,
+                    "rdp_port": rdp_port.unwrap_or(0),
+                    "vnc_port": vnc_port.unwrap_or(0),
                 });
                 let msg = match crate::dbus_client::dbus_ssh_update_host(host_id.clone(), host_data.to_string()).await {
                     Ok(()) => {
@@ -1158,10 +1253,24 @@ pub fn show_edit_host_dialog(
                                 error!("store SSH password: {e:#}");
                             }
                         }
+                        // Store certificate if provided.
+                        if !certificate.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(host_id.clone(), certificate).await {
+                                error!("store SSH certificate: {e:#}");
+                            }
+                        }
                         // Store FortiGate API token and port if token is provided.
                         if !api_token.is_empty() {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id, api_token, api_port).await {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id.clone(), api_token, api_port).await {
                                 error!("store API token/port: {e:#}");
+                            }
+                        }
+                        // Store UniFi Controller config if URL and credentials provided.
+                        if !unifi_url.is_empty() && !unifi_user.is_empty() && !unifi_pass.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_unifi_controller(
+                                host_id, unifi_url, unifi_user, unifi_pass,
+                            ).await {
+                                error!("store UniFi controller: {e:#}");
                             }
                         }
                         match crate::dbus_client::dbus_ssh_list_hosts().await {
@@ -1249,6 +1358,184 @@ pub fn show_audit_log_dialog(
             gtk4::glib::ControlFlow::Continue
         }
     });
+
+    dialog.present(Some(window));
+}
+
+// ---------------------------------------------------------------------------
+// Batch SSH command dialog
+// ---------------------------------------------------------------------------
+
+/// Show a dialog to run a command on multiple SSH hosts simultaneously.
+pub fn show_batch_command_dialog(
+    window: &adw::ApplicationWindow,
+    hosts: &[supermgr_core::ssh::host::SshHostSummary],
+    rt: &tokio::runtime::Handle,
+) {
+    let dialog = adw::Dialog::builder()
+        .title("Run Command on Multiple Hosts")
+        .content_width(600)
+        .content_height(500)
+        .build();
+
+    let header = adw::HeaderBar::new();
+
+    let host_group = adw::PreferencesGroup::builder()
+        .title("Select Hosts")
+        .build();
+
+    let checks: Vec<(String, String, gtk4::CheckButton)> = hosts.iter().map(|h| {
+        let check = gtk4::CheckButton::builder().active(true).build();
+        let row = adw::ActionRow::builder()
+            .title(&h.label)
+            .subtitle(&h.hostname)
+            .activatable_widget(&check)
+            .build();
+        row.add_prefix(&check);
+        host_group.add(&row);
+        (h.id.to_string(), h.label.clone(), check)
+    }).collect();
+
+    let cmd_row = adw::EntryRow::builder()
+        .title("Command")
+        .build();
+    let cmd_group = adw::PreferencesGroup::builder()
+        .title("Command")
+        .build();
+    cmd_group.add(&cmd_row);
+
+    let run_btn = gtk4::Button::builder()
+        .label("Run")
+        .css_classes(["suggested-action", "pill"])
+        .halign(gtk4::Align::Center)
+        .margin_top(8)
+        .build();
+
+    let results_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    let results_group = adw::PreferencesGroup::builder()
+        .title("Results")
+        .build();
+    results_group.add(&results_list);
+
+    let scroll = gtk4::ScrolledWindow::builder()
+        .vexpand(true)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .build();
+    let content = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(12)
+        .build();
+    content.append(&host_group);
+    content.append(&cmd_group);
+    content.append(&run_btn);
+    content.append(&results_group);
+    scroll.set_child(Some(&content));
+
+    let vbox = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    vbox.append(&header);
+    vbox.append(&scroll);
+    dialog.set_child(Some(&vbox));
+
+    {
+        let rt = rt.clone();
+        let checks = checks.clone();
+        let cmd_row = cmd_row.clone();
+        let results_list = results_list.clone();
+        run_btn.connect_clicked(move |btn| {
+            let command = cmd_row.text().to_string();
+            if command.is_empty() { return; }
+            btn.set_sensitive(false);
+
+            while let Some(child) = results_list.first_child() {
+                results_list.remove(&child);
+            }
+
+            let selected: Vec<(String, String)> = checks.iter()
+                .filter(|(_, _, check)| check.is_active())
+                .map(|(id, label, _)| (id.clone(), label.clone()))
+                .collect();
+
+            for (_, label) in &selected {
+                let row = adw::ActionRow::builder()
+                    .title(label)
+                    .subtitle("Running\u{2026}")
+                    .build();
+                let spinner = gtk4::Spinner::new();
+                spinner.start();
+                spinner.set_valign(gtk4::Align::Center);
+                row.add_prefix(&spinner);
+                row.set_widget_name(&format!("batch-{}", label.replace(' ', "-")));
+                results_list.append(&row);
+            }
+
+            let (tx, rx) = std::sync::mpsc::channel::<(String, Result<String, String>)>();
+            for (host_id, label) in selected {
+                let command = command.clone();
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let result = crate::dbus_client::dbus_ssh_execute_command(
+                        host_id, command,
+                    ).await;
+                    let _ = tx.send((label, result.map_err(|e| e.to_string())));
+                });
+            }
+
+            let results_list = results_list.clone();
+            let btn = btn.clone();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+                while let Ok((label, result)) = rx.try_recv() {
+                    let name = format!("batch-{}", label.replace(' ', "-"));
+                    let mut child = results_list.first_child();
+                    while let Some(c) = child {
+                        if c.widget_name() == name {
+                            if let Some(row) = c.downcast_ref::<adw::ActionRow>() {
+                                let (subtitle, icon) = match &result {
+                                    Ok(output) => {
+                                        let short = if output.len() > 300 {
+                                            format!("{}\u{2026}", &output[..300])
+                                        } else {
+                                            output.clone()
+                                        };
+                                        (short, "emblem-ok-symbolic")
+                                    }
+                                    Err(e) => (e.clone(), "dialog-error-symbolic"),
+                                };
+                                row.set_subtitle(&subtitle);
+                                if let Some(prefix) = row.first_child() {
+                                    if prefix.downcast_ref::<gtk4::Spinner>().is_some() {
+                                        row.remove(&prefix);
+                                        row.add_prefix(&gtk4::Image::from_icon_name(icon));
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        child = c.next_sibling();
+                    }
+                }
+                // Check for remaining spinners.
+                let mut c = results_list.first_child();
+                while let Some(child) = c {
+                    if let Some(first) = child.first_child() {
+                        if first.downcast_ref::<gtk4::Spinner>().is_some() {
+                            return gtk4::glib::ControlFlow::Continue;
+                        }
+                    }
+                    c = child.next_sibling();
+                }
+                btn.set_sensitive(true);
+                gtk4::glib::ControlFlow::Break
+            });
+        });
+    }
 
     dialog.present(Some(window));
 }

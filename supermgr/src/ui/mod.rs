@@ -126,6 +126,7 @@ struct LockPage {
     confirm_row: adw::PasswordEntryRow,
     unlock_btn: gtk4::Button,
     set_btn: gtk4::Button,
+    quit_btn: gtk4::Button,
     status_label: gtk4::Label,
 }
 
@@ -189,6 +190,12 @@ fn build_lock_page() -> LockPage {
         .css_classes(["suggested-action", "pill"])
         .build();
     btn_box.append(&set_btn);
+
+    let quit_btn = gtk4::Button::builder()
+        .label("Quit")
+        .css_classes(["destructive-action", "pill"])
+        .build();
+    btn_box.append(&quit_btn);
     container.append(&btn_box);
 
     LockPage {
@@ -197,6 +204,7 @@ fn build_lock_page() -> LockPage {
         confirm_row,
         unlock_btn,
         set_btn,
+        quit_btn,
         status_label,
     }
 }
@@ -350,7 +358,7 @@ pub fn build_ui(
         .spacing(2)
         .build();
     let ssh_add_host_btn = gtk4::Button::builder()
-        .label("Add SSH Host")
+        .label("Add Host")
         .has_frame(false)
         .halign(gtk4::Align::Fill)
         .build();
@@ -397,10 +405,80 @@ pub fn build_ui(
     let view_stack = navigation::build_view_stack();
     let view_switcher = navigation::build_view_switcher(&view_stack);
 
+    // Notification bell button + popover.
+    let notif_btn = gtk4::MenuButton::builder()
+        .icon_name("bell-outline-symbolic")
+        .tooltip_text("Notifications")
+        .css_classes(["flat"])
+        .build();
+    let notif_list = gtk4::ListBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .css_classes(["boxed-list"])
+        .build();
+    notif_list.set_widget_name("notif-list");
+    let notif_placeholder = adw::ActionRow::builder()
+        .title("No notifications")
+        .activatable(false)
+        .build();
+    notif_list.append(&notif_placeholder);
+    // Header label + clear button for the notification panel.
+    let notif_header = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_bottom(4)
+        .build();
+    let notif_title = gtk4::Label::builder()
+        .label("Notifications")
+        .css_classes(["heading"])
+        .halign(gtk4::Align::Start)
+        .hexpand(true)
+        .build();
+    let notif_clear_btn = gtk4::Button::builder()
+        .label("Clear")
+        .css_classes(["flat"])
+        .build();
+    {
+        let notif_list = notif_list.clone();
+        notif_clear_btn.connect_clicked(move |_| {
+            while let Some(child) = notif_list.first_child() {
+                notif_list.remove(&child);
+            }
+            let placeholder = adw::ActionRow::builder()
+                .title("No notifications")
+                .activatable(false)
+                .build();
+            notif_list.append(&placeholder);
+        });
+    }
+    notif_header.append(&notif_title);
+    notif_header.append(&notif_clear_btn);
+
+    let notif_scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .min_content_width(420)
+        .min_content_height(150)
+        .max_content_height(500)
+        .child(&notif_list)
+        .build();
+    let notif_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    notif_box.append(&notif_header);
+    notif_box.append(&notif_scroll);
+    let notif_popover = gtk4::Popover::builder()
+        .child(&notif_box)
+        .build();
+    notif_btn.set_popover(Some(&notif_popover));
+
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&view_switcher));
     header.pack_end(&hamburger_btn);
     header.pack_end(&add_menu_btn);
+    header.pack_end(&notif_btn);
     header.pack_end(&logs_btn);
     header.pack_end(&settings_btn);
 
@@ -455,116 +533,35 @@ pub fn build_ui(
     vpn_page.set_icon_name(Some("network-vpn-symbolic"));
 
     // =========================================================================
-    // SSH page
+    // Dashboard page (standalone, full-width)
     // =========================================================================
-
-    // SSH sidebar: a GtkStack with "keys" and "hosts" tabs, switched by a
-    // linked toggle-button pair.
-    let ssh_key_list = ssh::key_list::build_ssh_key_list();
-    let ssh_host_list = ssh::host_tree::build_ssh_host_list();
-
-    let ssh_sidebar_stack = gtk4::Stack::new();
-    let ssh_key_scroll = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .child(&ssh_key_list)
-        .build();
-    let ssh_host_scroll = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .child(&ssh_host_list)
-        .build();
-    ssh_sidebar_stack.add_named(&ssh_key_scroll, Some("keys"));
-    ssh_sidebar_stack.add_named(&ssh_host_scroll, Some("hosts"));
-
-    let ssh_toggle_keys = gtk4::ToggleButton::builder()
-        .label("Keys")
-        .active(true)
-        .build();
-    let ssh_toggle_hosts = gtk4::ToggleButton::builder()
-        .label("Hosts")
-        .group(&ssh_toggle_keys)
-        .build();
-    let ssh_toggle_dashboard = gtk4::ToggleButton::builder()
-        .label("Dashboard")
-        .group(&ssh_toggle_keys)
-        .build();
-    let ssh_toggle_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    ssh_toggle_box.add_css_class("linked");
-    ssh_toggle_box.append(&ssh_toggle_keys);
-    ssh_toggle_box.append(&ssh_toggle_hosts);
-    ssh_toggle_box.append(&ssh_toggle_dashboard);
-    ssh_toggle_box.set_halign(gtk4::Align::Center);
-    ssh_toggle_box.set_margin_top(8);
-    ssh_toggle_box.set_margin_bottom(4);
-
-    {
-        let ssh_sidebar_stack = ssh_sidebar_stack.clone();
-        let ssh_keys_add_group = ssh_keys_add_group.clone();
-        let ssh_hosts_add_group = ssh_hosts_add_group.clone();
-        let add_menu_btn = add_menu_btn.clone();
-        ssh_toggle_keys.connect_toggled(move |btn| {
-            if btn.is_active() {
-                ssh_sidebar_stack.set_visible_child_name("keys");
-                ssh_keys_add_group.set_visible(true);
-                ssh_hosts_add_group.set_visible(false);
-                add_menu_btn.set_visible(true);
-            }
-        });
-    }
-    {
-        let ssh_sidebar_stack = ssh_sidebar_stack.clone();
-        let ssh_keys_add_group = ssh_keys_add_group.clone();
-        let ssh_hosts_add_group = ssh_hosts_add_group.clone();
-        let add_menu_btn = add_menu_btn.clone();
-        ssh_toggle_hosts.connect_toggled(move |btn| {
-            if btn.is_active() {
-                ssh_sidebar_stack.set_visible_child_name("hosts");
-                ssh_keys_add_group.set_visible(false);
-                ssh_hosts_add_group.set_visible(true);
-                add_menu_btn.set_visible(true);
-            }
-        });
-    }
-    {
-        let add_menu_btn = add_menu_btn.clone();
-        ssh_toggle_dashboard.connect_toggled(move |btn| {
-            if btn.is_active() {
-                add_menu_btn.set_visible(false);
-            }
-        });
-    }
-
-    // Build the multi-device dashboard widget.
     let (dashboard_flow_box, dashboard_widget) =
         ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
-    // SSH sidebar search entry — filters both key and host lists.
-    let ssh_search_entry = gtk4::SearchEntry::builder()
-        .placeholder_text("Filter keys / hosts\u{2026}")
+    view_stack.add_titled(&dashboard_widget, Some("dashboard"), "Dashboard");
+    let dashboard_page_ref = view_stack.page(&dashboard_widget);
+    dashboard_page_ref.set_icon_name(Some("utilities-system-monitor-symbolic"));
+
+    // =========================================================================
+    // Hosts page
+    // =========================================================================
+    let ssh_host_list = ssh::host_tree::build_ssh_host_list();
+
+    let ssh_host_search = gtk4::SearchEntry::builder()
+        .placeholder_text("Filter hosts\u{2026}")
         .margin_start(8)
         .margin_end(8)
         .margin_top(8)
         .build();
     {
-        let ssh_key_list = ssh_key_list.clone();
         let ssh_host_list = ssh_host_list.clone();
         let app_state = app_state.clone();
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
-        ssh_search_entry.connect_search_changed(move |entry| {
+        ssh_host_search.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            populate_ssh_key_list(
-                &ssh_key_list,
-                &s.ssh_keys,
-                s.selected_ssh_key.as_deref(),
-                &window,
-                &rt,
-                &tx,
-                &text,
-            );
             let health = s.host_health.clone();
             populate_ssh_host_list(
                 &ssh_host_list,
@@ -581,58 +578,180 @@ pub fn build_ui(
         });
     }
 
-    let ssh_sidebar_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .build();
-    ssh_sidebar_box.append(&ssh_search_entry);
-    ssh_sidebar_box.append(&ssh_toggle_box);
-    ssh_sidebar_box.append(&ssh_sidebar_stack);
-
-    let ssh_sidebar_page = adw::NavigationPage::builder()
-        .title("SSH")
-        .child(&ssh_sidebar_box)
+    let ssh_host_scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vexpand(true)
+        .child(&ssh_host_list)
         .build();
 
-    // SSH content: stack that shows either key detail or host detail.
-    let (ssh_key_detail, ssh_key_detail_widget) = ssh::key_detail::build_ssh_key_detail();
-    let (ssh_host_detail, ssh_host_detail_widget) = ssh::host_detail::build_ssh_host_detail();
-
-    let ssh_content_stack = gtk4::Stack::new();
-    let ssh_empty_status = adw::StatusPage::builder()
-        .title("SSH Manager")
-        .description("Select a key or host from the sidebar to view details.")
-        .icon_name("dialog-password-symbolic")
+    // Sync to ~/.ssh/config button.
+    let ssh_config_sync_btn = gtk4::Button::builder()
+        .icon_name("document-save-symbolic")
+        .tooltip_text("Sync hosts to ~/.ssh/config")
+        .css_classes(["flat"])
         .build();
-    ssh_content_stack.add_named(&ssh_empty_status, Some("empty"));
-    ssh_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
-    ssh_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
-    ssh_content_stack.add_named(&dashboard_widget, Some("dashboard"));
-    ssh_content_stack.set_visible_child_name("empty");
-
-    let ssh_content_page = adw::NavigationPage::builder()
-        .title("Details")
-        .child(&ssh_content_stack)
+    let ssh_host_header = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
         .build();
-
-    // Wire the "Dashboard" toggle to show the dashboard content.
+    ssh_host_search.set_hexpand(true);
+    // Batch command button.
+    let ssh_batch_btn = gtk4::Button::builder()
+        .icon_name("utilities-terminal-symbolic")
+        .tooltip_text("Run command on multiple hosts")
+        .css_classes(["flat"])
+        .build();
     {
-        let ssh_content_stack = ssh_content_stack.clone();
-        ssh_toggle_dashboard.connect_toggled(move |btn| {
-            if btn.is_active() {
-                ssh_content_stack.set_visible_child_name("dashboard");
-            }
+        let app_state = Arc::clone(&app_state);
+        let window = window.clone();
+        let rt = rt.clone();
+        ssh_batch_btn.connect_clicked(move |_| {
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            ssh::dialogs::show_batch_command_dialog(&window, &s.ssh_hosts, &rt);
         });
     }
 
-    let ssh_split = adw::NavigationSplitView::builder().vexpand(true).build();
-    ssh_split.set_min_sidebar_width(280.0);
-    ssh_split.set_max_sidebar_width(400.0);
-    ssh_split.set_sidebar(Some(&ssh_sidebar_page));
-    ssh_split.set_content(Some(&ssh_content_page));
+    ssh_host_header.append(&ssh_host_search);
+    ssh_host_header.append(&ssh_batch_btn);
+    ssh_host_header.append(&ssh_config_sync_btn);
 
-    view_stack.add_titled(&ssh_split, Some("ssh"), "SSH");
-    let ssh_page_ref = view_stack.page(&ssh_split);
-    ssh_page_ref.set_icon_name(Some("dialog-password-symbolic"));
+    {
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_config_sync_btn.connect_clicked(move |_| {
+            let tx = tx.clone();
+            rt.spawn(async move {
+                match crate::dbus_client::generate_ssh_config().await {
+                    Ok(count) => {
+                        let _ = tx.send(AppMsg::ShowToast(
+                            format!("Synced {count} hosts to ~/.ssh/config"),
+                        ));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::OperationFailed(
+                            format!("SSH config sync failed: {e}"),
+                        ));
+                    }
+                }
+            });
+        });
+    }
+
+    let hosts_sidebar_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    hosts_sidebar_box.append(&ssh_host_header);
+    hosts_sidebar_box.append(&ssh_host_scroll);
+
+    let hosts_sidebar_page = adw::NavigationPage::builder()
+        .title("Hosts")
+        .child(&hosts_sidebar_box)
+        .build();
+
+    let (ssh_host_detail, ssh_host_detail_widget) = ssh::host_detail::build_ssh_host_detail();
+
+    let hosts_content_stack = gtk4::Stack::new();
+    let hosts_empty_status = adw::StatusPage::builder()
+        .title("Hosts")
+        .description("Select a host from the sidebar to view details.")
+        .icon_name("computer-symbolic")
+        .build();
+    hosts_content_stack.add_named(&hosts_empty_status, Some("empty"));
+    hosts_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
+    hosts_content_stack.set_visible_child_name("empty");
+
+    let hosts_content_page = adw::NavigationPage::builder()
+        .title("Details")
+        .child(&hosts_content_stack)
+        .build();
+
+    let hosts_split = adw::NavigationSplitView::builder().vexpand(true).build();
+    hosts_split.set_min_sidebar_width(280.0);
+    hosts_split.set_max_sidebar_width(400.0);
+    hosts_split.set_sidebar(Some(&hosts_sidebar_page));
+    hosts_split.set_content(Some(&hosts_content_page));
+
+    view_stack.add_titled(&hosts_split, Some("hosts"), "Hosts");
+    let hosts_page_ref = view_stack.page(&hosts_split);
+    hosts_page_ref.set_icon_name(Some("computer-symbolic"));
+
+    // =========================================================================
+    // Keys page
+    // =========================================================================
+    let ssh_key_list = ssh::key_list::build_ssh_key_list();
+
+    let ssh_key_search = gtk4::SearchEntry::builder()
+        .placeholder_text("Filter keys\u{2026}")
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
+        .build();
+    {
+        let ssh_key_list = ssh_key_list.clone();
+        let app_state = app_state.clone();
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_key_search.connect_search_changed(move |entry| {
+            let text = entry.text().to_string();
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            populate_ssh_key_list(
+                &ssh_key_list,
+                &s.ssh_keys,
+                s.selected_ssh_key.as_deref(),
+                &window,
+                &rt,
+                &tx,
+                &text,
+            );
+        });
+    }
+
+    let ssh_key_scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vexpand(true)
+        .child(&ssh_key_list)
+        .build();
+
+    let keys_sidebar_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .build();
+    keys_sidebar_box.append(&ssh_key_search);
+    keys_sidebar_box.append(&ssh_key_scroll);
+
+    let keys_sidebar_page = adw::NavigationPage::builder()
+        .title("Keys")
+        .child(&keys_sidebar_box)
+        .build();
+
+    let (ssh_key_detail, ssh_key_detail_widget) = ssh::key_detail::build_ssh_key_detail();
+
+    let keys_content_stack = gtk4::Stack::new();
+    let keys_empty_status = adw::StatusPage::builder()
+        .title("Keys")
+        .description("Select a key from the sidebar to view details.")
+        .icon_name("dialog-password-symbolic")
+        .build();
+    keys_content_stack.add_named(&keys_empty_status, Some("empty"));
+    keys_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
+    keys_content_stack.set_visible_child_name("empty");
+
+    let keys_content_page = adw::NavigationPage::builder()
+        .title("Details")
+        .child(&keys_content_stack)
+        .build();
+
+    let keys_split = adw::NavigationSplitView::builder().vexpand(true).build();
+    keys_split.set_min_sidebar_width(280.0);
+    keys_split.set_max_sidebar_width(400.0);
+    keys_split.set_sidebar(Some(&keys_sidebar_page));
+    keys_split.set_content(Some(&keys_content_page));
+
+    view_stack.add_titled(&keys_split, Some("keys"), "Keys");
+    let keys_page_ref = view_stack.page(&keys_split);
+    keys_page_ref.set_icon_name(Some("dialog-password-symbolic"));
+
+    // Search entry alias for keyboard shortcut (Ctrl+K / Ctrl+F).
+    let ssh_search_entry = ssh_host_search.clone();
 
     // Populate SSH lists with initial state.
     {
@@ -657,6 +776,137 @@ pub fn build_ui(
             "",
             &health,
         );
+    }
+
+    // =========================================================================
+    // Right-click context menus on sidebar empty space
+    // =========================================================================
+
+    // VPN sidebar: right-click → Import WireGuard / Add FortiGate / ...
+    {
+        let import_wg_btn = import_wg_btn.clone();
+        let add_fg_btn = add_fg_btn.clone();
+        let import_ov_btn = import_ov_btn.clone();
+        let import_az_btn = import_az_btn.clone();
+        let import_toml_btn = import_toml_btn.clone();
+
+        let menu = gio::Menu::new();
+        menu.append(Some("Import WireGuard .conf"), Some("vpn-bg.import-wg"));
+        menu.append(Some("Add FortiGate connection"), Some("vpn-bg.add-fg"));
+        menu.append(Some("Import OpenVPN .ovpn"), Some("vpn-bg.import-ov"));
+        menu.append(Some("Import Azure VPN config"), Some("vpn-bg.import-az"));
+        menu.append(Some("Import TOML config\u{2026}"), Some("vpn-bg.import-toml"));
+
+        let ag = gio::SimpleActionGroup::new();
+        {
+            let a = gio::SimpleAction::new("import-wg", None);
+            let b = import_wg_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+        {
+            let a = gio::SimpleAction::new("add-fg", None);
+            let b = add_fg_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+        {
+            let a = gio::SimpleAction::new("import-ov", None);
+            let b = import_ov_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+        {
+            let a = gio::SimpleAction::new("import-az", None);
+            let b = import_az_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+        {
+            let a = gio::SimpleAction::new("import-toml", None);
+            let b = import_toml_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+
+        let popover = gtk4::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(&vpn_profile_list);
+        popover.set_has_arrow(false);
+        vpn_profile_list.insert_action_group("vpn-bg", Some(&ag));
+
+        let gesture = gtk4::GestureClick::builder().button(3).build();
+        let popover_ref = popover.clone();
+        gesture.connect_pressed(move |_, _, x, y| {
+            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.popup();
+        });
+        vpn_profile_list.add_controller(gesture);
+    }
+
+    // Hosts sidebar: right-click → Add SSH Host
+    {
+        let ssh_add_host_btn = ssh_add_host_btn.clone();
+
+        let menu = gio::Menu::new();
+        menu.append(Some("Add Host"), Some("hosts-bg.add-host"));
+
+        let ag = gio::SimpleActionGroup::new();
+        {
+            let a = gio::SimpleAction::new("add-host", None);
+            let b = ssh_add_host_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+
+        let popover = gtk4::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(&ssh_host_list);
+        popover.set_has_arrow(false);
+        ssh_host_list.insert_action_group("hosts-bg", Some(&ag));
+
+        let gesture = gtk4::GestureClick::builder().button(3).build();
+        let popover_ref = popover.clone();
+        gesture.connect_pressed(move |_, _, x, y| {
+            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.popup();
+        });
+        ssh_host_list.add_controller(gesture);
+    }
+
+    // Keys sidebar: right-click → Generate Key / Import Keys
+    {
+        let ssh_gen_key_btn = ssh_gen_key_btn.clone();
+        let ssh_import_keys_btn = ssh_import_keys_btn.clone();
+
+        let menu = gio::Menu::new();
+        menu.append(Some("Generate SSH Key"), Some("keys-bg.gen-key"));
+        menu.append(Some("Import SSH Keys\u{2026}"), Some("keys-bg.import-keys"));
+
+        let ag = gio::SimpleActionGroup::new();
+        {
+            let a = gio::SimpleAction::new("gen-key", None);
+            let b = ssh_gen_key_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+        {
+            let a = gio::SimpleAction::new("import-keys", None);
+            let b = ssh_import_keys_btn.clone();
+            a.connect_activate(move |_, _| b.emit_clicked());
+            ag.add_action(&a);
+        }
+
+        let popover = gtk4::PopoverMenu::from_model(Some(&menu));
+        popover.set_parent(&ssh_key_list);
+        popover.set_has_arrow(false);
+        ssh_key_list.insert_action_group("keys-bg", Some(&ag));
+
+        let gesture = gtk4::GestureClick::builder().button(3).build();
+        let popover_ref = popover.clone();
+        gesture.connect_pressed(move |_, _, x, y| {
+            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.popup();
+        });
+        ssh_key_list.add_controller(gesture);
     }
 
     // =========================================================================
@@ -696,8 +946,6 @@ pub fn build_ui(
         let ssh_keys_add_group = ssh_keys_add_group.clone();
         let ssh_hosts_add_group = ssh_hosts_add_group.clone();
         let add_menu_btn = add_menu_btn.clone();
-        let ssh_toggle_keys = ssh_toggle_keys.clone();
-        let ssh_toggle_dashboard = ssh_toggle_dashboard.clone();
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
             let page = page.as_deref().unwrap_or("vpn");
@@ -708,18 +956,20 @@ pub fn build_ui(
                     ssh_hosts_add_group.set_visible(false);
                     add_menu_btn.set_visible(true);
                 }
-                "ssh" => {
+                "hosts" => {
                     vpn_add_group.set_visible(false);
-                    if ssh_toggle_dashboard.is_active() {
-                        add_menu_btn.set_visible(false);
-                    } else {
-                        add_menu_btn.set_visible(true);
-                        ssh_keys_add_group.set_visible(ssh_toggle_keys.is_active());
-                        ssh_hosts_add_group.set_visible(!ssh_toggle_keys.is_active());
-                    }
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(true);
+                    add_menu_btn.set_visible(true);
+                }
+                "keys" => {
+                    vpn_add_group.set_visible(false);
+                    ssh_keys_add_group.set_visible(true);
+                    ssh_hosts_add_group.set_visible(false);
+                    add_menu_btn.set_visible(true);
                 }
                 _ => {
-                    // Console, Provisioning — no add actions.
+                    // Dashboard, Console, Provisioning — no add actions.
                     add_menu_btn.set_visible(false);
                 }
             }
@@ -752,6 +1002,7 @@ pub fn build_ui(
             lock_page.status_label.set_text("Enter your master password to unlock.");
             lock_page.set_btn.set_visible(false);
             lock_page.confirm_row.set_visible(false);
+            lock_page.password_row.grab_focus();
         } else {
             // No password yet — go straight to the app.
             outer_stack.set_visible_child_name("app");
@@ -1019,15 +1270,17 @@ pub fn build_ui(
         let vpn_content_page = vpn_content_page.clone();
         let profile_name_label = vpn_detail.profile_name_label.clone();
         let auto_connect_switch = vpn_detail.auto_connect_switch.clone();
+        let full_tunnel_row = vpn_detail.full_tunnel_row.clone();
         let full_tunnel_switch = vpn_detail.full_tunnel_switch.clone();
         let kill_switch_switch = vpn_detail.kill_switch_switch.clone();
         let rotate_key_btn = vpn_detail.rotate_key_btn.clone();
         let export_btn = vpn_detail.export_btn.clone();
+        let duplicate_btn = vpn_detail.duplicate_btn.clone();
         let split_routes_row = vpn_detail.split_routes_row.clone();
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_profile_list.connect_row_activated(move |list, row| {
             let idx = row.index() as usize;
-            let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg) = {
+            let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg, azure) = {
                 let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let mut sorted: Vec<&ProfileSummary> = s.profiles.iter().collect();
                 sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -1045,11 +1298,12 @@ pub fn build_ui(
                     p.backend == "OpenVPN3" || p.backend.starts_with("FortiGate")
                 });
                 let wg = entry.map_or(false, |p| p.backend == "WireGuard");
+                let azure = entry.map_or(false, |p| p.backend.starts_with("Azure"));
                 s.selected_profile = entry.map(|p| p.id.to_string());
                 if matches!(s.vpn_state, VpnState::Error { .. }) {
                     s.vpn_state = VpnState::Disconnected;
                 }
-                (name, exists, ac, ft, ks, supports, routes, editable, wg)
+                (name, exists, ac, ft, ks, supports, routes, editable, wg, azure)
             };
 
             if profile_exists {
@@ -1059,6 +1313,8 @@ pub fn build_ui(
                 }
                 auto_connect_switch.set_active(ac);
                 auto_connect_switch.set_sensitive(true);
+                // Azure VPN routes are pushed by the gateway; full-tunnel toggle is meaningless.
+                full_tunnel_row.set_visible(!azure);
                 full_tunnel_switch.set_active(ft);
                 full_tunnel_switch.set_sensitive(true);
                 kill_switch_switch.set_active(ks);
@@ -1066,6 +1322,7 @@ pub fn build_ui(
                 edit_creds_btn.set_visible(is_editable);
                 rotate_key_btn.set_visible(is_wg);
                 export_btn.set_sensitive(true);
+                duplicate_btn.set_sensitive(true);
                 let show_split = supports_split && !ft;
                 split_routes_row.set_visible(show_split);
                 if show_split {
@@ -1091,7 +1348,7 @@ pub fn build_ui(
     // --- SSH key list selection ----------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
-        let ssh_content_stack = ssh_content_stack.clone();
+        let keys_content_stack = keys_content_stack.clone();
         let ssh_key_detail = &ssh_key_detail;
         let key_name_label = ssh_key_detail.key_name_label.clone();
         let key_type_badge = ssh_key_detail.key_type_badge.clone();
@@ -1129,7 +1386,7 @@ pub fn build_ui(
                 deployed_list.append(&deployed_row);
 
                 key_detail_stack.set_visible_child_name("detail");
-                ssh_content_stack.set_visible_child_name("key-detail");
+                keys_content_stack.set_visible_child_name("key-detail");
                 s.selected_ssh_key = Some(key.id.to_string());
                 s.selected_ssh_host = None;
 
@@ -1153,7 +1410,7 @@ pub fn build_ui(
     // --- SSH host list selection ---------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
-        let ssh_content_stack = ssh_content_stack.clone();
+        let hosts_content_stack = hosts_content_stack.clone();
         let host_detail = ssh_host_detail.clone();
         let _host_label_lbl = host_detail.host_label_lbl.clone();
         let _group_badge = host_detail.group_badge.clone();
@@ -1198,7 +1455,7 @@ pub fn build_ui(
 
             if let Some(Some(host)) = flat.get(idx as usize) {
                 ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.ssh_hosts);
-                ssh_content_stack.set_visible_child_name("host-detail");
+                hosts_content_stack.set_visible_child_name("host-detail");
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
 
@@ -1752,6 +2009,46 @@ pub fn build_ui(
         });
     }
 
+    // --- Duplicate profile button -------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        vpn_detail.duplicate_btn.connect_clicked(move |_| {
+            let profile_id = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.selected_profile.clone()
+            };
+            let Some(profile_id) = profile_id else { return };
+            let tx = tx.clone();
+            rt.spawn(async move {
+                match dbus_export_profile(profile_id).await {
+                    Ok(toml_text) => {
+                        // Re-import the exported TOML with a " (copy)" suffix.
+                        match crate::dbus_client::dbus_import_toml_string(toml_text, Some(" (copy)".to_string())).await {
+                            Ok(profiles) => {
+                                let _ = tx.send(AppMsg::ImportSucceeded {
+                                    profiles,
+                                    toast: Some("Profile duplicated"),
+                                });
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(
+                                    format!("duplicate profile: {e}"),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::OperationFailed(
+                            format!("export for duplicate: {e}"),
+                        ));
+                    }
+                }
+            });
+        });
+    }
+
     // --- Split-routes "Edit" button -----------------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -1866,6 +2163,66 @@ pub fn build_ui(
         });
     }
 
+    // --- RDP button -----------------------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        let rt = rt.clone();
+        ssh_host_detail.rdp_btn.connect_clicked(move |_| {
+            let (host_id, hostname, port, username, has_password) = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let sel = s.selected_ssh_host.as_deref();
+                sel.and_then(|id| s.ssh_hosts.iter().find(|h| h.id.to_string() == id))
+                    .map(|h| (h.id.to_string(), h.hostname.clone(), h.rdp_port.unwrap_or(3389), h.username.clone(), h.has_password))
+                    .unwrap_or_default()
+            };
+            if hostname.is_empty() { return; }
+            let tx = tx.clone();
+            // Fetch password from daemon if available, then launch.
+            if has_password {
+                let rt = rt.clone();
+                rt.spawn(async move {
+                    let pw = async {
+                        let conn = zbus::Connection::system().await.ok()?;
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await.ok()?;
+                        proxy.ssh_get_password(&host_id).await.ok()
+                    }.await;
+                    let result = ssh::host_detail::launch_rdp(&hostname, port, &username, pw.as_deref());
+                    match result {
+                        Ok(msg) => { let _ = tx.send(AppMsg::ShowToast(msg)); }
+                        Err(msg) => { let _ = tx.send(AppMsg::OperationFailed(msg)); }
+                    }
+                });
+            } else {
+                match ssh::host_detail::launch_rdp(&hostname, port, &username, None) {
+                    Ok(msg) => { let _ = tx.send(AppMsg::ShowToast(msg)); }
+                    Err(msg) => { let _ = tx.send(AppMsg::OperationFailed(msg)); }
+                }
+            }
+        });
+    }
+
+    // --- VNC button -----------------------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let tx = tx.clone();
+        ssh_host_detail.vnc_btn.connect_clicked(move |_| {
+            let (hostname, port) = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let sel = s.selected_ssh_host.as_deref();
+                sel.and_then(|id| s.ssh_hosts.iter().find(|h| h.id.to_string() == id))
+                    .map(|h| (h.hostname.clone(), h.vnc_port.unwrap_or(5900)))
+                    .unwrap_or_default()
+            };
+            if hostname.is_empty() { return; }
+            let tx = tx.clone();
+            match ssh::host_detail::launch_vnc(&hostname, port) {
+                Ok(msg) => { let _ = tx.send(AppMsg::ShowToast(msg)); }
+                Err(msg) => { let _ = tx.send(AppMsg::OperationFailed(msg)); }
+            }
+        });
+    }
+
     // --- SSH Test Connection button -------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -1957,7 +2314,7 @@ pub fn build_ui(
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
-        let ssh_content_stack = ssh_content_stack.clone();
+        let keys_content_stack = keys_content_stack.clone();
         ssh_key_detail.delete_btn.connect_clicked(move |_| {
             let key_id = {
                 app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key.clone()
@@ -1973,11 +2330,11 @@ pub fn build_ui(
 
             let tx = tx.clone();
             let rt = rt.clone();
-            let ssh_content_stack = ssh_content_stack.clone();
+            let keys_content_stack = keys_content_stack.clone();
             dialog.connect_response(Some("delete"), move |_dlg, _resp| {
                 let key_id = key_id.clone();
                 let tx = tx.clone();
-                let ssh_content_stack = ssh_content_stack.clone();
+                let keys_content_stack = keys_content_stack.clone();
                 rt.spawn(async move {
                     let msg = match crate::dbus_client::dbus_ssh_delete_key(key_id).await {
                         Ok(()) => {
@@ -1989,7 +2346,7 @@ pub fn build_ui(
                     tx.send(msg).ok();
                 });
                 // Optimistically return to empty.
-                ssh_content_stack.set_visible_child_name("empty");
+                keys_content_stack.set_visible_child_name("empty");
             });
             dialog.present(Some(&window));
         });
@@ -2214,7 +2571,7 @@ pub fn build_ui(
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
-        let ssh_content_stack = ssh_content_stack.clone();
+        let hosts_content_stack = hosts_content_stack.clone();
         ssh_host_detail.delete_btn.connect_clicked(move |_| {
             let host_id = {
                 app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host.clone()
@@ -2230,11 +2587,11 @@ pub fn build_ui(
 
             let tx = tx.clone();
             let rt = rt.clone();
-            let ssh_content_stack = ssh_content_stack.clone();
+            let hosts_content_stack = hosts_content_stack.clone();
             dialog.connect_response(Some("delete"), move |_dlg, _resp| {
                 let host_id = host_id.clone();
                 let tx = tx.clone();
-                let ssh_content_stack = ssh_content_stack.clone();
+                let hosts_content_stack = hosts_content_stack.clone();
                 rt.spawn(async move {
                     let msg = match crate::dbus_client::dbus_ssh_delete_host(host_id).await {
                         Ok(()) => {
@@ -2245,7 +2602,7 @@ pub fn build_ui(
                     };
                     tx.send(msg).ok();
                 });
-                ssh_content_stack.set_visible_child_name("empty");
+                hosts_content_stack.set_visible_child_name("empty");
             });
             dialog.present(Some(&window));
         });
@@ -2333,11 +2690,14 @@ pub fn build_ui(
     let rx_tray_handle = Arc::clone(&tray_handle);
     let rx_ssh_key_list = ssh_key_list.clone();
     let rx_ssh_host_list = ssh_host_list.clone();
-    let rx_ssh_content_stack = ssh_content_stack.clone();
+    let rx_keys_content_stack = keys_content_stack.clone();
+    let rx_hosts_content_stack = hosts_content_stack.clone();
     let rx_ssh_key_pubkey_view = ssh_key_detail.public_key_view.clone();
     let rx_console_panel = console_panel.clone();
     let rx_ssh_host_detail = ssh_host_detail.clone();
     let rx_dashboard_flow_box = dashboard_flow_box.clone();
+    let rx_notif_list = notif_list.clone();
+    let rx_notif_btn = notif_btn.clone();
 
     let prev_state_init: VpnState = {
         let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2415,13 +2775,18 @@ pub fn build_ui(
                         s.daemon_available = true;
                     }
                     rx_banner.set_revealed(false);
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    // Snapshot everything we need, then drop the lock.
+                    // push_notification() needs to re-lock, so we must not hold it.
+                    let (vpn_state_snap, profiles_snap, selected_snap, vpn_filter_snap) = {
+                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        (s.vpn_state.clone(), s.profiles.clone(),
+                         s.selected_profile.clone(), s.vpn_filter.clone())
+                    };
                     // Desktop notifications on state transitions.
-                    match &s.vpn_state {
+                    match &vpn_state_snap {
                         VpnState::Connected { profile_id, .. } => {
                             if !matches!(&rx_prev_state, VpnState::Connected { .. }) {
-                                let body = s
-                                    .profiles
+                                let body = profiles_snap
                                     .iter()
                                     .find(|p| p.id == *profile_id)
                                     .map(|p| p.name.as_str())
@@ -2429,17 +2794,26 @@ pub fn build_ui(
                                 let notif = gio::Notification::new("VPN Connected");
                                 notif.set_body(Some(body));
                                 rx_app.send_notification(Some("vpn-state"), &notif);
+                                push_notification(
+                                    &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                                    "network-vpn-symbolic",
+                                    &format!("VPN Connected: {body}"),
+                                );
                             }
                         }
                         VpnState::Error { message, .. } => {
                             let notif = gio::Notification::new("VPN Error");
                             notif.set_body(Some(message.as_str()));
                             rx_app.send_notification(Some("vpn-state"), &notif);
+                            push_notification(
+                                &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                                "dialog-warning-symbolic",
+                                &format!("VPN Error: {message}"),
+                            );
                         }
                         VpnState::Disconnected => {
                             if let VpnState::Connected { profile_id, .. } = &rx_prev_state {
-                                let body = s
-                                    .profiles
+                                let body = profiles_snap
                                     .iter()
                                     .find(|p| p.id == *profile_id)
                                     .map(|p| p.name.as_str())
@@ -2447,44 +2821,52 @@ pub fn build_ui(
                                 let notif = gio::Notification::new("VPN Disconnected");
                                 notif.set_body(Some(body));
                                 rx_app.send_notification(Some("vpn-state"), &notif);
+                                push_notification(
+                                    &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                                    "network-vpn-disabled-symbolic",
+                                    &format!("VPN Disconnected: {body}"),
+                                );
                             }
                         }
                         _ => {}
                     }
-                    rx_prev_state = s.vpn_state.clone();
-                    if !matches!(s.vpn_state, VpnState::Connected { .. }) {
+                    rx_prev_state = vpn_state_snap.clone();
+                    if !matches!(vpn_state_snap, VpnState::Connected { .. }) {
                         rx_stats_uptime.set_visible(false);
                         rx_stats_virtual_ip.set_visible(false);
                         rx_stats_routes.set_visible(false);
                     }
-                    let display_name = s
-                        .selected_profile
+                    let display_name = selected_snap
                         .as_deref()
-                        .and_then(|sid| s.profiles.iter().find(|p| p.id.to_string() == sid))
+                        .and_then(|sid| profiles_snap.iter().find(|p| p.id.to_string() == sid))
                         .map(|p| p.name.as_str())
                         .unwrap_or("");
                     rx_profile_name_label.set_label(display_name);
                     populate_vpn_sidebar(
                         &rx_profile_list,
-                        &s.profiles,
-                        &s.vpn_state,
-                        s.selected_profile.as_deref(),
+                        &profiles_snap,
+                        &vpn_state_snap,
+                        selected_snap.as_deref(),
                         &rx_window,
                         &rx_rt,
                         &rx_tx,
-                        &s.vpn_filter,
+                        &vpn_filter_snap,
                     );
-                    apply_vpn_state(
-                        &rx_connect_btn,
-                        &rx_rename_btn,
-                        &rx_status_label,
-                        &rx_stats_box,
-                        &s,
-                    );
+                    // Re-lock briefly for apply_vpn_state (reads multiple fields).
+                    {
+                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        apply_vpn_state(
+                            &rx_connect_btn,
+                            &rx_rename_btn,
+                            &rx_status_label,
+                            &rx_stats_box,
+                            &s,
+                        );
+                    }
                     push_tray_update(
                         &rx_tray_handle,
-                        s.vpn_state.clone(),
-                        s.profiles.clone(),
+                        vpn_state_snap.clone(),
+                        profiles_snap.clone(),
                         &rx_rt,
                     );
                 }
@@ -2587,6 +2969,10 @@ pub fn build_ui(
                 }
                 AppMsg::OperationFailed(msg) => {
                     error!("operation failed: {}", msg);
+                    push_notification(
+                        &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                        "dialog-error-symbolic", &msg,
+                    );
                     if msg.len() <= 80 {
                         rx_toast_overlay.add_toast(adw::Toast::new(&msg));
                     } else {
@@ -2631,6 +3017,10 @@ pub fn build_ui(
                 }
                 AppMsg::ShowToast(msg) => {
                     rx_toast_overlay.add_toast(adw::Toast::new(&msg));
+                    push_notification(
+                        &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                        "emblem-ok-symbolic", &msg,
+                    );
                 }
                 AppMsg::CopyToClipboard(text) => {
                     let display = gtk4::prelude::WidgetExt::display(&rx_window);
@@ -2683,7 +3073,7 @@ pub fn build_ui(
                         if !s.ssh_keys.iter().any(|k| k.id.to_string() == *sel) {
                             drop(s);
                             rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key = None;
-                            rx_ssh_content_stack.set_visible_child_name("empty");
+                            rx_keys_content_stack.set_visible_child_name("empty");
                         }
                     }
                     rx_toast_overlay.add_toast(adw::Toast::new("SSH keys updated"));
@@ -2713,7 +3103,7 @@ pub fn build_ui(
                         } else {
                             drop(s);
                             rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
-                            rx_ssh_content_stack.set_visible_child_name("empty");
+                            rx_hosts_content_stack.set_visible_child_name("empty");
                         }
                     }
                 }
@@ -2832,6 +3222,9 @@ pub fn build_ui(
                                 &rx_ssh_host_detail.pf_listbox,
                                 &host.port_forwards,
                                 Some(&active_map),
+                                Some(&host.id.to_string()),
+                                Some(&rx_rt),
+                                Some(&rx_tx),
                             );
                         }
                     }
@@ -2853,11 +3246,49 @@ pub fn build_ui(
                         &data,
                     );
                 }
+                AppMsg::FortigateConfigDiff { hostname, diff } => {
+                    let win = gtk4::Window::builder()
+                        .title(&format!("Config diff — {hostname}"))
+                        .default_width(700)
+                        .default_height(550)
+                        .resizable(true)
+                        .build();
+                    let header = adw::HeaderBar::new();
+                    let text_view = gtk4::TextView::builder()
+                        .editable(false)
+                        .cursor_visible(false)
+                        .monospace(true)
+                        .top_margin(8)
+                        .bottom_margin(8)
+                        .left_margin(8)
+                        .right_margin(8)
+                        .build();
+                    text_view.buffer().set_text(&diff);
+                    let scroll = gtk4::ScrolledWindow::builder()
+                        .vexpand(true)
+                        .child(&text_view)
+                        .build();
+                    let vbox = gtk4::Box::builder()
+                        .orientation(gtk4::Orientation::Vertical)
+                        .build();
+                    vbox.append(&header);
+                    vbox.append(&scroll);
+                    win.set_child(Some(&vbox));
+                    win.present();
+                }
                 AppMsg::DashboardDeviceStatus { host_id, data } => {
                     ssh::dashboard::apply_dashboard_status(
                         &rx_dashboard_flow_box,
                         &host_id,
                         &data,
+                    );
+                    rx_dashboard_flow_box.invalidate_sort();
+                    ssh::dashboard::refresh_summary(&rx_dashboard_flow_box);
+                }
+                AppMsg::DashboardCloudDevices { devices } => {
+                    ssh::dashboard::add_cloud_device_cards(
+                        &rx_dashboard_flow_box,
+                        &devices,
                     );
                 }
                 AppMsg::FortigateBackupDone { host_id: _, result } => {
@@ -2936,20 +3367,27 @@ pub fn build_ui(
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_2 => {
-                        view_stack.set_visible_child_name("ssh");
+                        view_stack.set_visible_child_name("dashboard");
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_3 => {
+                        view_stack.set_visible_child_name("hosts");
+                        return glib::Propagation::Stop;
+                    }
+                    gtk4::gdk::Key::_4 => {
+                        view_stack.set_visible_child_name("keys");
+                        return glib::Propagation::Stop;
+                    }
+                    gtk4::gdk::Key::_5 => {
                         view_stack.set_visible_child_name("console");
                         console_input.grab_focus();
                         return glib::Propagation::Stop;
                     }
-                    gtk4::gdk::Key::_4 => {
+                    gtk4::gdk::Key::_6 => {
                         view_stack.set_visible_child_name("provisioning");
                         return glib::Propagation::Stop;
                     }
-                    gtk4::gdk::Key::k => {
-                        view_stack.set_visible_child_name("ssh");
+                    gtk4::gdk::Key::k | gtk4::gdk::Key::f => {
                         ssh_search_entry.grab_focus();
                         return glib::Propagation::Stop;
                     }
@@ -2994,6 +3432,14 @@ pub fn build_ui(
         });
     }
 
+    // --- Quit button (exits the application from the lock screen) -------------
+    {
+        let window_quit = window.clone();
+        lock_page.quit_btn.connect_clicked(move |_| {
+            window_quit.close();
+        });
+    }
+
     // --- Set Password button (first-time setup, also accessible from lock) ----
     {
         let app_settings = Arc::clone(&app_settings);
@@ -3033,15 +3479,19 @@ pub fn build_ui(
         let key_ctrl = gtk4::EventControllerKey::builder()
             .propagation_phase(gtk4::PropagationPhase::Capture)
             .build();
+        let quit_btn = lock_page.quit_btn.clone();
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            if (key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter)
-                && outer_stack_enter.visible_child_name().as_deref() == Some("lock")
-            {
-                if unlock_btn.is_visible() {
-                    unlock_btn.emit_clicked();
-                    return glib::Propagation::Stop;
-                } else if set_btn.is_visible() {
-                    set_btn.emit_clicked();
+            if outer_stack_enter.visible_child_name().as_deref() == Some("lock") {
+                if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
+                    if unlock_btn.is_visible() {
+                        unlock_btn.emit_clicked();
+                        return glib::Propagation::Stop;
+                    } else if set_btn.is_visible() {
+                        set_btn.emit_clicked();
+                        return glib::Propagation::Stop;
+                    }
+                } else if key == gtk4::gdk::Key::Escape {
+                    quit_btn.emit_clicked();
                     return glib::Propagation::Stop;
                 }
             }
@@ -3171,11 +3621,9 @@ pub fn build_ui(
         focus_search_action.connect_activate(move |_, _| {
             let page = view_stack.visible_child_name();
             match page.as_deref() {
-                // SSH section has a search entry — focus it.
-                Some("ssh") => {
+                Some("hosts") | Some("keys") => {
                     ssh_search_entry.grab_focus();
                 }
-                // VPN section has no search entry; do nothing for now.
                 _ => {}
             }
         });
@@ -3210,7 +3658,8 @@ pub fn build_ui(
                 return;
             }
             // Otherwise, clear search in the active section.
-            if view_stack.visible_child_name().as_deref() == Some("ssh") {
+            let page = view_stack.visible_child_name();
+            if matches!(page.as_deref(), Some("hosts") | Some("keys")) {
                 let text = ssh_search_entry.text();
                 if !text.is_empty() {
                     ssh_search_entry.set_text("");
@@ -3287,6 +3736,67 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
 // ---------------------------------------------------------------------------
 
 /// Switch the outer stack to the lock page and prepare it for unlock.
+/// Push a notification into the store and update the popover list.
+fn push_notification(
+    app_state: &Arc<Mutex<AppState>>,
+    notif_list: &gtk4::ListBox,
+    notif_btn: &gtk4::MenuButton,
+    icon: &'static str,
+    message: &str,
+) {
+    {
+        let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        s.push_notification(icon, message);
+    }
+
+    // Remove placeholder if present.
+    while let Some(child) = notif_list.first_child() {
+        if child.downcast_ref::<adw::ActionRow>()
+            .map_or(false, |r| r.title() == "No notifications")
+        {
+            notif_list.remove(&child);
+            break;
+        } else {
+            break;
+        }
+    }
+
+    // Prepend new row with wrapping text.
+    let now = chrono::Local::now().format("%H:%M:%S").to_string();
+    let row_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    row_box.append(&gtk4::Image::from_icon_name(icon));
+    let text_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .build();
+    let msg_lbl = gtk4::Label::builder()
+        .label(message)
+        .halign(gtk4::Align::Start)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .build();
+    let time_lbl = gtk4::Label::builder()
+        .label(&now)
+        .halign(gtk4::Align::Start)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    text_box.append(&msg_lbl);
+    text_box.append(&time_lbl);
+    row_box.append(&text_box);
+    notif_list.prepend(&row_box);
+
+    // Badge: update icon to filled bell.
+    notif_btn.set_icon_name("bell-symbolic");
+}
+
 fn lock_session(outer_stack: &gtk4::Stack, lock_page: &LockPage) {
     lock_page.password_row.set_text("");
     lock_page.confirm_row.set_text("");

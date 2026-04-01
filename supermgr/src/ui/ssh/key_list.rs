@@ -47,8 +47,13 @@ pub fn populate_ssh_key_list(
     filter: &str,
 ) {
     // Clear.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
+    let mut child = list_box.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        if c.is::<gtk4::ListBoxRow>() {
+            list_box.remove(&c);
+        }
+        child = next;
     }
 
     // Apply search filter.

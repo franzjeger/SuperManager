@@ -229,6 +229,38 @@ pub async fn dbus_import_toml(
     Ok(result)
 }
 
+/// Import a TOML profile string directly, optionally appending a suffix to
+/// the profile name (e.g. " (copy)" for duplication).
+/// Returns the refreshed profile list.
+pub async fn dbus_import_toml_string(
+    toml_text: String,
+    name_suffix: Option<String>,
+) -> anyhow::Result<Vec<ProfileSummary>> {
+    let mut text = toml_text;
+    // Modify the name field if a suffix is provided.
+    if let Some(suffix) = name_suffix {
+        // Simple regex-free approach: find `name = "..."` and append suffix.
+        if let Some(start) = text.find("name = \"") {
+            let after = start + 8; // skip `name = "`
+            if let Some(end) = text[after..].find('"') {
+                let name = text[after..after + end].to_owned();
+                text = format!(
+                    "{}name = \"{name}{suffix}\"{}",
+                    &text[..start],
+                    &text[after + end + 1..],
+                );
+            }
+        }
+    }
+
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.import_toml(&text).await.context("ImportToml")?;
+    let json = proxy.list_profiles().await.context("ListProfiles")?;
+    let profiles: Vec<ProfileSummary> = serde_json::from_str(&json).context("parse profiles")?;
+    Ok(profiles)
+}
+
 /// Open a fresh system-bus connection and issue `Connect(profile_id)`.
 pub async fn dbus_connect(profile_id: String) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
@@ -556,6 +588,12 @@ pub async fn dbus_ssh_connect_command(host_id: String) -> anyhow::Result<String>
     Ok(proxy.ssh_connect_command(&host_id).await?)
 }
 
+pub async fn dbus_ssh_execute_command(host_id: String, command: String) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy.ssh_execute_command(&host_id, &command).await?)
+}
+
 pub async fn dbus_ssh_test_connection(host_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
@@ -581,10 +619,26 @@ pub async fn dbus_ssh_set_password(host_id: String, password: String) -> anyhow:
     Ok(())
 }
 
+pub async fn dbus_ssh_set_certificate(host_id: String, certificate: String) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    proxy.ssh_set_certificate(&host_id, &certificate).await?;
+    Ok(())
+}
+
 pub async fn dbus_ssh_set_api_token(host_id: String, token: String, port: u16) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     proxy.ssh_set_api_token(&host_id, &token, port).await?;
+    Ok(())
+}
+
+pub async fn dbus_ssh_set_unifi_controller(
+    host_id: String, url: String, username: String, password: String,
+) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    proxy.unifi_set_controller(&host_id, &url, &username, &password).await?;
     Ok(())
 }
 
@@ -965,4 +1019,98 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     let days = days_to_year(year) + day_of_year;
     if days < EPOCH_DAYS { return None; }
     Some((days - EPOCH_DAYS) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+// ---------------------------------------------------------------------------
+// SSH config generation
+// ---------------------------------------------------------------------------
+
+/// Generate `~/.ssh/config` entries for all managed hosts.
+/// Returns the number of hosts written.
+pub async fn generate_ssh_config() -> anyhow::Result<usize> {
+    let hosts = dbus_ssh_list_hosts().await?;
+    let keys = dbus_ssh_list_keys().await?;
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let ssh_dir = std::path::PathBuf::from(&home).join(".ssh");
+    let config_path = ssh_dir.join("config");
+
+    // Read existing config to preserve non-managed entries.
+    let existing = tokio::fs::read_to_string(&config_path).await.unwrap_or_default();
+
+    let marker_start = "# ── SuperManager managed hosts (do not edit) ──";
+    let marker_end = "# ── End SuperManager managed hosts ──";
+
+    // Split: keep everything before our block and after it.
+    let (before, after) = if let Some(start) = existing.find(marker_start) {
+        let end_pos = existing.find(marker_end)
+            .map(|p| p + marker_end.len())
+            .unwrap_or(existing.len());
+        // Trim trailing newline after marker.
+        let after_pos = if existing[end_pos..].starts_with('\n') { end_pos + 1 } else { end_pos };
+        (existing[..start].to_owned(), existing[after_pos..].to_owned())
+    } else {
+        (existing.clone(), String::new())
+    };
+
+    let mut block = String::new();
+    block.push_str(marker_start);
+    block.push('\n');
+
+    let mut count = 0usize;
+    for host in &hosts {
+        // Sanitize label for SSH config Host alias.
+        let alias: String = host.label.chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+            .collect();
+
+        block.push_str(&format!("Host {alias}\n"));
+        block.push_str(&format!("    HostName {}\n", host.hostname));
+        block.push_str(&format!("    User {}\n", host.username));
+        if host.port != 22 {
+            block.push_str(&format!("    Port {}\n", host.port));
+        }
+
+        // Find the key file in ~/.ssh/ if exported.
+        if let Some(ref key_id) = host.auth_key_id {
+            let key_id_str = key_id.to_string();
+            if let Some(key) = keys.iter().find(|k| k.id.to_string() == key_id_str) {
+                let key_file = ssh_dir.join(format!("supermgr_{}", key.name.replace(' ', "_")));
+                if key_file.exists() {
+                    block.push_str(&format!("    IdentityFile {}\n", key_file.display()));
+                }
+            }
+        }
+
+        // Bastion/jump host.
+        if let Some(ref jump) = host.proxy_jump {
+            let jump_str = jump.to_string();
+            if let Some(jump_host) = hosts.iter().find(|h| h.id.to_string() == jump_str) {
+                let jump_alias: String = jump_host.label.chars()
+                    .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+                    .collect();
+                block.push_str(&format!("    ProxyJump {jump_alias}\n"));
+            }
+        }
+
+        block.push('\n');
+        count += 1;
+    }
+
+    block.push_str(marker_end);
+    block.push('\n');
+
+    let new_config = format!("{before}{block}{after}");
+    tokio::fs::create_dir_all(&ssh_dir).await?;
+    tokio::fs::write(&config_path, &new_config).await?;
+
+    // Ensure correct permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).await?;
+    }
+
+    info!("wrote {count} hosts to {}", config_path.display());
+    Ok(count)
 }

@@ -1,6 +1,6 @@
 [package]
 name        = "supermgr"
-version     = "0.1.1"
+version     = "1.0.0"
 edition     = "2021"
 description = "GTK4/Adwaita GUI for the SuperManager SSH + VPN manager"
 license     = "GPL-3.0-or-later"
@@ -29,8 +29,9 @@ libadwaita  = { version = "0.7",  features = ["v1_5"] }
 # System tray (StatusNotifierItem)
 ksni        = { version = "0.3",  features = ["tokio"] }
 
-# HTTP client for Claude API
+# HTTP client for Claude API / UI.com cloud API
 reqwest     = { workspace = true }
+chrono      = { workspace = true }
 
 # Password hashing (SHA-256) and salt generation
 sha2        = { workspace = true }

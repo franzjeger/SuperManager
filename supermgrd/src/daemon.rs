@@ -434,6 +434,13 @@ impl DaemonService {
         Ok(buf.iter().cloned().collect())
     }
 
+    /// Clear the in-memory log buffer.
+    async fn clear_logs(&self) -> fdo::Result<()> {
+        let mut buf = self.log_buffer.lock().map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        buf.clear();
+        Ok(())
+    }
+
     /// Dynamically change the daemon's tracing log level at runtime.
     ///
     /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
@@ -1687,6 +1694,13 @@ impl DaemonService {
         if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
             host.api_port = Some(v as u16);
         }
+        // RDP/VNC ports: 0 or null means "not configured".
+        if let Some(v) = updates.get("rdp_port") {
+            host.rdp_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+        }
+        if let Some(v) = updates.get("vnc_port") {
+            host.vnc_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+        }
         if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
             host.pinned = v;
         }
@@ -2047,6 +2061,25 @@ impl DaemonService {
     }
 
     /// Store an SSH password for the given host.
+    /// Retrieve the stored SSH password for a host (used for RDP/VNC login).
+    async fn ssh_get_password(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let state = self.state.lock().await;
+        let host = state.ssh_hosts.get(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        let label = match &host.auth_password_ref {
+            Some(r) => r.label().to_owned(),
+            None => return Err(fdo::Error::Failed("no password stored for this host".into())),
+        };
+        drop(state);
+        let bytes = secrets::retrieve_secret(&label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve password: {e}")))?;
+        String::from_utf8(bytes)
+            .map_err(|e| fdo::Error::Failed(format!("password is not valid UTF-8: {e}")))
+    }
+
     async fn ssh_set_password(&self, host_id: &str, password: &str) -> fdo::Result<()> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -2066,6 +2099,29 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         info!("stored SSH password for host {id}");
+        Ok(())
+    }
+
+    /// Store an OpenSSH certificate for the given host.
+    async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let label = format!("supermgr/ssh/{}/certificate", id.simple());
+        secrets::store_secret(&label, certificate.as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("store certificate: {e}")))?;
+
+        let mut state = self.state.lock().await;
+        let host = state.ssh_hosts.get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.auth_cert_ref = Some(SecretRef::new(&label));
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state.save_ssh_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
+
+        info!("stored SSH certificate for host {id}");
         Ok(())
     }
 
@@ -5089,9 +5145,57 @@ pub fn spawn_monitor_task(
                                 let _ = DaemonService::state_changed(&ctx, json).await;
                             }
                         }
-                        let mut state = state.lock().await;
-                        state.vpn_state = error_state;
-                        state.active_backend = None;
+                        // Auto-reconnect: if the profile has auto_connect and
+                        // the kill switch is NOT active, attempt to reconnect
+                        // after a short delay.
+                        let auto_reconnect_profile = if !profile_kill_switch {
+                            let s = state.lock().await;
+                            if let VpnState::Connected { profile_id, .. } = &current_state {
+                                s.profiles.get(profile_id)
+                                    .filter(|p| p.auto_connect)
+                                    .cloned()
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        {
+                            let mut s = state.lock().await;
+                            s.vpn_state = error_state;
+                            s.active_backend = None;
+                        }
+
+                        // Attempt auto-reconnect with backoff.
+                        if let Some(profile) = auto_reconnect_profile {
+                            info!("auto-reconnect: will retry '{}' in 5 s", profile.name);
+                            let state_c = Arc::clone(&state);
+                            let conn_c = conn.clone();
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                // Only reconnect if still idle.
+                                let idle = {
+                                    let s = state_c.lock().await;
+                                    s.vpn_state.is_idle()
+                                };
+                                if !idle {
+                                    info!("auto-reconnect: skipped, tunnel already active");
+                                    return;
+                                }
+                                let object_path = zbus::zvariant::ObjectPath::try_from(
+                                    supermgr_core::dbus::DBUS_OBJECT_PATH,
+                                ).expect("static path");
+                                if let Ok(ctx) = SignalContext::new(&conn_c, object_path) {
+                                    info!("auto-reconnect: connecting '{}'", profile.name);
+                                    if let Err(e) = connect_profile(
+                                        profile.clone(), Arc::clone(&state_c), ctx,
+                                    ).await {
+                                        warn!("auto-reconnect failed: {e}");
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 Err(e) => {

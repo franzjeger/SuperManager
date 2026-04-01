@@ -55,6 +55,31 @@ pub struct AppState {
     pub host_health: std::collections::HashMap<String, bool>,
     /// Conversation history for the Claude Console (multi-turn memory).
     pub console_messages: Vec<Value>,
+    /// Notification history (newest first).
+    pub notifications: Vec<Notification>,
+}
+
+/// A notification event stored in the notification center.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    /// When the event occurred.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Icon name for the event type.
+    pub icon: &'static str,
+    /// Short message describing the event.
+    pub message: String,
+}
+
+impl AppState {
+    /// Push a notification into the store (max 100, newest first).
+    pub fn push_notification(&mut self, icon: &'static str, message: impl Into<String>) {
+        self.notifications.insert(0, Notification {
+            timestamp: chrono::Utc::now(),
+            icon,
+            message: message.into(),
+        });
+        self.notifications.truncate(100);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -168,12 +193,24 @@ pub enum AppMsg {
         data: Value,
     },
 
-    /// Dashboard device status data fetched for a FortiGate host.
+    /// Dashboard device status data fetched for a local host (FortiGate/UniFi).
     DashboardDeviceStatus {
         /// UUID string of the host.
         host_id: String,
         /// Parsed JSON response (system status + resource + vpn tunnels).
         data: Value,
+    },
+    /// FortiGate config diff between two backups.
+    FortigateConfigDiff {
+        /// Hostname of the FortiGate.
+        hostname: String,
+        /// Unified diff text.
+        diff: String,
+    },
+    /// Cloud-fetched devices from UI.com Site Manager API.
+    DashboardCloudDevices {
+        /// List of (device_id, device_name, hostname, data) tuples.
+        devices: Vec<(String, String, String, Value)>,
     },
     /// FortiGate config backup completed.
     FortigateBackupDone {

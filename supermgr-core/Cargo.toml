@@ -1,6 +1,6 @@
 [package]
 name        = "supermgr-core"
-version     = "0.1.1"
+version     = "1.0.0"
 edition     = "2021"
 description = "Shared types, D-Bus interface definitions, and backend trait for SuperManager"
 license     = "GPL-3.0-or-later"

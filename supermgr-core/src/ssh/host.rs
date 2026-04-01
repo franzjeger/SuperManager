@@ -108,6 +108,14 @@ pub struct SshHost {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unifi_api_token_ref: Option<SecretRef>,
 
+    /// RDP port (typically 3389).  If set, an "RDP" button is shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdp_port: Option<u16>,
+
+    /// VNC port (typically 5900).  If set, a "VNC" button is shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vnc_port: Option<u16>,
+
     /// Saved port-forwarding rules for this host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_forwards: Vec<PortForward>,
@@ -176,9 +184,25 @@ pub struct SshHostSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
 
+    /// Whether an SSH certificate is stored for this host.
+    #[serde(default)]
+    pub has_certificate: bool,
+
     /// Whether a UniFi Controller URL is configured for this host.
     #[serde(default)]
     pub has_unifi_controller: bool,
+
+    /// UniFi Controller URL (for display in edit dialog).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unifi_controller_url: Option<String>,
+
+    /// RDP port (if configured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rdp_port: Option<u16>,
+
+    /// VNC port (if configured).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vnc_port: Option<u16>,
 
     /// Saved port-forwarding rules.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -207,9 +231,13 @@ impl From<&SshHost> for SshHostSummary {
             auth_key_id: host.auth_key_id,
             vpn_profile_id: host.vpn_profile_id,
             has_password: host.auth_password_ref.is_some(),
+            has_certificate: host.auth_cert_ref.is_some(),
             has_api: host.api_token_ref.is_some(),
             api_port: host.api_port,
             has_unifi_controller: host.unifi_controller_url.is_some(),
+            unifi_controller_url: host.unifi_controller_url.clone(),
+            rdp_port: host.rdp_port,
+            vnc_port: host.vnc_port,
             port_forwards: host.port_forwards.clone(),
             proxy_jump: host.proxy_jump,
             pinned: host.pinned,

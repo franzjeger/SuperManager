@@ -209,6 +209,9 @@ pub trait Daemon {
     /// Returns up to 500 lines, oldest first.
     async fn get_logs(&self) -> fdo::Result<Vec<String>>;
 
+    /// Clear the in-memory log buffer.
+    async fn clear_logs(&self) -> fdo::Result<()>;
+
     /// Dynamically change the daemon's tracing log level at runtime.
     ///
     /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
@@ -481,7 +484,11 @@ pub trait Daemon {
     async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>>;
 
     /// Store an SSH password for the given host.
+    async fn ssh_get_password(&self, host_id: &str) -> fdo::Result<String>;
     async fn ssh_set_password(&self, host_id: &str, password: &str) -> fdo::Result<()>;
+
+    /// Store an OpenSSH certificate for the given host (certificate auth).
+    async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()>;
 
     /// Store a FortiGate REST API token and port for the given host.
     /// Pass `port = 0` to keep the existing port.

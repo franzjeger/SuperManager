@@ -63,6 +63,23 @@ pub struct AppSettings {
     /// Send a webhook notification when a VPN tunnel disconnects unexpectedly.
     #[serde(default)]
     pub webhook_on_vpn_disconnect: bool,
+
+    // ---- UniFi Cloud (ui.com Site Manager) ----
+
+    /// API key for the UI.com Site Manager API (https://unifi.ui.com).
+    /// Create at Settings > API Keys in Site Manager.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unifi_cloud_api_key: String,
+
+    // ---- Remote Desktop ----
+
+    /// Preferred RDP client: "auto", "remmina", "xfreerdp3", "xfreerdp".
+    #[serde(default = "default_rdp_client")]
+    pub rdp_client: String,
+}
+
+fn default_rdp_client() -> String {
+    "auto".into()
 }
 
 fn default_opacity() -> f64 {
@@ -89,6 +106,8 @@ impl Default for AppSettings {
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
+            unifi_cloud_api_key: String::new(),
+            rdp_client: "auto".into(),
         }
     }
 }

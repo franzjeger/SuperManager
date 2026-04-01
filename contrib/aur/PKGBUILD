@@ -1,6 +1,6 @@
 # Maintainer: Franz Jeger <franz@jeger.dev>
 pkgname=supermanager-git
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="Unified SSH key + VPN connection manager (GUI + daemon)"
 arch=('x86_64')

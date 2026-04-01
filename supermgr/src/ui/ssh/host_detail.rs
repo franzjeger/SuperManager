@@ -45,6 +45,10 @@ pub struct SshHostDetail {
     pub delete_btn: gtk4::Button,
     pub pin_btn: gtk4::ToggleButton,
 
+    // RDP / VNC connect buttons (only visible when rdp_port/vnc_port is set).
+    pub rdp_btn: gtk4::Button,
+    pub vnc_btn: gtk4::Button,
+
     // UniFi set-inform button (only visible for UniFi device type).
     pub set_inform_btn: gtk4::Button,
 
@@ -155,7 +159,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 
     // FortiGate dashboard (hidden by default).
     let fg_dashboard_group = adw::PreferencesGroup::builder()
-        .title("FortiGate Dashboard")
+        .title("Dashboard")
         .margin_top(12)
         .visible(false)
         .build();
@@ -271,6 +275,18 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .tooltip_text("Push SSH key to FortiGate admin via REST API")
         .visible(false)
         .build();
+    let rdp_btn = gtk4::Button::builder()
+        .label("RDP")
+        .css_classes(["flat"])
+        .tooltip_text("Open Remote Desktop connection")
+        .visible(false)
+        .build();
+    let vnc_btn = gtk4::Button::builder()
+        .label("VNC")
+        .css_classes(["flat"])
+        .tooltip_text("Open VNC connection")
+        .visible(false)
+        .build();
     let set_inform_btn = gtk4::Button::builder()
         .label("Set Inform\u{2026}")
         .css_classes(["flat"])
@@ -292,6 +308,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     btn_box.append(&pin_btn);
     btn_box.append(&connect_btn);
+    btn_box.append(&rdp_btn);
+    btn_box.append(&vnc_btn);
     btn_box.append(&test_btn);
     btn_box.append(&push_key_btn);
     btn_box.append(&push_key_api_btn);
@@ -357,6 +375,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         test_btn,
         push_key_btn,
         push_key_api_btn,
+        rdp_btn,
+        vnc_btn,
         set_inform_btn,
         edit_btn,
         delete_btn,
@@ -431,6 +451,10 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all
     // Show "Set Inform" button for UniFi devices.
     detail.set_inform_btn.set_visible(host.device_type == DeviceType::UniFi);
 
+    // Show RDP / VNC buttons when ports are configured.
+    detail.rdp_btn.set_visible(host.rdp_port.is_some());
+    detail.vnc_btn.set_visible(host.vnc_port.is_some());
+
     if is_fortigate_api {
         // Reset dashboard rows to loading placeholders.
         detail.fg_firmware_row.set_subtitle("Loading\u{2026}");
@@ -443,7 +467,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all
     }
 
     // Populate port forwards listbox.
-    populate_port_forwards_list(&detail.pf_listbox, &host.port_forwards, None);
+    populate_port_forwards_list(&detail.pf_listbox, &host.port_forwards, None, None, None, None);
 
     detail.detail_stack.set_visible_child_name("detail");
 }
@@ -460,6 +484,9 @@ pub fn populate_port_forwards_list(
     listbox: &gtk4::ListBox,
     forwards: &[PortForward],
     active_map: Option<&std::collections::HashMap<String, String>>,
+    host_id: Option<&str>,
+    rt: Option<&tokio::runtime::Handle>,
+    tx: Option<&mpsc::Sender<AppMsg>>,
 ) {
     // Remove all existing rows.
     while let Some(child) = listbox.first_child() {
@@ -504,7 +531,76 @@ pub fn populate_port_forwards_list(
         }
         row.add_prefix(&dot);
 
-        // Store the forward_id and forward key as widget names for later use.
+        // Start/Stop button.
+        if let (Some(rt), Some(tx)) = (rt, tx) {
+            if is_active {
+                let stop_btn = gtk4::Button::builder()
+                    .icon_name("media-playback-stop-symbolic")
+                    .tooltip_text("Stop tunnel")
+                    .css_classes(["flat", "circular"])
+                    .valign(gtk4::Align::Center)
+                    .build();
+                let fwd_id = active_fwd_id.unwrap().clone();
+                let tx = tx.clone();
+                let rt = rt.clone();
+                stop_btn.connect_clicked(move |btn| {
+                    btn.set_sensitive(false);
+                    let fwd_id = fwd_id.clone();
+                    let tx = tx.clone();
+                    rt.spawn(async move {
+                        match crate::dbus_client::dbus_ssh_stop_port_forward(fwd_id).await {
+                            Ok(()) => {
+                                if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                                    let _ = tx.send(AppMsg::PortForwardsRefreshed(json));
+                                }
+                                let _ = tx.send(AppMsg::ShowToast("Tunnel stopped".to_string()));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(format!("stop tunnel: {e}")));
+                            }
+                        }
+                    });
+                });
+                row.add_suffix(&stop_btn);
+            } else if let Some(host_id) = host_id {
+                let start_btn = gtk4::Button::builder()
+                    .icon_name("media-playback-start-symbolic")
+                    .tooltip_text("Start tunnel")
+                    .css_classes(["flat", "circular"])
+                    .valign(gtk4::Align::Center)
+                    .build();
+                let host_id = host_id.to_owned();
+                let local_port = pf.local_port;
+                let remote_host = pf.remote_host.clone();
+                let remote_port = pf.remote_port;
+                let tx = tx.clone();
+                let rt = rt.clone();
+                start_btn.connect_clicked(move |btn| {
+                    btn.set_sensitive(false);
+                    let host_id = host_id.clone();
+                    let remote_host = remote_host.clone();
+                    let tx = tx.clone();
+                    rt.spawn(async move {
+                        match crate::dbus_client::dbus_ssh_start_port_forward(
+                            host_id, local_port, remote_host, remote_port,
+                        ).await {
+                            Ok(_fwd_id) => {
+                                if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                                    let _ = tx.send(AppMsg::PortForwardsRefreshed(json));
+                                }
+                                let _ = tx.send(AppMsg::ShowToast("Tunnel started".to_string()));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(format!("start tunnel: {e}")));
+                            }
+                        }
+                    });
+                });
+                row.add_suffix(&start_btn);
+            }
+        }
+
+        // Store the forward key as widget name for later use.
         row.set_widget_name(&key);
 
         listbox.append(&row);
@@ -928,6 +1024,127 @@ pub fn launch_ssh_terminal(ssh_cmd: &str) {
     }
 
     error!("no suitable terminal emulator found for SSH session");
+}
+
+/// Launch an RDP session to the given host.
+///
+/// Tries common RDP clients: xfreerdp3, xfreerdp, remmina, gnome-connections.
+pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&str>) -> Result<String, String> {
+    let preferred = crate::settings::AppSettings::load().rdp_client;
+    let all_clients = [
+        ("remmina", {
+            let profile_dir = std::env::temp_dir().join("supermgr-rdp");
+            let _ = std::fs::create_dir_all(&profile_dir);
+            let profile_path = profile_dir.join(format!("{hostname}_{port}.remmina"));
+            let mut profile = format!(
+                "[remmina]\n\
+                 name={username}@{hostname}\n\
+                 protocol=RDP\n\
+                 server={hostname}:{port}\n\
+                 username={username}\n\
+                 resolution_mode=2\n\
+                 colordepth=99\n\
+                 quality=2\n\
+                 shareclipboard=true\n\
+                 disablepasswordstoring=1\n"
+            );
+            if let Some(pw) = password {
+                profile.push_str(&format!("password={pw}\n"));
+            }
+            let _ = std::fs::write(&profile_path, &profile);
+            vec!["-c".into(), profile_path.to_string_lossy().into_owned()]
+        }),
+        ("xfreerdp3", {
+            let mut args = vec![
+                format!("/v:{hostname}:{port}"),
+                format!("/u:{username}"),
+                "/dynamic-resolution".into(),
+                "+clipboard".into(),
+                "/cert:tofu".into(),
+            ];
+            if let Some(pw) = password {
+                args.push(format!("/p:{pw}"));
+            }
+            args
+        }),
+        ("xfreerdp", {
+            let mut args = vec![
+                format!("/v:{hostname}:{port}"),
+                format!("/u:{username}"),
+                "/dynamic-resolution".into(),
+                "+clipboard".into(),
+                "/cert-ignore".into(),
+            ];
+            if let Some(pw) = password {
+                args.push(format!("/p:{pw}"));
+            }
+            args
+        }),
+    ];
+
+    // If user selected a specific client, try only that one.
+    // "auto" tries all in order.
+    let candidates: Vec<&(&str, Vec<String>)> = if preferred == "auto" {
+        all_clients.iter().collect()
+    } else {
+        all_clients.iter().filter(|(name, _)| *name == preferred).collect()
+    };
+
+    for (client, args) in candidates {
+        if which_exists(client) {
+            match std::process::Command::new(client)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => {
+                    info!("launched RDP via {client} to {hostname}:{port}");
+                    return Ok(format!("Launching RDP to {hostname}:{port} via {client}"));
+                }
+                Err(e) => {
+                    error!("failed to launch {client}: {e}");
+                    continue;
+                }
+            }
+        }
+    }
+
+    if preferred != "auto" {
+        Err(format!("RDP client '{preferred}' not found — install it or switch to Auto in Settings"))
+    } else {
+        Err("No RDP client found — install freerdp or remmina".into())
+    }
+}
+
+/// Launch a VNC session to the given host.
+///
+/// Tries common VNC clients: vncviewer (TigerVNC/RealVNC), remmina.
+pub fn launch_vnc(hostname: &str, port: u16) -> Result<String, String> {
+    let clients: &[(&str, Vec<String>)] = &[
+        ("vncviewer", vec![format!("{hostname}:{port}")]),
+        ("remmina", vec!["-c".into(), format!("vnc://{hostname}:{port}")]),
+    ];
+
+    for (client, args) in clients {
+        if which_exists(client) {
+            let mut cmd = std::process::Command::new(client);
+            for arg in args {
+                cmd.arg(arg);
+            }
+            match cmd.spawn() {
+                Ok(_) => {
+                    info!("launched VNC session via {client} to {hostname}:{port}");
+                    return Ok(format!("Launching VNC to {hostname}:{port} via {client}"));
+                }
+                Err(e) => {
+                    error!("failed to launch {client}: {e}");
+                    continue;
+                }
+            }
+        }
+    }
+    Err("No VNC client found — install tigervnc or remmina".into())
 }
 
 /// Check whether an executable is on PATH.

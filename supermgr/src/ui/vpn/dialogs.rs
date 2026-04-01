@@ -1051,20 +1051,33 @@ pub fn show_logs_dialog(
         .child(&text_view)
         .build();
 
-    let toggle_all = gtk4::ToggleButton::builder()
-        .label("All")
-        .active(true)
-        .build();
-    let toggle_conn = gtk4::ToggleButton::builder()
-        .label("Connection")
-        .group(&toggle_all)
+    let toggle_all = gtk4::ToggleButton::builder().label("All").active(true).build();
+    let toggle_vpn = gtk4::ToggleButton::builder().label("VPN").group(&toggle_all).build();
+    let toggle_ssh = gtk4::ToggleButton::builder().label("SSH").group(&toggle_all).build();
+    let toggle_backup = gtk4::ToggleButton::builder().label("Backup").group(&toggle_all).build();
+    let toggle_err = gtk4::ToggleButton::builder().label("Errors").group(&toggle_all).build();
+
+    // Search entry for free-text filter.
+    let log_search = gtk4::SearchEntry::builder()
+        .placeholder_text("Filter\u{2026}")
+        .width_request(160)
         .build();
 
-    let conn_mode = std::rc::Rc::new(std::cell::Cell::new(false));
+    // Filter mode: "all", "vpn", "ssh", "backup", "err"
+    let filter_mode = std::rc::Rc::new(std::cell::RefCell::new("all".to_owned()));
+    let search_text = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+
+    // Pause button — explicitly stops auto-refresh so user can read logs.
+    let paused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let pause_btn = gtk4::ToggleButton::builder()
+        .icon_name("media-playback-pause-symbolic")
+        .tooltip_text("Pause auto-refresh")
+        .css_classes(["flat"])
+        .build();
     {
-        let conn_mode = conn_mode.clone();
-        toggle_conn.connect_toggled(move |btn| {
-            conn_mode.set(btn.is_active());
+        let paused = paused.clone();
+        pause_btn.connect_toggled(move |btn| {
+            paused.set(btn.is_active());
         });
     }
 
@@ -1101,8 +1114,36 @@ pub fn show_logs_dialog(
     let toggle_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     toggle_box.add_css_class("linked");
     toggle_box.append(&toggle_all);
-    toggle_box.append(&toggle_conn);
+    toggle_box.append(&toggle_vpn);
+    toggle_box.append(&toggle_ssh);
+    toggle_box.append(&toggle_backup);
+    toggle_box.append(&toggle_err);
+    let clear_log_btn = gtk4::Button::builder()
+        .icon_name("edit-clear-all-symbolic")
+        .tooltip_text("Clear log view")
+        .css_classes(["flat"])
+        .build();
+    {
+        let text_view = text_view.clone();
+        let rt = rt.clone();
+        clear_log_btn.connect_clicked(move |_| {
+            text_view.buffer().set_text("");
+            // Clear daemon log buffer so old entries don't come back.
+            rt.spawn(async {
+                let conn = zbus::Connection::system().await.ok();
+                if let Some(conn) = conn {
+                    if let Ok(proxy) = supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                        let _ = proxy.clear_logs().await;
+                    }
+                }
+            });
+        });
+    }
+
     header.pack_start(&toggle_box);
+    header.pack_start(&log_search);
+    header.pack_start(&pause_btn);
+    header.pack_start(&clear_log_btn);
 
     let level_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     let level_label = gtk4::Label::new(Some("Daemon Level:"));
@@ -1115,55 +1156,94 @@ pub fn show_logs_dialog(
     toolbar_view.set_content(Some(&scroll));
     log_window.set_content(Some(&toolbar_view));
 
+    // Track scroll position — only auto-scroll if user is at the bottom.
     let load_logs = {
         let text_view = text_view.clone();
         let scroll = scroll.clone();
         let rt = rt.clone();
-        let conn_mode = conn_mode.clone();
+        let filter_mode = filter_mode.clone();
+        let search_text = search_text.clone();
+        let paused = paused.clone();
         move || {
             let text_view = text_view.clone();
             let scroll = scroll.clone();
             let rt = rt.clone();
-            let conn_only = conn_mode.get();
+            let mode = filter_mode.borrow().clone();
+            let query = search_text.borrow().to_lowercase();
+            let paused = paused.clone();
             glib::MainContext::default().spawn_local(async move {
                 let join = rt.spawn(async { dbus_get_logs().await });
-                let mut lines = match join.await {
+                let lines = match join.await {
                     Ok(Ok(v)) => v,
                     Ok(Err(e)) => vec![format!("[error] could not fetch logs: {e}")],
                     Err(e) => vec![format!("[error] task failed: {e}")],
                 };
 
-                if conn_only {
-                    if let Some(start) = lines.iter().rposition(|l| l.contains("=== [")) {
-                        lines = lines[start..].to_vec();
-                    }
+                let filtered: Vec<&str> = lines.iter()
+                    .map(|l| l.as_str())
+                    .filter(|line| {
+                        let lower = line.to_lowercase();
+                        // Category filter.
+                        let cat_ok = match mode.as_str() {
+                            "vpn" => lower.contains("vpn") || lower.contains("connect")
+                                || lower.contains("tunnel") || lower.contains("wireguard")
+                                || lower.contains("fortigate") || lower.contains("openvpn")
+                                || lower.contains("azure") || lower.contains("ipsec"),
+                            "ssh" => lower.contains("ssh") || lower.contains("host")
+                                || lower.contains("key") || lower.contains("push"),
+                            "backup" => lower.contains("backup") || lower.contains("config"),
+                            "err" => lower.contains("error") || lower.contains("fail")
+                                || lower.contains("warn"),
+                            _ => true, // "all"
+                        };
+                        // Free-text search.
+                        let search_ok = query.is_empty() || lower.contains(&query);
+                        cat_ok && search_ok
+                    })
+                    .collect();
+
+                // When paused, skip the update entirely.
+                if paused.get() {
+                    return;
                 }
 
-                let text = lines.join("\n");
+                let text = filtered.join("\n");
                 let buf = text_view.buffer();
-
-                let vadj = scroll.vadjustment();
-                let near_bottom = vadj.value() >= vadj.upper() - vadj.page_size() - 50.0;
-
                 buf.set_text(&text);
-
-                if near_bottom {
-                    let mut end = buf.end_iter();
-                    text_view.scroll_to_iter(&mut end, 0.0, false, 0.0, 0.0);
-                }
+                // Auto-scroll to bottom.
+                let mut end = buf.end_iter();
+                text_view.scroll_to_iter(&mut end, 0.0, false, 0.0, 0.0);
             });
         }
     };
 
     load_logs();
 
-    {
+    // Wire up filter buttons.
+    for (btn, mode) in [
+        (&toggle_all, "all"),
+        (&toggle_vpn, "vpn"),
+        (&toggle_ssh, "ssh"),
+        (&toggle_backup, "backup"),
+        (&toggle_err, "err"),
+    ] {
         let load_logs = load_logs.clone();
-        toggle_all.connect_toggled(move |_| load_logs());
+        let filter_mode = filter_mode.clone();
+        let mode = mode.to_owned();
+        btn.connect_toggled(move |b| {
+            if b.is_active() {
+                *filter_mode.borrow_mut() = mode.clone();
+                load_logs();
+            }
+        });
     }
     {
         let load_logs = load_logs.clone();
-        toggle_conn.connect_toggled(move |_| load_logs());
+        let search_text = search_text.clone();
+        log_search.connect_search_changed(move |entry| {
+            *search_text.borrow_mut() = entry.text().to_string();
+            load_logs();
+        });
     }
 
     {
@@ -1677,9 +1757,74 @@ pub fn show_settings_dialog(
         });
     }
 
+    // --- UniFi Cloud (Site Manager) group ---
+    let unifi_group = adw::PreferencesGroup::builder()
+        .title("UniFi Cloud (Site Manager)")
+        .description("Connect to ui.com to monitor all UniFi devices on the Dashboard")
+        .build();
+
+    let unifi_key_row = adw::PasswordEntryRow::builder()
+        .title("UI.com API Key")
+        .build();
+    {
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.unifi_cloud_api_key.is_empty() {
+            unifi_key_row.set_text(&s.unifi_cloud_api_key);
+        }
+    }
+    unifi_group.add(&unifi_key_row);
+
+    {
+        let app_settings = Arc::clone(&app_settings);
+        unifi_key_row.connect_changed(move |row| {
+            let key = row.text().to_string();
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.unifi_cloud_api_key = key;
+            s.save();
+        });
+    }
+
+    // --- Remote Desktop group ---
+    let rdp_group = adw::PreferencesGroup::builder()
+        .title("Remote Desktop")
+        .build();
+    let rdp_model = gtk4::StringList::new(&["Auto", "Remmina", "xfreerdp3", "xfreerdp"]);
+    let rdp_row = adw::ComboRow::builder()
+        .title("RDP Client")
+        .subtitle("Which application to use for Remote Desktop connections")
+        .model(&rdp_model)
+        .build();
+    {
+        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let idx = match s.rdp_client.as_str() {
+            "remmina" => 1,
+            "xfreerdp3" => 2,
+            "xfreerdp" => 3,
+            _ => 0,
+        };
+        rdp_row.set_selected(idx);
+    }
+    rdp_group.add(&rdp_row);
+    {
+        let app_settings = Arc::clone(&app_settings);
+        rdp_row.connect_selected_notify(move |row| {
+            let client = match row.selected() {
+                1 => "remmina",
+                2 => "xfreerdp3",
+                3 => "xfreerdp",
+                _ => "auto",
+            };
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.rdp_client = client.to_owned();
+            s.save();
+        });
+    }
+
     let prefs_page = adw::PreferencesPage::new();
     prefs_page.add(&appearance_group);
     prefs_page.add(&console_group);
+    prefs_page.add(&rdp_group);
+    prefs_page.add(&unifi_group);
     prefs_page.add(&security_group);
     prefs_page.add(&notify_group);
     prefs_page.add(&backup_group);

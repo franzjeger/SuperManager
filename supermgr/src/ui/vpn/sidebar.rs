@@ -99,9 +99,17 @@ pub fn populate_vpn_sidebar(
     tx: &mpsc::Sender<AppMsg>,
     filter: &str,
 ) {
-    // Clear all children.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
+    // Clear all children. We must iterate via next_sibling and call
+    // list_box.remove() only on GtkListBoxRow children; other widgets
+    // (such as popovers parented to rows) are cleaned up automatically
+    // when their parent row is removed.
+    let mut child = list_box.first_child();
+    while let Some(c) = child {
+        let next = c.next_sibling();
+        if c.is::<gtk4::ListBoxRow>() {
+            list_box.remove(&c);
+        }
+        child = next;
     }
 
     // Apply search filter.
@@ -165,7 +173,24 @@ pub fn populate_vpn_sidebar(
         if profile.auto_connect {
             subtitle_parts.push("Auto".to_owned());
         }
-        if let Some(ts) = profile.last_connected_secs {
+        // Show connection duration for active profile, last-connected for idle.
+        if matches!(row_state, RowState::Connected) {
+            if let VpnState::Connected { since, .. } = vpn_state {
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(*since)
+                    .num_seconds()
+                    .max(0) as u64;
+                let h = elapsed / 3600;
+                let m = (elapsed % 3600) / 60;
+                if h > 0 {
+                    subtitle_parts.push(format!("Connected {h}h {m:02}m"));
+                } else {
+                    subtitle_parts.push(format!("Connected {m}m"));
+                }
+            }
+        } else if matches!(row_state, RowState::Connecting) {
+            subtitle_parts.push("Connecting\u{2026}".to_owned());
+        } else if let Some(ts) = profile.last_connected_secs {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()

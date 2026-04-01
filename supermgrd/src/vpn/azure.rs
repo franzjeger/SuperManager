@@ -660,7 +660,7 @@ impl VpnBackend for AzureBackend {
             .await
             .map_err(BackendError::Io)?;
 
-        // auth-user-pass: <upn>\n<access_token>  (mode 0600 — openvpn warns otherwise)
+        // auth-user-pass: <upn>\n<access_token>  (mode 0600)
         tokio::fs::write(&auth_path, format!("{upn}\n{access_token}\n"))
             .await
             .map_err(BackendError::Io)?;
@@ -674,7 +674,7 @@ impl VpnBackend for AzureBackend {
         // openvpn config
         let ovpn_text = build_ovpn_config(
             cfg,
-            "",  // CA is inlined
+            "",
             &key_path.to_string_lossy(),
             &auth_path.to_string_lossy(),
             profile.full_tunnel,
@@ -839,14 +839,26 @@ impl VpnBackend for AzureBackend {
             revert_link_dns(ifindex).await;
         }
 
-        // Kill the openvpn process.
+        // Send SIGTERM first so openvpn can clean up routes gracefully,
+        // then wait briefly before falling back to SIGKILL.
         if let Some(mut child) = child_opt {
-            info!("Azure: killing openvpn child");
-            if let Err(e) = child.kill().await {
-                warn!("Azure: kill openvpn: {e}");
+            info!("Azure: stopping openvpn child");
+            // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            );
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                child.wait(),
+            ).await {
+                Ok(_) => info!("Azure: openvpn exited cleanly"),
+                Err(_) => {
+                    warn!("Azure: openvpn did not exit in 5 s, killing");
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
             }
-            // Reap to avoid zombie.
-            let _ = child.wait().await;
         }
 
         // Remove temp files.
@@ -917,34 +929,51 @@ fn extract_tun_iface(line: &str) -> Option<String> {
     if name.is_empty() { None } else { Some(name) }
 }
 
-/// Parse the virtual IP from an openvpn log line such as:
-/// `/usr/bin/ip addr add dev tun0 10.134.2.3/24 broadcast +`
+/// Parse the virtual IP from an openvpn log line.
+///
+/// OpenVPN 2.6: `/usr/bin/ip addr add dev tun0 10.134.2.3/24 broadcast +`
+/// OpenVPN 2.7: `net_addr_v4_add: 10.134.2.2/24 dev tun0`
 fn extract_virtual_ip(line: &str) -> Option<String> {
-    // Look for "ip addr add dev <iface> <cidr>"
-    let idx = line.find("ip addr add dev ")?;
-    let rest = &line[idx + "ip addr add dev ".len()..];
-    // Skip the interface name.
-    let rest = rest.splitn(2, ' ').nth(1)?.trim();
-    // Take the CIDR token (stops at space or end).
-    let cidr = rest.split_whitespace().next()?;
-    // Validate it looks like a CIDR.
-    if cidr.contains('.') || cidr.contains(':') {
-        Some(cidr.to_owned())
-    } else {
-        None
+    // OpenVPN 2.7+ format: "net_addr_v4_add: <cidr> dev <iface>"
+    if let Some(idx) = line.find("net_addr_v4_add: ") {
+        let rest = &line[idx + "net_addr_v4_add: ".len()..];
+        let cidr = rest.split_whitespace().next()?;
+        if cidr.contains('.') {
+            return Some(cidr.to_owned());
+        }
     }
+    // OpenVPN 2.6 format: "ip addr add dev <iface> <cidr>"
+    if let Some(idx) = line.find("ip addr add dev ") {
+        let rest = &line[idx + "ip addr add dev ".len()..];
+        let rest = rest.splitn(2, ' ').nth(1)?.trim();
+        let cidr = rest.split_whitespace().next()?;
+        if cidr.contains('.') || cidr.contains(':') {
+            return Some(cidr.to_owned());
+        }
+    }
+    None
 }
 
-/// Parse a pushed route from an openvpn log line such as:
-/// `/usr/bin/ip route add 10.134.0.0/23 via 10.134.2.1`
+/// Parse a pushed route from an openvpn log line.
+///
+/// OpenVPN 2.6: `/usr/bin/ip route add 10.134.0.0/23 via 10.134.2.1`
+/// OpenVPN 2.7: `net_route_v4_add: 10.134.0.0/23 via 10.134.2.1 dev [NULL] table 0 metric -1`
 fn extract_pushed_route(line: &str) -> Option<String> {
-    let idx = line.find("ip route add ")?;
-    let rest = &line[idx + "ip route add ".len()..];
-    // The destination is the first token.
-    let dest = rest.split_whitespace().next()?;
-    if dest.contains('.') || dest.contains(':') {
-        Some(dest.to_owned())
-    } else {
-        None
+    // OpenVPN 2.7+ format: "net_route_v4_add: <dest> via ..."
+    if let Some(idx) = line.find("net_route_v4_add: ") {
+        let rest = &line[idx + "net_route_v4_add: ".len()..];
+        let dest = rest.split_whitespace().next()?;
+        if dest.contains('.') || dest.contains(':') {
+            return Some(dest.to_owned());
+        }
     }
+    // OpenVPN 2.6 format: "ip route add <dest> via ..."
+    if let Some(idx) = line.find("ip route add ") {
+        let rest = &line[idx + "ip route add ".len()..];
+        let dest = rest.split_whitespace().next()?;
+        if dest.contains('.') || dest.contains(':') {
+            return Some(dest.to_owned());
+        }
+    }
+    None
 }

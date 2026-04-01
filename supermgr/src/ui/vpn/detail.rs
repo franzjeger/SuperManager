@@ -24,10 +24,12 @@ pub struct VpnDetail {
     pub rename_btn: gtk4::Button,
     pub edit_creds_btn: gtk4::Button,
     pub auto_connect_switch: gtk4::Switch,
+    pub full_tunnel_row: gtk4::Box,
     pub full_tunnel_switch: gtk4::Switch,
     pub kill_switch_switch: gtk4::Switch,
     pub rotate_key_btn: gtk4::Button,
     pub export_btn: gtk4::Button,
+    pub duplicate_btn: gtk4::Button,
     pub split_routes_row: gtk4::Box,
     pub split_routes_value: gtk4::Label,
     pub split_routes_edit_btn: gtk4::Button,
@@ -167,6 +169,14 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         .sensitive(false)
         .build();
 
+    // Duplicate button.
+    let duplicate_btn = gtk4::Button::builder()
+        .label("Duplicate Profile")
+        .css_classes(["flat"])
+        .halign(gtk4::Align::Center)
+        .sensitive(false)
+        .build();
+
     // Split-routes row.
     let split_routes_row = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -277,6 +287,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     detail_box.append(&split_routes_row);
     detail_box.append(&rotate_key_btn);
     detail_box.append(&export_btn);
+    detail_box.append(&duplicate_btn);
     detail_box.append(&stats_box);
 
     detail_stack.add_named(&detail_box, Some("detail"));
@@ -301,10 +312,12 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         rename_btn,
         edit_creds_btn,
         auto_connect_switch,
+        full_tunnel_row,
         full_tunnel_switch,
         kill_switch_switch,
         rotate_key_btn,
         export_btn,
+        duplicate_btn,
         split_routes_row,
         split_routes_value,
         split_routes_edit_btn,
