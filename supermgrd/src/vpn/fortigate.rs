@@ -3,7 +3,7 @@
 //! # Architecture
 //!
 //! 1. Writes a per-connection `swanctl.conf` fragment to
-//!    `/etc/swanctl/conf.d/supermgr-<uuid>.conf`.
+//!    the system's swanctl `conf.d/` directory (auto-detected).
 //! 2. Runs `swanctl --load-all` to reload strongSwan's connection + secrets tables.
 //! 3. Adds a `/32` host route for the FortiGate endpoint IP via the original
 //!    default gateway so IKE/ESP packets reach the peer on the physical NIC.
@@ -18,7 +18,7 @@
 //!
 //! - `strongswan` and `strongswan-swanctl` installed.
 //! - `charon` IKE daemon running (managed by the `strongswan` systemd unit).
-//! - `supermgrd` running as root (write access to `/etc/swanctl/conf.d/`).
+//! - `supermgrd` running as root (write access to the swanctl `conf.d/` directory).
 //!
 //! # Tunnel cipher suite
 //!
@@ -50,8 +50,38 @@ use crate::secrets;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Directory where swanctl reads per-connection config fragments.
-const SWANCTL_CONF_DIR: &str = "/etc/swanctl/conf.d";
+/// Candidate directories where swanctl reads per-connection config fragments.
+/// The first one that exists on the current system is used.
+///
+/// - `/etc/strongswan/swanctl/conf.d` — Fedora 40+, RHEL 9+, openSUSE
+/// - `/etc/swanctl/conf.d`            — Debian, Ubuntu, Arch, older Fedora
+///
+/// The more specific path is checked first because on some distros (e.g. Fedora)
+/// both directories exist but only the `/etc/strongswan/` prefixed one is used.
+const SWANCTL_CONF_DIR_CANDIDATES: &[&str] = &[
+    "/etc/strongswan/swanctl/conf.d",
+    "/etc/swanctl/conf.d",
+];
+
+/// Returns the first swanctl conf.d directory that exists on the system,
+/// or falls back to the first candidate if none exist.
+fn swanctl_conf_dir() -> &'static str {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<&str> = OnceLock::new();
+    DIR.get_or_init(|| {
+        for candidate in SWANCTL_CONF_DIR_CANDIDATES {
+            if std::path::Path::new(candidate).is_dir() {
+                info!("using swanctl config directory: {candidate}");
+                return candidate;
+            }
+        }
+        warn!(
+            "no swanctl conf.d directory found; defaulting to {}",
+            SWANCTL_CONF_DIR_CANDIDATES[0]
+        );
+        SWANCTL_CONF_DIR_CANDIDATES[0]
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Internal state
@@ -167,7 +197,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 // swanctl config generation
 // ---------------------------------------------------------------------------
 
-/// Generate the `/etc/swanctl/conf.d/supermgr-<uuid>.conf` text for a FortiGate
+/// Generate the swanctl config fragment text for a FortiGate
 /// connection.
 ///
 /// Uses:
@@ -597,16 +627,17 @@ impl VpnBackend for FortiGateBackend {
         }
         let config_text =
             generate_swanctl_config(&conn_name, &profile_id_simple, fg_cfg, &password, &psk, profile.full_tunnel);
-        let config_path = PathBuf::from(SWANCTL_CONF_DIR).join(format!("{conn_name}.conf"));
+        let config_path = PathBuf::from(swanctl_conf_dir()).join(format!("{conn_name}.conf"));
 
         info!("writing swanctl config to {}", config_path.display());
         tokio::fs::write(&config_path, &config_text).await.map_err(|e| {
+            let dir = swanctl_conf_dir();
             let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
-                " — the daemon must run as root to write to /etc/swanctl/conf.d/"
+                format!(" — the daemon must run as root to write to {dir}/")
             } else if e.kind() == std::io::ErrorKind::NotFound {
-                " — /etc/swanctl/conf.d/ does not exist; install strongswan-swanctl"
+                format!(" — {dir}/ does not exist; install strongswan-swanctl")
             } else {
-                ""
+                String::new()
             };
             BackendError::Subprocess {
                 command: "write swanctl config".into(),
