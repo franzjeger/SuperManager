@@ -1624,6 +1624,54 @@ pub fn build_ui(
         });
     }
 
+    // --- FortiGate Show/Hide API Token button ---------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let rt = rt.clone();
+        let tx = tx.clone();
+        let token_row = ssh_host_detail.fg_api_token_row.clone();
+        let token_visible = std::rc::Rc::new(std::cell::Cell::new(false));
+        ssh_host_detail.fg_show_token_btn.connect_clicked(move |btn| {
+            if token_visible.get() {
+                token_row.set_subtitle("••••••••");
+                btn.set_icon_name("view-reveal-symbolic");
+                token_visible.set(false);
+                return;
+            }
+            let host_id = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.selected_ssh_host.clone()
+            };
+            if let Some(host_id) = host_id {
+                token_visible.set(true);
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let result: Result<String, String> = async {
+                        let conn = zbus::Connection::system().await
+                            .map_err(|e| format!("D-Bus connect: {e}"))?;
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await
+                            .map_err(|e| format!("D-Bus proxy: {e}"))?;
+                        proxy.fortigate_get_api_token(&host_id).await
+                            .map_err(|e| format!("{e}"))
+                    }.await;
+                    match result {
+                        Ok(token) => {
+                            let _ = tx.send(AppMsg::FortigateApiTokenFetched {
+                                host_id,
+                                token,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(
+                                format!("API token: {e}"),
+                            ));
+                        }
+                    }
+                });
+            }
+        });
+    }
+
     // --- Port Forward: "Add Forward" button ----------------------------------
     {
         let app_state = Arc::clone(&app_state);
@@ -3237,6 +3285,13 @@ pub fn build_ui(
                             &rx_ssh_host_detail,
                             &data,
                         );
+                    }
+                }
+                AppMsg::FortigateApiTokenFetched { host_id, token } => {
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    if s.selected_ssh_host.as_deref() == Some(&host_id) {
+                        rx_ssh_host_detail.fg_api_token_row.set_subtitle(&token);
+                        rx_ssh_host_detail.fg_show_token_btn.set_icon_name("view-conceal-symbolic");
                     }
                 }
                 AppMsg::FortigateCompliance { host_id: _, data } => {

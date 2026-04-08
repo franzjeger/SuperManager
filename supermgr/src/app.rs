@@ -193,6 +193,14 @@ pub enum AppMsg {
         data: Value,
     },
 
+    /// FortiGate API token fetched for display in the detail panel.
+    FortigateApiTokenFetched {
+        /// UUID string of the host.
+        host_id: String,
+        /// The API token string.
+        token: String,
+    },
+
     /// Dashboard device status data fetched for a local host (FortiGate/UniFi).
     DashboardDeviceStatus {
         /// UUID string of the host.

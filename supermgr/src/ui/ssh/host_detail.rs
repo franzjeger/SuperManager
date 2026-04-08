@@ -68,6 +68,8 @@ pub struct SshHostDetail {
     pub fg_compliance_btn: gtk4::Button,
     pub fg_gen_token_btn: gtk4::Button,
     pub fg_copy_token_btn: gtk4::Button,
+    pub fg_api_token_row: adw::ActionRow,
+    pub fg_show_token_btn: gtk4::Button,
 
     // Port forwards section.
     pub pf_group: adw::PreferencesGroup,
@@ -212,6 +214,18 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     fg_dashboard_group.add(&fg_memory_row);
 
+    let fg_api_token_row = adw::ActionRow::builder()
+        .title("API Token")
+        .subtitle("••••••••")
+        .activatable(false)
+        .build();
+    fg_dashboard_group.add(&fg_api_token_row);
+    let fg_show_token_btn = gtk4::Button::builder()
+        .icon_name("view-reveal-symbolic")
+        .tooltip_text("Show/hide API token")
+        .css_classes(["flat"])
+        .build();
+
     let fg_btn_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .spacing(4)
@@ -246,6 +260,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     fg_btn_box.append(&fg_compliance_btn);
     fg_btn_box.append(&fg_gen_token_btn);
     fg_btn_box.append(&fg_copy_token_btn);
+    fg_btn_box.append(&fg_show_token_btn);
     fg_dashboard_group.set_header_suffix(Some(&fg_btn_box));
 
     // Action buttons.
@@ -394,6 +409,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         fg_compliance_btn,
         fg_gen_token_btn,
         fg_copy_token_btn,
+        fg_api_token_row,
+        fg_show_token_btn,
         pf_group,
         pf_listbox,
         pf_add_btn,
@@ -464,6 +481,8 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all
         detail.fg_ha_row.set_subtitle("Loading\u{2026}");
         detail.fg_cpu_row.set_subtitle("Loading\u{2026}");
         detail.fg_memory_row.set_subtitle("Loading\u{2026}");
+        detail.fg_api_token_row.set_subtitle("••••••••");
+        detail.fg_show_token_btn.set_icon_name("view-reveal-symbolic");
     }
 
     // Populate port forwards listbox.
