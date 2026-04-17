@@ -15,7 +15,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/etc/supermgrd /var/log/supermgrd /run/supermgrd /etc/swanctl/conf.d /etc/strongswan/swanctl/conf.d /tmp/supermgrd
+ReadWritePaths=/etc/supermgrd /var/log/supermgrd /run/supermgrd /tmp/supermgrd -/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
 PrivateTmp=false
 NoNewPrivileges=false
 
