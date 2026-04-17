@@ -25,9 +25,10 @@
 //! IKE proposals (IKEv2):
 //! `aes128-sha256-ecp384`, `aes256-sha256-ecp384`,
 //! `aes128gcm16-prfsha256-ecp384`, `aes256gcm16-prfsha384-ecp521`,
-//! `chacha20poly1305-prfsha256-ecp384`
+//! `chacha20poly1305-prfsha256-ecp384`, and `aes256-sha256-modp2048`
+//! (legacy fallback for FortiGates without ECP DH groups).
 //!
-//! DH groups 20 (ECP-384) and 21 (ECP-521).
+//! DH groups: 20 (ECP-384), 21 (ECP-521), and 14 (modp2048).
 //! Authentication: EAP-MSCHAPv2 (local) + PSK (remote).
 //! Virtual IP via IKEv2 config payload (`vips = 0.0.0.0`).
 
@@ -202,7 +203,10 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 ///
 /// Uses:
 /// - IKEv2 proposals: aes128/256-sha256-ecp384, aes128/256gcm16, chacha20poly1305
-/// - DH groups 20 (ecp384) and 21 (ecp521)
+/// - DH groups 20 (ecp384), 21 (ecp521), and 14 (modp2048) as a legacy fallback
+///   for FortiGates whose phase1 crypto hasn't been updated to ECP groups —
+///   without a modp group in our proposal list, FortiOS silently drops the
+///   IKE_SA_INIT when it can't parse the KE payload's DH group.
 /// - `local { auth = eap-mschapv2; eap_id = <username> }`
 /// - `remote { auth = psk }`
 /// - `vips = 0.0.0.0` for mode-config virtual IP assignment
@@ -232,7 +236,7 @@ fn generate_swanctl_config(
   {conn} {{
     remote_addrs = {host}
     vips = 0.0.0.0
-    proposals = aes128-sha256-ecp384,aes256-sha256-ecp384,aes128gcm16-prfsha256-ecp384,aes256gcm16-prfsha384-ecp521,chacha20poly1305-prfsha256-ecp384
+    proposals = aes128-sha256-ecp384,aes256-sha256-ecp384,aes128gcm16-prfsha256-ecp384,aes256gcm16-prfsha384-ecp521,chacha20poly1305-prfsha256-ecp384,aes256-sha256-modp2048
     local {{
       auth = eap-mschapv2
       id = {user}
