@@ -587,9 +587,9 @@ pub fn show_fortigate_dialog(
         let user_row = user_row.clone();
         let add_btn = add_btn.clone();
         Rc::new(move || {
-            let ok = !name_row.text().is_empty()
-                && !host_row.text().is_empty()
-                && !user_row.text().is_empty();
+            let ok = !name_row.text().trim().is_empty()
+                && !host_row.text().trim().is_empty()
+                && !user_row.text().trim().is_empty();
             add_btn.set_sensitive(ok);
         })
     };
@@ -621,9 +621,9 @@ pub fn show_fortigate_dialog(
         let rt = rt.clone();
         let tx = tx.clone();
         add_btn.connect_clicked(move |_| {
-            let name = name_row.text().to_string();
-            let host = host_row.text().to_string();
-            let username = user_row.text().to_string();
+            let name = name_row.text().trim().to_string();
+            let host = host_row.text().trim().to_string();
+            let username = user_row.text().trim().to_string();
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
             dialog.close();
@@ -721,9 +721,9 @@ pub fn show_edit_fortigate_dialog(
         let save_btn = save_btn.clone();
         Rc::new(move || {
             save_btn.set_sensitive(
-                !name_row.text().is_empty()
-                    && !host_row.text().is_empty()
-                    && !user_row.text().is_empty(),
+                !name_row.text().trim().is_empty()
+                    && !host_row.text().trim().is_empty()
+                    && !user_row.text().trim().is_empty(),
             );
         })
     };
@@ -756,9 +756,9 @@ pub fn show_edit_fortigate_dialog(
         let rt = rt.clone();
         let tx = tx.clone();
         save_btn.connect_clicked(move |_| {
-            let name = name_row.text().to_string();
-            let host = host_row.text().to_string();
-            let username = user_row.text().to_string();
+            let name = name_row.text().trim().to_string();
+            let host = host_row.text().trim().to_string();
+            let username = user_row.text().trim().to_string();
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
             let pid = profile_id.clone();

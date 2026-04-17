@@ -559,6 +559,11 @@ impl DaemonService {
     async fn import_wireguard(&self, conf_text: &str, name: &str) -> fdo::Result<String> {
         info!("import_wireguard called, len={}", conf_text.len());
 
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(fdo::Error::InvalidArgs("name must not be empty".into()));
+        }
+
         // Generate the profile UUID first so the keyring secret label and the
         // on-disk profile file share the same identifier.
         let profile_id = Uuid::new_v4();
@@ -711,6 +716,10 @@ impl DaemonService {
     ) -> fdo::Result<String> {
         let profile_id = Uuid::new_v4();
 
+        let name = name.trim().to_string();
+        let host = host.trim().to_string();
+        let username = username.trim().to_string();
+
         info!(
             "import_fortigate: creating profile '{}' for host '{}', user '{}'",
             name, host, username
@@ -802,6 +811,12 @@ impl DaemonService {
         username: &str,
         password: &str,
     ) -> fdo::Result<String> {
+        let name = name.trim();
+        let username = username.trim();
+        if name.is_empty() {
+            return Err(fdo::Error::InvalidArgs("name must not be empty".into()));
+        }
+
         info!("import_openvpn called for profile '{}'", name);
 
         // Validate the config text before touching the filesystem.
@@ -1231,6 +1246,7 @@ impl DaemonService {
         };
 
         // Update username (allow empty to clear it).
+        let username = username.trim();
         ov.username = if username.is_empty() { None } else { Some(username.to_owned()) };
 
         // Update password if supplied; keep existing secret ref if not.
@@ -1421,6 +1437,11 @@ impl DaemonService {
         vpn_settings_xml: &str,
         name: &str,
     ) -> fdo::Result<String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(fdo::Error::InvalidArgs("name must not be empty".into()));
+        }
+
         info!("import_azure_vpn: parsing config for profile '{name}'");
 
         let cfg = parse_azure_xml(azure_xml, vpn_settings_xml).map_err(|e| {
