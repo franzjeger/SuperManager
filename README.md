@@ -103,12 +103,11 @@ The GUI communicates with the daemon over D-Bus on the system bus. The daemon ha
 ## Building
 
 ```bash
-# Dependencies (Arch Linux)
-sudo pacman -S gtk4 libadwaita vte4 openssl sshpass wireguard-tools strongswan openvpn freerdp remmina
+# Dependencies (Arch Linux / CachyOS)
+sudo pacman -S gtk4 libadwaita vte4 openssl sshpass wireguard-tools strongswan openvpn nftables freerdp remmina networkmanager
 
-# Optional
-sudo pacman -S openvpn  # Azure VPN (classic openvpn, not openvpn3)
-sudo pacman -S networkmanager  # auto-connect on network change
+# Optional (AUR) — for non-Azure OpenVPN profiles
+paru -S openvpn3
 
 # Build
 cargo build --release
@@ -124,7 +123,8 @@ sudo install -Dm644 contrib/desktop/org.supermgr.SuperManager.desktop /usr/share
 sudo install -Dm644 contrib/icons/org.supermgr.SuperManager.svg /usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg
 sudo install -Dm644 contrib/man/supermgr.1 /usr/share/man/man1/supermgr.1
 sudo install -Dm644 contrib/man/supermgrd.8 /usr/share/man/man8/supermgrd.8
-sudo systemctl enable --now supermgrd
+sudo systemctl daemon-reload
+sudo systemctl enable --now strongswan supermgrd
 ```
 
 ### AUR (Arch Linux)

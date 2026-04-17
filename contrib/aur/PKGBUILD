@@ -9,9 +9,13 @@ license=('MIT')
 depends=(
     'gtk4'
     'libadwaita'
+    'vte4'
     'sshpass'
     'wireguard-tools'
     'strongswan'
+    'openvpn'
+    'nftables'
+    'openssh'
 )
 makedepends=(
     'rust'
@@ -22,13 +26,23 @@ makedepends=(
 provides=('supermanager')
 conflicts=('supermanager')
 optdepends=(
-    'openssh: SSH key management and FortiGate interaction'
+    'openvpn3: OpenVPN profiles via openvpn3 CLI (AUR)'
+    'networkmanager: auto-connect on network change'
+    'freerdp: RDP remote desktop sessions'
+    'remmina: alternative RDP/VNC client'
 )
 backup=(
     'etc/supermgrd/config.toml'
 )
-source=("${pkgname}::git+ssh://git@github.com/franzjeger/SuperManager.git")
-sha256sums=('SKIP')
+install="${pkgname}.install"
+source=(
+    "${pkgname}::git+https://github.com/franzjeger/SuperManager.git"
+    "${pkgname}.install"
+)
+sha256sums=(
+    'SKIP'
+    'SKIP'
+)
 
 pkgver() {
     cd "$pkgname"

@@ -1,0 +1,31 @@
+post_install() {
+    systemctl daemon-reload
+    systemctl enable --now strongswan.service >/dev/null 2>&1 || true
+    systemctl enable --now supermgrd.service >/dev/null 2>&1 || true
+    cat <<EOF
+
+SuperManager installed.
+
+  Launch GUI:        supermgr
+  Daemon status:     systemctl status supermgrd
+  Daemon logs:       journalctl -u supermgrd -f
+
+Optional:
+  - openvpn3 (AUR) for non-Azure OpenVPN profiles
+  - networkmanager (enabled) for auto-connect on network change
+
+EOF
+}
+
+post_upgrade() {
+    systemctl daemon-reload
+    systemctl try-restart supermgrd.service >/dev/null 2>&1 || true
+}
+
+pre_remove() {
+    systemctl disable --now supermgrd.service >/dev/null 2>&1 || true
+}
+
+post_remove() {
+    systemctl daemon-reload
+}
