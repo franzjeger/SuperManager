@@ -1180,6 +1180,7 @@ impl DaemonService {
         username: &str,
         password: &str,
         psk: &str,
+        dns_servers: &str,
     ) -> fdo::Result<()> {
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
@@ -1194,6 +1195,8 @@ impl DaemonService {
             return Err(fdo::Error::InvalidArgs("username must not be empty".into()));
         }
 
+        let parsed_dns = parse_dns_server_list(dns_servers);
+
         let mut state = self.state.lock().await;
         let profile = state
             .profiles
@@ -1207,6 +1210,7 @@ impl DaemonService {
 
         fg.host = host.trim().to_owned();
         fg.username = username.trim().to_owned();
+        fg.dns_servers = parsed_dns;
 
         // Update secrets only when the caller supplies a non-empty value.
         if !password.is_empty() {

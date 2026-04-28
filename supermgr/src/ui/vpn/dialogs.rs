@@ -671,6 +671,7 @@ pub fn show_edit_fortigate_dialog(
     current_name: String,
     current_host: String,
     current_username: String,
+    current_dns_servers: String,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
@@ -693,6 +694,10 @@ pub fn show_edit_fortigate_dialog(
     let psk_row = adw::PasswordEntryRow::builder()
         .title("Pre-shared Key (leave blank to keep)")
         .build();
+    let dns_row = adw::EntryRow::builder()
+        .title("DNS Servers (optional)")
+        .build();
+    dns_row.set_text(&current_dns_servers);
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
@@ -700,6 +705,7 @@ pub fn show_edit_fortigate_dialog(
     group.add(&user_row);
     group.add(&pass_row);
     group.add(&psk_row);
+    group.add(&dns_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let save_btn = gtk4::Button::builder()
@@ -766,6 +772,7 @@ pub fn show_edit_fortigate_dialog(
         let user_row = user_row.clone();
         let pass_row = pass_row.clone();
         let psk_row = psk_row.clone();
+        let dns_row = dns_row.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         save_btn.connect_clicked(move |_| {
@@ -774,12 +781,15 @@ pub fn show_edit_fortigate_dialog(
             let username = user_row.text().trim().to_string();
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
+            let dns_servers = dns_row.text().trim().to_string();
             let pid = profile_id.clone();
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
-                let msg = match dbus_update_fortigate(pid, name, host, username, password, psk)
-                    .await
+                let msg = match dbus_update_fortigate(
+                    pid, name, host, username, password, psk, dns_servers,
+                )
+                .await
                 {
                     Ok(()) => match dbus_list_profiles().await {
                         Ok(profiles) => AppMsg::ImportSucceeded {

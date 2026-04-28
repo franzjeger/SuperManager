@@ -386,6 +386,10 @@ pub struct ProfileSummary {
     /// For FortiGate/OpenVPN: the authentication username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
+    /// For FortiGate: user-supplied DNS-server overrides. Empty when the
+    /// profile relies on whatever the gateway pushes via mode-config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers: Vec<IpAddr>,
     /// Kill-switch flag.
     #[serde(default)]
     pub kill_switch: bool,
@@ -419,6 +423,10 @@ impl From<&Profile> for ProfileSummary {
                 ProfileConfig::FortiGate(fg) => Some(fg.username.clone()),
                 ProfileConfig::OpenVpn(ov) => ov.username.clone(),
                 _ => None,
+            },
+            dns_servers: match &p.config {
+                ProfileConfig::FortiGate(fg) => fg.dns_servers.clone(),
+                _ => Vec::new(),
             },
             kill_switch: p.kill_switch,
         }

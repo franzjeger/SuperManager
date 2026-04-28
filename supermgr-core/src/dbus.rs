@@ -259,6 +259,11 @@ pub trait Daemon {
     ///
     /// Non-empty `password` / `psk` overwrite the stored secret; empty strings
     /// leave the existing secret unchanged.
+    ///
+    /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
+    /// addresses that overrides the FortiGate's mode-config-pushed DNS.
+    /// Pass an empty string to clear any previous override and revert to
+    /// using mode-config DNS.
     async fn update_fortigate(
         &self,
         profile_id: &str,
@@ -267,6 +272,7 @@ pub trait Daemon {
         username: &str,
         password: &str,
         psk: &str,
+        dns_servers: &str,
     ) -> fdo::Result<()>;
 
     /// Update an OpenVPN profile's credentials.
