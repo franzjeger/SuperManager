@@ -128,6 +128,12 @@ pub struct SshHost {
     #[serde(default)]
     pub pinned: bool,
 
+    /// Customer / tenant tag for cross-tab grouping (e.g. "Sybr",
+    /// "Elteco", "Autostrada"). Distinct from `group`, which is meant
+    /// for technical role ("web", "db"). Empty = ungrouped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub customer: String,
+
     /// When this host was created.
     #[serde(default = "chrono::Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -215,6 +221,10 @@ pub struct SshHostSummary {
     /// Whether this host is pinned/favourited.
     #[serde(default)]
     pub pinned: bool,
+
+    /// Customer / tenant tag for cross-tab grouping. Empty = ungrouped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub customer: String,
 }
 
 impl From<&SshHost> for SshHostSummary {
@@ -241,6 +251,7 @@ impl From<&SshHost> for SshHostSummary {
             port_forwards: host.port_forwards.clone(),
             proxy_jump: host.proxy_jump,
             pinned: host.pinned,
+            customer: host.customer.clone(),
         }
     }
 }
@@ -274,6 +285,7 @@ mod tests {
             vnc_port: None,
             proxy_jump: None,
             pinned: true,
+            customer: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

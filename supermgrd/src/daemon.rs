@@ -655,6 +655,7 @@ impl DaemonService {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            customer: String::new(),
             config: ProfileConfig::WireGuard(wg_cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -772,6 +773,7 @@ impl DaemonService {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            customer: String::new(),
             config: ProfileConfig::FortiGate(fg_cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -875,6 +877,7 @@ impl DaemonService {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            customer: String::new(),
             config: ProfileConfig::OpenVpn(OpenVpnConfig {
                 config_file: config_path_str,
                 username: opt_username,
@@ -1168,6 +1171,36 @@ impl DaemonService {
         })?;
 
         info!("profile {id}: kill_switch set to {enabled}");
+        Ok(())
+    }
+
+    /// Set or clear the customer/tenant tag on a VPN profile.
+    ///
+    /// Pass an empty string to remove the tag (un-group the profile).
+    async fn set_profile_customer(
+        &self,
+        profile_id: &str,
+        customer: &str,
+    ) -> fdo::Result<()> {
+        let id = Uuid::parse_str(profile_id)
+            .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
+        let trimmed = customer.trim().to_owned();
+
+        let mut state = self.state.lock().await;
+        let profile = state
+            .profiles
+            .get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject(format!("profile {id} not found")))?;
+
+        profile.customer = trimmed.clone();
+        profile.updated_at = chrono::Utc::now();
+
+        let profile_clone = profile.clone();
+        state.save_profile(&profile_clone).map_err(|e| {
+            fdo::Error::Failed(format!("save failed: {e}"))
+        })?;
+
+        info!("profile {id}: customer set to {trimmed:?}");
         Ok(())
     }
 
@@ -1468,6 +1501,7 @@ impl DaemonService {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            customer: String::new(),
             config: ProfileConfig::AzureVpn(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -1763,6 +1797,33 @@ impl DaemonService {
         state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
         let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Set or clear the customer/tenant tag on an SSH host.
+    ///
+    /// Pass an empty string to remove the tag (un-group the host).
+    async fn ssh_set_host_customer(
+        &self,
+        host_id: &str,
+        customer: &str,
+    ) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let trimmed = customer.trim().to_owned();
+
+        let mut state = self.state.lock().await;
+        let host = state
+            .ssh_hosts
+            .get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.customer = trimmed.clone();
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state
+            .save_ssh_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        info!("ssh host {id}: customer set to {trimmed:?}");
+        Ok(())
     }
 
     /// Delete an SSH host by UUID.
