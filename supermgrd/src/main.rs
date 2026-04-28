@@ -154,6 +154,9 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     cleanup_stale_interfaces().await;
     cleanup_stale_strongswan().await;
+    // Remove any leftover FortiGate DNS dummy from a previous crash so
+    // systemd-resolved doesn't keep stale state pinned to a dead link.
+    crate::vpn::fortigate::remove_dns_dummy().await;
     // If a previous daemon run was killed without a clean disconnect the
     // nftables supermgr_killswitch table will still be active in the kernel,
     // blocking all non-VPN traffic.  Remove it unconditionally on startup
