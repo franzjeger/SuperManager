@@ -838,7 +838,19 @@ impl VpnBackend for FortiGateBackend {
             });
 
         if let Some(vip) = vip {
-            let outbound_dev = outbound_iface.as_deref().unwrap_or("enp129s0");
+            // The outbound interface comes from the captured default route's
+            // dev field. If that capture failed we cannot install tunnel routes
+            // safely — the previous hardcoded fallback ("enp129s0") silently
+            // installed routes on a non-existent or unrelated NIC on every
+            // machine that didn't happen to use that exact interface name.
+            let outbound_dev = outbound_iface.as_deref().ok_or_else(|| {
+                BackendError::Interface(
+                    "could not determine outbound interface — no default route \
+                     found in main table; install a default route or check \
+                     'ip route show' before retrying"
+                        .into(),
+                )
+            })?;
 
             if profile.full_tunnel {
                 // Full-tunnel: capture old default, then add a new one with src=VIP.
