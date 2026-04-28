@@ -875,7 +875,16 @@ impl VpnBackend for FortiGateBackend {
                             .map_err(BackendError::Io)?;
 
                         if add_out.status.success() {
-                            tunnel_routes.push("default".to_owned());
+                            // Store the FULL route spec, not just "default", so disconnect
+                            // can delete this exact route instead of `ip route del default`
+                            // (which non-deterministically removes the first matching default
+                            // and may delete a parallel NM-restored default — leaving only
+                            // the now-stale VPN default with src=VIP after teardown, which
+                            // makes the kernel try to send packets with an unreachable
+                            // source address and the network appears dead).
+                            tunnel_routes.push(format!(
+                                "default via {gw} dev {outbound_dev} src {vip} metric 50"
+                            ));
                             info!("full-tunnel default route installed — ok");
                         } else {
                             let stderr = String::from_utf8_lossy(&add_out.stderr);
@@ -1028,16 +1037,26 @@ impl VpnBackend for FortiGateBackend {
         }
 
         // Step 3b: Remove tunnel routes we added and restore original default.
-        for cidr in &tunnel_routes {
-            info!("removing tunnel route: {cidr}");
-            let out = tokio::process::Command::new("ip")
-                .args(["route", "del", cidr])
+        // For full-tunnel, the entry is the FULL route spec (default via GW dev IF
+        // src VIP metric 50) so the kernel deletes that exact route, not whichever
+        // default route happens to be first in the table — see the comment in
+        // connect() where this is pushed.  For split-tunnel, the entry is a plain
+        // CIDR which becomes a one-token argument; whitespace-splitting handles
+        // both cases uniformly.
+        for spec in &tunnel_routes {
+            info!("removing tunnel route: {spec}");
+            let mut cmd = tokio::process::Command::new("ip");
+            cmd.arg("route").arg("del");
+            for word in spec.split_whitespace() {
+                cmd.arg(word);
+            }
+            let out = cmd
                 .output()
                 .await
                 .map_err(BackendError::Io)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!("ip route del {cidr} → {} (may already be gone)", stderr.trim());
+                warn!("ip route del {spec} → {} (may already be gone)", stderr.trim());
             }
         }
 
