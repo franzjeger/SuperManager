@@ -299,6 +299,53 @@ pub struct DaemonService {
     pub set_log_level: LogLevelSetter,
 }
 
+impl DaemonService {
+    /// Look up an OPNsense host's stored credentials and connection details.
+    ///
+    /// Returns `(hostname, port, credentials)`. Errors map to `fdo::Error`s
+    /// suitable for returning straight from a D-Bus method.
+    async fn load_opnsense_creds(
+        &self,
+        id: &Uuid,
+    ) -> fdo::Result<(String, u16, crate::opnsense::Credentials)> {
+        let (hostname, port, label) = {
+            let state = self.state.lock().await;
+            let host = state
+                .ssh_hosts
+                .get(id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+            let label = host
+                .api_token_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    fdo::Error::Failed(
+                        "no OPNsense credentials configured — call opnsense_set_credentials first"
+                            .into(),
+                    )
+                })?
+                .label()
+                .to_owned();
+            (
+                host.hostname.clone(),
+                host.api_port.unwrap_or(443),
+                label,
+            )
+        };
+
+        let blob = secrets::retrieve_secret(&label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve credentials: {e}")))?;
+        let blob = String::from_utf8(blob)
+            .map_err(|e| fdo::Error::Failed(format!("invalid credentials encoding: {e}")))?;
+        let creds: crate::opnsense::Credentials = serde_json::from_str(&blob).map_err(|e| {
+            fdo::Error::Failed(format!(
+                "stored credentials are not in OPNsense JSON format: {e}"
+            ))
+        })?;
+        Ok((hostname, port, creds))
+    }
+}
+
 #[interface(name = "org.supermgr.Daemon1")]
 impl DaemonService {
     // =======================================================================
@@ -3185,6 +3232,138 @@ impl DaemonService {
 
         info!("stored UniFi controller credentials for host {id} (url={url})");
         Ok(())
+    }
+
+    // =======================================================================
+    // OPNsense REST API
+    // =======================================================================
+
+    /// Store OPNsense API credentials (key + secret) for an SSH host and
+    /// validate them against the box. The credentials are persisted as a
+    /// JSON blob in the system secret service under
+    /// `supermgr/opnsense/<uuid>/credentials`; the host's `api_token_ref`
+    /// is set to point at it and `api_port` is updated.
+    async fn opnsense_set_credentials(
+        &self,
+        host_id: &str,
+        port: u16,
+        api_key: &str,
+        api_secret: &str,
+    ) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        if api_key.trim().is_empty() || api_secret.is_empty() {
+            return Err(fdo::Error::InvalidArgs(
+                "OPNsense API key and secret must not be empty".into(),
+            ));
+        }
+        let port = if port == 0 { 443 } else { port };
+
+        let hostname = {
+            let state = self.state.lock().await;
+            state
+                .ssh_hosts
+                .get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .hostname
+                .clone()
+        };
+
+        // Validate by hitting an inexpensive authenticated endpoint.
+        let creds = crate::opnsense::Credentials {
+            key: api_key.trim().to_owned(),
+            secret: api_secret.to_owned(),
+        };
+        let resp = crate::opnsense::request(
+            &hostname,
+            port,
+            &creds,
+            "GET",
+            "/api/diagnostics/system/system_information",
+            "",
+        )
+        .await
+        .map_err(fdo::Error::Failed)?;
+        if resp.status == 401 || resp.status == 403 {
+            return Err(fdo::Error::Failed(format!(
+                "OPNsense rejected the credentials (HTTP {}); verify the API key+secret in System → Access → Users",
+                resp.status
+            )));
+        }
+        if resp.status >= 400 {
+            return Err(fdo::Error::Failed(format!(
+                "OPNsense API returned HTTP {} during credential validation: {}",
+                resp.status,
+                resp.body.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let label = format!("supermgr/opnsense/{}/credentials", id.simple());
+        let blob = serde_json::to_string(&creds)
+            .map_err(|e| fdo::Error::Failed(format!("serialise credentials: {e}")))?;
+        secrets::store_secret(&label, blob.as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("store credentials: {e}")))?;
+
+        let mut state = self.state.lock().await;
+        let host = state
+            .ssh_hosts
+            .get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.api_token_ref = Some(SecretRef::new(&label));
+        host.api_port = Some(port);
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state
+            .save_ssh_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
+
+        info!("stored OPNsense credentials for host {id} ({hostname}:{port})");
+        Ok(())
+    }
+
+    /// Issue a Basic-Auth API call to an OPNsense host and return the body as text.
+    ///
+    /// Mirrors `fortigate_api`: it's a thin authenticated HTTP proxy so the GUI
+    /// can hit any endpoint without re-implementing credential handling.
+    async fn opnsense_api(
+        &self,
+        host_id: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        let (hostname, port, creds) = self.load_opnsense_creds(&id).await?;
+
+        crate::audit::log_event("OPNSENSE_API", &format!("{method} {path} on {host_id}"));
+        let resp = crate::opnsense::request(&hostname, port, &creds, method, path, body)
+            .await
+            .map_err(fdo::Error::Failed)?;
+        if resp.status >= 400 {
+            return Err(fdo::Error::Failed(format!(
+                "OPNsense API returned HTTP {}: {}",
+                resp.status,
+                resp.body.chars().take(500).collect::<String>()
+            )));
+        }
+        Ok(resp.body)
+    }
+
+    /// Composite status snapshot for the dashboard.
+    ///
+    /// Returns the [`crate::opnsense::OpnSenseStatus`] struct serialised as JSON.
+    /// Individual underlying endpoint failures are tolerated and surface as
+    /// missing fields in the returned struct rather than failing the whole call.
+    async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let (hostname, port, creds) = self.load_opnsense_creds(&id).await?;
+        let status = crate::opnsense::get_status(&hostname, port, &creds).await;
+        serde_json::to_string(&status)
+            .map_err(|e| fdo::Error::Failed(format!("serialise status: {e}")))
     }
 
     // =======================================================================
