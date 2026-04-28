@@ -31,6 +31,7 @@ mod ssh;
 mod daemon;
 mod secrets;
 mod opnsense;
+mod backup_retention;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

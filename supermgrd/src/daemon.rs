@@ -5624,6 +5624,17 @@ pub fn spawn_monitor_task(
 /// Default backup interval: 24 hours.
 const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Per-host retention cap. The scheduler's housekeeping pass after each
+/// daily backup unlinks anything beyond this most-recent count for a given
+/// host. Sized to comfortably cover a month of dailies with breathing room.
+const BACKUP_KEEP_LAST: usize = 30;
+
+/// Compress backup files older than this many days in place.  The choice
+/// of 7 days balances "still close to live config so likely the diff
+/// you're looking at" (uncompressed, fast `diff`) against "old enough that
+/// disk pressure from a chatty fleet starts to matter."
+const BACKUP_COMPRESS_AFTER_DAYS: i64 = 7;
+
 /// Spawn a background task that periodically backs up all hosts with API
 /// credentials configured.
 ///
@@ -5707,6 +5718,52 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                     Err(e) => {
                         warn!("backup scheduler: failed to back up [{kind}] '{label}': {e}");
                     }
+                }
+            }
+
+            // After this run's backups are written, do housekeeping:
+            // compress files older than 7 days, prune to the last 30 per
+            // host, and check for content drift between the newest two.
+            // The whole pass is filesystem-driven, so it covers every
+            // vendor uniformly and tolerates partial failures.
+            let backup_dir = std::path::Path::new("/etc/supermgrd/backups");
+            let report = crate::backup_retention::housekeep(
+                backup_dir,
+                BACKUP_KEEP_LAST,
+                chrono::Duration::days(BACKUP_COMPRESS_AFTER_DAYS),
+                chrono::Utc::now(),
+            );
+            if !report.compressed.is_empty() || !report.pruned.is_empty() {
+                info!(
+                    "backup housekeeping: compressed={} pruned={}",
+                    report.compressed.len(),
+                    report.pruned.len()
+                );
+            }
+
+            // Fire a webhook for each host whose newest backup differs from
+            // its predecessor. This is the change-detection signal the user
+            // gets for free without standing up an external diff pipeline.
+            if !report.diffed_hosts.is_empty() {
+                let webhook_url = {
+                    let s = state.lock().await;
+                    s.webhook_url.clone()
+                };
+                if !webhook_url.is_empty() {
+                    for host in &report.diffed_hosts {
+                        let msg = format!(
+                            "SuperManager: backup diff detected for `{host}` — \
+                             today's config differs from yesterday's. Compare \
+                             the two newest files in /etc/supermgrd/backups/."
+                        );
+                        let url = webhook_url.clone();
+                        tokio::spawn(async move { send_webhook(&url, &msg).await });
+                    }
+                } else {
+                    debug!(
+                        "backup diff webhook: {} host(s) drifted but no webhook URL configured",
+                        report.diffed_hosts.len()
+                    );
                 }
             }
         }
