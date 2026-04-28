@@ -717,7 +717,7 @@ impl DaemonService {
         let profile_id = Uuid::new_v4();
 
         let name = name.trim().to_string();
-        let host = host.trim().to_string();
+        let host = sanitize_fortigate_host(&host);
         let username = username.trim().to_string();
 
         info!(
@@ -1199,7 +1199,7 @@ impl DaemonService {
             _ => return Err(fdo::Error::InvalidArgs("profile is not a FortiGate profile".into())),
         };
 
-        fg.host = host.trim().to_owned();
+        fg.host = sanitize_fortigate_host(host);
         fg.username = username.trim().to_owned();
 
         // Update secrets only when the caller supplies a non-empty value.
@@ -4287,6 +4287,40 @@ async fn openvpn_server_ips(config_file: &str) -> Vec<String> {
         }
     }
     ips
+}
+
+/// Normalize the host string supplied for a FortiGate profile.
+///
+/// Users frequently paste hostnames with a stray scheme (`https://`), trailing
+/// slash, or a `:port` / bare trailing `:` from a copy/paste boundary. The
+/// IKE backend always uses ports 500/4500, so any port qualifier is wrong;
+/// any leftover `:` would cause `tokio::net::lookup_host("host::500")` to
+/// fail with "Name or service not known" on connect.
+fn sanitize_fortigate_host(raw: &str) -> String {
+    let mut s = raw.trim();
+
+    for scheme in ["https://", "http://", "ipsec://"] {
+        if let Some(rest) = s.strip_prefix(scheme) {
+            s = rest;
+        }
+    }
+    s = s.trim_end_matches('/');
+
+    // Strip a trailing :port (decimal) but preserve a bracketed-IPv6 literal.
+    // We don't accept arbitrary user-supplied ports — the IKE port is fixed.
+    if !s.starts_with('[') {
+        if let Some((host, tail)) = s.rsplit_once(':') {
+            // Don't mistake an IPv6 colon for a port separator.
+            let looks_like_port = !tail.is_empty()
+                && tail.chars().all(|c| c.is_ascii_digit())
+                && !host.contains(':');
+            if looks_like_port || tail.is_empty() {
+                s = host;
+            }
+        }
+    }
+
+    s.trim_end_matches(':').to_owned()
 }
 
 /// Install an nftables kill-switch that drops all non-VPN traffic.
