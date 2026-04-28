@@ -310,6 +310,10 @@ pub async fn dbus_set_auto_connect(profile_id: String, auto_connect: bool) -> an
 }
 
 /// Call `UpdateFortigate` on the daemon.
+///
+/// `dns_servers` is a free-form list (comma/semicolon/whitespace-separated)
+/// of IPv4/IPv6 addresses; pass an empty string to clear any override and
+/// fall back to the FortiGate's mode-config-pushed DNS.
 pub async fn dbus_update_fortigate(
     profile_id: String,
     name: String,
@@ -317,11 +321,20 @@ pub async fn dbus_update_fortigate(
     username: String,
     password: String,
     psk: String,
+    dns_servers: String,
 ) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
-        .update_fortigate(&profile_id, &name, &host, &username, &password, &psk)
+        .update_fortigate(
+            &profile_id,
+            &name,
+            &host,
+            &username,
+            &password,
+            &psk,
+            &dns_servers,
+        )
         .await
         .context("UpdateFortigate")?;
     Ok(())
@@ -384,17 +397,22 @@ pub async fn dbus_list_profiles() -> anyhow::Result<Vec<ProfileSummary>> {
 }
 
 /// Call `ImportFortigate` then `ListProfiles` on the daemon.
+///
+/// `dns_servers` is a free-form list (comma/semicolon/whitespace-separated)
+/// of IPv4/IPv6 addresses; pass an empty string to use the FortiGate's
+/// mode-config-pushed DNS servers instead.
 pub async fn dbus_import_fortigate(
     name: String,
     host: String,
     username: String,
     password: String,
     psk: String,
+    dns_servers: String,
 ) -> anyhow::Result<Vec<ProfileSummary>> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let _uuid = proxy
-        .import_fortigate(&name, &host, &username, &password, &psk)
+        .import_fortigate(&name, &host, &username, &password, &psk, &dns_servers)
         .await
         .context("ImportFortigate")?;
     let json = proxy.list_profiles().await.context("ListProfiles")?;
