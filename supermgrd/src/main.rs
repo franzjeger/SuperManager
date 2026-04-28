@@ -30,6 +30,7 @@ mod vpn;
 mod ssh;
 mod daemon;
 mod secrets;
+mod docs;
 mod opnsense;
 mod sophos;
 mod tailscale;
