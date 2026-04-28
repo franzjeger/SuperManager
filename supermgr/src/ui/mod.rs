@@ -1848,7 +1848,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         vpn_detail.edit_creds_btn.connect_clicked(move |_| {
-            let (profile_id, backend, name, host, username) = {
+            let (profile_id, backend, name, host, username, dns_servers) = {
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let idx = pid.as_deref().and_then(|id| {
@@ -1863,6 +1863,11 @@ pub fn build_ui(
                             p.name.clone(),
                             p.host.clone().unwrap_or_default(),
                             p.username.clone().unwrap_or_default(),
+                            p.dns_servers
+                                .iter()
+                                .map(|ip| ip.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
                         )
                     }
                     None => return,
@@ -1870,7 +1875,7 @@ pub fn build_ui(
             };
             if backend.starts_with("FortiGate") {
                 vpn::dialogs::show_edit_fortigate_dialog(
-                    &window, profile_id, name, host, username, &rt, &tx,
+                    &window, profile_id, name, host, username, dns_servers, &rt, &tx,
                 );
             } else if backend == "OpenVPN3" {
                 vpn::dialogs::show_edit_openvpn_dialog(&window, profile_id, username, &rt, &tx);
@@ -3227,10 +3232,17 @@ pub fn build_ui(
                         let name = p.name.clone();
                         let host = p.host.clone().unwrap_or_default();
                         let username = p.username.clone().unwrap_or_default();
+                        let dns_servers = p
+                            .dns_servers
+                            .iter()
+                            .map(|ip| ip.to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         drop(s);
                         if backend.starts_with("FortiGate") {
                             vpn::dialogs::show_edit_fortigate_dialog(
-                                &rx_window, profile_id, name, host, username, &rx_rt, &rx_tx,
+                                &rx_window, profile_id, name, host, username, dns_servers,
+                                &rx_rt, &rx_tx,
                             );
                         } else if backend == "OpenVPN3" {
                             vpn::dialogs::show_edit_openvpn_dialog(
