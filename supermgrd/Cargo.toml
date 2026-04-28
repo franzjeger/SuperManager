@@ -47,6 +47,11 @@ rtnetlink              = "0.14"
 netlink-packet-route   = "0.19"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
+# Backup retention compresses files older than 7 days to gzip in place
+# (the format is universally readable by zcat / less / gzip on every distro
+# we target, so on-call doesn't need a special tool).
+flate2 = "1"
+
 [dev-dependencies]
 tempfile = "3"
 
