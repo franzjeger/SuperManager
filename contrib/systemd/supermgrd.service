@@ -10,16 +10,22 @@ ExecStart=/usr/bin/supermgrd
 Restart=on-failure
 RestartSec=5
 
-# Runtime directory — systemd creates and manages /run/supermgrd
+# State directories — systemd creates and manages these on start
+# (auto-creates /run/supermgrd, /etc/supermgrd, /var/log/supermgrd with the
+# correct mode/owner; also implicitly ReadWrite under ProtectSystem=strict)
 RuntimeDirectory=supermgrd
 RuntimeDirectoryMode=0750
+ConfigurationDirectory=supermgrd
+ConfigurationDirectoryMode=0750
+LogsDirectory=supermgrd
+LogsDirectoryMode=0750
 
 # Security hardening
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/etc/supermgrd /var/log/supermgrd -/tmp/supermgrd -/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
+ReadWritePaths=-/tmp/supermgrd -/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
 PrivateTmp=false
 NoNewPrivileges=false
 

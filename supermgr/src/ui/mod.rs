@@ -3486,8 +3486,13 @@ pub fn build_ui(
         let inactivity_counter = inactivity_counter.clone();
         lock_page.unlock_btn.connect_clicked(move |_| {
             let password = lock_page.password_row.text().to_string();
-            let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
             if s.verify_password(&password) {
+                // Transparently upgrade pre-Argon2 hashes on first successful
+                // unlock — same password, stronger KDF on disk.
+                if s.needs_hash_upgrade() {
+                    s.upgrade_legacy_hash(&password);
+                }
                 lock_page.password_row.set_text("");
                 lock_page.status_label.set_text("");
                 outer_stack.set_visible_child_name("app");
