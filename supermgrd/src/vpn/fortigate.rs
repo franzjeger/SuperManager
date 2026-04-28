@@ -810,12 +810,86 @@ impl VpnBackend for FortiGateBackend {
             )));
         }
 
+        // ── Steps 6–7 wrapped in a rollback-on-error scope ───────────────────
+        //
+        // Once `--initiate` succeeds the IKE SA is up in the kernel. Any
+        // subsequent failure — list-sas not running, `ip route` subprocess
+        // bombing on EBUSY, mode-config DNS push erroring out — would
+        // previously leak the SA, the endpoint host route, and the swanctl
+        // config fragment, leaving the user with a half-up tunnel and no
+        // way to clean it up except restarting the daemon.
+        //
+        // All post-initiate fallible work runs inside the `post_initiate`
+        // async block. On Err the rollback below tears the SA down via
+        // `swanctl --terminate --ike` and removes the side-effects we
+        // installed before propagating the original error.
+        let mut tunnel_routes: Vec<String> = Vec::new();
+        let mut saved_default_route: Option<String> = None;
+
+        // Helper closure that tears down everything we've installed since the
+        // SA came up. Used by every rollback path below so the cleanup logic
+        // stays in one place. Each step is best-effort — if it fails we still
+        // try the next so the system gets back as close to clean as possible.
+        let rollback_after_initiate = |conn_name: &str,
+                                       endpoint_host_routes: &[String],
+                                       tunnel_routes: &[String],
+                                       saved_default_route: &Option<String>,
+                                       config_path: &PathBuf| {
+            let conn_name = conn_name.to_owned();
+            let endpoint_host_routes = endpoint_host_routes.to_vec();
+            let tunnel_routes = tunnel_routes.to_vec();
+            let saved_default_route = saved_default_route.clone();
+            let config_path = config_path.clone();
+            async move {
+                let _ = run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "5"]).await;
+                for spec in &tunnel_routes {
+                    let mut cmd = tokio::process::Command::new("ip");
+                    cmd.arg("route").arg("del");
+                    for word in spec.split_whitespace() {
+                        cmd.arg(word);
+                    }
+                    let _ = cmd.output().await;
+                }
+                if let Some(saved) = saved_default_route {
+                    let mut cmd = tokio::process::Command::new("ip");
+                    cmd.arg("route").arg("add");
+                    for word in saved.split_whitespace() {
+                        cmd.arg(word);
+                    }
+                    let _ = cmd.output().await;
+                }
+                for cidr in &endpoint_host_routes {
+                    let _ = tokio::process::Command::new("ip")
+                        .args(["route", "del", cidr])
+                        .output()
+                        .await;
+                }
+                let _ = tokio::fs::remove_file(&config_path).await;
+                let _ = run_swanctl(&["--load-all"]).await;
+            }
+        };
+
         // ── Step 6: Log virtual IP from list-sas ─────────────────────────────
-        let list_out = run_swanctl(&["--list-sas"]).await?;
-        let list_stdout = String::from_utf8_lossy(&list_out.stdout);
-        match parse_virtual_ip(&list_stdout) {
-            Some(vip) => info!("mode-config assigned virtual IP: {}", vip),
-            None => info!("no virtual IP in --list-sas output (split-tunnel or parse miss)"),
+        match run_swanctl(&["--list-sas"]).await {
+            Ok(list_out) => {
+                let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+                match parse_virtual_ip(&list_stdout) {
+                    Some(vip) => info!("mode-config assigned virtual IP: {}", vip),
+                    None => info!("no virtual IP in --list-sas output (split-tunnel or parse miss)"),
+                }
+            }
+            Err(e) => {
+                warn!("--list-sas failed after successful initiate; tearing down SA: {e}");
+                rollback_after_initiate(
+                    &conn_name,
+                    &endpoint_host_routes,
+                    &tunnel_routes,
+                    &saved_default_route,
+                    &config_path,
+                )
+                .await;
+                return Err(e);
+            }
         }
 
         // ── Step 6b: Install tunnel routes ──────────────────────────────────
@@ -823,9 +897,6 @@ impl VpnBackend for FortiGateBackend {
         // kernel needs explicit routes that force traffic to use the VIP as
         // source address, otherwise packets leave with the physical IP and
         // bypass the tunnel entirely.
-        let mut tunnel_routes: Vec<String> = Vec::new();
-        let mut saved_default_route: Option<String> = None;
-
         // Parse VIP from the initiate output (already confirmed above).
         let stdout_str = String::from_utf8_lossy(&out.stdout);
         let vip: Option<std::net::IpAddr> = stdout_str
@@ -862,7 +933,12 @@ impl VpnBackend for FortiGateBackend {
                             .await;
 
                         // Add new default with src=VIP so XFRM policy matches.
-                        let add_out = tokio::process::Command::new("ip")
+                        // If the subprocess itself fails (e.g. fork ENOMEM)
+                        // after we've already deleted the original default,
+                        // the system is left with no default at all *and* a
+                        // live SA. Roll back the SA + restore the original
+                        // default before propagating the error.
+                        let add_out = match tokio::process::Command::new("ip")
                             .args([
                                 "route", "add", "default",
                                 "via", &gw,
@@ -872,7 +948,24 @@ impl VpnBackend for FortiGateBackend {
                             ])
                             .output()
                             .await
-                            .map_err(BackendError::Io)?;
+                        {
+                            Ok(o) => o,
+                            Err(io) => {
+                                warn!(
+                                    "ip route add default failed to spawn ({io}); \
+                                     tearing down SA and restoring original default"
+                                );
+                                rollback_after_initiate(
+                                    &conn_name,
+                                    &endpoint_host_routes,
+                                    &tunnel_routes,
+                                    &saved_default_route,
+                                    &config_path,
+                                )
+                                .await;
+                                return Err(BackendError::Io(io));
+                            }
+                        };
 
                         if add_out.status.success() {
                             tunnel_routes.push("default".to_owned());
