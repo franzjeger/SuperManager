@@ -12,10 +12,89 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::{error, info};
 
-use supermgr_core::host::HostSummary;
+use supermgr_core::{host::HostSummary, ssh::DeviceType};
 
 use crate::app::AppMsg;
 use crate::dbus_client::{dbus_ssh_delete_host, dbus_ssh_toggle_pin};
+
+// ---------------------------------------------------------------------------
+// Device-type-aware menu construction
+// ---------------------------------------------------------------------------
+
+/// Decide which menu items to offer for a given host.
+///
+/// The right-click menu used to be a fixed five-item list (Connect, Test,
+/// Edit, Pin, Delete) for every host regardless of type — RDP got offered
+/// on FortiGate firewalls, "Open WebAdmin" was nowhere even though every
+/// appliance has one. This helper returns a curated list based on the
+/// host's `device_type` plus what's actually configured (RDP/VNC ports,
+/// API token, UniFi controller URL).
+///
+/// Returned tuples are `(label, action_id)`; `host-ctx.` is prepended to
+/// each id when the menu is wired up.
+fn host_menu_items(host: &HostSummary) -> Vec<(&'static str, &'static str)> {
+    let mut items: Vec<(&'static str, &'static str)> = Vec::new();
+
+    // ---- Primary actions: how do you "open" this host? ----------------
+    // Windows boxes get RDP first since that's the natural primary.
+    // Everything else gets SSH first.
+    if matches!(host.device_type, DeviceType::Windows) && host.rdp_port.is_some() {
+        items.push(("Open RDP", "rdp"));
+        items.push(("Open SSH terminal", "connect"));
+    } else {
+        items.push(("Open SSH terminal", "connect"));
+        if host.rdp_port.is_some() {
+            items.push(("Open RDP", "rdp"));
+        }
+    }
+    if host.vnc_port.is_some() {
+        items.push(("Open VNC", "vnc"));
+    }
+
+    // ---- Vendor-specific web admin & API actions ---------------------
+    // RDP/VNC don't make sense on appliances, but a "click to land in the
+    // box's web UI" entry does — these are the things you actually want
+    // when a customer call requires fast triage.
+    // OpnSense / Sophos land here once their enum variants merge in
+    // — the variant additions are tracked in #13/#14. A follow-up PR
+    // will extend this match arm.
+    let appliance = matches!(
+        host.device_type,
+        DeviceType::Fortigate | DeviceType::PfSense | DeviceType::OpenWrt
+    );
+    if appliance {
+        items.push(("Open WebAdmin in browser", "open-webadmin"));
+    }
+    if matches!(host.device_type, DeviceType::UniFi) && host.has_unifi_controller {
+        items.push(("Open Controller in browser", "open-webadmin"));
+    }
+
+    // ---- Always-applicable maintenance actions -----------------------
+    items.push(("Test connection", "test"));
+    items.push(("Edit\u{2026}", "edit"));
+    items.push((if host.pinned { "Unpin" } else { "Pin" }, "toggle-pin"));
+    items.push(("Delete\u{2026}", "delete"));
+
+    items
+}
+
+/// Resolve the WebAdmin / Controller URL for `host`, if one can be derived.
+///
+/// FortiGate / pfSense / OpenWrt use `https://<hostname>:<api_port>/`
+/// (defaulting `api_port` to 443). UniFi uses `unifi_controller_url`
+/// directly. OpnSense and Sophos URL handling will be added in the
+/// follow-up PR that ties this menu to those device-type variants.
+fn web_admin_url(host: &HostSummary) -> Option<String> {
+    match host.device_type {
+        DeviceType::UniFi => host.unifi_controller_url.clone(),
+        DeviceType::Fortigate | DeviceType::PfSense | DeviceType::OpenWrt => Some(format!(
+            "https://{}:{}/",
+            host.hostname,
+            host.api_port.unwrap_or(443)
+        )),
+        _ => None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Build
@@ -228,21 +307,21 @@ pub fn populate_ssh_host_list(
             {
                 let host_id = host.id.to_string();
                 let host_label = host.label.clone();
-                let is_pinned = host.pinned;
+                let host_hostname = host.hostname.clone();
+                let host_username = host.username.clone();
+                let host_rdp_port = host.rdp_port;
+                let host_vnc_port = host.vnc_port;
+                let host_webadmin = web_admin_url(host);
                 let window_ctx = window.clone();
                 let rt_ctx = rt.clone();
                 let tx_ctx = tx.clone();
 
-                // Build gio::Menu model for the popover.
+                // Build the gio::Menu model from the device-type-aware list.
                 let menu_model = gio::Menu::new();
-                menu_model.append(Some("Connect"), Some("host-ctx.connect"));
-                menu_model.append(Some("Test Connection"), Some("host-ctx.test"));
-                menu_model.append(Some("Edit"), Some("host-ctx.edit"));
-                menu_model.append(
-                    Some(if is_pinned { "Unpin" } else { "Pin" }),
-                    Some("host-ctx.toggle-pin"),
-                );
-                menu_model.append(Some("Delete"), Some("host-ctx.delete"));
+                for (label, id) in host_menu_items(host) {
+                    let action_path = format!("host-ctx.{id}");
+                    menu_model.append(Some(label), Some(&action_path));
+                }
 
                 let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
                 popover.set_has_arrow(true);
@@ -336,6 +415,88 @@ pub fn populate_ssh_host_list(
                     let action = gio::SimpleAction::new("edit", None);
                     action.connect_activate(move |_, _| {
                         tx.send(AppMsg::EditSshHost(host_id.clone())).ok();
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // RDP action — only registered when the menu actually
+                // contains the entry, but registering unconditionally is
+                // cheap and keeps the wiring uniform.
+                {
+                    let hostname = host_hostname.clone();
+                    let username = host_username.clone();
+                    let port = host_rdp_port;
+                    let tx = tx_ctx.clone();
+                    let action = gio::SimpleAction::new("rdp", None);
+                    action.connect_activate(move |_, _| {
+                        if let Some(p) = port {
+                            let hostname = hostname.clone();
+                            let username = username.clone();
+                            let tx = tx.clone();
+                            glib::idle_add_once(move || {
+                                match super::host_detail::launch_rdp(
+                                    &hostname,
+                                    p,
+                                    &username,
+                                    None,
+                                ) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let _ = tx.send(AppMsg::OperationFailed(format!(
+                                            "RDP launch failed: {e}"
+                                        )));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // VNC action.
+                {
+                    let hostname = host_hostname.clone();
+                    let port = host_vnc_port;
+                    let tx = tx_ctx.clone();
+                    let action = gio::SimpleAction::new("vnc", None);
+                    action.connect_activate(move |_, _| {
+                        if let Some(p) = port {
+                            let hostname = hostname.clone();
+                            let tx = tx.clone();
+                            glib::idle_add_once(move || {
+                                if let Err(e) =
+                                    super::host_detail::launch_vnc(&hostname, p)
+                                {
+                                    let _ = tx.send(AppMsg::OperationFailed(format!(
+                                        "VNC launch failed: {e}"
+                                    )));
+                                }
+                            });
+                        }
+                    });
+                    action_group.add_action(&action);
+                }
+
+                // Open WebAdmin / Controller action — xdg-open the URL
+                // resolved from device_type and stored fields. Only fires
+                // for hosts whose menu listed the entry.
+                {
+                    let url = host_webadmin.clone();
+                    let tx = tx_ctx.clone();
+                    let action = gio::SimpleAction::new("open-webadmin", None);
+                    action.connect_activate(move |_, _| {
+                        let Some(url) = url.clone() else { return };
+                        let tx = tx.clone();
+                        match std::process::Command::new("xdg-open").arg(&url).spawn() {
+                            Ok(_) => {
+                                info!("xdg-open {}", url);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(AppMsg::OperationFailed(format!(
+                                    "could not launch browser: {e}"
+                                )));
+                            }
+                        }
                     });
                     action_group.add_action(&action);
                 }
