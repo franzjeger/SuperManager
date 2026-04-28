@@ -1277,3 +1277,118 @@ impl VpnBackend for FortiGateBackend {
         "FortiGate (IPsec/IKEv2)"
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pure-function tests
+// ---------------------------------------------------------------------------
+//
+// These cover the parsers that translate strongSwan / iproute2 output into
+// the typed values the connect/disconnect flow relies on. A regression in
+// any of these silently corrupts state (wrong VIP, wrong route count, wrong
+// gateway) and only manifests as a runtime networking failure — exactly the
+// bug class the recent FortiGate fixes traced.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_gateway_extracts_via_and_dev() {
+        let line = "default via 192.168.200.1 dev enp14s0 proto dhcp src 192.168.200.121 metric 100";
+        assert_eq!(
+            parse_gateway(line),
+            Some(("192.168.200.1".into(), "enp14s0".into()))
+        );
+    }
+
+    #[test]
+    fn parse_gateway_handles_unordered_tokens() {
+        // ip(8) does not always emit `via` before `dev`; the parser must not assume order.
+        let line = "default dev wlp4s0 via 10.0.0.1 metric 600";
+        assert_eq!(
+            parse_gateway(line),
+            Some(("10.0.0.1".into(), "wlp4s0".into()))
+        );
+    }
+
+    #[test]
+    fn parse_gateway_returns_none_when_either_missing() {
+        assert_eq!(parse_gateway("default dev enp14s0"), None);
+        assert_eq!(parse_gateway("default via 192.168.1.1"), None);
+        assert_eq!(parse_gateway(""), None);
+    }
+
+    #[test]
+    fn parse_virtual_ip_picks_last_bracket_pair_on_local_line() {
+        let out = "\
+            local  'sybr_admin' @ 192.168.200.121[4500] [192.168.251.1]\n\
+            remote '79.160.88.198' @ 79.160.88.198[4500]\n";
+        assert_eq!(
+            parse_virtual_ip(out),
+            Some("192.168.251.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn parse_virtual_ip_ignores_port_numbers_in_brackets() {
+        // [4500] is a port, not an IP — must not be returned.
+        let out = "local 'u' @ 192.168.1.10[4500]\n";
+        assert_eq!(parse_virtual_ip(out), None);
+    }
+
+    #[test]
+    fn parse_virtual_ip_returns_none_without_local_line() {
+        let out = "remote '1.2.3.4' @ 1.2.3.4[500] [10.0.0.5]\n";
+        assert_eq!(parse_virtual_ip(out), None);
+    }
+
+    #[test]
+    fn parse_active_routes_collects_remote_cidrs() {
+        let out = "\
+            CHILD_SAs:\n\
+              supermgr-abc{1}: ESPv2 ...\n\
+                local  192.168.251.1/32\n\
+                remote 0.0.0.0/0\n\
+              supermgr-abc{2}: ESPv2 ...\n\
+                remote 10.0.0.0/8\n\
+                remote 172.16.0.0/12\n";
+        assert_eq!(
+            parse_active_routes(out),
+            vec!["0.0.0.0/0", "10.0.0.0/8", "172.16.0.0/12"]
+        );
+    }
+
+    #[test]
+    fn parse_active_routes_skips_quoted_remote_id_lines() {
+        // `remote '1.2.3.4' @ 1.2.3.4[500]` is the peer identity, not a route.
+        let out = "remote '79.160.88.198' @ 79.160.88.198[500]\n  remote 10.0.0.0/8\n";
+        assert_eq!(parse_active_routes(out), vec!["10.0.0.0/8"]);
+    }
+
+    #[test]
+    fn parse_sa_bytes_sums_across_child_sas() {
+        let out = "\
+            in  c1234abcd, 1024 bytes, 10 packets\n\
+            out d4321efab, 2048 bytes, 20 packets\n\
+            in  cabcd9999, 100 bytes, 1 packets\n\
+            out d9999abcd, 200 bytes, 2 packets\n";
+        // (in_bytes, out_bytes)
+        assert_eq!(parse_sa_bytes(out), (1124, 2248));
+    }
+
+    #[test]
+    fn parse_sa_bytes_returns_zero_when_no_traffic_lines() {
+        let out = "no SAs found\n";
+        assert_eq!(parse_sa_bytes(out), (0, 0));
+    }
+
+    #[test]
+    fn parse_sa_bytes_ignores_unrelated_lines() {
+        // The parser must not misread direction tokens out of garbage like
+        // "input gateway ..." or stat headers.
+        let out = "\
+            stats refresh interval: 10s\n\
+            input gateway: 192.168.1.1\n\
+            in  c0, 50 bytes, 1 packets\n";
+        assert_eq!(parse_sa_bytes(out), (50, 0));
+    }
+}
