@@ -53,7 +53,7 @@ struct JsonRpcError {
 fn tool_definitions() -> Value {
     json!([
         {
-            "name": "ssh_list_hosts",
+            "name": "list_hosts",
             "description": "List all configured SSH hosts with their connection details (hostname, port, username, device type, auth method).",
             "inputSchema": {
                 "type": "object",
@@ -78,7 +78,7 @@ fn tool_definitions() -> Value {
                 "properties": {
                     "host_id": {
                         "type": "string",
-                        "description": "UUID of the target SSH host (from ssh_list_hosts)"
+                        "description": "UUID of the target SSH host (from list_hosts)"
                     },
                     "command": {
                         "type": "string",
@@ -130,7 +130,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "ssh_add_host",
+            "name": "add_host",
             "description": "Add a new SSH host configuration.",
             "inputSchema": {
                 "type": "object",
@@ -148,7 +148,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "ssh_test_connection",
+            "name": "test_host_connection",
             "description": "Test SSH and (optionally) FortiGate API connectivity for a host. Returns a JSON object like {\"ssh\": \"ok\", \"api\": \"ok\"} or {\"ssh\": \"timeout\", \"api\": \"auth_failed\"}.",
             "inputSchema": {
                 "type": "object",
@@ -162,7 +162,7 @@ fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "ssh_toggle_pin",
+            "name": "toggle_host_pin",
             "description": "Pin or unpin an SSH host (toggle its favourite/pinned state). Returns the refreshed host list.",
             "inputSchema": {
                 "type": "object",
@@ -304,8 +304,8 @@ fn tool_definitions() -> Value {
 
 async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Result<Value, String> {
     match name {
-        "ssh_list_hosts" => {
-            let json_str = proxy.ssh_list_hosts().await.map_err(|e| e.to_string())?;
+        "list_hosts" => {
+            let json_str = proxy.list_hosts().await.map_err(|e| e.to_string())?;
             let hosts: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
             Ok(hosts)
         }
@@ -344,7 +344,7 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
             proxy.disconnect().await.map_err(|e| e.to_string())?;
             Ok(json!({ "status": "disconnecting" }))
         }
-        "ssh_add_host" => {
+        "add_host" => {
             let host_json = json!({
                 "label": args.get("label").and_then(|v| v.as_str()).unwrap_or(""),
                 "hostname": args.get("hostname").and_then(|v| v.as_str()).unwrap_or(""),
@@ -355,22 +355,22 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
                 "auth_method": args.get("auth_method").and_then(|v| v.as_str()).unwrap_or("password"),
                 "auth_key_id": args.get("auth_key_id"),
             });
-            let id = proxy.ssh_add_host(&host_json.to_string()).await
+            let id = proxy.add_host(&host_json.to_string()).await
                 .map_err(|e| e.to_string())?;
             Ok(json!({ "id": id, "status": "created" }))
         }
-        "ssh_test_connection" => {
+        "test_host_connection" => {
             let host_id = args.get("host_id").and_then(|v| v.as_str())
                 .ok_or("missing host_id")?;
-            let result = proxy.ssh_test_connection(host_id).await
+            let result = proxy.test_host_connection(host_id).await
                 .map_err(|e| e.to_string())?;
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)
         }
-        "ssh_toggle_pin" => {
+        "toggle_host_pin" => {
             let host_id = args.get("host_id").and_then(|v| v.as_str())
                 .ok_or("missing host_id")?;
-            let result = proxy.ssh_toggle_pin(host_id).await
+            let result = proxy.toggle_host_pin(host_id).await
                 .map_err(|e| e.to_string())?;
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)

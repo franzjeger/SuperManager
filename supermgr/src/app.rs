@@ -6,7 +6,7 @@ use supermgr_core::{
     vpn::profile::ProfileSummary,
     vpn::state::VpnState,
     ssh::key::SshKeySummary,
-    ssh::host::SshHostSummary,
+    host::HostSummary,
 };
 
 /// Which top-level section is active in the UI.
@@ -39,7 +39,7 @@ pub struct AppState {
     /// SSH keys returned by `SshListKeys`.
     pub ssh_keys: Vec<SshKeySummary>,
     /// SSH hosts returned by `SshListHosts`.
-    pub ssh_hosts: Vec<SshHostSummary>,
+    pub hosts: Vec<HostSummary>,
     /// UUID string of the SSH key selected in the sidebar, if any.
     pub selected_ssh_key: Option<String>,
     /// UUID string of the SSH host selected in the sidebar, if any.
@@ -153,7 +153,7 @@ pub enum AppMsg {
     /// SSH key list was refreshed from the daemon.
     SshKeysRefreshed(Vec<SshKeySummary>),
     /// SSH host list was refreshed from the daemon.
-    SshHostsRefreshed(Vec<SshHostSummary>),
+    SshHostsRefreshed(Vec<HostSummary>),
     /// Right-click "Edit" on an SSH host row — select it and open the edit dialog.
     EditSshHost(String),
     /// Right-click "Edit" on a VPN profile row — select it and open the edit dialog.

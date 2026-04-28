@@ -8,7 +8,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
 pub fn update_ssh_key_detail(
     detail: &SshKeyDetail,
     key: &SshKeySummary,
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     public_key_text: &str,
     deployed_host_ids: &[String],
 ) {
