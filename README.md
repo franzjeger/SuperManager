@@ -102,14 +102,50 @@ The GUI communicates with the daemon over D-Bus on the system bus. The daemon ha
 
 ## Building
 
+### Dependencies
+
+<details>
+<summary><b>Arch Linux / CachyOS</b></summary>
+
 ```bash
-# Dependencies (Arch Linux / CachyOS)
 sudo pacman -S gtk4 libadwaita vte4 openssl sshpass wireguard-tools strongswan openvpn nftables freerdp remmina networkmanager
 
 # Optional (AUR) — for non-Azure OpenVPN profiles
 paru -S openvpn3
+```
+</details>
 
-# Build
+<details>
+<summary><b>Fedora 40+</b></summary>
+
+```bash
+sudo dnf install -y rust cargo gcc pkg-config \
+    gtk4-devel libadwaita-devel vte291-gtk4-devel \
+    openssl-devel dbus-devel glib2-devel \
+    sshpass wireguard-tools strongswan openvpn nftables \
+    freerdp remmina NetworkManager
+```
+
+`openvpn3` is not packaged for Fedora — needed only for non-Azure OpenVPN profiles.
+</details>
+
+<details>
+<summary><b>Debian / Ubuntu (24.04+)</b></summary>
+
+```bash
+sudo apt install -y rustc cargo build-essential pkg-config \
+    libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
+    libssl-dev libdbus-1-dev libglib2.0-dev \
+    sshpass wireguard-tools strongswan strongswan-swanctl \
+    openvpn nftables freerdp3-x11 remmina network-manager
+```
+
+If your distro's `rustc` is older than the workspace MSRV, install via [rustup](https://rustup.rs) instead.
+</details>
+
+### Build
+
+```bash
 cargo build --release
 
 # Install
