@@ -344,6 +344,51 @@ impl DaemonService {
         })?;
         Ok((hostname, port, creds))
     }
+
+    /// Look up a Sophos host's stored credentials and connection details.
+    ///
+    /// Returns `(hostname, port, credentials)`. Mirrors `load_opnsense_creds`
+    /// but expects the JSON blob to deserialise as `sophos::Credentials`.
+    async fn load_sophos_creds(
+        &self,
+        id: &Uuid,
+    ) -> fdo::Result<(String, u16, crate::sophos::Credentials)> {
+        let (hostname, port, label) = {
+            let state = self.state.lock().await;
+            let host = state
+                .ssh_hosts
+                .get(id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+            let label = host
+                .api_token_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    fdo::Error::Failed(
+                        "no Sophos credentials configured — call sophos_set_credentials first"
+                            .into(),
+                    )
+                })?
+                .label()
+                .to_owned();
+            (
+                host.hostname.clone(),
+                host.api_port.unwrap_or(4444),
+                label,
+            )
+        };
+
+        let blob = secrets::retrieve_secret(&label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve credentials: {e}")))?;
+        let blob = String::from_utf8(blob)
+            .map_err(|e| fdo::Error::Failed(format!("invalid credentials encoding: {e}")))?;
+        let creds: crate::sophos::Credentials = serde_json::from_str(&blob).map_err(|e| {
+            fdo::Error::Failed(format!(
+                "stored credentials are not in Sophos JSON format: {e}"
+            ))
+        })?;
+        Ok((hostname, port, creds))
+    }
 }
 
 #[interface(name = "org.supermgr.Daemon1")]
@@ -3364,6 +3409,123 @@ impl DaemonService {
         let status = crate::opnsense::get_status(&hostname, port, &creds).await;
         serde_json::to_string(&status)
             .map_err(|e| fdo::Error::Failed(format!("serialise status: {e}")))
+    }
+
+    // =======================================================================
+    // Sophos XML Configuration API
+    // =======================================================================
+
+    /// Store Sophos WebAdmin credentials (username + password) for an SSH host
+    /// and validate them against the box.
+    ///
+    /// Sophos has no token endpoint and reuses the WebAdmin credentials on
+    /// every API call, so they are stored as a JSON `{username, password}`
+    /// blob in the system secret service under
+    /// `supermgr/sophos/<uuid>/credentials`. The host's `api_token_ref` is
+    /// set to point at it and `api_port` is updated.
+    ///
+    /// `port` is the WebAdmin HTTPS port (typically 4444; 443 if the appliance
+    /// publishes WebAdmin on the standard port). Defaults to 4444 if 0.
+    async fn sophos_set_credentials(
+        &self,
+        host_id: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        if username.trim().is_empty() || password.is_empty() {
+            return Err(fdo::Error::InvalidArgs(
+                "Sophos username and password must not be empty".into(),
+            ));
+        }
+        let port = if port == 0 { 4444 } else { port };
+
+        let hostname = {
+            let state = self.state.lock().await;
+            state
+                .ssh_hosts
+                .get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .hostname
+                .clone()
+        };
+
+        let creds = crate::sophos::Credentials {
+            username: username.trim().to_owned(),
+            password: password.to_owned(),
+        };
+        // Cheapest documented operation that exercises authentication: a
+        // no-op `<Get><Login/></Get>` would be ideal, but Sophos returns a
+        // login error if the inner block is empty. Query the firewall-rule
+        // count which exists on every appliance.
+        let probe = "<Get><FirewallRule></FirewallRule></Get>";
+        let resp = crate::sophos::xml_request(&hostname, port, &creds, probe)
+            .await
+            .map_err(fdo::Error::Failed)?;
+        if !crate::sophos::looks_successful(&resp.body) {
+            // Sophos signals auth failure in the body, not the HTTP status.
+            return Err(fdo::Error::Failed(format!(
+                "Sophos rejected credentials or returned an error (HTTP {}): {}",
+                resp.status,
+                resp.body.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let label = format!("supermgr/sophos/{}/credentials", id.simple());
+        let blob = serde_json::to_string(&creds)
+            .map_err(|e| fdo::Error::Failed(format!("serialise credentials: {e}")))?;
+        secrets::store_secret(&label, blob.as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("store credentials: {e}")))?;
+
+        let mut state = self.state.lock().await;
+        let host = state
+            .ssh_hosts
+            .get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        host.api_token_ref = Some(SecretRef::new(&label));
+        host.api_port = Some(port);
+        host.updated_at = chrono::Utc::now();
+        let host = host.clone();
+        state
+            .save_ssh_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
+
+        info!("stored Sophos credentials for host {id} ({hostname}:{port})");
+        Ok(())
+    }
+
+    /// Send a Sophos XML Configuration API operation and return the raw XML
+    /// response body.
+    ///
+    /// `inner_xml` is the operation block (e.g. `<Get><FirewallRule/></Get>`);
+    /// the `<Request>` envelope and `<Login>` block are added automatically.
+    /// The caller is responsible for XML-escaping any user-supplied values
+    /// inside `inner_xml`.
+    ///
+    /// **Note:** Sophos always returns HTTP 200; success/failure is encoded
+    /// in the `<Status code="N">` tag of the response body. Use
+    /// [`crate::sophos::looks_successful`] to discriminate at a glance, or
+    /// parse the body for finer-grained checks.
+    async fn sophos_xml_api(&self, host_id: &str, inner_xml: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let (hostname, port, creds) = self.load_sophos_creds(&id).await?;
+
+        crate::audit::log_event("SOPHOS_API", &format!("op on {host_id}"));
+        let resp = crate::sophos::xml_request(&hostname, port, &creds, inner_xml)
+            .await
+            .map_err(fdo::Error::Failed)?;
+        if resp.status >= 400 {
+            return Err(fdo::Error::Failed(format!(
+                "Sophos returned HTTP {}: {}",
+                resp.status,
+                resp.body.chars().take(500).collect::<String>()
+            )));
+        }
+        Ok(resp.body)
     }
 
     // =======================================================================
