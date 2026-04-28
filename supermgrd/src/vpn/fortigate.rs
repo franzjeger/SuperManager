@@ -180,6 +180,22 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Filter benign plugin-not-found warnings from swanctl's stderr before
+    // logging. strongSwan emits one of these on every invocation when an
+    // optional plugin (sqlite, kernel-libipsec, etc.) is not built into the
+    // installed binary. They have no operational meaning and otherwise
+    // dominate the journal, making real errors hard to spot.
+    let filtered_stderr: String = stderr
+        .lines()
+        .filter(|l| {
+            !(l.contains("plugin '")
+                && (l.contains("failed to load")
+                    || l.contains("no plugin file available")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     if is_stats {
         debug!("{} → exit={}", cmd_str, out.status);
     } else {
@@ -188,7 +204,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
             cmd_str,
             out.status,
             stdout.trim(),
-            stderr.trim()
+            filtered_stderr.trim()
         );
     }
     Ok(out)
