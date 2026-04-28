@@ -841,7 +841,8 @@ impl VpnBackend for FortiGateBackend {
             let outbound_dev = outbound_iface.as_deref().unwrap_or("enp129s0");
 
             if profile.full_tunnel {
-                // Full-tunnel: capture old default, then add a new one with src=VIP.
+                // Full-tunnel: capture old default, then atomically swap in a
+                // new one with src=VIP via the same gateway.
                 let cap = tokio::process::Command::new("ip")
                     .args(["route", "show", "exact", "0.0.0.0/0"])
                     .output()
@@ -850,21 +851,20 @@ impl VpnBackend for FortiGateBackend {
                 let cap_out = String::from_utf8_lossy(&cap.stdout);
                 saved_default_route = cap_out.lines().next().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
 
-                // Delete old default and add new one with src=VIP via the same gateway.
                 if let Some(ref saved) = saved_default_route {
                     if let Some((gw, _dev)) = parse_gateway(saved) {
                         info!("installing full-tunnel default: via {gw} dev {outbound_dev} src {vip}");
 
-                        // Delete existing defaults.
-                        let _ = tokio::process::Command::new("ip")
-                            .args(["route", "del", "default"])
-                            .output()
-                            .await;
-
-                        // Add new default with src=VIP so XFRM policy matches.
-                        let add_out = tokio::process::Command::new("ip")
+                        // `ip route replace` is a single atomic netlink op:
+                        // RTM_NEWROUTE with NLM_F_REPLACE, evaluated under the
+                        // RTNL lock. The kernel swaps the matching route in
+                        // place rather than running a `del` + `add` sequence,
+                        // closing the brief window during which the routing
+                        // table had no default at all (~1ms but enough for
+                        // background traffic to error out).
+                        let replace_out = tokio::process::Command::new("ip")
                             .args([
-                                "route", "add", "default",
+                                "route", "replace", "default",
                                 "via", &gw,
                                 "dev", outbound_dev,
                                 "src", &vip.to_string(),
@@ -874,11 +874,11 @@ impl VpnBackend for FortiGateBackend {
                             .await
                             .map_err(BackendError::Io)?;
 
-                        if add_out.status.success() {
+                        if replace_out.status.success() {
                             tunnel_routes.push("default".to_owned());
                             info!("full-tunnel default route installed — ok");
                         } else {
-                            let stderr = String::from_utf8_lossy(&add_out.stderr);
+                            let stderr = String::from_utf8_lossy(&replace_out.stderr);
                             warn!("failed to install full-tunnel default: {}", stderr.trim());
                         }
                     }
