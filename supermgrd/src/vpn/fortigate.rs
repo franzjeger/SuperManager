@@ -476,10 +476,83 @@ async fn capture_default_route_v4() -> Result<Option<String>, BackendError> {
 // DNS helper
 // ---------------------------------------------------------------------------
 
+/// Name of the dedicated dummy netdev that holds the FortiGate session's DNS
+/// state in systemd-resolved.
+///
+/// IPsec/XFRM has no kernel netdev, so we used to attach DNS to the *physical*
+/// outbound interface (e.g. `enp14s0`).  But systemd-resolved's `RevertLink`
+/// is per-link and indiscriminate — calling it on the physical link on
+/// disconnect wiped NetworkManager's LAN DNS too, leaving the system unable
+/// to resolve anything until a manual `nmcli connection up`.
+///
+/// Putting DNS on a dummy interface that we own end-to-end means RevertLink
+/// only clears state we set, never NM's.  The dummy carries no IP and no
+/// route — systemd-resolved only needs a netdev to anchor DNS state to;
+/// query packets still leave the box via the real default route (the VPN).
+const DNS_DUMMY_IFACE: &str = "supermgr_dns";
+
+/// Ensure the DNS dummy interface exists and is up.
+///
+/// Idempotent: if a stale dummy from a previous crash is present we delete it
+/// and recreate so we know the link state is fresh.  Returns the interface
+/// name on success so the caller can pass it to `configure_dns_for_link`.
+async fn ensure_dns_dummy() -> Option<&'static str> {
+    // Best-effort delete of any leftover from a previous run.
+    let _ = tokio::process::Command::new("ip")
+        .args(["link", "del", DNS_DUMMY_IFACE])
+        .output()
+        .await;
+
+    let add = tokio::process::Command::new("ip")
+        .args(["link", "add", DNS_DUMMY_IFACE, "type", "dummy"])
+        .output()
+        .await;
+    match add {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            warn!(
+                "ip link add {DNS_DUMMY_IFACE}: exit={} stderr={:?} (DNS will not be pushed)",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!("ip link add {DNS_DUMMY_IFACE}: spawn error {e}");
+            return None;
+        }
+    }
+
+    let up = tokio::process::Command::new("ip")
+        .args(["link", "set", DNS_DUMMY_IFACE, "up"])
+        .output()
+        .await;
+    if let Ok(out) = up {
+        if !out.status.success() {
+            warn!(
+                "ip link set {DNS_DUMMY_IFACE} up: exit={} stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+
+    Some(DNS_DUMMY_IFACE)
+}
+
+/// Remove the DNS dummy interface.  Idempotent — ignores errors.
+pub(crate) async fn remove_dns_dummy() {
+    let _ = tokio::process::Command::new("ip")
+        .args(["link", "del", DNS_DUMMY_IFACE])
+        .output()
+        .await;
+}
+
 /// Configure per-link DNS on `iface_name` via systemd-resolved D-Bus.
 ///
-/// `iface_name` is the physical outbound interface (from the default route),
-/// since IPsec/XFRM does not create a separate kernel interface.
+/// `iface_name` should be the dedicated dummy netdev returned by
+/// [`ensure_dns_dummy`] — never the physical outbound interface, or
+/// `RevertLink` on disconnect will wipe NetworkManager's DNS.
 /// Returns `Some(ifindex)` on success for later [`RevertLink`] call.
 async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Option<i32> {
     if dns_servers.is_empty() {
@@ -718,7 +791,7 @@ impl VpnBackend for FortiGateBackend {
         // once the CHILD_SA is established — we must not interfere with that.
         let default_route = capture_default_route_v4().await?;
         let gw_v4 = default_route.as_deref().and_then(parse_gateway);
-        let mut outbound_iface: Option<String> = gw_v4.as_ref().map(|(_, dev)| dev.clone());
+        let outbound_iface: Option<String> = gw_v4.as_ref().map(|(_, dev)| dev.clone());
 
         let mut endpoint_host_routes: Vec<String> = Vec::new();
         if let Some((gw, dev)) = &gw_v4 {
@@ -981,11 +1054,12 @@ impl VpnBackend for FortiGateBackend {
         };
 
         let dns_configured_ifindex = if !effective_dns.is_empty() {
-            configure_dns_for_link(
-                outbound_iface.get_or_insert_with(|| "eth0".to_owned()),
-                &effective_dns,
-            )
-            .await
+            // Attach DNS to a dedicated dummy netdev so RevertLink on disconnect
+            // never wipes NetworkManager's DNS on the physical interface.
+            match ensure_dns_dummy().await {
+                Some(name) => configure_dns_for_link(name, &effective_dns).await,
+                None => None,
+            }
         } else {
             None
         };
@@ -1025,9 +1099,12 @@ impl VpnBackend for FortiGateBackend {
             }
         };
 
-        // Step 0: Revert systemd-resolved DNS (non-fatal).
+        // Step 0: Revert systemd-resolved DNS, then delete the dummy netdev
+        // (non-fatal).  RevertLink only touches the dummy's per-link state, so
+        // NetworkManager's DNS on the physical interface is preserved.
         if let Some(ifindex) = dns_ifindex {
             revert_link_dns(ifindex).await;
+            remove_dns_dummy().await;
         }
 
         // Step 1: Terminate IKE SA.
