@@ -1799,6 +1799,41 @@ impl DaemonService {
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
+    // =======================================================================
+    // Per-customer documentation export
+    // =======================================================================
+
+    /// Return a JSON array of distinct customer tags currently in use across
+    /// VPN profiles and SSH hosts, sorted and case-insensitively deduplicated.
+    async fn list_customers(&self) -> fdo::Result<String> {
+        let (profiles, hosts) = {
+            let state = self.state.lock().await;
+            (
+                state.profiles.values().cloned().collect::<Vec<_>>(),
+                state.ssh_hosts.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+        let names = crate::docs::list_customers(&profiles, &hosts);
+        serde_json::to_string(&names)
+            .map_err(|e| fdo::Error::Failed(format!("serialise customers: {e}")))
+    }
+
+    /// Render a Markdown documentation snapshot for `customer`.
+    ///
+    /// Matching is case-insensitive on the trimmed input. Pass an empty
+    /// string to render an "Ungrouped" report covering every profile and
+    /// host whose customer tag is empty.
+    async fn export_customer_docs(&self, customer: &str) -> fdo::Result<String> {
+        let (profiles, hosts) = {
+            let state = self.state.lock().await;
+            (
+                state.profiles.values().cloned().collect::<Vec<_>>(),
+                state.ssh_hosts.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+        Ok(crate::docs::render_customer_doc(customer, &profiles, &hosts))
+    }
+
     /// Set or clear the customer/tenant tag on an SSH host.
     ///
     /// Pass an empty string to remove the tag (un-group the host).

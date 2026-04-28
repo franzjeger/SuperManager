@@ -474,6 +474,21 @@ pub trait Daemon {
         customer: &str,
     ) -> fdo::Result<()>;
 
+    // =======================================================================
+    // Per-customer documentation export
+    // =======================================================================
+
+    /// Return a JSON array of distinct customer tags currently in use across
+    /// VPN profiles and SSH hosts. Sorted, case-insensitively deduplicated.
+    async fn list_customers(&self) -> fdo::Result<String>;
+
+    /// Render a Markdown documentation snapshot for `customer`.
+    ///
+    /// Matching is case-insensitive on the trimmed input. Pass an empty
+    /// string to render an "Ungrouped" report covering every profile and
+    /// host whose customer tag is empty.
+    async fn export_customer_docs(&self, customer: &str) -> fdo::Result<String>;
+
     /// Delete an SSH host by UUID string.
     async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()>;
 

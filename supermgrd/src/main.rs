@@ -30,6 +30,7 @@ mod vpn;
 mod ssh;
 mod daemon;
 mod secrets;
+mod docs;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
