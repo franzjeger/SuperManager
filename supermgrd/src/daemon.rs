@@ -1637,6 +1637,23 @@ impl DaemonService {
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
+    // =======================================================================
+    // Tailscale tailnet listing
+    // =======================================================================
+
+    /// List nodes in the local tailnet via `tailscale status --json`.
+    ///
+    /// Returns a JSON array of [`crate::tailscale::TailscaleNode`] objects.
+    /// Errors when the tailscale CLI isn't installed or tailscaled isn't
+    /// running — in either case the GUI surfaces the error string verbatim.
+    async fn tailscale_list_nodes(&self) -> fdo::Result<String> {
+        let nodes = crate::tailscale::list_nodes()
+            .await
+            .map_err(fdo::Error::Failed)?;
+        serde_json::to_string(&nodes)
+            .map_err(|e| fdo::Error::Failed(format!("serialise nodes: {e}")))
+    }
+
     /// Return a single SSH key as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
