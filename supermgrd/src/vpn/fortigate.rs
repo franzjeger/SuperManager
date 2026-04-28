@@ -180,6 +180,22 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Filter benign plugin-not-found warnings from swanctl's stderr before
+    // logging. strongSwan emits one of these on every invocation when an
+    // optional plugin (sqlite, kernel-libipsec, etc.) is not built into the
+    // installed binary. They have no operational meaning and otherwise
+    // dominate the journal, making real errors hard to spot.
+    let filtered_stderr: String = stderr
+        .lines()
+        .filter(|l| {
+            !(l.contains("plugin '")
+                && (l.contains("failed to load")
+                    || l.contains("no plugin file available")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     if is_stats {
         debug!("{} → exit={}", cmd_str, out.status);
     } else {
@@ -188,7 +204,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
             cmd_str,
             out.status,
             stdout.trim(),
-            stderr.trim()
+            filtered_stderr.trim()
         );
     }
     Ok(out)
@@ -982,7 +998,19 @@ impl VpnBackend for FortiGateBackend {
             });
 
         if let Some(vip) = vip {
-            let outbound_dev = outbound_iface.as_deref().unwrap_or("enp129s0");
+            // The outbound interface comes from the captured default route's
+            // dev field. If that capture failed we cannot install tunnel routes
+            // safely — the previous hardcoded fallback ("enp129s0") silently
+            // installed routes on a non-existent or unrelated NIC on every
+            // machine that didn't happen to use that exact interface name.
+            let outbound_dev = outbound_iface.as_deref().ok_or_else(|| {
+                BackendError::Interface(
+                    "could not determine outbound interface — no default route \
+                     found in main table; install a default route or check \
+                     'ip route show' before retrying"
+                        .into(),
+                )
+            })?;
 
             if profile.full_tunnel {
                 // Full-tunnel: capture old default, then add a new one with src=VIP.
