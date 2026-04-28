@@ -180,6 +180,22 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+
+    // Filter benign plugin-not-found warnings from swanctl's stderr before
+    // logging. strongSwan emits one of these on every invocation when an
+    // optional plugin (sqlite, kernel-libipsec, etc.) is not built into the
+    // installed binary. They have no operational meaning and otherwise
+    // dominate the journal, making real errors hard to spot.
+    let filtered_stderr: String = stderr
+        .lines()
+        .filter(|l| {
+            !(l.contains("plugin '")
+                && (l.contains("failed to load")
+                    || l.contains("no plugin file available")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
     if is_stats {
         debug!("{} → exit={}", cmd_str, out.status);
     } else {
@@ -188,7 +204,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
             cmd_str,
             out.status,
             stdout.trim(),
-            stderr.trim()
+            filtered_stderr.trim()
         );
     }
     Ok(out)
@@ -460,10 +476,83 @@ async fn capture_default_route_v4() -> Result<Option<String>, BackendError> {
 // DNS helper
 // ---------------------------------------------------------------------------
 
+/// Name of the dedicated dummy netdev that holds the FortiGate session's DNS
+/// state in systemd-resolved.
+///
+/// IPsec/XFRM has no kernel netdev, so we used to attach DNS to the *physical*
+/// outbound interface (e.g. `enp14s0`).  But systemd-resolved's `RevertLink`
+/// is per-link and indiscriminate — calling it on the physical link on
+/// disconnect wiped NetworkManager's LAN DNS too, leaving the system unable
+/// to resolve anything until a manual `nmcli connection up`.
+///
+/// Putting DNS on a dummy interface that we own end-to-end means RevertLink
+/// only clears state we set, never NM's.  The dummy carries no IP and no
+/// route — systemd-resolved only needs a netdev to anchor DNS state to;
+/// query packets still leave the box via the real default route (the VPN).
+const DNS_DUMMY_IFACE: &str = "supermgr_dns";
+
+/// Ensure the DNS dummy interface exists and is up.
+///
+/// Idempotent: if a stale dummy from a previous crash is present we delete it
+/// and recreate so we know the link state is fresh.  Returns the interface
+/// name on success so the caller can pass it to `configure_dns_for_link`.
+async fn ensure_dns_dummy() -> Option<&'static str> {
+    // Best-effort delete of any leftover from a previous run.
+    let _ = tokio::process::Command::new("ip")
+        .args(["link", "del", DNS_DUMMY_IFACE])
+        .output()
+        .await;
+
+    let add = tokio::process::Command::new("ip")
+        .args(["link", "add", DNS_DUMMY_IFACE, "type", "dummy"])
+        .output()
+        .await;
+    match add {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            warn!(
+                "ip link add {DNS_DUMMY_IFACE}: exit={} stderr={:?} (DNS will not be pushed)",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return None;
+        }
+        Err(e) => {
+            warn!("ip link add {DNS_DUMMY_IFACE}: spawn error {e}");
+            return None;
+        }
+    }
+
+    let up = tokio::process::Command::new("ip")
+        .args(["link", "set", DNS_DUMMY_IFACE, "up"])
+        .output()
+        .await;
+    if let Ok(out) = up {
+        if !out.status.success() {
+            warn!(
+                "ip link set {DNS_DUMMY_IFACE} up: exit={} stderr={:?}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    }
+
+    Some(DNS_DUMMY_IFACE)
+}
+
+/// Remove the DNS dummy interface.  Idempotent — ignores errors.
+pub(crate) async fn remove_dns_dummy() {
+    let _ = tokio::process::Command::new("ip")
+        .args(["link", "del", DNS_DUMMY_IFACE])
+        .output()
+        .await;
+}
+
 /// Configure per-link DNS on `iface_name` via systemd-resolved D-Bus.
 ///
-/// `iface_name` is the physical outbound interface (from the default route),
-/// since IPsec/XFRM does not create a separate kernel interface.
+/// `iface_name` should be the dedicated dummy netdev returned by
+/// [`ensure_dns_dummy`] — never the physical outbound interface, or
+/// `RevertLink` on disconnect will wipe NetworkManager's DNS.
 /// Returns `Some(ifindex)` on success for later [`RevertLink`] call.
 async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Option<i32> {
     if dns_servers.is_empty() {
@@ -702,7 +791,7 @@ impl VpnBackend for FortiGateBackend {
         // once the CHILD_SA is established — we must not interfere with that.
         let default_route = capture_default_route_v4().await?;
         let gw_v4 = default_route.as_deref().and_then(parse_gateway);
-        let mut outbound_iface: Option<String> = gw_v4.as_ref().map(|(_, dev)| dev.clone());
+        let outbound_iface: Option<String> = gw_v4.as_ref().map(|(_, dev)| dev.clone());
 
         let mut endpoint_host_routes: Vec<String> = Vec::new();
         if let Some((gw, dev)) = &gw_v4 {
@@ -838,7 +927,19 @@ impl VpnBackend for FortiGateBackend {
             });
 
         if let Some(vip) = vip {
-            let outbound_dev = outbound_iface.as_deref().unwrap_or("enp129s0");
+            // The outbound interface comes from the captured default route's
+            // dev field. If that capture failed we cannot install tunnel routes
+            // safely — the previous hardcoded fallback ("enp129s0") silently
+            // installed routes on a non-existent or unrelated NIC on every
+            // machine that didn't happen to use that exact interface name.
+            let outbound_dev = outbound_iface.as_deref().ok_or_else(|| {
+                BackendError::Interface(
+                    "could not determine outbound interface — no default route \
+                     found in main table; install a default route or check \
+                     'ip route show' before retrying"
+                        .into(),
+                )
+            })?;
 
             if profile.full_tunnel {
                 // Full-tunnel: capture old default, then add a new one with src=VIP.
@@ -875,7 +976,16 @@ impl VpnBackend for FortiGateBackend {
                             .map_err(BackendError::Io)?;
 
                         if add_out.status.success() {
-                            tunnel_routes.push("default".to_owned());
+                            // Store the FULL route spec, not just "default", so disconnect
+                            // can delete this exact route instead of `ip route del default`
+                            // (which non-deterministically removes the first matching default
+                            // and may delete a parallel NM-restored default — leaving only
+                            // the now-stale VPN default with src=VIP after teardown, which
+                            // makes the kernel try to send packets with an unreachable
+                            // source address and the network appears dead).
+                            tunnel_routes.push(format!(
+                                "default via {gw} dev {outbound_dev} src {vip} metric 50"
+                            ));
                             info!("full-tunnel default route installed — ok");
                         } else {
                             let stderr = String::from_utf8_lossy(&add_out.stderr);
@@ -944,11 +1054,12 @@ impl VpnBackend for FortiGateBackend {
         };
 
         let dns_configured_ifindex = if !effective_dns.is_empty() {
-            configure_dns_for_link(
-                outbound_iface.get_or_insert_with(|| "eth0".to_owned()),
-                &effective_dns,
-            )
-            .await
+            // Attach DNS to a dedicated dummy netdev so RevertLink on disconnect
+            // never wipes NetworkManager's DNS on the physical interface.
+            match ensure_dns_dummy().await {
+                Some(name) => configure_dns_for_link(name, &effective_dns).await,
+                None => None,
+            }
         } else {
             None
         };
@@ -988,9 +1099,12 @@ impl VpnBackend for FortiGateBackend {
             }
         };
 
-        // Step 0: Revert systemd-resolved DNS (non-fatal).
+        // Step 0: Revert systemd-resolved DNS, then delete the dummy netdev
+        // (non-fatal).  RevertLink only touches the dummy's per-link state, so
+        // NetworkManager's DNS on the physical interface is preserved.
         if let Some(ifindex) = dns_ifindex {
             revert_link_dns(ifindex).await;
+            remove_dns_dummy().await;
         }
 
         // Step 1: Terminate IKE SA.
@@ -1028,16 +1142,26 @@ impl VpnBackend for FortiGateBackend {
         }
 
         // Step 3b: Remove tunnel routes we added and restore original default.
-        for cidr in &tunnel_routes {
-            info!("removing tunnel route: {cidr}");
-            let out = tokio::process::Command::new("ip")
-                .args(["route", "del", cidr])
+        // For full-tunnel, the entry is the FULL route spec (default via GW dev IF
+        // src VIP metric 50) so the kernel deletes that exact route, not whichever
+        // default route happens to be first in the table — see the comment in
+        // connect() where this is pushed.  For split-tunnel, the entry is a plain
+        // CIDR which becomes a one-token argument; whitespace-splitting handles
+        // both cases uniformly.
+        for spec in &tunnel_routes {
+            info!("removing tunnel route: {spec}");
+            let mut cmd = tokio::process::Command::new("ip");
+            cmd.arg("route").arg("del");
+            for word in spec.split_whitespace() {
+                cmd.arg(word);
+            }
+            let out = cmd
                 .output()
                 .await
                 .map_err(BackendError::Io)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!("ip route del {cidr} → {} (may already be gone)", stderr.trim());
+                warn!("ip route del {spec} → {} (may already be gone)", stderr.trim());
             }
         }
 
