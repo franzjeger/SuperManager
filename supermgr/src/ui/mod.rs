@@ -286,41 +286,60 @@ pub fn build_ui(
         .spacing(2)
         .build();
 
-    // VPN import buttons (shown when VPN section is active).
+    // VPN add menu (shown when VPN section is active).
+    //
+    // The previous design was five flat buttons (Import WG / Add FG /
+    // Import OV / Import Azure / Import TOML). With multiple backends and
+    // a "Create new vs. import" distinction, that's too wide and forces
+    // the user to re-learn which backends have which option. Switch to a
+    // single "Add VPN connection" MenuButton whose model-based popover
+    // groups by backend, with submenu entries for "Create new" / "Import"
+    // — submenus collapse to a single entry where only one mode is
+    // currently supported (e.g. WireGuard import-only until we ship a
+    // keypair-generator dialog).
     let vpn_add_group = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(2)
         .build();
-    let import_wg_btn = gtk4::Button::builder()
-        .label("Import WireGuard .conf")
+
+    let vpn_add_menu = gio::Menu::new();
+    {
+        let wg = gio::Menu::new();
+        wg.append(Some("Import .conf file\u{2026}"), Some("vpn-add.wg-import"));
+        vpn_add_menu.append_submenu(Some("WireGuard"), &wg);
+
+        let fg = gio::Menu::new();
+        fg.append(Some("Create new\u{2026}"), Some("vpn-add.fg-new"));
+        vpn_add_menu.append_submenu(Some("FortiGate"), &fg);
+
+        let ov = gio::Menu::new();
+        ov.append(Some("Import .ovpn file\u{2026}"), Some("vpn-add.ov-import"));
+        vpn_add_menu.append_submenu(Some("OpenVPN"), &ov);
+
+        let az = gio::Menu::new();
+        az.append(
+            Some("Import Azure Portal config\u{2026}"),
+            Some("vpn-add.az-import"),
+        );
+        vpn_add_menu.append_submenu(Some("Azure VPN"), &az);
+
+        // Universal entry at the bottom — picks the backend by reading
+        // the TOML's [config] discriminator. Not under any backend
+        // submenu because it's intentionally cross-vendor.
+        let other = gio::Menu::new();
+        other.append(
+            Some("Any SuperManager TOML profile\u{2026}"),
+            Some("vpn-add.toml-import"),
+        );
+        vpn_add_menu.append_section(None, &other);
+    }
+    let vpn_add_menu_btn = gtk4::MenuButton::builder()
+        .label("Add VPN connection")
         .has_frame(false)
         .halign(gtk4::Align::Fill)
+        .menu_model(&vpn_add_menu)
         .build();
-    let add_fg_btn = gtk4::Button::builder()
-        .label("Add FortiGate connection")
-        .has_frame(false)
-        .halign(gtk4::Align::Fill)
-        .build();
-    let import_ov_btn = gtk4::Button::builder()
-        .label("Import OpenVPN .ovpn")
-        .has_frame(false)
-        .halign(gtk4::Align::Fill)
-        .build();
-    let import_az_btn = gtk4::Button::builder()
-        .label("Import Azure VPN config")
-        .has_frame(false)
-        .halign(gtk4::Align::Fill)
-        .build();
-    let import_toml_btn = gtk4::Button::builder()
-        .label("Import TOML config\u{2026}")
-        .has_frame(false)
-        .halign(gtk4::Align::Fill)
-        .build();
-    vpn_add_group.append(&import_wg_btn);
-    vpn_add_group.append(&add_fg_btn);
-    vpn_add_group.append(&import_ov_btn);
-    vpn_add_group.append(&import_az_btn);
-    vpn_add_group.append(&import_toml_btn);
+    vpn_add_group.append(&vpn_add_menu_btn);
 
     // SSH Keys buttons (shown when SSH > Keys sub-tab is active).
     let ssh_keys_add_group = gtk4::Box::builder()
@@ -782,57 +801,45 @@ pub fn build_ui(
     // Right-click context menus on sidebar empty space
     // =========================================================================
 
-    // VPN sidebar: right-click → Import WireGuard / Add FortiGate / ...
+    // VPN sidebar: right-click on empty space presents the same submenu
+    // tree as the toolbar "+" Add button. The actions themselves live on
+    // the window under the `vpn-add` namespace (installed below where
+    // toast_overlay is in scope) — both this popover and the MenuButton
+    // popover dispatch to the same handlers, so changes only need to be
+    // made in one place.
     {
-        let import_wg_btn = import_wg_btn.clone();
-        let add_fg_btn = add_fg_btn.clone();
-        let import_ov_btn = import_ov_btn.clone();
-        let import_az_btn = import_az_btn.clone();
-        let import_toml_btn = import_toml_btn.clone();
-
         let menu = gio::Menu::new();
-        menu.append(Some("Import WireGuard .conf"), Some("vpn-bg.import-wg"));
-        menu.append(Some("Add FortiGate connection"), Some("vpn-bg.add-fg"));
-        menu.append(Some("Import OpenVPN .ovpn"), Some("vpn-bg.import-ov"));
-        menu.append(Some("Import Azure VPN config"), Some("vpn-bg.import-az"));
-        menu.append(Some("Import TOML config\u{2026}"), Some("vpn-bg.import-toml"));
+        {
+            let wg = gio::Menu::new();
+            wg.append(Some("Import .conf file\u{2026}"), Some("vpn-add.wg-import"));
+            menu.append_submenu(Some("WireGuard"), &wg);
 
-        let ag = gio::SimpleActionGroup::new();
-        {
-            let a = gio::SimpleAction::new("import-wg", None);
-            let b = import_wg_btn.clone();
-            a.connect_activate(move |_, _| b.emit_clicked());
-            ag.add_action(&a);
-        }
-        {
-            let a = gio::SimpleAction::new("add-fg", None);
-            let b = add_fg_btn.clone();
-            a.connect_activate(move |_, _| b.emit_clicked());
-            ag.add_action(&a);
-        }
-        {
-            let a = gio::SimpleAction::new("import-ov", None);
-            let b = import_ov_btn.clone();
-            a.connect_activate(move |_, _| b.emit_clicked());
-            ag.add_action(&a);
-        }
-        {
-            let a = gio::SimpleAction::new("import-az", None);
-            let b = import_az_btn.clone();
-            a.connect_activate(move |_, _| b.emit_clicked());
-            ag.add_action(&a);
-        }
-        {
-            let a = gio::SimpleAction::new("import-toml", None);
-            let b = import_toml_btn.clone();
-            a.connect_activate(move |_, _| b.emit_clicked());
-            ag.add_action(&a);
+            let fg = gio::Menu::new();
+            fg.append(Some("Create new\u{2026}"), Some("vpn-add.fg-new"));
+            menu.append_submenu(Some("FortiGate"), &fg);
+
+            let ov = gio::Menu::new();
+            ov.append(Some("Import .ovpn file\u{2026}"), Some("vpn-add.ov-import"));
+            menu.append_submenu(Some("OpenVPN"), &ov);
+
+            let az = gio::Menu::new();
+            az.append(
+                Some("Import Azure Portal config\u{2026}"),
+                Some("vpn-add.az-import"),
+            );
+            menu.append_submenu(Some("Azure VPN"), &az);
+
+            let other = gio::Menu::new();
+            other.append(
+                Some("Any SuperManager TOML profile\u{2026}"),
+                Some("vpn-add.toml-import"),
+            );
+            menu.append_section(None, &other);
         }
 
         let popover = gtk4::PopoverMenu::from_model(Some(&menu));
         popover.set_parent(&vpn_profile_list);
         popover.set_has_arrow(false);
-        vpn_profile_list.insert_action_group("vpn-bg", Some(&ag));
 
         let gesture = gtk4::GestureClick::builder().button(3).build();
         let popover_ref = popover.clone();
@@ -1126,81 +1133,103 @@ pub fn build_ui(
         });
     }
 
-    // --- VPN import/add buttons ---------------------------------------------
+    // --- VPN add menu actions -----------------------------------------------
+    //
+    // One SimpleActionGroup attached to the MenuButton handles every
+    // submenu entry. Each closure calls popover.popdown() on the OUTER
+    // add-popover (the one with VPN/SSH-keys/SSH-hosts sections) so the
+    // chrome closes after a dialog is launched.
     {
-        let app_state = Arc::clone(&app_state);
-        let toast_overlay = toast_overlay.clone();
-        let popover = popover.clone();
-        let tx = tx.clone();
-        let rt = rt.clone();
-        let window = window.clone();
-        import_wg_btn.connect_clicked(move |_| {
-            popover.popdown();
-            vpn::dialogs::import_wireguard(
-                &window,
-                &app_state,
-                &toast_overlay,
-                &tx,
-                &rt,
-            );
-        });
-    }
-    {
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        let popover = popover.clone();
-        add_fg_btn.connect_clicked(move |_| {
-            popover.popdown();
-            vpn::dialogs::show_fortigate_dialog(&window, &rt, &tx);
-        });
-    }
-    {
-        let app_state = Arc::clone(&app_state);
-        let toast_overlay = toast_overlay.clone();
-        let popover = popover.clone();
-        let tx = tx.clone();
-        let rt = rt.clone();
-        let window = window.clone();
-        import_ov_btn.connect_clicked(move |_| {
-            popover.popdown();
-            vpn::dialogs::import_openvpn(
-                &window,
-                &app_state,
-                &toast_overlay,
-                &tx,
-                &rt,
-            );
-        });
-    }
-    {
-        let popover = popover.clone();
-        let tx = tx.clone();
-        let rt = rt.clone();
-        let window = window.clone();
-        import_az_btn.connect_clicked(move |_| {
-            popover.popdown();
-            vpn::dialogs::show_azure_import_dialog(&window, &rt, &tx);
-        });
-    }
+        let action_group = gio::SimpleActionGroup::new();
 
-    {
-        let app_state = Arc::clone(&app_state);
-        let toast_overlay = toast_overlay.clone();
-        let popover = popover.clone();
-        let tx = tx.clone();
-        let rt = rt.clone();
-        let window = window.clone();
-        import_toml_btn.connect_clicked(move |_| {
-            popover.popdown();
-            vpn::dialogs::import_toml_config(
-                &window,
-                &app_state,
-                &toast_overlay,
-                &tx,
-                &rt,
-            );
-        });
+        let make_action = |name: &str| gio::SimpleAction::new(name, None);
+
+        // WireGuard — import only.
+        {
+            let action = make_action("wg-import");
+            let app_state = Arc::clone(&app_state);
+            let toast_overlay = toast_overlay.clone();
+            let popover = popover.clone();
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let window = window.clone();
+            action.connect_activate(move |_, _| {
+                popover.popdown();
+                vpn::dialogs::import_wireguard(&window, &app_state, &toast_overlay, &tx, &rt);
+            });
+            action_group.add_action(&action);
+        }
+
+        // FortiGate — create new (the only backend with a build-from-form path today).
+        {
+            let action = make_action("fg-new");
+            let popover = popover.clone();
+            let window = window.clone();
+            let rt = rt.clone();
+            let tx = tx.clone();
+            action.connect_activate(move |_, _| {
+                popover.popdown();
+                vpn::dialogs::show_fortigate_dialog(&window, &rt, &tx);
+            });
+            action_group.add_action(&action);
+        }
+
+        // OpenVPN — import only.
+        {
+            let action = make_action("ov-import");
+            let app_state = Arc::clone(&app_state);
+            let toast_overlay = toast_overlay.clone();
+            let popover = popover.clone();
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let window = window.clone();
+            action.connect_activate(move |_, _| {
+                popover.popdown();
+                vpn::dialogs::import_openvpn(&window, &app_state, &toast_overlay, &tx, &rt);
+            });
+            action_group.add_action(&action);
+        }
+
+        // Azure VPN — import only (config is downloaded from Azure Portal).
+        {
+            let action = make_action("az-import");
+            let popover = popover.clone();
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let window = window.clone();
+            action.connect_activate(move |_, _| {
+                popover.popdown();
+                vpn::dialogs::show_azure_import_dialog(&window, &rt, &tx);
+            });
+            action_group.add_action(&action);
+        }
+
+        // Universal TOML import — backend chosen by the file's [config] discriminator.
+        {
+            let action = make_action("toml-import");
+            let app_state = Arc::clone(&app_state);
+            let toast_overlay = toast_overlay.clone();
+            let popover = popover.clone();
+            let tx = tx.clone();
+            let rt = rt.clone();
+            let window = window.clone();
+            action.connect_activate(move |_, _| {
+                popover.popdown();
+                vpn::dialogs::import_toml_config(
+                    &window,
+                    &app_state,
+                    &toast_overlay,
+                    &tx,
+                    &rt,
+                );
+            });
+            action_group.add_action(&action);
+        }
+
+        // Install the action group on the window — referenced from both
+        // the MenuButton's popover and the sidebar's right-click popover
+        // via the `vpn-add.<id>` action paths.
+        window.insert_action_group("vpn-add", Some(&action_group));
     }
 
     // --- SSH add buttons ----------------------------------------------------
