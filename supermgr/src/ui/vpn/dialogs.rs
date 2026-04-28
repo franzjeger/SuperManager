@@ -546,6 +546,12 @@ pub fn show_fortigate_dialog(
     let psk_row = adw::PasswordEntryRow::builder()
         .title("Pre-shared Key")
         .build();
+    // Optional DNS override — leave empty to use whatever DNS the FortiGate
+    // pushes via IKEv2 mode-config.  Accepts comma/semicolon/space separated
+    // IPv4 and IPv6 addresses.
+    let dns_row = adw::EntryRow::builder()
+        .title("DNS Servers (optional)")
+        .build();
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
@@ -553,6 +559,7 @@ pub fn show_fortigate_dialog(
     group.add(&user_row);
     group.add(&pass_row);
     group.add(&psk_row);
+    group.add(&dns_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let add_btn = gtk4::Button::builder()
@@ -618,6 +625,7 @@ pub fn show_fortigate_dialog(
         let user_row = user_row.clone();
         let pass_row = pass_row.clone();
         let psk_row = psk_row.clone();
+        let dns_row = dns_row.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         add_btn.connect_clicked(move |_| {
@@ -626,10 +634,15 @@ pub fn show_fortigate_dialog(
             let username = user_row.text().trim().to_string();
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
+            let dns_servers = dns_row.text().trim().to_string();
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
-                let msg = match dbus_import_fortigate(name, host, username, password, psk).await {
+                let msg = match dbus_import_fortigate(
+                    name, host, username, password, psk, dns_servers,
+                )
+                .await
+                {
                     Ok(profiles) => AppMsg::ImportSucceeded {
                         profiles,
                         toast: Some("Profile imported"),

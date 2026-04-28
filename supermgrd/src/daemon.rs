@@ -713,16 +713,22 @@ impl DaemonService {
         username: String,
         password: String,
         psk: String,
+        dns_servers: String,
     ) -> fdo::Result<String> {
         let profile_id = Uuid::new_v4();
 
         let name = name.trim().to_string();
         let host = host.trim().to_string();
         let username = username.trim().to_string();
+        let dns_servers = parse_dns_server_list(&dns_servers);
 
         info!(
-            "import_fortigate: creating profile '{}' for host '{}', user '{}'",
-            name, host, username
+            "import_fortigate: creating profile '{}' for host '{}', user '{}', \
+             user-supplied DNS servers: {}",
+            name,
+            host,
+            username,
+            dns_servers.len()
         );
 
         if host.is_empty() {
@@ -755,7 +761,7 @@ impl DaemonService {
             username,
             password: SecretRef::new(pw_label),
             psk: SecretRef::new(psk_label),
-            dns_servers: Vec::new(),
+            dns_servers,
             routes: Vec::new(),
         };
 
@@ -4289,6 +4295,22 @@ async fn openvpn_server_ips(config_file: &str) -> Vec<String> {
     ips
 }
 
+/// Parse a user-supplied list of DNS servers.
+///
+/// Accepts comma-, semicolon-, or whitespace-separated IPv4/IPv6 addresses
+/// (the GUI text field doesn't enforce a separator and a paste from
+/// `resolvectl status` uses spaces). Invalid tokens are silently skipped
+/// rather than rejected wholesale: a typo in one entry shouldn't make the
+/// whole import fail. An empty input returns an empty Vec, which the
+/// connect path treats as "fall back to mode-config DNS from the gateway".
+fn parse_dns_server_list(raw: &str) -> Vec<std::net::IpAddr> {
+    raw.split(|c: char| c == ',' || c == ';' || c.is_ascii_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .collect()
+}
+
 /// Install an nftables kill-switch that drops all non-VPN traffic.
 ///
 /// All rules are applied atomically via a single `nft -f -` invocation so
@@ -5387,4 +5409,66 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_dns_server_list_handles_common_separators() {
+        assert_eq!(
+            parse_dns_server_list("1.1.1.1, 8.8.8.8"),
+            vec![
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "8.8.8.8".parse().unwrap()
+            ]
+        );
+        // Whitespace-only — matches what `resolvectl status` prints.
+        assert_eq!(
+            parse_dns_server_list("1.1.1.1 8.8.8.8"),
+            vec![
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "8.8.8.8".parse().unwrap()
+            ]
+        );
+        // Semicolon — friendly for paste from /etc/resolv.conf-style notes.
+        assert_eq!(
+            parse_dns_server_list("1.1.1.1;8.8.8.8"),
+            vec![
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "8.8.8.8".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_dns_server_list_skips_garbage_tokens_without_failing() {
+        // A single typo shouldn't sink the whole import.
+        assert_eq!(
+            parse_dns_server_list("1.1.1.1, not-an-ip, 8.8.8.8"),
+            vec![
+                "1.1.1.1".parse::<std::net::IpAddr>().unwrap(),
+                "8.8.8.8".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_dns_server_list_accepts_ipv6() {
+        assert_eq!(
+            parse_dns_server_list("2606:4700:4700::1111, 2001:4860:4860::8888"),
+            vec![
+                "2606:4700:4700::1111".parse::<std::net::IpAddr>().unwrap(),
+                "2001:4860:4860::8888".parse().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_dns_server_list_empty_input_returns_empty_vec() {
+        assert!(parse_dns_server_list("").is_empty());
+        assert!(parse_dns_server_list("   ").is_empty());
+        assert!(parse_dns_server_list(",,,").is_empty());
+    }
 }

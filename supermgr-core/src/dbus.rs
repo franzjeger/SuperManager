@@ -319,6 +319,11 @@ pub trait Daemon {
     /// `username` / `password` are the EAP-MSCHAPv2 credentials; `psk` is
     /// the group pre-shared key for IKE SA authentication.
     ///
+    /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
+    /// addresses to push to systemd-resolved on connect. Pass an empty
+    /// string to fall back to whatever DNS servers the FortiGate sends
+    /// during IKE mode-config negotiation.
+    ///
     /// Returns the new profile's UUID string on success.
     async fn import_fortigate(
         &self,
@@ -327,6 +332,7 @@ pub trait Daemon {
         username: &str,
         password: &str,
         psk: &str,
+        dns_servers: &str,
     ) -> fdo::Result<String>;
 
     /// Import an OpenVPN `.ovpn` configuration file.
