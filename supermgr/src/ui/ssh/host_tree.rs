@@ -12,7 +12,7 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::{error, info};
 
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 
 use crate::app::AppMsg;
 use crate::dbus_client::{dbus_ssh_delete_host, dbus_ssh_toggle_pin};
@@ -39,7 +39,7 @@ pub fn build_ssh_host_list() -> gtk4::ListBox {
 /// Group headers are non-activatable bold labels.
 pub fn populate_ssh_host_list(
     list_box: &gtk4::ListBox,
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     selected_id: Option<&str>,
     window: &adw::ApplicationWindow,
     rt: &tokio::runtime::Handle,
@@ -59,7 +59,7 @@ pub fn populate_ssh_host_list(
 
     // Apply search filter.
     let filter_lower = filter.to_lowercase();
-    let filtered: Vec<&SshHostSummary> = if filter.is_empty() {
+    let filtered: Vec<&HostSummary> = if filter.is_empty() {
         hosts.iter().collect()
     } else {
         hosts.iter()
@@ -87,7 +87,7 @@ pub fn populate_ssh_host_list(
     }
 
     // Group hosts by their group field.
-    let mut groups: BTreeMap<String, Vec<&SshHostSummary>> = BTreeMap::new();
+    let mut groups: BTreeMap<String, Vec<&HostSummary>> = BTreeMap::new();
     for host in &filtered {
         let group_name = if host.group.is_empty() {
             "Ungrouped".to_owned()

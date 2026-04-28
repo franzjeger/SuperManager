@@ -12,7 +12,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use supermgr_core::dbus::DaemonProxy;
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 use supermgr_core::ssh::DeviceType;
 
 use crate::app::{AppMsg, AppState};
@@ -311,9 +311,9 @@ fn populate_dashboard(
         flow_box.remove(&child);
     }
 
-    let dash_hosts: Vec<SshHostSummary> = {
+    let dash_hosts: Vec<HostSummary> = {
         let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-        s.ssh_hosts
+        s.hosts
             .iter()
             .filter(|h| {
                 (h.device_type == DeviceType::Fortigate && h.has_api)
@@ -883,7 +883,7 @@ fn make_progress_row(label_text: &str, bar_name: &str, pct_name: &str) -> gtk4::
 
 /// Build a single device card for the flow box.
 fn build_device_card(
-    host: &SshHostSummary,
+    host: &HostSummary,
     _app_state: &Arc<Mutex<AppState>>,
 ) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
@@ -1346,7 +1346,7 @@ pub fn add_cloud_device_cards(
     refresh_summary(&flow_box);
 }
 
-/// Build a card for a cloud-fetched device (no SshHostSummary needed).
+/// Build a card for a cloud-fetched device (no HostSummary needed).
 fn build_cloud_card(id: &str, label: &str, hostname: &str, site: &str) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)

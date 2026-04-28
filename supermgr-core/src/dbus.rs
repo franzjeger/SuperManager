@@ -102,17 +102,17 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_export_public_key(&self, key_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String> { ... }
-//       async fn ssh_add_host(&self, host_json: &str) -> fdo::Result<String> { ... }
-//       async fn ssh_update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> { ... }
-//       async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String> { ... }
-//       async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()> { ... }
-//       async fn ssh_list_hosts(&self) -> fdo::Result<String> { ... }
-//       async fn ssh_get_host(&self, host_id: &str) -> fdo::Result<String> { ... }
+//       async fn add_host(&self, host_json: &str) -> fdo::Result<String> { ... }
+//       async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> { ... }
+//       async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String> { ... }
+//       async fn delete_host(&self, host_id: &str) -> fdo::Result<()> { ... }
+//       async fn list_hosts(&self) -> fdo::Result<String> { ... }
+//       async fn get_host(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_push_key(&self, key_id: &str, host_ids_json: &str, use_sudo: bool) -> fdo::Result<String> { ... }
 //       async fn ssh_revoke_key(&self, key_id: &str, host_ids_json: &str, use_sudo: bool) -> fdo::Result<String> { ... }
 //       async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> { ... }
 //       async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String> { ... }
-//       async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
+//       async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String> { ... }
 //       async fn fortigate_push_ssh_key(&self, host_id: &str, key_id: &str, admin_user: &str) -> fdo::Result<String> { ... }
 //       async fn ssh_start_port_forward(&self, host_id: &str, local_port: u16, remote_host: &str, remote_port: u16) -> fdo::Result<String> { ... }
 //       async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()> { ... }
@@ -439,30 +439,30 @@ pub trait Daemon {
     async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String>;
 
     /// Add a new SSH host from a JSON-serialised
-    /// [`crate::ssh::host::SshHost`] object.
+    /// [`crate::host::Host`] object.
     ///
     /// Returns the new host's UUID string on success.
-    async fn ssh_add_host(&self, host_json: &str) -> fdo::Result<String>;
+    async fn add_host(&self, host_json: &str) -> fdo::Result<String>;
 
     /// Update an existing SSH host.
     ///
     /// `host_json` is the full JSON-serialised host object with updated fields.
-    async fn ssh_update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()>;
+    async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()>;
 
     /// Toggle the pinned/favourite state of an SSH host.
     ///
     /// Flips `pinned` and returns the refreshed host list as a JSON array of
-    /// [`crate::ssh::host::SshHostSummary`] objects.
-    async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String>;
+    /// [`crate::host::HostSummary`] objects.
+    async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String>;
 
     /// Delete an SSH host by UUID string.
-    async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()>;
+    async fn delete_host(&self, host_id: &str) -> fdo::Result<()>;
 
-    /// Return a JSON array of [`crate::ssh::host::SshHostSummary`] objects.
-    async fn ssh_list_hosts(&self) -> fdo::Result<String>;
+    /// Return a JSON array of [`crate::host::HostSummary`] objects.
+    async fn list_hosts(&self) -> fdo::Result<String>;
 
-    /// Return the full [`crate::ssh::host::SshHost`] serialised as JSON.
-    async fn ssh_get_host(&self, host_id: &str) -> fdo::Result<String>;
+    /// Return the full [`crate::host::Host`] serialised as JSON.
+    async fn get_host(&self, host_id: &str) -> fdo::Result<String>;
 
     /// Push a public key to one or more remote hosts' `authorized_keys`.
     ///
@@ -609,7 +609,7 @@ pub trait Daemon {
     ///
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.
-    async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String>;
+    async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String>;
 
     // =======================================================================
     // Config versioning
@@ -690,7 +690,7 @@ pub trait Daemon {
 
     /// Import configuration from a JSON backup string produced by
     /// [`Self::export_all`].  Each imported item receives a new UUID.
-    /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "ssh_hosts": N}`.
+    /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "hosts": N}`.
     async fn import_all(&self, data: &str) -> fdo::Result<String>;
 
     // =======================================================================

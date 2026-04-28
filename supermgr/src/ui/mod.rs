@@ -37,7 +37,7 @@ use tracing::{error, info};
 
 use supermgr_core::vpn::{profile::ProfileSummary, state::VpnState};
 use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 
 use crate::app::{AppMsg, AppState};
 use crate::dbus_client::{
@@ -565,7 +565,7 @@ pub fn build_ui(
             let health = s.host_health.clone();
             populate_ssh_host_list(
                 &ssh_host_list,
-                &s.ssh_hosts,
+                &s.hosts,
                 s.selected_ssh_host.as_deref(),
                 &window,
                 &rt,
@@ -606,7 +606,7 @@ pub fn build_ui(
         let rt = rt.clone();
         ssh_batch_btn.connect_clicked(move |_| {
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            ssh::dialogs::show_batch_command_dialog(&window, &s.ssh_hosts, &rt);
+            ssh::dialogs::show_batch_command_dialog(&window, &s.hosts, &rt);
         });
     }
 
@@ -768,7 +768,7 @@ pub fn build_ui(
         let health = s.host_health.clone();
         populate_ssh_host_list(
             &ssh_host_list,
-            &s.ssh_hosts,
+            &s.hosts,
             s.selected_ssh_host.as_deref(),
             &window,
             &rt,
@@ -1431,9 +1431,9 @@ pub fn build_ui(
             let idx = row.index();
             let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             // Reconstruct the grouped order to find which host this row maps to.
-            let mut groups: std::collections::BTreeMap<String, Vec<SshHostSummary>> =
+            let mut groups: std::collections::BTreeMap<String, Vec<HostSummary>> =
                 std::collections::BTreeMap::new();
-            for host in &s.ssh_hosts {
+            for host in &s.hosts {
                 let group_name = if host.group.is_empty() {
                     "Ungrouped".to_owned()
                 } else {
@@ -1445,7 +1445,7 @@ pub fn build_ui(
                 hosts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
             }
             // Flatten with group headers as None.
-            let mut flat: Vec<Option<SshHostSummary>> = Vec::new();
+            let mut flat: Vec<Option<HostSummary>> = Vec::new();
             for (_group_name, hosts_in_group) in &groups {
                 flat.push(None); // group header
                 for h in hosts_in_group {
@@ -1454,7 +1454,7 @@ pub fn build_ui(
             }
 
             if let Some(Some(host)) = flat.get(idx as usize) {
-                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.ssh_hosts);
+                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.hosts);
                 hosts_content_stack.set_visible_child_name("host-detail");
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
@@ -1491,7 +1491,7 @@ pub fn build_ui(
         ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
-                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::host_detail::refresh_fortigate_dashboard(
                         host_id.clone(),
                         host.hostname.clone(),
@@ -1681,7 +1681,7 @@ pub fn build_ui(
         ssh_host_detail.pf_add_btn.connect_clicked(move |_| {
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
-                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     let host = host.clone();
                     drop(s);
                     ssh::host_detail::show_add_port_forward_dialog(
@@ -2225,7 +2225,7 @@ pub fn build_ui(
             let (host_id, hostname, port, username, has_password) = {
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let sel = s.selected_ssh_host.as_deref();
-                sel.and_then(|id| s.ssh_hosts.iter().find(|h| h.id.to_string() == id))
+                sel.and_then(|id| s.hosts.iter().find(|h| h.id.to_string() == id))
                     .map(|h| (h.id.to_string(), h.hostname.clone(), h.rdp_port.unwrap_or(3389), h.username.clone(), h.has_password))
                     .unwrap_or_default()
             };
@@ -2263,7 +2263,7 @@ pub fn build_ui(
             let (hostname, port) = {
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let sel = s.selected_ssh_host.as_deref();
-                sel.and_then(|id| s.ssh_hosts.iter().find(|h| h.id.to_string() == id))
+                sel.and_then(|id| s.hosts.iter().find(|h| h.id.to_string() == id))
                     .map(|h| (h.hostname.clone(), h.vnc_port.unwrap_or(5900)))
                     .unwrap_or_default()
             };
@@ -2333,9 +2333,9 @@ pub fn build_ui(
         ssh_host_detail.edit_btn.connect_clicked(move |_| {
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(host_id) = &s.selected_ssh_host {
-                if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *host_id) {
+                if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::dialogs::show_edit_host_dialog(
-                        &window, host, &s.ssh_keys, &s.ssh_hosts, &s.profiles, &rt, &tx,
+                        &window, host, &s.ssh_keys, &s.hosts, &s.profiles, &rt, &tx,
                     );
                 }
             }
@@ -2353,7 +2353,7 @@ pub fn build_ui(
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
-                &s.ssh_hosts,
+                &s.hosts,
                 s.selected_ssh_key.as_deref(),
                 &rt,
                 &tx,
@@ -2416,7 +2416,7 @@ pub fn build_ui(
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
-                &s.ssh_hosts,
+                &s.hosts,
                 None,
                 &rt,
                 &tx,
@@ -3134,14 +3134,14 @@ pub fn build_ui(
                 AppMsg::SshHostsRefreshed(hosts) => {
                     {
                         let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                        s.ssh_hosts = hosts;
+                        s.hosts = hosts;
                     }
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     let filter = s.ssh_filter.clone();
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
                         &rx_ssh_host_list,
-                        &s.ssh_hosts,
+                        &s.hosts,
                         s.selected_ssh_host.as_deref(),
                         &rx_window,
                         &rx_rt,
@@ -3150,9 +3150,9 @@ pub fn build_ui(
                         &health,
                     );
                     if let Some(sel) = &s.selected_ssh_host {
-                        if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *sel) {
+                        if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *sel) {
                             // Refresh the detail panel with updated data.
-                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.ssh_hosts);
+                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.hosts);
                         } else {
                             drop(s);
                             rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
@@ -3172,7 +3172,7 @@ pub fn build_ui(
                     // Desktop notification on state *change* (not initial discovery).
                     if was_known_before && old_reachable != Some(reachable) {
                         let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                        let host_label = s.ssh_hosts.iter()
+                        let host_label = s.hosts.iter()
                             .find(|h| h.id.to_string() == host_id)
                             .map(|h| h.label.clone())
                             .unwrap_or_else(|| host_id.clone());
@@ -3200,7 +3200,7 @@ pub fn build_ui(
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
                         &rx_ssh_host_list,
-                        &s.ssh_hosts,
+                        &s.hosts,
                         s.selected_ssh_host.as_deref(),
                         &rx_window,
                         &rx_rt,
@@ -3219,9 +3219,9 @@ pub fn build_ui(
                 }
                 AppMsg::EditSshHost(host_id) => {
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == host_id) {
+                    if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == host_id) {
                         ssh::dialogs::show_edit_host_dialog(
-                            &rx_window, host, &s.ssh_keys, &s.ssh_hosts, &s.profiles, &rx_rt, &rx_tx,
+                            &rx_window, host, &s.ssh_keys, &s.hosts, &s.profiles, &rx_rt, &rx_tx,
                         );
                     }
                 }
@@ -3256,7 +3256,7 @@ pub fn build_ui(
                     ssh::dialogs::show_push_key_dialog(
                         &rx_window,
                         &s.ssh_keys,
-                        &s.ssh_hosts,
+                        &s.hosts,
                         Some(&key_id),
                         &rx_rt,
                         &rx_tx,
@@ -3277,7 +3277,7 @@ pub fn build_ui(
                     }
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(sel) = &s.selected_ssh_host {
-                        if let Some(host) = s.ssh_hosts.iter().find(|h| h.id.to_string() == *sel) {
+                        if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *sel) {
                             ssh::host_detail::populate_port_forwards_list(
                                 &rx_ssh_host_detail.pf_listbox,
                                 &host.port_forwards,
@@ -3770,7 +3770,7 @@ pub fn build_ui(
                     Ok(()) => {
                         let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                         tx.send(AppMsg::SshKeysRefreshed(s.ssh_keys.clone())).ok();
-                        tx.send(AppMsg::SshHostsRefreshed(s.ssh_hosts.clone())).ok();
+                        tx.send(AppMsg::SshHostsRefreshed(s.hosts.clone())).ok();
                     }
                     Err(_) => {}
                 }

@@ -429,7 +429,7 @@ fn build_step1_customer_info(
                 _ => "",
             };
             let mut labels = Vec::new();
-            for host in &s.ssh_hosts {
+            for host in &s.hosts {
                 let dt = format!("{:?}", host.device_type);
                 if filter.is_empty() || dt == filter {
                     labels.push(format!("{} ({}@{})", host.label, host.username, host.hostname));

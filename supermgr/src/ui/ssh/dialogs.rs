@@ -11,7 +11,7 @@ use libadwaita::prelude::*;
 use tracing::error;
 
 use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 use supermgr_core::vpn::profile::ProfileSummary;
 
 use crate::app::AppMsg;
@@ -609,7 +609,7 @@ pub fn show_import_keys_dialog(
 pub fn show_push_key_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     preselected_key_id: Option<&str>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -767,7 +767,7 @@ pub fn show_push_key_dialog(
 pub fn show_revoke_key_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     preselected_key_id: Option<&str>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -907,9 +907,9 @@ pub fn show_revoke_key_dialog(
 /// Show the "Edit SSH Host" dialog, pre-filled with existing values.
 pub fn show_edit_host_dialog(
     window: &adw::ApplicationWindow,
-    host: &SshHostSummary,
+    host: &HostSummary,
     keys: &[SshKeySummary],
-    all_hosts: &[SshHostSummary],
+    all_hosts: &[HostSummary],
     vpn_profiles: &[ProfileSummary],
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -1010,7 +1010,7 @@ pub fn show_edit_host_dialog(
         .build();
 
     // Jump Host (ProxyJump) combo — "None / Direct" plus all other SSH hosts.
-    let other_hosts: Vec<&SshHostSummary> = all_hosts.iter()
+    let other_hosts: Vec<&HostSummary> = all_hosts.iter()
         .filter(|h| h.id != host.id)
         .collect();
     let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
@@ -1369,7 +1369,7 @@ pub fn show_audit_log_dialog(
 /// Show a dialog to run a command on multiple SSH hosts simultaneously.
 pub fn show_batch_command_dialog(
     window: &adw::ApplicationWindow,
-    hosts: &[supermgr_core::ssh::host::SshHostSummary],
+    hosts: &[supermgr_core::host::HostSummary],
     rt: &tokio::runtime::Handle,
 ) {
     let dialog = adw::Dialog::builder()

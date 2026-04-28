@@ -33,7 +33,7 @@ use supermgr_core::{
 };
 
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
-use supermgr_core::ssh::host::{AuthMethod, SshHost, SshHostSummary};
+use supermgr_core::host::{AuthMethod, Host, HostSummary};
 
 use crate::secrets;
 
@@ -88,7 +88,7 @@ pub struct DaemonState {
     pub ssh_keys: std::collections::HashMap<Uuid, SshKey>,
 
     /// SSH hosts, keyed by UUID.
-    pub ssh_hosts: std::collections::HashMap<Uuid, SshHost>,
+    pub hosts: std::collections::HashMap<Uuid, Host>,
 
     /// SSH host health (reachability) map: host UUID → reachable.
     pub host_health: std::collections::HashMap<Uuid, bool>,
@@ -96,8 +96,12 @@ pub struct DaemonState {
     /// Directory where SSH key TOML files are stored.
     pub ssh_key_dir: PathBuf,
 
-    /// Directory where SSH host TOML files are stored.
-    pub ssh_host_dir: PathBuf,
+    /// Directory where managed-host JSON files are stored.
+    ///
+    /// On disk this is still `<base>/ssh/hosts/` for backward compatibility
+    /// with deployments created before the `SshHost` → `Host` type rename;
+    /// changing the path would orphan every existing user's saved hosts.
+    pub host_dir: PathBuf,
 
     // ---- Active port forwards ----
 
@@ -129,10 +133,10 @@ impl DaemonState {
             profile_dir,
             active_kill_switch_mode: None,
             ssh_keys: std::collections::HashMap::new(),
-            ssh_hosts: std::collections::HashMap::new(),
+            hosts: std::collections::HashMap::new(),
             host_health: std::collections::HashMap::new(),
             ssh_key_dir: base.join("ssh/keys"),
-            ssh_host_dir: base.join("ssh/hosts"),
+            host_dir: base.join("ssh/hosts"),
             port_forwards: std::collections::HashMap::new(),
             webhook_url: String::new(),
             webhook_on_host_down: true,
@@ -216,23 +220,23 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Load all `.toml` SSH host files from `ssh_host_dir`.
-    pub fn load_ssh_hosts(&mut self) -> anyhow::Result<()> {
-        if !self.ssh_host_dir.exists() {
-            std::fs::create_dir_all(&self.ssh_host_dir)?;
+    /// Load all `.toml` SSH host files from `host_dir`.
+    pub fn load_hosts(&mut self) -> anyhow::Result<()> {
+        if !self.host_dir.exists() {
+            std::fs::create_dir_all(&self.host_dir)?;
             return Ok(());
         }
-        for entry in std::fs::read_dir(&self.ssh_host_dir)? {
+        for entry in std::fs::read_dir(&self.host_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
                 continue;
             }
             let text = std::fs::read_to_string(&path)?;
-            match toml::from_str::<SshHost>(&text) {
+            match toml::from_str::<Host>(&text) {
                 Ok(host) => {
                     info!("loaded SSH host '{}' from {:?}", host.label, path);
-                    self.ssh_hosts.insert(host.id, host);
+                    self.hosts.insert(host.id, host);
                 }
                 Err(e) => {
                     warn!("skipping malformed SSH host {:?}: {}", path, e);
@@ -250,9 +254,9 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Persist a single SSH host to disk as `{ssh_host_dir}/{id}.toml`.
-    pub fn save_ssh_host(&self, host: &SshHost) -> anyhow::Result<()> {
-        let path = self.ssh_host_dir.join(format!("{}.toml", host.id));
+    /// Persist a single SSH host to disk as `{host_dir}/{id}.toml`.
+    pub fn save_host(&self, host: &Host) -> anyhow::Result<()> {
+        let path = self.host_dir.join(format!("{}.toml", host.id));
         let text = toml::to_string_pretty(host)?;
         std::fs::write(&path, text)?;
         Ok(())
@@ -268,8 +272,8 @@ impl DaemonState {
     }
 
     /// Delete an SSH host's on-disk file.
-    pub fn delete_ssh_host_file(&self, id: Uuid) -> anyhow::Result<()> {
-        let path = self.ssh_host_dir.join(format!("{id}.toml"));
+    pub fn delete_host_file(&self, id: Uuid) -> anyhow::Result<()> {
+        let path = self.host_dir.join(format!("{id}.toml"));
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -1056,7 +1060,7 @@ impl DaemonService {
 
         } else if table.contains_key("hostname") && table.contains_key("auth_method") {
             // ── SSH host ───────────────────────────────────────────────────
-            let mut host: SshHost = toml::from_str(toml_text)
+            let mut host: Host = toml::from_str(toml_text)
                 .map_err(|e| fdo::Error::InvalidArgs(format!("invalid SSH host TOML: {e}")))?;
 
             let new_id = Uuid::new_v4();
@@ -1067,11 +1071,11 @@ impl DaemonService {
 
             let label = host.label.clone();
             let mut state = self.state.lock().await;
-            std::fs::create_dir_all(&state.ssh_host_dir)
+            std::fs::create_dir_all(&state.host_dir)
                 .map_err(|e| fdo::Error::Failed(format!("create ssh host dir: {e}")))?;
-            state.save_ssh_host(&host)
+            state.save_host(&host)
                 .map_err(|e| fdo::Error::Failed(format!("save SSH host: {e}")))?;
-            state.ssh_hosts.insert(host.id, host);
+            state.hosts.insert(host.id, host);
 
             info!("import_toml: SSH host '{}' -> {}", label, new_id);
             Ok(serde_json::json!({ "type": "ssh_host", "id": new_id.to_string() }).to_string())
@@ -1650,8 +1654,8 @@ impl DaemonService {
     }
 
     /// Add a new SSH host from a JSON-serialised object.
-    async fn ssh_add_host(&self, host_json: &str) -> fdo::Result<String> {
-        let mut host: SshHost = serde_json::from_str(host_json)
+    async fn add_host(&self, host_json: &str) -> fdo::Result<String> {
+        let mut host: Host = serde_json::from_str(host_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host JSON: {e}")))?;
         host.id = Uuid::new_v4();
         let now = chrono::Utc::now();
@@ -1660,10 +1664,10 @@ impl DaemonService {
 
         let id_str = host.id.to_string();
         let mut state = self.state.lock().await;
-        tokio::fs::create_dir_all(&state.ssh_host_dir).await
+        tokio::fs::create_dir_all(&state.host_dir).await
             .map_err(|e| fdo::Error::Failed(format!("create dir: {e}")))?;
-        state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
-        state.ssh_hosts.insert(host.id, host);
+        state.save_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        state.hosts.insert(host.id, host);
 
         Ok(id_str)
     }
@@ -1672,13 +1676,13 @@ impl DaemonService {
     ///
     /// Merges the provided JSON fields into the existing host, preserving
     /// fields not present in the update (e.g. `api_token_ref`, `auth_password_ref`).
-    async fn ssh_update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> {
+    async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let updates: serde_json::Value = serde_json::from_str(host_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host JSON: {e}")))?;
 
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
         // Apply only the fields present in the update.
@@ -1743,7 +1747,7 @@ impl DaemonService {
         host.updated_at = chrono::Utc::now();
 
         let host = host.clone();
-        state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        state.save_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
         Ok(())
     }
 
@@ -1751,41 +1755,41 @@ impl DaemonService {
     ///
     /// Flips the `pinned` boolean and persists the change.  Returns the
     /// refreshed host list (JSON array of summaries) so the GUI can update.
-    async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String> {
+    async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.pinned = !host.pinned;
         host.updated_at = chrono::Utc::now();
         let host = host.clone();
-        state.save_ssh_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
-        let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
+        state.save_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
+        let summaries: Vec<HostSummary> = state.hosts.values().map(HostSummary::from).collect();
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Delete an SSH host by UUID.
-    async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()> {
+    async fn delete_host(&self, host_id: &str) -> fdo::Result<()> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
-        state.ssh_hosts.remove(&id);
-        let _ = state.delete_ssh_host_file(id);
+        state.hosts.remove(&id);
+        let _ = state.delete_host_file(id);
         Ok(())
     }
 
     /// List all SSH hosts as a JSON array of summaries.
-    async fn ssh_list_hosts(&self) -> fdo::Result<String> {
+    async fn list_hosts(&self) -> fdo::Result<String> {
         let state = self.state.lock().await;
-        let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
+        let summaries: Vec<HostSummary> = state.hosts.values().map(HostSummary::from).collect();
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Return a single SSH host as JSON.
-    async fn ssh_get_host(&self, host_id: &str) -> fdo::Result<String> {
+    async fn get_host(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let state = self.state.lock().await;
-        let host = state.ssh_hosts.get(&id).ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        let host = state.hosts.get(&id).ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         serde_json::to_string(host).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
@@ -1813,7 +1817,7 @@ impl DaemonService {
             for hid_str in &host_ids {
                 let hid = Uuid::parse_str(hid_str)
                     .map_err(|_| fdo::Error::InvalidArgs(format!("invalid host UUID: {hid_str}")))?;
-                let host = state.ssh_hosts.get(&hid)
+                let host = state.hosts.get(&hid)
                     .ok_or_else(|| fdo::Error::UnknownObject(format!("host {hid} not found")))?;
                 hosts_info.push(host.clone());
             }
@@ -1966,7 +1970,7 @@ impl DaemonService {
             for hid_str in &host_ids {
                 let hid = Uuid::parse_str(hid_str)
                     .map_err(|_| fdo::Error::InvalidArgs(format!("invalid host UUID: {hid_str}")))?;
-                let host = state.ssh_hosts.get(&hid)
+                let host = state.hosts.get(&hid)
                     .ok_or_else(|| fdo::Error::UnknownObject(format!("host {hid} not found")))?;
                 hosts_info.push(host.clone());
             }
@@ -2097,7 +2101,7 @@ impl DaemonService {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let state = self.state.lock().await;
-        let host = state.ssh_hosts.get(&id)
+        let host = state.hosts.get(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         let label = match &host.auth_password_ref {
             Some(r) => r.label().to_owned(),
@@ -2121,12 +2125,12 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("store password: {e}")))?;
 
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.auth_password_ref = Some(SecretRef::new(&label));
         host.updated_at = chrono::Utc::now();
         let host = host.clone();
-        state.save_ssh_host(&host)
+        state.save_host(&host)
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         info!("stored SSH password for host {id}");
@@ -2144,12 +2148,12 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("store certificate: {e}")))?;
 
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.auth_cert_ref = Some(SecretRef::new(&label));
         host.updated_at = chrono::Utc::now();
         let host = host.clone();
-        state.save_ssh_host(&host)
+        state.save_host(&host)
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         info!("stored SSH certificate for host {id}");
@@ -2167,12 +2171,12 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("store API token: {e}")))?;
 
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.api_token_ref = Some(SecretRef::new(&label));
         host.api_port = Some(port);
         host.updated_at = chrono::Utc::now();
-        state.save_ssh_host(&state.ssh_hosts[&id].clone())
+        state.save_host(&state.hosts[&id].clone())
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         info!("stored FortiGate API token for host {id} (port {})", port);
@@ -2194,7 +2198,7 @@ impl DaemonService {
 
         let host = {
             let state = self.state.lock().await;
-            state.ssh_hosts.get(&id)
+            state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
                 .clone()
         };
@@ -2278,7 +2282,7 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("store token: {e}")))?;
 
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.api_token_ref = Some(SecretRef::new(&label));
         if api_port > 0 {
@@ -2286,7 +2290,7 @@ impl DaemonService {
         }
         host.updated_at = chrono::Utc::now();
         let host = host.clone();
-        state.save_ssh_host(&host)
+        state.save_host(&host)
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         crate::audit::log_event("FG_API_KEYGEN", &format!("user={api_user} host={}", host.hostname));
@@ -2301,7 +2305,7 @@ impl DaemonService {
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
         let state = self.state.lock().await;
-        let host = state.ssh_hosts.get(&id)
+        let host = state.hosts.get(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
         let label = host.api_token_ref.as_ref()
@@ -2329,7 +2333,7 @@ impl DaemonService {
 
         let (hostname, api_port, _api_verify_tls, token_label) = {
             let state = self.state.lock().await;
-            let host = state.ssh_hosts.get(&id)
+            let host = state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
             let label = host.api_token_ref.as_ref()
                 .ok_or_else(|| fdo::Error::Failed("no API token configured for this host".into()))?
@@ -2477,7 +2481,7 @@ impl DaemonService {
 
         let host = {
             let state = self.state.lock().await;
-            state.ssh_hosts.get(&id)
+            state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
                 .clone()
         };
@@ -2517,7 +2521,7 @@ impl DaemonService {
         // --- Auto-VPN: connect the mapped VPN profile if needed -----------
         {
             let state = self.state.lock().await;
-            if let Some(host) = state.ssh_hosts.get(&id) {
+            if let Some(host) = state.hosts.get(&id) {
                 if let Some(vpn_id) = host.vpn_profile_id {
                     let already_connected = match &state.vpn_state {
                         VpnState::Connected { profile_id, .. } if *profile_id == vpn_id => true,
@@ -2573,7 +2577,7 @@ impl DaemonService {
         // Extract all needed data under the lock, then drop it before async I/O.
         let (port, username, hostname, auth_method, secret_label, password_label, proxy_jump_str) = {
             let state = self.state.lock().await;
-            let host = state.ssh_hosts.get(&id)
+            let host = state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
             let key_label = if host.auth_method == AuthMethod::Key {
@@ -2588,7 +2592,7 @@ impl DaemonService {
             let pw_label = host.auth_password_ref.as_ref().map(|r| r.label().to_owned());
 
             // Build ProxyJump chain string for -J flag (e.g. "user1@jump1:22,user2@jump2:22").
-            let jump_str = build_proxy_jump_chain(host.proxy_jump, &state.ssh_hosts);
+            let jump_str = build_proxy_jump_chain(host.proxy_jump, &state.hosts);
 
             (host.port, host.username.clone(), host.hostname.clone(), host.auth_method, key_label, pw_label, jump_str)
         };
@@ -2717,7 +2721,7 @@ impl DaemonService {
 
         let profiles: Vec<&Profile> = state.profiles.values().collect();
         let ssh_keys: Vec<&SshKey> = state.ssh_keys.values().collect();
-        let ssh_hosts: Vec<&SshHost> = state.ssh_hosts.values().collect();
+        let hosts: Vec<&Host> = state.hosts.values().collect();
 
         // Include all secrets so the backup is self-contained.
         let all_secrets: std::collections::HashMap<String, String> =
@@ -2783,7 +2787,7 @@ impl DaemonService {
             "exported_at": chrono::Utc::now().to_rfc3339(),
             "profiles": profiles,
             "ssh_keys": ssh_keys,
-            "ssh_hosts": ssh_hosts,
+            "hosts": hosts,
             "secrets": all_secrets,
             "gui_settings": gui_settings,
             "config_backups": config_backups,
@@ -2798,7 +2802,7 @@ impl DaemonService {
     ///
     /// Each imported item receives a new UUID so it never collides with
     /// existing data.  Returns a JSON summary:
-    /// `{"profiles": N, "ssh_keys": N, "ssh_hosts": N}`.
+    /// `{"profiles": N, "ssh_keys": N, "hosts": N}`.
     async fn import_all(&self, data: &str) -> fdo::Result<String> {
         let backup: serde_json::Value = serde_json::from_str(data)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
@@ -2867,17 +2871,17 @@ impl DaemonService {
         }
 
         // --- SSH hosts ---
-        if let Some(arr) = backup.get("ssh_hosts").and_then(|v| v.as_array()) {
+        if let Some(arr) = backup.get("hosts").and_then(|v| v.as_array()) {
             for item in arr {
-                match serde_json::from_value::<SshHost>(item.clone()) {
+                match serde_json::from_value::<Host>(item.clone()) {
                     Ok(mut host) => {
                         let new_id = Uuid::new_v4();
                         host.id = new_id;
-                        let path = state.ssh_host_dir.join(format!("{new_id}.toml"));
+                        let path = state.host_dir.join(format!("{new_id}.toml"));
                         match toml::to_string_pretty(&host) {
                             Ok(text) => {
-                                if let Err(e) = std::fs::create_dir_all(&state.ssh_host_dir) {
-                                    warn!("import_all: mkdir ssh_host_dir: {e}");
+                                if let Err(e) = std::fs::create_dir_all(&state.host_dir) {
+                                    warn!("import_all: mkdir host_dir: {e}");
                                     continue;
                                 }
                                 if let Err(e) = std::fs::write(&path, &text) {
@@ -2891,7 +2895,7 @@ impl DaemonService {
                             }
                         }
                         info!("import_all: imported SSH host '{}' as {new_id}", host.label);
-                        state.ssh_hosts.insert(new_id, host);
+                        state.hosts.insert(new_id, host);
                         imported_hosts += 1;
                     }
                     Err(e) => {
@@ -2959,7 +2963,7 @@ impl DaemonService {
         let summary = serde_json::json!({
             "profiles": imported_profiles,
             "ssh_keys": imported_keys,
-            "ssh_hosts": imported_hosts,
+            "hosts": imported_hosts,
             "secrets": imported_secrets,
             "settings": restored_settings,
             "config_backups": restored_backups,
@@ -2989,7 +2993,7 @@ impl DaemonService {
 
         let host = {
             let state = self.state.lock().await;
-            state.ssh_hosts.get(&id)
+            state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
                 .clone()
         };
@@ -3036,7 +3040,7 @@ impl DaemonService {
 
         let (controller_url, creds_label) = {
             let state = self.state.lock().await;
-            let host = state.ssh_hosts.get(&id)
+            let host = state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
             let url = host.unifi_controller_url.as_ref()
                 .ok_or_else(|| fdo::Error::Failed("no UniFi controller URL configured".into()))?
@@ -3175,12 +3179,12 @@ impl DaemonService {
 
         // Update the host record.
         let mut state = self.state.lock().await;
-        let host = state.ssh_hosts.get_mut(&id)
+        let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.unifi_controller_url = Some(url.to_owned());
         host.unifi_api_token_ref = Some(SecretRef::new(&label));
         host.updated_at = chrono::Utc::now();
-        state.save_ssh_host(&state.ssh_hosts[&id].clone())
+        state.save_host(&state.hosts[&id].clone())
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
         info!("stored UniFi controller credentials for host {id} (url={url})");
@@ -3196,18 +3200,18 @@ impl DaemonService {
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.  The `api` field is only
     /// present when the host has a FortiGate API token configured.
-    async fn ssh_test_connection(&self, host_id: &str) -> fdo::Result<String> {
+    async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
         let host = {
             let state = self.state.lock().await;
-            state.ssh_hosts.get(&id)
+            state.hosts.get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
                 .clone()
         };
 
-        info!("ssh_test_connection: testing {}@{}:{}", host.username, host.hostname, host.port);
+        info!("test_host_connection: testing {}@{}:{}", host.username, host.hostname, host.port);
 
         // --- Test SSH connectivity ---
         let state_arc = Arc::clone(&self.state);
@@ -3287,7 +3291,7 @@ impl DaemonService {
             result["api"] = serde_json::Value::String(api);
         }
 
-        info!("ssh_test_connection result for {id}: {result}");
+        info!("test_host_connection result for {id}: {result}");
         Ok(result.to_string())
     }
 
@@ -3435,7 +3439,7 @@ impl DaemonService {
         let (hostname, api_port, token_label) = {
             let state = self.state.lock().await;
             let host = state
-                .ssh_hosts
+                .hosts
                 .get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
             let label = host
@@ -3559,7 +3563,7 @@ impl DaemonService {
         let host = {
             let state = self.state.lock().await;
             state
-                .ssh_hosts
+                .hosts
                 .get(&id)
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
                 .clone()
@@ -3867,7 +3871,7 @@ impl DaemonService {
         // Clone the data we need before starting the background task.
         let state = self.state.lock().await;
         let host = state
-            .ssh_hosts
+            .hosts
             .get(&hid)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
             .clone();
@@ -4005,7 +4009,7 @@ impl DaemonService {
 /// If the host has a `proxy_jump` configured, the connection is tunnelled
 /// through the jump host (recursively, to support chaining).
 async fn connect_to_ssh_host(
-    host: &SshHost,
+    host: &Host,
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
@@ -4019,7 +4023,7 @@ async fn connect_to_ssh_host(
 
 /// Connect directly to a host (no jump host).
 async fn connect_direct(
-    host: &SshHost,
+    host: &Host,
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
@@ -4086,7 +4090,7 @@ async fn connect_direct(
 /// `"user1@host1:22,user2@host2:22"`, or `None` if no jump host is set.
 fn build_proxy_jump_chain(
     proxy_jump: Option<uuid::Uuid>,
-    hosts: &std::collections::HashMap<uuid::Uuid, SshHost>,
+    hosts: &std::collections::HashMap<uuid::Uuid, Host>,
 ) -> Option<String> {
     let mut current = proxy_jump?;
     let mut parts = Vec::new();
@@ -4117,7 +4121,7 @@ const MAX_PROXY_JUMP_DEPTH: u8 = 10;
 /// Supports recursive chaining: if the jump host itself has a `proxy_jump`,
 /// we connect through that chain first.
 async fn connect_via_jump(
-    target: &SshHost,
+    target: &Host,
     jump_id: uuid::Uuid,
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
@@ -4135,7 +4139,7 @@ async fn connect_via_jump(
     // Look up the jump host.
     let jump_host = {
         let state = state_arc.lock().await;
-        state.ssh_hosts.get(&jump_id).cloned().ok_or_else(|| SshError::ConnectionFailed {
+        state.hosts.get(&jump_id).cloned().ok_or_else(|| SshError::ConnectionFailed {
             host: target.hostname.clone(),
             reason: format!("jump host {jump_id} not found"),
         })?
@@ -5100,7 +5104,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
             // Snapshot the hosts we need to probe.
             let hosts: Vec<(Uuid, String, u16)> = {
                 let s = state.lock().await;
-                s.ssh_hosts
+                s.hosts
                     .values()
                     .map(|h| (h.id, h.hostname.clone(), h.port))
                     .collect()
@@ -5158,7 +5162,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
                     // Webhook: host went DOWN (was reachable or first-time unreachable).
                     if !reachable && wh_on_host_down && !wh_url.is_empty() {
                         let host_label = state_guard
-                            .ssh_hosts
+                            .hosts
                             .get(id)
                             .map(|h| format!("{} ({}:{})", h.label, h.hostname, h.port))
                             .unwrap_or_else(|| id.to_string());
@@ -5404,7 +5408,7 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
             // Collect FortiGate hosts with API tokens.
             let fg_hosts: Vec<(Uuid, String)> = {
                 let s = state.lock().await;
-                s.ssh_hosts
+                s.hosts
                     .values()
                     .filter(|h| {
                         h.device_type == supermgr_core::ssh::DeviceType::Fortigate
