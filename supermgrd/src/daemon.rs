@@ -3366,6 +3366,63 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("serialise status: {e}")))
     }
 
+    /// Download the running OPNsense config and save it to the shared backup
+    /// directory.
+    ///
+    /// Mirrors `fortigate_backup_config`: uses the same `/etc/supermgrd/backups/`
+    /// directory and `<host>_<ts>.xml` naming so all vendor backups land in
+    /// one place. Returns the filename written.
+    async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let (hostname, port, creds) = self.load_opnsense_creds(&id).await?;
+
+        crate::audit::log_event(
+            "OPNSENSE_BACKUP",
+            &format!("backup config for {host_id}"),
+        );
+        let resp = crate::opnsense::request(
+            &hostname,
+            port,
+            &creds,
+            "GET",
+            "/api/core/backup/download/this",
+            "",
+        )
+        .await
+        .map_err(fdo::Error::Failed)?;
+        if resp.status != 200 {
+            return Err(fdo::Error::Failed(format!(
+                "OPNsense backup download returned HTTP {}: {}",
+                resp.status,
+                resp.body.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let backup_dir = PathBuf::from("/etc/supermgrd/backups");
+        tokio::fs::create_dir_all(&backup_dir)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("create backup dir: {e}")))?;
+        let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let safe_host: String = hostname
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+            .collect();
+        // OPNsense's backup is XML; use a different extension than FortiGate's
+        // .conf so the existing list_config_versions filter doesn't surface
+        // them as FortiGate backups.
+        let filename = format!("{safe_host}_{ts}.opnsense.xml");
+        let filepath = backup_dir.join(&filename);
+        tokio::fs::write(&filepath, resp.body.as_bytes())
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("write backup: {e}")))?;
+        info!(
+            "opnsense_backup_config: saved {filepath:?} ({} bytes)",
+            resp.body.len()
+        );
+        Ok(filename)
+    }
+
     // =======================================================================
     // SSH test connection
     // =======================================================================
@@ -5567,11 +5624,12 @@ pub fn spawn_monitor_task(
 /// Default backup interval: 24 hours.
 const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Spawn a background task that periodically backs up all FortiGate hosts
-/// with API tokens configured.
+/// Spawn a background task that periodically backs up all hosts with API
+/// credentials configured.
 ///
-/// Runs every `BACKUP_INTERVAL` (24 h by default).  Failures for individual
-/// hosts are logged but do not stop the loop.
+/// Currently covers FortiGate (REST API + bearer token) and OPNsense
+/// (REST API + key/secret). Runs every `BACKUP_INTERVAL` (24 h by default).
+/// Failures for individual hosts are logged but do not stop the loop.
 pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connection) {
     tokio::spawn(async move {
         // Wait a bit after daemon start before the first backup run.
@@ -5580,47 +5638,74 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
         loop {
             ticker.tick().await;
 
-            // Collect FortiGate hosts with API tokens.
-            let fg_hosts: Vec<(Uuid, String)> = {
+            // Collect every host with API credentials, grouped by vendor so
+            // we can dispatch to the right D-Bus method below. Each entry
+            // is `(uuid, label, vendor_kind)`.
+            #[derive(Clone, Copy)]
+            enum Vendor {
+                FortiGate,
+                OpnSense,
+            }
+            let targets: Vec<(Uuid, String, Vendor)> = {
                 let s = state.lock().await;
                 s.ssh_hosts
                     .values()
-                    .filter(|h| {
-                        h.device_type == supermgr_core::ssh::DeviceType::Fortigate
-                            && h.api_token_ref.is_some()
+                    .filter_map(|h| {
+                        if h.api_token_ref.is_none() {
+                            return None;
+                        }
+                        let v = match h.device_type {
+                            supermgr_core::ssh::DeviceType::Fortigate => Vendor::FortiGate,
+                            supermgr_core::ssh::DeviceType::OpnSense => Vendor::OpnSense,
+                            _ => return None,
+                        };
+                        Some((h.id, h.label.clone(), v))
                     })
-                    .map(|h| (h.id, h.label.clone()))
                     .collect()
             };
 
-            if fg_hosts.is_empty() {
-                debug!("backup scheduler: no FortiGate hosts with API, skipping");
+            if targets.is_empty() {
+                debug!("backup scheduler: no hosts with API credentials, skipping");
                 continue;
             }
 
             info!(
                 "backup scheduler: starting scheduled backup for {} host(s)",
-                fg_hosts.len()
+                targets.len()
             );
 
-            for (id, label) in &fg_hosts {
+            for (id, label, vendor) in &targets {
                 let host_id = id.to_string();
-                // Use the D-Bus proxy to call our own backup method — this
-                // reuses the same auth/HTTP logic and avoids code duplication.
-                match async {
-                    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await
+                // Reuse the same D-Bus proxy across vendors — it dispatches
+                // to the right method by name.
+                let result: anyhow::Result<String> = async {
+                    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn)
+                        .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let filename = proxy.fortigate_backup_config(&host_id).await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    Ok::<String, anyhow::Error>(filename)
+                    let filename = match vendor {
+                        Vendor::FortiGate => proxy
+                            .fortigate_backup_config(&host_id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                        Vendor::OpnSense => proxy
+                            .opnsense_backup_config(&host_id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?,
+                    };
+                    Ok(filename)
                 }
-                .await
-                {
+                .await;
+
+                let kind = match vendor {
+                    Vendor::FortiGate => "FortiGate",
+                    Vendor::OpnSense => "OPNsense",
+                };
+                match result {
                     Ok(filename) => {
-                        info!("backup scheduler: backed up '{label}' -> {filename}");
+                        info!("backup scheduler: backed up [{kind}] '{label}' -> {filename}");
                     }
                     Err(e) => {
-                        warn!("backup scheduler: failed to back up '{label}': {e}");
+                        warn!("backup scheduler: failed to back up [{kind}] '{label}': {e}");
                     }
                 }
             }
