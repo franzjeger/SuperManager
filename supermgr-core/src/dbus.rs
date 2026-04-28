@@ -642,6 +642,11 @@ pub trait Daemon {
     /// individual endpoint failure does not fail the whole call.
     async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
 
+    /// Download the OPNsense running config and save it under
+    /// `/etc/supermgrd/backups/<safe_host>_<ts>.opnsense.xml`.
+    /// Returns the filename written.
+    async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
     // =======================================================================
     // Sophos XML Configuration API
     // =======================================================================
