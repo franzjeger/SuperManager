@@ -33,7 +33,10 @@ ksni        = { version = "0.3",  features = ["tokio"] }
 reqwest     = { workspace = true }
 chrono      = { workspace = true }
 
-# Password hashing (SHA-256) and salt generation
+# Password hashing — Argon2id for new hashes, sha2 retained for one-shot
+# verification of legacy SHA-256 hashes from settings.json files written by
+# pre-Argon2 builds (those are auto-upgraded on the next successful unlock).
+argon2      = { version = "0.5",  features = ["std"] }
 sha2        = { workspace = true }
 rand        = { workspace = true }
 
