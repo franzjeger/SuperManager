@@ -40,5 +40,8 @@ argon2      = { version = "0.5",  features = ["std"] }
 sha2        = { workspace = true }
 rand        = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 [lints]
 workspace = true

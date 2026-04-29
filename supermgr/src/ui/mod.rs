@@ -996,8 +996,7 @@ pub fn build_ui(
 
     // Determine initial page: locked if password is set, otherwise app.
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-        if s.has_password() {
+        if crate::master_password::is_set() {
             outer_stack.set_visible_child_name("lock");
             lock_page.status_label.set_text("Enter your master password to unlock.");
             lock_page.set_btn.set_visible(false);
@@ -1059,7 +1058,7 @@ pub fn build_ui(
                 let cur = ctr.get() + 1;
                 ctr.set(cur);
                 let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-                if s.has_password() && s.auto_lock_minutes > 0 {
+                if crate::master_password::is_set() && s.auto_lock_minutes > 0 {
                     let limit = s.auto_lock_minutes * 60;
                     if cur >= limit {
                         drop(s);
@@ -3460,8 +3459,7 @@ pub fn build_ui(
                     }
                     // Ctrl+L: manually lock the session.
                     gtk4::gdk::Key::l => {
-                        let s = app_settings_k.lock().unwrap_or_else(|e| e.into_inner());
-                        if s.has_password() {
+                        if crate::master_password::is_set() {
                             lock_session(&outer_stack_k, &lock_page_k);
                         }
                         return glib::Propagation::Stop;
@@ -3486,12 +3484,11 @@ pub fn build_ui(
         let inactivity_counter = inactivity_counter.clone();
         lock_page.unlock_btn.connect_clicked(move |_| {
             let password = lock_page.password_row.text().to_string();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-            if s.verify_password(&password) {
+            if crate::master_password::verify(&password) {
                 // Transparently upgrade pre-Argon2 hashes on first successful
                 // unlock — same password, stronger KDF on disk.
-                if s.needs_hash_upgrade() {
-                    s.upgrade_legacy_hash(&password);
+                if crate::master_password::needs_upgrade() {
+                    crate::master_password::upgrade_legacy(&password);
                 }
                 lock_page.password_row.set_text("");
                 lock_page.status_label.set_text("");
@@ -3530,8 +3527,7 @@ pub fn build_ui(
                 return;
             }
             {
-                let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-                s.set_password(&pw);
+                let _ = crate::master_password::set(&pw);
             }
             lock_page.password_row.set_text("");
             lock_page.confirm_row.set_text("");
