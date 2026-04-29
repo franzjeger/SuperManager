@@ -593,6 +593,49 @@ pub trait Daemon {
     ) -> fdo::Result<()>;
 
     // =======================================================================
+    // OPNsense REST API
+    // =======================================================================
+
+    /// Store OPNsense API credentials (key + secret) for an SSH host.
+    ///
+    /// `port` is the HTTPS port (defaults to 443 if 0). `api_key` and
+    /// `api_secret` are the values from OPNsense → System → Access → Users
+    /// → API keys.
+    ///
+    /// Validates the credentials by issuing an authenticated probe; on
+    /// success the credentials are persisted as a JSON blob in the system
+    /// secret service and the host's `api_token_ref` / `api_port` fields
+    /// are updated.
+    async fn opnsense_set_credentials(
+        &self,
+        host_id: &str,
+        port: u16,
+        api_key: &str,
+        api_secret: &str,
+    ) -> fdo::Result<()>;
+
+    /// Issue a Basic-Auth REST API call to an OPNsense host and return the
+    /// raw response body as text.
+    ///
+    /// `method` is one of `GET`, `POST`, `PUT`, `DELETE`. `path` is the
+    /// URL path including the leading `/api/...`. `body` is sent as
+    /// JSON for non-GET methods.
+    async fn opnsense_api(
+        &self,
+        host_id: &str,
+        method: &str,
+        path: &str,
+        body: &str,
+    ) -> fdo::Result<String>;
+
+    /// Composite "is this OPNsense alive" status snapshot for the dashboard.
+    ///
+    /// Returns the `OpnSenseStatus` struct (defined in the daemon's
+    /// `opnsense` module) serialised as JSON. Each field is optional; an
+    /// individual endpoint failure does not fail the whole call.
+    async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
+
+    // =======================================================================
     // SSH port forwarding
     // =======================================================================
 

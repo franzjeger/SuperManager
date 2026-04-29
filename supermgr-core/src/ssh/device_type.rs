@@ -17,6 +17,10 @@ pub enum DeviceType {
     UniFi,
     /// pfSense firewall.
     PfSense,
+    /// OPNsense firewall (FreeBSD-based fork of pfSense, distinct REST API).
+    OpnSense,
+    /// Sophos XG / SFOS firewall.
+    Sophos,
     /// OpenWrt router.
     OpenWrt,
     /// Fortinet FortiGate appliance.
@@ -34,6 +38,12 @@ impl DeviceType {
         match self {
             Self::UniFi => Some("Keys must be added via UniFi Controller GUI"),
             Self::Fortigate => Some("Keys must be added via FortiGate GUI or CLI"),
+            Self::OpnSense => Some(
+                "Keys must be added via OPNsense → System → Access → Users",
+            ),
+            Self::Sophos => Some(
+                "Keys must be added via Sophos Webadmin → Authentication → Users",
+            ),
             _ => None,
         }
     }
@@ -45,6 +55,8 @@ impl fmt::Display for DeviceType {
             Self::Linux => write!(f, "Linux"),
             Self::UniFi => write!(f, "UniFi"),
             Self::PfSense => write!(f, "pfSense"),
+            Self::OpnSense => write!(f, "OPNsense"),
+            Self::Sophos => write!(f, "Sophos"),
             Self::OpenWrt => write!(f, "OpenWrt"),
             Self::Fortigate => write!(f, "FortiGate"),
             Self::Windows => write!(f, "Windows"),
