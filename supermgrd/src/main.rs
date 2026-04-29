@@ -31,6 +31,7 @@ mod ssh;
 mod daemon;
 mod secrets;
 mod opnsense;
+mod tailscale;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 

@@ -439,6 +439,13 @@ pub trait Daemon {
     /// Return a JSON array of [`crate::ssh::key::SshKeySummary`] objects.
     async fn ssh_list_keys(&self) -> fdo::Result<String>;
 
+    /// List nodes in the local tailnet via `tailscale status --json`.
+    ///
+    /// Returns a JSON array of TailscaleNode objects (defined in the
+    /// daemon's `tailscale` module). Errors string-wise when the
+    /// tailscale CLI isn't installed or tailscaled isn't running.
+    async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
+
     /// Return the full [`crate::ssh::key::SshKey`] serialised as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String>;
 
