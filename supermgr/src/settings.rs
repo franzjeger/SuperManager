@@ -4,15 +4,22 @@
 //! (falling back to `~/.config/supermgr/settings.json`).  All fields are
 //! optional in the file; missing fields use their defaults so that older
 //! settings files remain valid after an upgrade.
+//!
+//! # Master password is intentionally NOT in this struct
+//!
+//! The Argon2id master-password hash lives in its own file
+//! (`master-password.hash`) handled by [`crate::master_password`]. It used
+//! to be the `password_hash` field on this struct, but every call to
+//! [`Self::save`] wrote the whole struct back — so changing any unrelated
+//! setting silently re-persisted the password hash that had been loaded
+//! into memory at startup. That meant deleting the password from disk
+//! never stuck while the GUI was running. Splitting it out makes the
+//! single writer of the password hash an explicit user action, never a
+//! side-effect of saving theme/opacity/RDP-client preference.
 
 use std::path::PathBuf;
 
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,10 +53,15 @@ pub struct AppSettings {
     /// Whether to use Claude Code CLI (subscription) instead of API key.
     #[serde(default)]
     pub use_claude_subscription: bool,
-    /// Master password hash stored as `"salt_hex:hash_hex"`.
-    /// Empty string means no master password has been set yet.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub password_hash: String,
+    /// Migration-only: legacy settings.json files written by builds before
+    /// the master-password split contained a `password_hash` field here.
+    /// We deserialise it so [`Self::load`] can hand it to
+    /// [`crate::master_password::migrate_from_legacy_field`], but never
+    /// serialise it again — the hash now lives in its own file. The
+    /// `skip_serializing` attribute ensures every subsequent
+    /// [`Self::save`] writes a settings.json without this field.
+    #[serde(default, skip_serializing, rename = "password_hash")]
+    legacy_password_hash: String,
     /// Minutes of inactivity before the session auto-locks.
     #[serde(default = "default_auto_lock_minutes")]
     pub auto_lock_minutes: u64,
@@ -104,7 +116,7 @@ impl Default for AppSettings {
             opacity: 1.0,
             anthropic_api_key: String::new(),
             use_claude_subscription: false,
-            password_hash: String::new(),
+            legacy_password_hash: String::new(),
             auto_lock_minutes: 15,
             webhook_url: String::new(),
             webhook_on_host_down: true,
@@ -112,158 +124,6 @@ impl Default for AppSettings {
             unifi_cloud_api_key: String::new(),
             rdp_client: "auto".into(),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Password hashing helpers
-// ---------------------------------------------------------------------------
-//
-// New hashes use Argon2id and are stored in the PHC string format
-// (`$argon2id$v=19$m=...,t=...,p=...$<salt>$<hash>`). Older installs
-// stored a `<hex_salt>:<sha256_hex>` pair; those are still verifiable for
-// backwards compatibility and are auto-upgraded to Argon2id on the next
-// successful unlock so an offline attacker can't crack a leaked SHA-256
-// hash with a wordlist in seconds.
-
-/// Hash a password with Argon2id and the OWASP-recommended defaults.
-fn hash_argon2id(password: &str) -> Result<String, argon2::password_hash::Error> {
-    let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
-        .hash_password(password.as_bytes(), &salt)
-        .map(|h| h.to_string())
-}
-
-/// Verify a PHC-format Argon2 hash.
-fn verify_argon2(password: &str, phc: &str) -> bool {
-    match PasswordHash::new(phc) {
-        Ok(parsed) => Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_ok(),
-        Err(_) => false,
-    }
-}
-
-/// Constant-time-ish verification of the legacy `<hex_salt>:<sha256_hex>`
-/// format. Kept only so existing installs can unlock once and have their
-/// hash transparently upgraded to Argon2id.
-fn verify_legacy_sha256(password: &str, salt_hex: &str, expected_hex: &str) -> bool {
-    let mut hasher = Sha256::new();
-    hasher.update(salt_hex.as_bytes());
-    hasher.update(password.as_bytes());
-    let computed = format!("{:x}", hasher.finalize());
-    // Length check first — `eq` on differing-length strings short-circuits,
-    // but the lengths are public anyway.
-    computed.len() == expected_hex.len()
-        && computed
-            .bytes()
-            .zip(expected_hex.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
-}
-
-impl AppSettings {
-    /// Returns `true` if a master password has been configured.
-    pub fn has_password(&self) -> bool {
-        !self.password_hash.is_empty()
-    }
-
-    /// Verify `password` against the stored hash.
-    ///
-    /// Accepts both the modern Argon2id PHC string and the legacy
-    /// `salt:sha256` pair from pre-Argon2 builds. Verification alone does
-    /// not rewrite the stored hash; call [`Self::upgrade_legacy_hash`] from
-    /// the unlock flow after a successful verify to migrate.
-    pub fn verify_password(&self, password: &str) -> bool {
-        if self.password_hash.is_empty() {
-            return false;
-        }
-        if self.password_hash.starts_with("$argon2") {
-            verify_argon2(password, &self.password_hash)
-        } else if let Some((salt, expected_hash)) = self.password_hash.split_once(':') {
-            verify_legacy_sha256(password, salt, expected_hash)
-        } else {
-            false
-        }
-    }
-
-    /// Returns `true` when the stored hash is the legacy SHA-256 format and
-    /// should be re-hashed with Argon2id at the next opportunity.
-    pub fn needs_hash_upgrade(&self) -> bool {
-        !self.password_hash.is_empty() && !self.password_hash.starts_with("$argon2")
-    }
-
-    /// Re-hash `password` with Argon2id and persist. Caller must verify the
-    /// password against the legacy hash *first*; this routine trusts its
-    /// argument and overwrites the stored hash unconditionally.
-    pub fn upgrade_legacy_hash(&mut self, password: &str) {
-        if let Ok(phc) = hash_argon2id(password) {
-            self.password_hash = phc;
-            self.save();
-        }
-    }
-
-    /// Hash and store a new master password.  Saves to disk immediately.
-    pub fn set_password(&mut self, password: &str) {
-        match hash_argon2id(password) {
-            Ok(phc) => {
-                self.password_hash = phc;
-                self.save();
-            }
-            // Argon2id failure is exceedingly rare (OOM at allocation of the
-            // memory cost); leaving the previous hash in place is safer than
-            // silently downgrading to an unsalted/cleartext store.
-            Err(_) => {}
-        }
-    }
-
-    /// Remove the master password (disables the lock screen).
-    pub fn clear_password(&mut self) {
-        self.password_hash.clear();
-        self.save();
-    }
-}
-
-#[cfg(test)]
-mod password_tests {
-    use super::*;
-
-    #[test]
-    fn argon2_round_trip() {
-        let mut s = AppSettings::default();
-        s.set_password("correct horse battery staple");
-        assert!(s.password_hash.starts_with("$argon2id$"));
-        assert!(s.verify_password("correct horse battery staple"));
-        assert!(!s.verify_password("wrong"));
-        assert!(!s.needs_hash_upgrade());
-    }
-
-    #[test]
-    fn legacy_hash_verifies_and_upgrades() {
-        let pw = "old-pass";
-        let salt = "0123456789abcdef0123456789abcdef";
-        let mut hasher = Sha256::new();
-        hasher.update(salt.as_bytes());
-        hasher.update(pw.as_bytes());
-        let legacy = format!("{salt}:{:x}", hasher.finalize());
-
-        let mut s = AppSettings::default();
-        s.password_hash = legacy.clone();
-        assert!(s.verify_password(pw));
-        assert!(s.needs_hash_upgrade());
-
-        s.upgrade_legacy_hash(pw);
-        assert!(s.password_hash.starts_with("$argon2id$"));
-        assert!(s.verify_password(pw));
-        assert!(!s.needs_hash_upgrade());
-    }
-
-    #[test]
-    fn empty_hash_rejects_everything() {
-        let s = AppSettings::default();
-        assert!(!s.has_password());
-        assert!(!s.verify_password(""));
-        assert!(!s.verify_password("anything"));
     }
 }
 
@@ -287,16 +147,34 @@ fn settings_path() -> PathBuf {
 
 impl AppSettings {
     /// Load settings from disk, falling back to defaults on any error.
+    ///
+    /// If the JSON contains a legacy `password_hash` field it is migrated
+    /// to the dedicated `master-password.hash` file (best-effort) and a
+    /// fresh save is issued so the legacy field is gone from disk on the
+    /// next read.
     pub fn load() -> Self {
         let path = settings_path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(t) => t,
+        let mut s: Self = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
             Err(_) => return Self::default(),
         };
-        serde_json::from_str(&text).unwrap_or_default()
+
+        if !s.legacy_password_hash.is_empty() {
+            crate::master_password::migrate_from_legacy_field(&s.legacy_password_hash);
+            // Drop the legacy value so the next save() doesn't include
+            // it (skip_serializing already does that, but clearing the
+            // in-memory copy makes the migration intent explicit).
+            s.legacy_password_hash.clear();
+            s.save();
+        }
+        s
     }
 
     /// Persist settings to disk.  Errors are silently ignored (best-effort).
+    ///
+    /// Note: this NEVER writes the master-password hash, even if a legacy
+    /// file used to. The hash is owned by [`crate::master_password`] and
+    /// has its own writer.
     pub fn save(&self) {
         let path = settings_path();
         if let Some(parent) = path.parent() {

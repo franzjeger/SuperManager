@@ -3272,6 +3272,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "supermgr-core",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

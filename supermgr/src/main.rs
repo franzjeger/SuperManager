@@ -49,6 +49,7 @@
 
 mod app;
 mod dbus_client;
+mod master_password;
 mod settings;
 mod tray;
 mod ui;

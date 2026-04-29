@@ -1407,7 +1407,7 @@ pub fn show_settings_dialog(
         .description("Master password and session lock")
         .build();
 
-    let has_pw = app_settings.lock().unwrap_or_else(|e| e.into_inner()).has_password();
+    let has_pw = crate::master_password::is_set();
 
     let pw_status_row = adw::ActionRow::builder()
         .title("Master Password")
@@ -1432,8 +1432,7 @@ pub fn show_settings_dialog(
         let app_settings_rm = Arc::clone(&app_settings);
         let pw_status_row_rm = pw_status_row.clone();
         remove_pw_btn.connect_clicked(move |btn| {
-            let mut s = app_settings_rm.lock().unwrap_or_else(|e| e.into_inner());
-            s.clear_password();
+            crate::master_password::clear();
             pw_status_row_rm.set_subtitle("Not set");
             btn.set_visible(false);
         });
@@ -1900,7 +1899,7 @@ fn show_change_password_dialog(
     window: &adw::ApplicationWindow,
     app_settings: Arc<Mutex<AppSettings>>,
 ) {
-    let has_pw = app_settings.lock().unwrap_or_else(|e| e.into_inner()).has_password();
+    let has_pw = crate::master_password::is_set();
 
     let dialog = adw::Dialog::builder()
         .title(if has_pw { "Change Password" } else { "Set Password" })
@@ -1962,10 +1961,10 @@ fn show_change_password_dialog(
         let dialog = dialog.clone();
         save_btn.connect_clicked(move |_| {
             let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-            let has = s.has_password();
+            let has = crate::master_password::is_set();
             if has {
                 let cur = current_row.text().to_string();
-                if !s.verify_password(&cur) {
+                if !crate::master_password::verify(&cur) {
                     status.set_text("Current password is incorrect.");
                     status.set_visible(true);
                     return;
@@ -1986,8 +1985,7 @@ fn show_change_password_dialog(
                 return;
             }
             {
-                let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-                s.set_password(&new_pw);
+                let _ = crate::master_password::set(&new_pw);
             }
             dialog.close();
         });
