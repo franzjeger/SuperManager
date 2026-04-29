@@ -11,7 +11,7 @@ use libadwaita::prelude::*;
 use tracing::error;
 
 use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::ssh::host::SshHostSummary;
+use supermgr_core::host::HostSummary;
 use supermgr_core::vpn::profile::ProfileSummary;
 
 use crate::app::AppMsg;
@@ -330,10 +330,12 @@ pub fn show_add_host_dialog(
             let device_type = match device_row.selected() {
                 1 => "uni_fi",
                 2 => "pf_sense",
-                3 => "open_wrt",
-                4 => "fortigate",
-                5 => "windows",
-                6 => "custom",
+                3 => "opn_sense",
+                4 => "sophos",
+                5 => "open_wrt",
+                6 => "fortigate",
+                7 => "windows",
+                8 => "custom",
                 _ => "linux",
             }
             .to_owned();
@@ -609,7 +611,7 @@ pub fn show_import_keys_dialog(
 pub fn show_push_key_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     preselected_key_id: Option<&str>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -767,7 +769,7 @@ pub fn show_push_key_dialog(
 pub fn show_revoke_key_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
-    hosts: &[SshHostSummary],
+    hosts: &[HostSummary],
     preselected_key_id: Option<&str>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -907,9 +909,9 @@ pub fn show_revoke_key_dialog(
 /// Show the "Edit SSH Host" dialog, pre-filled with existing values.
 pub fn show_edit_host_dialog(
     window: &adw::ApplicationWindow,
-    host: &SshHostSummary,
+    host: &HostSummary,
     keys: &[SshKeySummary],
-    all_hosts: &[SshHostSummary],
+    all_hosts: &[HostSummary],
     vpn_profiles: &[ProfileSummary],
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
@@ -928,16 +930,18 @@ pub fn show_edit_host_dialog(
     let group_row = adw::EntryRow::builder().title("Group (optional)").text(&host.group).build();
 
     let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OpenWrt", "FortiGate", "Windows", "Custom",
+        "Linux", "UniFi", "pfSense", "OPNsense", "Sophos", "OpenWrt", "FortiGate", "Windows", "Custom",
     ]);
     let device_idx = match host.device_type {
         supermgr_core::DeviceType::Linux => 0u32,
         supermgr_core::DeviceType::UniFi => 1,
         supermgr_core::DeviceType::PfSense => 2,
-        supermgr_core::DeviceType::OpenWrt => 3,
-        supermgr_core::DeviceType::Fortigate => 4,
-        supermgr_core::DeviceType::Windows => 5,
-        supermgr_core::DeviceType::Custom => 6,
+        supermgr_core::DeviceType::OpnSense => 3,
+        supermgr_core::DeviceType::Sophos => 4,
+        supermgr_core::DeviceType::OpenWrt => 5,
+        supermgr_core::DeviceType::Fortigate => 6,
+        supermgr_core::DeviceType::Windows => 7,
+        supermgr_core::DeviceType::Custom => 8,
     };
     let device_row = adw::ComboRow::builder()
         .title("Device type")
@@ -1010,7 +1014,7 @@ pub fn show_edit_host_dialog(
         .build();
 
     // Jump Host (ProxyJump) combo — "None / Direct" plus all other SSH hosts.
-    let other_hosts: Vec<&SshHostSummary> = all_hosts.iter()
+    let other_hosts: Vec<&HostSummary> = all_hosts.iter()
         .filter(|h| h.id != host.id)
         .collect();
     let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
@@ -1369,7 +1373,7 @@ pub fn show_audit_log_dialog(
 /// Show a dialog to run a command on multiple SSH hosts simultaneously.
 pub fn show_batch_command_dialog(
     window: &adw::ApplicationWindow,
-    hosts: &[supermgr_core::ssh::host::SshHostSummary],
+    hosts: &[supermgr_core::host::HostSummary],
     rt: &tokio::runtime::Handle,
 ) {
     let dialog = adw::Dialog::builder()

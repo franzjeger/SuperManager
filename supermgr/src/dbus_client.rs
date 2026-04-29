@@ -11,7 +11,7 @@ use supermgr_core::{
     vpn::profile::ProfileSummary,
     vpn::state::{state_from_json, VpnState},
     ssh::key::SshKeySummary,
-    ssh::host::SshHostSummary,
+    host::HostSummary,
 };
 
 use crate::app::{AppMsg, AppState};
@@ -150,12 +150,12 @@ pub async fn fetch_initial_ssh_state(app_state: &Arc<Mutex<AppState>>) -> anyhow
     let keys_json = proxy.ssh_list_keys().await.context("SshListKeys")?;
     let keys: Vec<SshKeySummary> = serde_json::from_str(&keys_json).context("parse SSH keys")?;
 
-    let hosts_json = proxy.ssh_list_hosts().await.context("SshListHosts")?;
-    let hosts: Vec<SshHostSummary> = serde_json::from_str(&hosts_json).context("parse SSH hosts")?;
+    let hosts_json = proxy.list_hosts().await.context("SshListHosts")?;
+    let hosts: Vec<HostSummary> = serde_json::from_str(&hosts_json).context("parse SSH hosts")?;
 
     let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
     s.ssh_keys = keys;
-    s.ssh_hosts = hosts;
+    s.hosts = hosts;
     Ok(())
 }
 
@@ -514,7 +514,7 @@ pub async fn dbus_export_all() -> anyhow::Result<String> {
 }
 
 /// Call `ImportAll(data)` on the daemon.  Returns the summary JSON string
-/// (e.g. `{"profiles": 2, "ssh_keys": 1, "ssh_hosts": 3}`).
+/// (e.g. `{"profiles": 2, "ssh_keys": 1, "hosts": 3}`).
 pub async fn dbus_import_all(data: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
@@ -544,10 +544,10 @@ pub async fn dbus_ssh_list_keys() -> anyhow::Result<Vec<SshKeySummary>> {
     Ok(serde_json::from_str(&json)?)
 }
 
-pub async fn dbus_ssh_list_hosts() -> anyhow::Result<Vec<SshHostSummary>> {
+pub async fn dbus_ssh_list_hosts() -> anyhow::Result<Vec<HostSummary>> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    let json = proxy.ssh_list_hosts().await?;
+    let json = proxy.list_hosts().await?;
     Ok(serde_json::from_str(&json)?)
 }
 
@@ -561,23 +561,23 @@ pub async fn dbus_ssh_delete_key(key_id: String) -> anyhow::Result<()> {
 pub async fn dbus_ssh_delete_host(host_id: String) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    proxy.ssh_delete_host(&host_id).await?;
+    proxy.delete_host(&host_id).await?;
     Ok(())
 }
 
-pub async fn dbus_ssh_toggle_pin(host_id: String) -> anyhow::Result<Vec<SshHostSummary>> {
+pub async fn dbus_ssh_toggle_pin(host_id: String) -> anyhow::Result<Vec<HostSummary>> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    let json = proxy.ssh_toggle_pin(&host_id).await?;
+    let json = proxy.toggle_host_pin(&host_id).await?;
     Ok(serde_json::from_str(&json)?)
 }
 
-pub async fn dbus_ssh_add_host(host_json: String) -> anyhow::Result<(Vec<SshHostSummary>, String)> {
+pub async fn dbus_ssh_add_host(host_json: String) -> anyhow::Result<(Vec<HostSummary>, String)> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    let uuid = proxy.ssh_add_host(&host_json).await?;
-    let json = proxy.ssh_list_hosts().await?;
-    let hosts: Vec<SshHostSummary> = serde_json::from_str(&json)?;
+    let uuid = proxy.add_host(&host_json).await?;
+    let json = proxy.list_hosts().await?;
+    let hosts: Vec<HostSummary> = serde_json::from_str(&json)?;
     Ok((hosts, uuid))
 }
 
@@ -615,7 +615,7 @@ pub async fn dbus_ssh_execute_command(host_id: String, command: String) -> anyho
 pub async fn dbus_ssh_test_connection(host_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    Ok(proxy.ssh_test_connection(&host_id).await?)
+    Ok(proxy.test_host_connection(&host_id).await?)
 }
 
 pub async fn dbus_ssh_export_public_key(key_id: String) -> anyhow::Result<String> {
@@ -685,7 +685,7 @@ pub async fn dbus_ssh_get_audit_log(max_lines: u32) -> anyhow::Result<Vec<String
 pub async fn dbus_ssh_update_host(host_id: String, host_json: String) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    proxy.ssh_update_host(&host_id, &host_json).await?;
+    proxy.update_host(&host_id, &host_json).await?;
     Ok(())
 }
 
@@ -700,7 +700,7 @@ pub async fn dbus_ssh_get_key(key_id: String) -> anyhow::Result<String> {
 pub async fn dbus_ssh_get_host(host_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    Ok(proxy.ssh_get_host(&host_id).await?)
+    Ok(proxy.get_host(&host_id).await?)
 }
 
 // ---------------------------------------------------------------------------
@@ -971,7 +971,7 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                     return;
                 }
                 let keys = s.ssh_keys.clone();
-                let hosts = s.ssh_hosts.clone();
+                let hosts = s.hosts.clone();
                 drop(s);
                 // Send SSH refresh messages so the GUI sidebar updates.
                 if tx.send(AppMsg::SshKeysRefreshed(keys)).is_err() {

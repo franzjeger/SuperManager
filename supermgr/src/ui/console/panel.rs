@@ -221,7 +221,7 @@ pub fn build_console_page(
                     VpnState::Disconnected => "VPN: disconnected".into(),
                     _ => "VPN: transitioning".into(),
                 };
-                let hosts: Vec<String> = s.ssh_hosts.iter()
+                let hosts: Vec<String> = s.hosts.iter()
                     .map(|h| {
                         let mut info = format!(
                             "- {} ({}@{}:{}, {}, auth={:?}, id={})",
@@ -248,7 +248,7 @@ pub fn build_console_page(
                     .collect();
                 let health: Vec<String> = s.host_health.iter()
                     .map(|(id, ok)| {
-                        let label = s.ssh_hosts.iter()
+                        let label = s.hosts.iter()
                             .find(|h| h.id.to_string() == *id)
                             .map(|h| h.label.as_str())
                             .unwrap_or(id);

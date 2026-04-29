@@ -234,7 +234,7 @@ pub async fn send_message_subscription(
 fn tools() -> Value {
     json!([
         {
-            "name": "ssh_list_hosts",
+            "name": "list_hosts",
             "description": "List all configured SSH hosts with their connection details.",
             "input_schema": { "type": "object", "properties": {}, "required": [] }
         },
@@ -282,7 +282,7 @@ fn tools() -> Value {
             "input_schema": { "type": "object", "properties": {}, "required": [] }
         },
         {
-            "name": "ssh_add_host",
+            "name": "add_host",
             "description": "Add a new SSH host.",
             "input_schema": {
                 "type": "object",
@@ -714,8 +714,8 @@ fn finalize_tool_block(
 /// Execute a single tool call against the daemon via D-Bus.
 async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Result<Value> {
     match name {
-        "ssh_list_hosts" => {
-            let j = proxy.ssh_list_hosts().await?;
+        "list_hosts" => {
+            let j = proxy.list_hosts().await?;
             Ok(serde_json::from_str(&j)?)
         }
         "ssh_list_keys" => {
@@ -746,7 +746,7 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
             proxy.disconnect().await?;
             Ok(json!({ "status": "disconnecting" }))
         }
-        "ssh_add_host" => {
+        "add_host" => {
             let host = json!({
                 "label": args["label"].as_str().unwrap_or(""),
                 "hostname": args["hostname"].as_str().unwrap_or(""),
@@ -757,7 +757,7 @@ async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Resu
                 "auth_method": args["auth_method"].as_str().unwrap_or("password"),
                 "auth_key_id": args.get("auth_key_id"),
             });
-            let id = proxy.ssh_add_host(&host.to_string()).await?;
+            let id = proxy.add_host(&host.to_string()).await?;
             Ok(json!({ "id": id, "status": "created" }))
         }
         "fortigate_api" => {

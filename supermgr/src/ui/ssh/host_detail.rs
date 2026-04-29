@@ -12,7 +12,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use supermgr_core::dbus::DaemonProxy;
-use supermgr_core::ssh::host::{AuthMethod, PortForward, SshHostSummary};
+use supermgr_core::host::{AuthMethod, PortForward, HostSummary};
 use supermgr_core::ssh::DeviceType;
 
 use crate::app::AppMsg;
@@ -424,7 +424,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 // ---------------------------------------------------------------------------
 
 /// Update the host detail panel to show the given host.
-pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &SshHostSummary, all_hosts: &[SshHostSummary]) {
+pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_hosts: &[HostSummary]) {
     detail.host_label_lbl.set_label(&host.label);
 
     if host.group.is_empty() {
@@ -633,10 +633,10 @@ pub fn populate_port_forwards_list(
 /// Show the "Add Port Forward" dialog.
 ///
 /// On submit, saves the forward to the host's `port_forwards` list via
-/// `ssh_update_host` and sends `SshHostsRefreshed`.
+/// `update_host` and sends `SshHostsRefreshed`.
 pub fn show_add_port_forward_dialog(
     window: &adw::ApplicationWindow,
-    host: &SshHostSummary,
+    host: &HostSummary,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {

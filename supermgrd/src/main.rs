@@ -146,9 +146,9 @@ async fn main() -> anyhow::Result<()> {
     // 2b. SSH data (keys and hosts)
     // -----------------------------------------------------------------------
     daemon_state.load_ssh_keys().context("failed to load SSH keys")?;
-    daemon_state.load_ssh_hosts().context("failed to load SSH hosts")?;
+    daemon_state.load_hosts().context("failed to load SSH hosts")?;
     let ssh_key_count = daemon_state.ssh_keys.len();
-    let ssh_host_count = daemon_state.ssh_hosts.len();
+    let ssh_host_count = daemon_state.hosts.len();
     info!("loaded {} SSH key(s), {} SSH host(s)", ssh_key_count, ssh_host_count);
 
     // -----------------------------------------------------------------------
