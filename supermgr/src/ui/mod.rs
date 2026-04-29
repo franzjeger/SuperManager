@@ -1252,7 +1252,7 @@ pub fn build_ui(
         ssh_add_host_btn.connect_clicked(move |_| {
             popover.popdown();
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            ssh::dialogs::show_add_host_dialog(&window, &s.ssh_keys, &rt, &tx);
+            ssh::dialogs::show_add_host_dialog(&window, &s.ssh_keys, &s.hosts, &s.profiles, &rt, &tx);
         });
     }
     {

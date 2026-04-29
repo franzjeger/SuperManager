@@ -21,6 +21,123 @@ use crate::dbus_client::{
 };
 
 // ---------------------------------------------------------------------------
+// Device-type context
+// ---------------------------------------------------------------------------
+//
+// Single source of truth for device-type ordering in host dialogs and the
+// per-device defaults / visibility rules that drive the Add and Edit forms.
+// Adding a device type means: extend `DEVICE_LABELS`, the `DeviceType` <->
+// index converters, and `device_context`.
+
+/// Order in which device types are shown in the dropdown.
+const DEVICE_LABELS: &[&str] = &[
+    "Linux", "UniFi", "pfSense", "OPNsense", "Sophos",
+    "OpenWrt", "FortiGate", "Windows", "Custom",
+];
+
+/// Map a `DeviceType` to its dropdown index.
+fn device_type_to_idx(d: supermgr_core::DeviceType) -> u32 {
+    use supermgr_core::DeviceType::*;
+    match d {
+        Linux => 0, UniFi => 1, PfSense => 2, OpnSense => 3, Sophos => 4,
+        OpenWrt => 5, Fortigate => 6, Windows => 7, Custom => 8,
+    }
+}
+
+/// Map a dropdown index to the `device_type` JSON value the daemon expects.
+fn idx_to_device_type_str(idx: u32) -> &'static str {
+    match idx {
+        1 => "uni_fi",
+        2 => "pf_sense",
+        3 => "opn_sense",
+        4 => "sophos",
+        5 => "open_wrt",
+        6 => "fortigate",
+        7 => "windows",
+        8 => "custom",
+        _ => "linux",
+    }
+}
+
+/// Per-device UI rules — what to show, what to default, what to forbid.
+///
+/// Anything not relevant to a device type is hidden so the form stays focused
+/// on settings that actually apply (e.g. Windows hides SSH key/cert/jump-host
+/// and uses port 3389 with password auth).
+struct DeviceContext {
+    /// Default value for the primary port row.
+    default_port: u16,
+    /// Label for the primary port row (e.g. "Port" for SSH, "RDP Port" for Windows).
+    port_label: &'static str,
+    /// Show the authentication group at all (it carries password/key/cert + VPN row).
+    show_auth_section: bool,
+    /// Show jump-host (ProxyJump) row. SSH-only concept.
+    show_jump_host: bool,
+    /// Authentication-method indices to allow. Forced to first entry if current
+    /// selection is not in the list. (0=Public Key, 1=Password, 2=Certificate.)
+    allowed_auth: &'static [u32],
+    /// Show the auth-method dropdown itself. Hidden when only one method is
+    /// allowed (e.g. Windows = Password only — no point asking).
+    show_auth_chooser: bool,
+    /// Show FortiGate REST API group (token + HTTPS port).
+    show_fortigate_api: bool,
+    /// Show OPNsense REST API group (reuses api_token_ref/api_port).
+    show_opnsense_api: bool,
+    /// Show UniFi Controller group.
+    show_unifi: bool,
+    /// Show RDP port row in the Remote Desktop group.
+    show_rdp_row: bool,
+    /// Show VNC port row in the Remote Desktop group.
+    show_vnc_row: bool,
+    /// Default value for the RDP port row when it is shown and empty.
+    default_rdp_port: u16,
+}
+
+fn device_context(idx: u32) -> DeviceContext {
+    // Defaults are SSH-shaped (Linux). Each match arm tweaks what differs.
+    let base = DeviceContext {
+        default_port: 22,
+        port_label: "Port",
+        show_auth_section: true,
+        show_jump_host: true,
+        allowed_auth: &[0, 1, 2],
+        show_auth_chooser: true,
+        show_fortigate_api: false,
+        show_opnsense_api: false,
+        show_unifi: false,
+        show_rdp_row: false,
+        show_vnc_row: false,
+        default_rdp_port: 3389,
+    };
+    match idx {
+        1 => DeviceContext { show_unifi: true, allowed_auth: &[0, 1], ..base }, // UniFi
+        2 => DeviceContext { allowed_auth: &[0, 1], ..base },                   // pfSense
+        3 => DeviceContext { show_opnsense_api: true, allowed_auth: &[0, 1], ..base }, // OPNsense
+        4 => DeviceContext {                                                    // Sophos: WebAdmin uses user/pass
+            allowed_auth: &[1],
+            show_auth_chooser: false,
+            ..base
+        },
+        5 => DeviceContext { allowed_auth: &[0, 1], ..base },                   // OpenWrt
+        6 => DeviceContext { show_fortigate_api: true, allowed_auth: &[0, 1], ..base }, // FortiGate
+        7 => DeviceContext {                                                    // Windows: RDP + password only
+            default_port: 3389,
+            port_label: "RDP Port",
+            show_jump_host: false,
+            allowed_auth: &[1],
+            show_auth_chooser: false,
+            ..base
+        },
+        8 => DeviceContext {                                                    // Custom: show everything
+            show_rdp_row: true,
+            show_vnc_row: true,
+            ..base
+        },
+        _ => base,                                                              // Linux
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Generate Key dialog
 // ---------------------------------------------------------------------------
 
@@ -156,6 +273,8 @@ pub fn show_generate_key_dialog(
 pub fn show_add_host_dialog(
     window: &adw::ApplicationWindow,
     keys: &[SshKeySummary],
+    all_hosts: &[HostSummary],
+    vpn_profiles: &[ProfileSummary],
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
@@ -166,23 +285,33 @@ pub fn show_add_host_dialog(
         .content_width(420)
         .build();
 
+    // --- Connection group ---------------------------------------------------
     let label_row = adw::EntryRow::builder().title("Label").build();
     let hostname_row = adw::EntryRow::builder().title("Hostname").build();
     let port_row = adw::EntryRow::builder().title("Port").text("22").build();
     let username_row = adw::EntryRow::builder().title("Username").build();
-    let group_row = adw::EntryRow::builder()
-        .title("Group (optional)")
-        .build();
+    let group_row = adw::EntryRow::builder().title("Group (optional)").build();
 
-    let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OpenWrt", "FortiGate", "Windows", "Custom",
-    ]);
+    let device_model = gtk4::StringList::new(DEVICE_LABELS);
     let device_row = adw::ComboRow::builder()
         .title("Device type")
         .model(&device_model)
         .selected(0)
         .build();
 
+    // Jump host combo — "None / Direct" plus all existing SSH hosts.
+    let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
+    jump_names.extend(all_hosts.iter().map(|h| format!("{} ({})", h.label, h.hostname)));
+    let jump_name_refs: Vec<&str> = jump_names.iter().map(|s| s.as_str()).collect();
+    let jump_model = gtk4::StringList::new(&jump_name_refs);
+    let jump_row = adw::ComboRow::builder()
+        .title("Jump Host")
+        .subtitle("Connect via bastion/jump host (ProxyJump)")
+        .model(&jump_model)
+        .selected(0)
+        .build();
+
+    // --- Authentication group -----------------------------------------------
     let auth_model = gtk4::StringList::new(&["Public Key", "Password", "Certificate"]);
     let auth_row = adw::ComboRow::builder()
         .title("Authentication")
@@ -190,7 +319,6 @@ pub fn show_add_host_dialog(
         .selected(0)
         .build();
 
-    // Key selector (visible when auth = key or certificate).
     let key_names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
     let key_model = gtk4::StringList::new(&key_names);
     let key_row = adw::ComboRow::builder()
@@ -199,40 +327,85 @@ pub fn show_add_host_dialog(
         .selected(0)
         .build();
 
-    // Password row (visible when auth = password).
     let pass_row = adw::PasswordEntryRow::builder()
         .title("Password")
         .visible(false)
         .build();
 
-    // Certificate row (visible when auth = certificate).
     let cert_row = adw::EntryRow::builder()
         .title("Certificate (paste OpenSSH cert)")
         .visible(false)
         .build();
 
-    // Toggle key/password/cert visibility based on auth method selection.
-    {
-        let key_row = key_row.clone();
-        let pass_row = pass_row.clone();
-        let cert_row = cert_row.clone();
-        auth_row.connect_selected_notify(move |row| {
-            let sel = row.selected();
-            key_row.set_visible(sel == 0 || sel == 2); // key or certificate
-            pass_row.set_visible(sel == 1);             // password
-            cert_row.set_visible(sel == 2);             // certificate
-        });
-    }
-
-    let conn_group = adw::PreferencesGroup::builder()
-        .title("Connection")
+    // VPN auto-connect combo — "None" plus all VPN profiles.
+    let mut vpn_names: Vec<&str> = vec!["None"];
+    vpn_names.extend(vpn_profiles.iter().map(|p| p.name.as_str()));
+    let vpn_model = gtk4::StringList::new(&vpn_names);
+    let vpn_row = adw::ComboRow::builder()
+        .title("VPN Profile")
+        .subtitle("Auto-connect VPN before SSH")
+        .model(&vpn_model)
+        .selected(0)
         .build();
+
+    // --- Device-specific groups --------------------------------------------
+    let api_group = adw::PreferencesGroup::builder()
+        .title("FortiGate REST API")
+        .margin_top(12)
+        .visible(false)
+        .build();
+    let api_token_row = adw::PasswordEntryRow::builder().title("API Token").build();
+    let api_port_row = adw::EntryRow::builder().title("HTTPS Port").text("443").build();
+    api_group.add(&api_token_row);
+    api_group.add(&api_port_row);
+
+    let opnsense_group = adw::PreferencesGroup::builder()
+        .title("OPNsense REST API")
+        .margin_top(12)
+        .visible(false)
+        .build();
+    let opnsense_token_row = adw::PasswordEntryRow::builder()
+        .title("API Key:Secret (key:secret)")
+        .build();
+    let opnsense_port_row = adw::EntryRow::builder().title("HTTPS Port").text("443").build();
+    opnsense_group.add(&opnsense_token_row);
+    opnsense_group.add(&opnsense_port_row);
+
+    let unifi_group = adw::PreferencesGroup::builder()
+        .title("UniFi Controller")
+        .margin_top(12)
+        .visible(false)
+        .build();
+    let unifi_url_row = adw::EntryRow::builder().title("Controller URL").build();
+    let unifi_user_row = adw::EntryRow::builder().title("Username").build();
+    let unifi_pass_row = adw::PasswordEntryRow::builder().title("Password").build();
+    unifi_group.add(&unifi_url_row);
+    unifi_group.add(&unifi_user_row);
+    unifi_group.add(&unifi_pass_row);
+
+    let remote_group = adw::PreferencesGroup::builder()
+        .title("Remote Desktop")
+        .margin_top(12)
+        .visible(false)
+        .build();
+    let rdp_port_row = adw::EntryRow::builder()
+        .title("RDP Port (leave empty to disable)")
+        .build();
+    let vnc_port_row = adw::EntryRow::builder()
+        .title("VNC Port (leave empty to disable)")
+        .build();
+    remote_group.add(&rdp_port_row);
+    remote_group.add(&vnc_port_row);
+
+    // --- Layout -------------------------------------------------------------
+    let conn_group = adw::PreferencesGroup::builder().title("Connection").build();
     conn_group.add(&label_row);
     conn_group.add(&hostname_row);
     conn_group.add(&port_row);
     conn_group.add(&username_row);
     conn_group.add(&group_row);
     conn_group.add(&device_row);
+    conn_group.add(&jump_row);
 
     let auth_group = adw::PreferencesGroup::builder()
         .title("Authentication")
@@ -242,6 +415,7 @@ pub fn show_add_host_dialog(
     auth_group.add(&key_row);
     auth_group.add(&pass_row);
     auth_group.add(&cert_row);
+    auth_group.add(&vpn_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let add_btn = gtk4::Button::builder()
@@ -258,21 +432,143 @@ pub fn show_add_host_dialog(
 
     let content_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .margin_top(12)
-        .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
+        .margin_top(12).margin_bottom(24).margin_start(24).margin_end(24)
         .spacing(0)
         .build();
     content_box.append(&conn_group);
     content_box.append(&auth_group);
+    content_box.append(&api_group);
+    content_box.append(&opnsense_group);
+    content_box.append(&unifi_group);
+    content_box.append(&remote_group);
+
+    let scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .vexpand(true)
+        .child(&content_box)
+        .build();
 
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&content_box));
+    toolbar_view.set_content(Some(&scroll));
     dialog.set_child(Some(&toolbar_view));
+    dialog.set_content_height(620);
 
-    // Validate: label + hostname + username required.
+    // --- Auth-method visibility (within SSH-auth context) -------------------
+    let apply_auth_visibility = {
+        let key_row = key_row.clone();
+        let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
+        let auth_row = auth_row.clone();
+        Rc::new(move || {
+            let sel = auth_row.selected();
+            key_row.set_visible(sel == 0 || sel == 2);
+            pass_row.set_visible(sel == 1);
+            cert_row.set_visible(sel == 2);
+        })
+    };
+    {
+        let f = Rc::clone(&apply_auth_visibility);
+        auth_row.connect_selected_notify(move |_| f());
+    }
+
+    // --- Per-device-type visibility & defaults ------------------------------
+    // user_touched: true once the user has typed into the field by hand.
+    // updating: guard set while we programmatically set_text() so the changed
+    // signal doesn't mistake our own write for user input.
+    let port_user_touched = Rc::new(std::cell::Cell::new(false));
+    let rdp_user_touched = Rc::new(std::cell::Cell::new(false));
+    let updating = Rc::new(std::cell::Cell::new(false));
+    {
+        let touched = Rc::clone(&port_user_touched);
+        let updating = Rc::clone(&updating);
+        port_row.connect_changed(move |_| {
+            if !updating.get() { touched.set(true); }
+        });
+    }
+    {
+        let touched = Rc::clone(&rdp_user_touched);
+        let updating = Rc::clone(&updating);
+        rdp_port_row.connect_changed(move |_| {
+            if !updating.get() { touched.set(true); }
+        });
+    }
+
+    let apply_device_context: Rc<dyn Fn(u32)> = {
+        let port_row = port_row.clone();
+        let auth_row = auth_row.clone();
+        let auth_group = auth_group.clone();
+        let key_row = key_row.clone();
+        let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
+        let vpn_row = vpn_row.clone();
+        let jump_row = jump_row.clone();
+        let api_group = api_group.clone();
+        let opnsense_group = opnsense_group.clone();
+        let unifi_group = unifi_group.clone();
+        let remote_group = remote_group.clone();
+        let rdp_port_row = rdp_port_row.clone();
+        let vnc_port_row = vnc_port_row.clone();
+        let port_user_touched = Rc::clone(&port_user_touched);
+        let rdp_user_touched = Rc::clone(&rdp_user_touched);
+        let updating = Rc::clone(&updating);
+        let apply_auth_visibility = Rc::clone(&apply_auth_visibility);
+        Rc::new(move |idx: u32| {
+            let ctx = device_context(idx);
+
+            port_row.set_title(ctx.port_label);
+            if !port_user_touched.get() {
+                updating.set(true);
+                port_row.set_text(&ctx.default_port.to_string());
+                updating.set(false);
+            }
+
+            // Auth section + jump host are independent now.
+            auth_group.set_visible(ctx.show_auth_section);
+            jump_row.set_visible(ctx.show_jump_host);
+            auth_row.set_visible(ctx.show_auth_chooser);
+            // VPN auto-connect only makes sense for SSH-style devices that
+            // also have SSH/RDP behind the tunnel — keep it tied to the auth
+            // section's visibility.
+            vpn_row.set_visible(ctx.show_auth_section);
+
+            if ctx.show_auth_section {
+                let sel = auth_row.selected();
+                if !ctx.allowed_auth.contains(&sel) {
+                    if let Some(&first) = ctx.allowed_auth.first() {
+                        auth_row.set_selected(first);
+                    }
+                }
+                apply_auth_visibility();
+            } else {
+                key_row.set_visible(false);
+                pass_row.set_visible(false);
+                cert_row.set_visible(false);
+            }
+
+            api_group.set_visible(ctx.show_fortigate_api);
+            opnsense_group.set_visible(ctx.show_opnsense_api);
+            unifi_group.set_visible(ctx.show_unifi);
+
+            let any_remote = ctx.show_rdp_row || ctx.show_vnc_row;
+            remote_group.set_visible(any_remote);
+            rdp_port_row.set_visible(ctx.show_rdp_row);
+            vnc_port_row.set_visible(ctx.show_vnc_row);
+            if ctx.show_rdp_row && !rdp_user_touched.get() && rdp_port_row.text().is_empty() {
+                updating.set(true);
+                rdp_port_row.set_text(&ctx.default_rdp_port.to_string());
+                updating.set(false);
+            }
+        })
+    };
+    {
+        let f = Rc::clone(&apply_device_context);
+        device_row.connect_selected_notify(move |row| f(row.selected()));
+    }
+    // Initialise with current selection.
+    apply_device_context(device_row.selected());
+
+    // --- Validation ---------------------------------------------------------
     let validate: Rc<dyn Fn()> = {
         let label_row = label_row.clone();
         let hostname_row = hostname_row.clone();
@@ -285,107 +581,156 @@ pub fn show_add_host_dialog(
             add_btn.set_sensitive(ok);
         })
     };
-    {
-        let v = Rc::clone(&validate);
-        label_row.connect_changed(move |_| v());
-    }
-    {
-        let v = Rc::clone(&validate);
-        hostname_row.connect_changed(move |_| v());
-    }
-    {
-        let v = Rc::clone(&validate);
-        username_row.connect_changed(move |_| v());
-    }
+    { let v = Rc::clone(&validate); label_row.connect_changed(move |_| v()); }
+    { let v = Rc::clone(&validate); hostname_row.connect_changed(move |_| v()); }
+    { let v = Rc::clone(&validate); username_row.connect_changed(move |_| v()); }
 
     {
         let dialog = dialog.clone();
         cancel_btn.connect_clicked(move |_| { dialog.close(); });
     }
 
-    // Collect key IDs for referencing by index.
+    // --- Submit -------------------------------------------------------------
     let key_ids: Vec<String> = keys.iter().map(|k| k.id.to_string()).collect();
+    let vpn_profile_ids: Vec<String> = vpn_profiles.iter().map(|p| p.id.to_string()).collect();
+    let jump_host_ids: Vec<String> = all_hosts.iter().map(|h| h.id.to_string()).collect();
 
     {
         let dialog = dialog.clone();
-        let label_row = label_row.clone();
-        let hostname_row = hostname_row.clone();
-        let port_row = port_row.clone();
-        let username_row = username_row.clone();
-        let group_row = group_row.clone();
-        let device_row = device_row.clone();
-        let auth_row = auth_row.clone();
-        let key_row = key_row.clone();
-        let pass_row = pass_row.clone();
-        let cert_row = cert_row.clone();
-        let key_ids = key_ids.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         add_btn.connect_clicked(move |_| {
+            let device_idx = device_row.selected();
+            let ctx = device_context(device_idx);
             let label = label_row.text().to_string();
             let hostname = hostname_row.text().to_string();
-            let port: u16 = port_row.text().parse().unwrap_or(22);
             let username = username_row.text().to_string();
             let group = group_row.text().to_string();
-            let device_type = match device_row.selected() {
-                1 => "uni_fi",
-                2 => "pf_sense",
-                3 => "opn_sense",
-                4 => "sophos",
-                5 => "open_wrt",
-                6 => "fortigate",
-                7 => "windows",
-                8 => "custom",
-                _ => "linux",
-            }
-            .to_owned();
-            let auth_method = match auth_row.selected() {
+            let device_type = idx_to_device_type_str(device_idx).to_owned();
+
+            // For Windows the primary "Port" field is RDP, not SSH — keep SSH
+            // port at the default 22 and feed the typed value into rdp_port.
+            let primary_port: u16 = port_row.text().parse().unwrap_or(ctx.default_port);
+            let (ssh_port, rdp_port_from_primary) = if ctx.port_label == "RDP Port" {
+                (22u16, Some(primary_port))
+            } else {
+                (primary_port, None)
+            };
+
+            // Auth — fall back to first allowed method if the chooser is hidden.
+            let auth_sel = if ctx.show_auth_chooser {
+                auth_row.selected()
+            } else {
+                ctx.allowed_auth.first().copied().unwrap_or(1)
+            };
+            let auth_method = match auth_sel {
                 1 => "password",
                 2 => "certificate",
                 _ => "key",
             }.to_owned();
-            let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
+            let key_id = if ctx.show_auth_section && (auth_sel == 0 || auth_sel == 2) {
                 key_ids.get(key_row.selected() as usize).cloned()
             } else {
                 None
             };
-            let password = if auth_row.selected() == 1 {
-                Some(pass_row.text().to_string())
+            let password = if auth_sel == 1 {
+                let p = pass_row.text().to_string();
+                if p.is_empty() { None } else { Some(p) }
             } else {
                 None
             };
-            let certificate = if auth_row.selected() == 2 {
+            let certificate = if ctx.show_auth_section && auth_sel == 2 {
                 let c = cert_row.text().to_string();
                 if c.is_empty() { None } else { Some(c) }
             } else {
                 None
             };
 
+            let vpn_id = if ctx.show_auth_section {
+                let sel = vpn_row.selected() as usize;
+                if sel > 0 { vpn_profile_ids.get(sel - 1).cloned() } else { None }
+            } else {
+                None
+            };
+            let jump_id = if ctx.show_jump_host {
+                let sel = jump_row.selected() as usize;
+                if sel > 0 { jump_host_ids.get(sel - 1).cloned() } else { None }
+            } else {
+                None
+            };
+
+            // Remote Desktop ports.
+            let rdp_port: Option<u16> = if let Some(p) = rdp_port_from_primary {
+                Some(p)
+            } else if ctx.show_rdp_row {
+                rdp_port_row.text().parse().ok().filter(|&p: &u16| p > 0)
+            } else {
+                None
+            };
+            let vnc_port: Option<u16> = if ctx.show_vnc_row {
+                vnc_port_row.text().parse().ok().filter(|&p: &u16| p > 0)
+            } else {
+                None
+            };
+
+            // Device-specific credentials.
+            let api_token = if ctx.show_fortigate_api { api_token_row.text().to_string() } else { String::new() };
+            let api_https_port: u16 = if ctx.show_fortigate_api {
+                api_port_row.text().parse().unwrap_or(443)
+            } else { 443 };
+            let opn_token = if ctx.show_opnsense_api { opnsense_token_row.text().to_string() } else { String::new() };
+            let opn_https_port: u16 = if ctx.show_opnsense_api {
+                opnsense_port_row.text().parse().unwrap_or(443)
+            } else { 443 };
+            let unifi_url = if ctx.show_unifi { unifi_url_row.text().to_string() } else { String::new() };
+            let unifi_user = if ctx.show_unifi { unifi_user_row.text().to_string() } else { String::new() };
+            let unifi_pass = if ctx.show_unifi { unifi_pass_row.text().to_string() } else { String::new() };
+
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
-                let host_data = serde_json::json!({
+                let mut host_data = serde_json::json!({
                     "label": label,
                     "hostname": hostname,
-                    "port": port,
+                    "port": ssh_port,
                     "username": username,
                     "group": group,
                     "device_type": device_type,
                     "auth_method": auth_method,
                     "auth_key_id": key_id,
+                    "vpn_profile_id": vpn_id,
+                    "proxy_jump": jump_id,
                 });
+                if let Some(p) = rdp_port { host_data["rdp_port"] = serde_json::json!(p); }
+                if let Some(p) = vnc_port { host_data["vnc_port"] = serde_json::json!(p); }
+
                 let msg = match dbus_ssh_add_host(host_data.to_string()).await {
                     Ok((hosts, uuid)) => {
                         if let Some(pw) = password {
-                            if !pw.is_empty() {
-                                if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid.clone(), pw).await {
-                                    error!("store SSH password: {e:#}");
-                                }
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid.clone(), pw).await {
+                                error!("store SSH password: {e:#}");
                             }
                         }
                         if let Some(cert) = certificate {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(uuid, cert).await {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(uuid.clone(), cert).await {
                                 error!("store SSH certificate: {e:#}");
+                            }
+                        }
+                        if !api_token.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(uuid.clone(), api_token, api_https_port).await {
+                                error!("store FortiGate API token: {e:#}");
+                            }
+                        }
+                        if !opn_token.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(uuid.clone(), opn_token, opn_https_port).await {
+                                error!("store OPNsense API token: {e:#}");
+                            }
+                        }
+                        if !unifi_url.is_empty() && !unifi_user.is_empty() && !unifi_pass.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_unifi_controller(
+                                uuid, unifi_url, unifi_user, unifi_pass,
+                            ).await {
+                                error!("store UniFi controller: {e:#}");
                             }
                         }
                         AppMsg::SshHostsRefreshed(hosts)
@@ -919,36 +1264,39 @@ pub fn show_edit_host_dialog(
     use std::rc::Rc;
 
     let dialog = adw::Dialog::builder()
-        .title("Edit SSH Host")
+        .title("Edit Host")
         .content_width(420)
         .build();
 
+    let device_idx = device_type_to_idx(host.device_type);
+    let initial_ctx = device_context(device_idx);
+
+    // For Windows-style devices the primary "Port" row is the RDP port —
+    // show host.rdp_port (or default) there, and keep host.port as SSH on save.
+    let primary_port_text = if initial_ctx.port_label == "RDP Port" {
+        host.rdp_port.unwrap_or(initial_ctx.default_port).to_string()
+    } else {
+        host.port.to_string()
+    };
+
+    // --- Connection group ---------------------------------------------------
     let label_row = adw::EntryRow::builder().title("Label").text(&host.label).build();
     let hostname_row = adw::EntryRow::builder().title("Hostname").text(&host.hostname).build();
-    let port_row = adw::EntryRow::builder().title("Port").text(&host.port.to_string()).build();
+    let port_row = adw::EntryRow::builder()
+        .title(initial_ctx.port_label)
+        .text(&primary_port_text)
+        .build();
     let username_row = adw::EntryRow::builder().title("Username").text(&host.username).build();
     let group_row = adw::EntryRow::builder().title("Group (optional)").text(&host.group).build();
 
-    let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OPNsense", "Sophos", "OpenWrt", "FortiGate", "Windows", "Custom",
-    ]);
-    let device_idx = match host.device_type {
-        supermgr_core::DeviceType::Linux => 0u32,
-        supermgr_core::DeviceType::UniFi => 1,
-        supermgr_core::DeviceType::PfSense => 2,
-        supermgr_core::DeviceType::OpnSense => 3,
-        supermgr_core::DeviceType::Sophos => 4,
-        supermgr_core::DeviceType::OpenWrt => 5,
-        supermgr_core::DeviceType::Fortigate => 6,
-        supermgr_core::DeviceType::Windows => 7,
-        supermgr_core::DeviceType::Custom => 8,
-    };
+    let device_model = gtk4::StringList::new(DEVICE_LABELS);
     let device_row = adw::ComboRow::builder()
         .title("Device type")
         .model(&device_model)
         .selected(device_idx)
         .build();
 
+    // --- Authentication group -----------------------------------------------
     let auth_model = gtk4::StringList::new(&["Public Key", "Password", "Certificate"]);
     let auth_idx = match host.auth_method {
         supermgr_core::AuthMethod::Key => 0u32,
@@ -963,7 +1311,6 @@ pub fn show_edit_host_dialog(
 
     let key_names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
     let key_model = gtk4::StringList::new(&key_names);
-    // Pre-select the key currently assigned to this host (fall back to 0).
     let current_key_idx = host.auth_key_id
         .and_then(|kid| keys.iter().position(|k| k.id == kid))
         .unwrap_or(0) as u32;
@@ -971,40 +1318,21 @@ pub fn show_edit_host_dialog(
         .title("SSH Key")
         .model(&key_model)
         .selected(current_key_idx)
-        .visible(auth_idx == 0 || auth_idx == 2)
         .build();
 
     let pass_title = if host.has_password { "Password (configured — leave empty to keep)" } else { "Password" };
-    let pass_row = adw::PasswordEntryRow::builder()
-        .title(pass_title)
-        .visible(auth_idx == 1)
-        .build();
+    let pass_row = adw::PasswordEntryRow::builder().title(pass_title).build();
 
     let cert_title = if host.has_certificate { "Certificate (configured — leave empty to keep)" } else { "Certificate (paste OpenSSH cert)" };
-    let cert_row = adw::EntryRow::builder()
-        .title(cert_title)
-        .visible(auth_idx == 2)
-        .build();
+    let cert_row = adw::EntryRow::builder().title(cert_title).build();
 
-    {
-        let key_row = key_row.clone();
-        let pass_row = pass_row.clone();
-        let cert_row = cert_row.clone();
-        auth_row.connect_selected_notify(move |row| {
-            let sel = row.selected();
-            key_row.set_visible(sel == 0 || sel == 2);
-            pass_row.set_visible(sel == 1);
-            cert_row.set_visible(sel == 2);
-        });
-    }
-
-    // VPN auto-connect combo — "None" plus all VPN profiles.
+    // VPN auto-connect combo.
     let mut vpn_names: Vec<&str> = vec!["None"];
     vpn_names.extend(vpn_profiles.iter().map(|p| p.name.as_str()));
     let vpn_model = gtk4::StringList::new(&vpn_names);
     let vpn_idx = host.vpn_profile_id
         .and_then(|vid| vpn_profiles.iter().position(|p| p.id == vid))
-        .map(|i| (i + 1) as u32) // +1 because index 0 is "None"
+        .map(|i| (i + 1) as u32)
         .unwrap_or(0);
     let vpn_row = adw::ComboRow::builder()
         .title("VPN Profile")
@@ -1013,10 +1341,8 @@ pub fn show_edit_host_dialog(
         .selected(vpn_idx)
         .build();
 
-    // Jump Host (ProxyJump) combo — "None / Direct" plus all other SSH hosts.
-    let other_hosts: Vec<&HostSummary> = all_hosts.iter()
-        .filter(|h| h.id != host.id)
-        .collect();
+    // Jump host combo.
+    let other_hosts: Vec<&HostSummary> = all_hosts.iter().filter(|h| h.id != host.id).collect();
     let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
     jump_names.extend(other_hosts.iter().map(|h| format!("{} ({})", h.label, h.hostname)));
     let jump_name_refs: Vec<&str> = jump_names.iter().map(|s| s.as_str()).collect();
@@ -1032,6 +1358,65 @@ pub fn show_edit_host_dialog(
         .selected(jump_idx)
         .build();
 
+    // --- Device-specific groups --------------------------------------------
+    let api_group = adw::PreferencesGroup::builder()
+        .title("FortiGate REST API")
+        .margin_top(12)
+        .build();
+    let token_title = if host.has_api { "API Token (configured — leave empty to keep)" } else { "API Token" };
+    let api_token_row = adw::PasswordEntryRow::builder().title(token_title).build();
+    let api_port_row = adw::EntryRow::builder()
+        .title("HTTPS Port")
+        .text(&host.api_port.unwrap_or(443).to_string())
+        .build();
+    api_group.add(&api_token_row);
+    api_group.add(&api_port_row);
+
+    let opnsense_group = adw::PreferencesGroup::builder()
+        .title("OPNsense REST API")
+        .margin_top(12)
+        .build();
+    let opn_token_title = if host.has_api { "API Key:Secret (configured — leave empty to keep)" } else { "API Key:Secret (key:secret)" };
+    let opnsense_token_row = adw::PasswordEntryRow::builder().title(opn_token_title).build();
+    let opnsense_port_row = adw::EntryRow::builder()
+        .title("HTTPS Port")
+        .text(&host.api_port.unwrap_or(443).to_string())
+        .build();
+    opnsense_group.add(&opnsense_token_row);
+    opnsense_group.add(&opnsense_port_row);
+
+    let unifi_group = adw::PreferencesGroup::builder()
+        .title("UniFi Controller")
+        .margin_top(12)
+        .build();
+    let unifi_url_row = adw::EntryRow::builder()
+        .title("Controller URL")
+        .text(host.unifi_controller_url.as_deref().unwrap_or(""))
+        .build();
+    let unifi_user_row = adw::EntryRow::builder().title("Username").build();
+    let unifi_pass_row = adw::PasswordEntryRow::builder()
+        .title(if host.has_unifi_controller { "Password (configured — leave empty to keep)" } else { "Password" })
+        .build();
+    unifi_group.add(&unifi_url_row);
+    unifi_group.add(&unifi_user_row);
+    unifi_group.add(&unifi_pass_row);
+
+    let remote_group = adw::PreferencesGroup::builder()
+        .title("Remote Desktop")
+        .margin_top(12)
+        .build();
+    let rdp_port_row = adw::EntryRow::builder()
+        .title("RDP Port (leave empty to disable)")
+        .text(&host.rdp_port.map(|p| p.to_string()).unwrap_or_default())
+        .build();
+    let vnc_port_row = adw::EntryRow::builder()
+        .title("VNC Port (leave empty to disable)")
+        .text(&host.vnc_port.map(|p| p.to_string()).unwrap_or_default())
+        .build();
+    remote_group.add(&rdp_port_row);
+    remote_group.add(&vnc_port_row);
+
+    // --- Layout -------------------------------------------------------------
     let conn_group = adw::PreferencesGroup::builder().title("Connection").build();
     conn_group.add(&label_row);
     conn_group.add(&hostname_row);
@@ -1047,52 +1432,6 @@ pub fn show_edit_host_dialog(
     auth_group.add(&pass_row);
     auth_group.add(&cert_row);
     auth_group.add(&vpn_row);
-
-    // FortiGate REST API group (only visible for fortigate device type).
-    let api_group = adw::PreferencesGroup::builder()
-        .title("FortiGate REST API")
-        .margin_top(12)
-        .visible(host.device_type == supermgr_core::DeviceType::Fortigate)
-        .build();
-    let token_title = if host.has_api { "API Token (configured — leave empty to keep)" } else { "API Token" };
-    let api_token_row = adw::PasswordEntryRow::builder()
-        .title(token_title)
-        .build();
-    let api_port_row = adw::EntryRow::builder()
-        .title("HTTPS Port")
-        .text(&host.api_port.unwrap_or(443).to_string())
-        .build();
-    api_group.add(&api_token_row);
-    api_group.add(&api_port_row);
-
-    // UniFi Controller group (only visible for UniFi device type).
-    let unifi_group = adw::PreferencesGroup::builder()
-        .title("UniFi Controller")
-        .margin_top(12)
-        .visible(host.device_type == supermgr_core::DeviceType::UniFi)
-        .build();
-    let unifi_url_row = adw::EntryRow::builder()
-        .title("Controller URL")
-        .text(host.unifi_controller_url.as_deref().unwrap_or(""))
-        .build();
-    let unifi_user_row = adw::EntryRow::builder()
-        .title("Username")
-        .build();
-    let unifi_pass_row = adw::PasswordEntryRow::builder()
-        .title(if host.has_unifi_controller { "Password (configured — leave empty to keep)" } else { "Password" })
-        .build();
-    unifi_group.add(&unifi_url_row);
-    unifi_group.add(&unifi_user_row);
-    unifi_group.add(&unifi_pass_row);
-
-    {
-        let api_group = api_group.clone();
-        let unifi_group = unifi_group.clone();
-        device_row.connect_selected_notify(move |row| {
-            api_group.set_visible(row.selected() == 4);   // index 4 = fortigate
-            unifi_group.set_visible(row.selected() == 1); // index 1 = unifi
-        });
-    }
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let save_btn = gtk4::Button::builder()
@@ -1115,23 +1454,8 @@ pub fn show_edit_host_dialog(
     content_box.append(&conn_group);
     content_box.append(&auth_group);
     content_box.append(&api_group);
+    content_box.append(&opnsense_group);
     content_box.append(&unifi_group);
-
-    // Remote Desktop group (RDP / VNC ports).
-    let remote_group = adw::PreferencesGroup::builder()
-        .title("Remote Desktop")
-        .margin_top(12)
-        .build();
-    let rdp_port_row = adw::EntryRow::builder()
-        .title("RDP Port (leave empty to disable)")
-        .text(&host.rdp_port.map(|p| p.to_string()).unwrap_or_default())
-        .build();
-    let vnc_port_row = adw::EntryRow::builder()
-        .title("VNC Port (leave empty to disable)")
-        .text(&host.vnc_port.map(|p| p.to_string()).unwrap_or_default())
-        .build();
-    remote_group.add(&rdp_port_row);
-    remote_group.add(&vnc_port_row);
     content_box.append(&remote_group);
 
     let scroll = gtk4::ScrolledWindow::builder()
@@ -1144,8 +1468,130 @@ pub fn show_edit_host_dialog(
     toolbar_view.add_top_bar(&header);
     toolbar_view.set_content(Some(&scroll));
     dialog.set_child(Some(&toolbar_view));
-    dialog.set_content_height(600);
+    dialog.set_content_height(620);
 
+    // --- Auth-method visibility (within SSH-auth context) -------------------
+    let apply_auth_visibility = {
+        let key_row = key_row.clone();
+        let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
+        let auth_row = auth_row.clone();
+        Rc::new(move || {
+            let sel = auth_row.selected();
+            key_row.set_visible(sel == 0 || sel == 2);
+            pass_row.set_visible(sel == 1);
+            cert_row.set_visible(sel == 2);
+        })
+    };
+    {
+        let f = Rc::clone(&apply_auth_visibility);
+        auth_row.connect_selected_notify(move |_| f());
+    }
+
+    // --- Per-device-type visibility & defaults ------------------------------
+    // For Edit, the existing values were just loaded into the rows, so
+    // pre-mark them as user-touched — we don't want to clobber what's already
+    // configured for this host when re-applying the initial context.
+    let port_user_touched = Rc::new(std::cell::Cell::new(true));
+    let rdp_user_touched = Rc::new(std::cell::Cell::new(true));
+    let updating = Rc::new(std::cell::Cell::new(false));
+    {
+        let touched = Rc::clone(&port_user_touched);
+        let updating = Rc::clone(&updating);
+        port_row.connect_changed(move |_| {
+            if !updating.get() { touched.set(true); }
+        });
+    }
+    {
+        let touched = Rc::clone(&rdp_user_touched);
+        let updating = Rc::clone(&updating);
+        rdp_port_row.connect_changed(move |_| {
+            if !updating.get() { touched.set(true); }
+        });
+    }
+
+    let apply_device_context: Rc<dyn Fn(u32)> = {
+        let port_row = port_row.clone();
+        let auth_row = auth_row.clone();
+        let auth_group = auth_group.clone();
+        let key_row = key_row.clone();
+        let pass_row = pass_row.clone();
+        let cert_row = cert_row.clone();
+        let vpn_row = vpn_row.clone();
+        let jump_row = jump_row.clone();
+        let api_group = api_group.clone();
+        let opnsense_group = opnsense_group.clone();
+        let unifi_group = unifi_group.clone();
+        let remote_group = remote_group.clone();
+        let rdp_port_row = rdp_port_row.clone();
+        let vnc_port_row = vnc_port_row.clone();
+        let port_user_touched = Rc::clone(&port_user_touched);
+        let rdp_user_touched = Rc::clone(&rdp_user_touched);
+        let updating = Rc::clone(&updating);
+        let apply_auth_visibility = Rc::clone(&apply_auth_visibility);
+        Rc::new(move |idx: u32| {
+            let ctx = device_context(idx);
+
+            port_row.set_title(ctx.port_label);
+            if !port_user_touched.get() {
+                updating.set(true);
+                port_row.set_text(&ctx.default_port.to_string());
+                updating.set(false);
+            }
+
+            auth_group.set_visible(ctx.show_auth_section);
+            jump_row.set_visible(ctx.show_jump_host);
+            auth_row.set_visible(ctx.show_auth_chooser);
+            vpn_row.set_visible(ctx.show_auth_section);
+
+            if ctx.show_auth_section {
+                let sel = auth_row.selected();
+                if !ctx.allowed_auth.contains(&sel) {
+                    if let Some(&first) = ctx.allowed_auth.first() {
+                        auth_row.set_selected(first);
+                    }
+                }
+                apply_auth_visibility();
+            } else {
+                key_row.set_visible(false);
+                pass_row.set_visible(false);
+                cert_row.set_visible(false);
+            }
+
+            api_group.set_visible(ctx.show_fortigate_api);
+            opnsense_group.set_visible(ctx.show_opnsense_api);
+            unifi_group.set_visible(ctx.show_unifi);
+
+            let any_remote = ctx.show_rdp_row || ctx.show_vnc_row;
+            remote_group.set_visible(any_remote);
+            rdp_port_row.set_visible(ctx.show_rdp_row);
+            vnc_port_row.set_visible(ctx.show_vnc_row);
+            if ctx.show_rdp_row && !rdp_user_touched.get() && rdp_port_row.text().is_empty() {
+                updating.set(true);
+                rdp_port_row.set_text(&ctx.default_rdp_port.to_string());
+                updating.set(false);
+            }
+        })
+    };
+    // Once the initial layout has been applied we want subsequent device-type
+    // switches to re-default the port (unless the user has typed since).
+    {
+        let port_user_touched = Rc::clone(&port_user_touched);
+        let rdp_user_touched = Rc::clone(&rdp_user_touched);
+        let device_row_clone = device_row.clone();
+        device_row_clone.connect_selected_notify(move |_| {
+            port_user_touched.set(false);
+            rdp_user_touched.set(false);
+        });
+    }
+    {
+        let f = Rc::clone(&apply_device_context);
+        device_row.connect_selected_notify(move |row| f(row.selected()));
+    }
+    // Initialise based on the host's existing device type.
+    apply_device_context(device_idx);
+
+    // --- Validation ---------------------------------------------------------
     let has_password = host.has_password;
     let has_certificate = host.has_certificate;
     let validate: Rc<dyn Fn()> = {
@@ -1161,9 +1607,9 @@ pub fn show_edit_host_dialog(
                 && !hostname_row.text().is_empty()
                 && !username_row.text().is_empty();
             let auth_ok = match auth_row.selected() {
-                0 => true,                                           // key — always ok
-                1 => has_password || !pass_row.text().is_empty(),    // password
-                2 => has_certificate || !cert_row.text().is_empty(), // certificate
+                0 => true,
+                1 => has_password || !pass_row.text().is_empty(),
+                2 => has_certificate || !cert_row.text().is_empty(),
                 _ => true,
             };
             save_btn.set_sensitive(basic_ok && auth_ok);
@@ -1185,25 +1631,40 @@ pub fn show_edit_host_dialog(
     let vpn_profile_ids: Vec<String> = vpn_profiles.iter().map(|p| p.id.to_string()).collect();
     let jump_host_ids: Vec<String> = other_hosts.iter().map(|h| h.id.to_string()).collect();
     let host_id = host.id.to_string();
+    let original_ssh_port = host.port;
 
     {
         let dialog = dialog.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         save_btn.connect_clicked(move |_| {
+            let device_idx = device_row.selected();
+            let ctx = device_context(device_idx);
             let label = label_row.text().to_string();
             let hostname = hostname_row.text().to_string();
-            let port: u16 = port_row.text().parse().unwrap_or(22);
             let username = username_row.text().to_string();
             let group = group_row.text().to_string();
-            let device_type = match device_row.selected() {
-                1 => "uni_fi", 2 => "pf_sense", 3 => "open_wrt",
-                4 => "fortigate", 5 => "windows", 6 => "custom", _ => "linux",
-            }.to_owned();
-            let auth_method = match auth_row.selected() {
+            let device_type = idx_to_device_type_str(device_idx).to_owned();
+
+            // For Windows-style devices the primary port is RDP; keep the
+            // original SSH port unchanged (or fall back to 22).
+            let primary_port: u16 = port_row.text().parse().unwrap_or(ctx.default_port);
+            let (ssh_port, rdp_port_from_primary) = if ctx.port_label == "RDP Port" {
+                let preserved = if original_ssh_port == 0 { 22 } else { original_ssh_port };
+                (preserved, Some(primary_port))
+            } else {
+                (primary_port, None)
+            };
+
+            let auth_sel = if ctx.show_auth_chooser {
+                auth_row.selected()
+            } else {
+                ctx.allowed_auth.first().copied().unwrap_or(1)
+            };
+            let auth_method = match auth_sel {
                 1 => "password", 2 => "certificate", _ => "key",
             }.to_owned();
-            let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
+            let key_id = if ctx.show_auth_section && (auth_sel == 0 || auth_sel == 2) {
                 key_ids.get(key_row.selected() as usize).cloned()
             } else {
                 None
@@ -1211,24 +1672,42 @@ pub fn show_edit_host_dialog(
 
             let password = pass_row.text().to_string();
             let certificate = cert_row.text().to_string();
-            let api_token = api_token_row.text().to_string();
-            let api_port: u16 = api_port_row.text().parse().unwrap_or(443);
-            let unifi_url = unifi_url_row.text().to_string();
-            let unifi_user = unifi_user_row.text().to_string();
-            let unifi_pass = unifi_pass_row.text().to_string();
-            let rdp_port: Option<u16> = rdp_port_row.text().parse().ok().filter(|&p: &u16| p > 0);
-            let vnc_port: Option<u16> = vnc_port_row.text().parse().ok().filter(|&p: &u16| p > 0);
+            let api_token = if ctx.show_fortigate_api { api_token_row.text().to_string() } else { String::new() };
+            let api_https_port: u16 = if ctx.show_fortigate_api {
+                api_port_row.text().parse().unwrap_or(443)
+            } else { 443 };
+            let opn_token = if ctx.show_opnsense_api { opnsense_token_row.text().to_string() } else { String::new() };
+            let opn_https_port: u16 = if ctx.show_opnsense_api {
+                opnsense_port_row.text().parse().unwrap_or(443)
+            } else { 443 };
+            let unifi_url = if ctx.show_unifi { unifi_url_row.text().to_string() } else { String::new() };
+            let unifi_user = if ctx.show_unifi { unifi_user_row.text().to_string() } else { String::new() };
+            let unifi_pass = if ctx.show_unifi { unifi_pass_row.text().to_string() } else { String::new() };
 
-            // VPN profile: index 0 = None, 1.. = vpn_profile_ids[i-1]
-            let vpn_id = {
-                let sel = vpn_row.selected() as usize;
-                if sel > 0 { vpn_profile_ids.get(sel - 1).cloned() } else { None }
+            let rdp_port: Option<u16> = if let Some(p) = rdp_port_from_primary {
+                Some(p)
+            } else if ctx.show_rdp_row {
+                rdp_port_row.text().parse().ok().filter(|&p: &u16| p > 0)
+            } else {
+                None
+            };
+            let vnc_port: Option<u16> = if ctx.show_vnc_row {
+                vnc_port_row.text().parse().ok().filter(|&p: &u16| p > 0)
+            } else {
+                None
             };
 
-            // Jump host: index 0 = None, 1.. = jump_host_ids[i-1]
-            let jump_id = {
+            let vpn_id = if ctx.show_auth_section {
+                let sel = vpn_row.selected() as usize;
+                if sel > 0 { vpn_profile_ids.get(sel - 1).cloned() } else { None }
+            } else {
+                None
+            };
+            let jump_id = if ctx.show_jump_host {
                 let sel = jump_row.selected() as usize;
                 if sel > 0 { jump_host_ids.get(sel - 1).cloned() } else { None }
+            } else {
+                None
             };
 
             dialog.close();
@@ -1238,7 +1717,7 @@ pub fn show_edit_host_dialog(
                 let host_data = serde_json::json!({
                     "label": label,
                     "hostname": hostname,
-                    "port": port,
+                    "port": ssh_port,
                     "username": username,
                     "group": group,
                     "device_type": device_type,
@@ -1251,25 +1730,26 @@ pub fn show_edit_host_dialog(
                 });
                 let msg = match crate::dbus_client::dbus_ssh_update_host(host_id.clone(), host_data.to_string()).await {
                     Ok(()) => {
-                        // Store SSH password if provided.
                         if !password.is_empty() {
                             if let Err(e) = crate::dbus_client::dbus_ssh_set_password(host_id.clone(), password).await {
                                 error!("store SSH password: {e:#}");
                             }
                         }
-                        // Store certificate if provided.
                         if !certificate.is_empty() {
                             if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(host_id.clone(), certificate).await {
                                 error!("store SSH certificate: {e:#}");
                             }
                         }
-                        // Store FortiGate API token and port if token is provided.
                         if !api_token.is_empty() {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id.clone(), api_token, api_port).await {
-                                error!("store API token/port: {e:#}");
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id.clone(), api_token, api_https_port).await {
+                                error!("store FortiGate API token: {e:#}");
                             }
                         }
-                        // Store UniFi Controller config if URL and credentials provided.
+                        if !opn_token.is_empty() {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id.clone(), opn_token, opn_https_port).await {
+                                error!("store OPNsense API token: {e:#}");
+                            }
+                        }
                         if !unifi_url.is_empty() && !unifi_user.is_empty() && !unifi_pass.is_empty() {
                             if let Err(e) = crate::dbus_client::dbus_ssh_set_unifi_controller(
                                 host_id, unifi_url, unifi_user, unifi_pass,
