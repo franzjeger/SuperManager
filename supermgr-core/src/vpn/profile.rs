@@ -308,6 +308,13 @@ pub struct Profile {
     #[serde(default)]
     pub kill_switch: bool,
 
+    /// Customer / tenant tag for grouping in the GUI. Free-form display
+    /// label (e.g. "Sybr", "Elteco", "Autostrada"). Empty = no group.
+    /// Profiles written by older builds deserialise with the default
+    /// (empty string) so the on-disk TOML layout stays compatible.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub customer: String,
+
     /// The backend-specific configuration.
     pub config: ProfileConfig,
 
@@ -330,6 +337,7 @@ impl Profile {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            customer: String::new(),
             config,
             updated_at: Utc::now(),
         }
@@ -393,6 +401,9 @@ pub struct ProfileSummary {
     /// Kill-switch flag.
     #[serde(default)]
     pub kill_switch: bool,
+    /// Customer / tenant tag for grouping. Empty = ungrouped.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub customer: String,
 }
 
 impl From<&Profile> for ProfileSummary {
@@ -429,6 +440,7 @@ impl From<&Profile> for ProfileSummary {
                 _ => Vec::new(),
             },
             kill_switch: p.kill_switch,
+            customer: p.customer.clone(),
         }
     }
 }

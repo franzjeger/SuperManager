@@ -304,6 +304,16 @@ pub trait Daemon {
     /// The change is persisted to the profile's TOML file immediately.
     async fn set_kill_switch(&self, profile_id: &str, enabled: bool) -> fdo::Result<()>;
 
+    /// Set or clear the customer/tenant tag on a VPN profile.
+    ///
+    /// Pass an empty string to clear the tag (un-group the profile).
+    /// The change is persisted to the profile's TOML file immediately.
+    async fn set_profile_customer(
+        &self,
+        profile_id: &str,
+        customer: &str,
+    ) -> fdo::Result<()>;
+
     /// Set the split-tunnel route list for a WireGuard profile.
     ///
     /// `routes` is a list of CIDR strings (e.g. `["10.0.0.0/8", "192.168.1.0/24"]`).
@@ -454,6 +464,15 @@ pub trait Daemon {
     /// Flips `pinned` and returns the refreshed host list as a JSON array of
     /// [`crate::ssh::host::SshHostSummary`] objects.
     async fn ssh_toggle_pin(&self, host_id: &str) -> fdo::Result<String>;
+
+    /// Set or clear the customer/tenant tag on an SSH host.
+    ///
+    /// Pass an empty string to clear the tag.
+    async fn ssh_set_host_customer(
+        &self,
+        host_id: &str,
+        customer: &str,
+    ) -> fdo::Result<()>;
 
     /// Delete an SSH host by UUID string.
     async fn ssh_delete_host(&self, host_id: &str) -> fdo::Result<()>;
