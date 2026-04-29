@@ -643,6 +643,41 @@ pub trait Daemon {
     async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
 
     // =======================================================================
+    // Sophos XML Configuration API
+    // =======================================================================
+
+    /// Store Sophos WebAdmin credentials for an SSH host and validate them.
+    ///
+    /// Sophos has no token endpoint; the username and password are stored as
+    /// a JSON blob in the system secret service and resent on every API call
+    /// inside the `<Login>` block of the XML envelope.
+    ///
+    /// `port` defaults to 4444 (the conventional WebAdmin HTTPS port) if 0.
+    async fn sophos_set_credentials(
+        &self,
+        host_id: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+    ) -> fdo::Result<()>;
+
+    /// Send a Sophos XML Configuration API operation.
+    ///
+    /// `inner_xml` is the operation body (`<Get>...</Get>`, `<Set>...</Set>`,
+    /// `<Remove>...</Remove>`). The daemon adds the `<Request>` envelope and
+    /// `<Login>` block. The caller is responsible for XML-escaping any
+    /// user-supplied values inside `inner_xml`.
+    ///
+    /// Sophos always returns HTTP 200; success/failure is encoded in the
+    /// `<Status code="N">` tag of the response body, which is returned
+    /// verbatim.
+    async fn sophos_xml_api(
+        &self,
+        host_id: &str,
+        inner_xml: &str,
+    ) -> fdo::Result<String>;
+
+    // =======================================================================
     // SSH port forwarding
     // =======================================================================
 
