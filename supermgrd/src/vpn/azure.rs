@@ -51,24 +51,22 @@ use supermgr_core::{
 /// expiry is usually 15 minutes; we give them 20 to be safe).
 const AUTH_TIMEOUT_SECS: u64 = 20 * 60;
 
-/// Timeout waiting for openvpn to complete tunnel negotiation.
-const OPENVPN_CONNECT_TIMEOUT_SECS: u64 = 60;
-
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Default)]
 struct AzState {
-    /// Running openvpn child process.
-    child: Option<tokio::process::Child>,
-    /// Temporary directory holding config/key/credential files.
+    /// openvpn3 session D-Bus path (e.g. `/net/openvpn/v3/sessions/<id>`),
+    /// used to disconnect via `openvpn3 session-manage --disconnect --path`.
+    session_path: Option<String>,
+    /// Temporary directory holding config/key files.
     tmp_dir: Option<PathBuf>,
     /// systemd-resolved interface index; set when DNS was configured.
     dns_configured_ifindex: Option<i32>,
-    /// Kernel interface name opened by openvpn (e.g. `tun0`).
+    /// Kernel interface name opened by openvpn3 (e.g. `tun0`).
     interface: Option<String>,
-    /// Virtual IP assigned to this client by the VPN (e.g. `10.134.2.3/24`).
+    /// Virtual IP assigned to this client by the VPN (e.g. `10.134.2.3`).
     virtual_ip: String,
     /// Routes pushed by the server and installed in the kernel.
     active_routes: Vec<String>,
@@ -479,11 +477,13 @@ fn hex_to_openvpn_key(hex: &str) -> String {
 }
 
 /// Assemble the `.ovpn` configuration text.
+///
+/// `auth-user-pass` is emitted without a path: openvpn3 prompts for the
+/// username and password interactively, and we feed them via stdin.
 fn build_ovpn_config(
     cfg: &AzureVpnConfig,
     _ca_path: &str,
     key_path: &str,
-    auth_path: &str,
     full_tunnel: bool,
 ) -> String {
     let mut s = format!(
@@ -498,21 +498,20 @@ fn build_ovpn_config(
          auth SHA256\n\
          cipher AES-256-GCM\n\
          data-ciphers AES-256-GCM\n\
-         disable-dco\n\
          verb 3\n\
          <ca>\n",
         fqdn = cfg.gateway_fqdn,
     );
 
     // Inline the CA cert rather than referencing the file path so the temp
-    // file can be cleaned up after openvpn has started without breaking TLS.
+    // file can be cleaned up after openvpn3 has started without breaking TLS.
     s.push_str(&cfg.ca_cert_pem);
     if !cfg.ca_cert_pem.ends_with('\n') {
         s.push('\n');
     }
     s.push_str("</ca>\n");
 
-    s.push_str(&format!("auth-user-pass {auth_path}\n"));
+    s.push_str("auth-user-pass\n");
     s.push_str(&format!("tls-auth {key_path} 1\n"));
 
     if full_tunnel || cfg.routes.is_empty() {
@@ -624,6 +623,154 @@ async fn revert_link_dns(ifindex: i32) {
 // VpnBackend implementation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// openvpn3 session helpers
+// ---------------------------------------------------------------------------
+
+/// One row of `openvpn3 sessions-list`.
+struct OpenVpn3Session {
+    /// D-Bus path, e.g. `/net/openvpn/v3/sessions/<id>`.
+    path: String,
+    /// Kernel device name, e.g. `tun0`.
+    device: String,
+    /// Session name (typically `<host>_<port>`).
+    session_name: String,
+}
+
+/// Run `openvpn3 sessions-list` and parse all active sessions.
+///
+/// The list output has a fixed-width pretty-printed format:
+/// ```text
+/// -----------------------------------------------------------------------------
+///         Path: /net/openvpn/v3/sessions/<id>
+///      Created: <date>            PID: <pid>
+///        Owner: <user>                 Device: tun0
+/// Session name: gw.example.com_443
+///       Status: Connection, Client connected
+/// -----------------------------------------------------------------------------
+/// ```
+async fn list_openvpn3_sessions() -> Vec<OpenVpn3Session> {
+    let out = match tokio::process::Command::new("openvpn3")
+        .arg("sessions-list")
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        Ok(_) | Err(_) => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut sessions = Vec::new();
+    let mut path = String::new();
+    let mut device = String::new();
+    let mut name = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("Path:") {
+            // Starting a new entry — flush any pending one.
+            if !path.is_empty() {
+                sessions.push(OpenVpn3Session {
+                    path: std::mem::take(&mut path),
+                    device: std::mem::take(&mut device),
+                    session_name: std::mem::take(&mut name),
+                });
+            }
+            path = rest.trim().to_string();
+        } else if let Some(idx) = trimmed.find("Device:") {
+            // Device may share a line with Owner: skip past the marker.
+            device = trimmed[idx + "Device:".len()..].trim().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix("Session name:") {
+            name = rest.trim().to_string();
+        }
+    }
+    if !path.is_empty() {
+        sessions.push(OpenVpn3Session { path, device, session_name: name });
+    }
+    sessions
+}
+
+/// Find the session matching `gateway_fqdn` in its session name.
+///
+/// Polls for up to 5 s — on a fresh `session-start` the session can take a
+/// moment to register with the session manager.
+async fn find_openvpn3_session_for_remote(gateway_fqdn: &str) -> Option<OpenVpn3Session> {
+    for _ in 0..10 {
+        for s in list_openvpn3_sessions().await {
+            if s.session_name.contains(gateway_fqdn) && !s.device.is_empty() {
+                return Some(s);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    None
+}
+
+/// Disconnect a single openvpn3 session by D-Bus path.
+async fn disconnect_openvpn3_session(path: &str) {
+    let out = tokio::process::Command::new("openvpn3")
+        .arg("session-manage")
+        .arg("--disconnect")
+        .arg("--path")
+        .arg(path)
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                "openvpn3 session-manage --disconnect {path} failed: {}",
+                stderr.trim()
+            );
+        }
+        Err(e) => warn!("openvpn3 session-manage --disconnect {path}: {e}"),
+    }
+}
+
+/// Read the first IPv4 address assigned to `iface` via `ip -4 addr show`.
+async fn read_iface_ipv4(iface: &str) -> Option<String> {
+    let out = tokio::process::Command::new("ip")
+        .args(["-4", "addr", "show", "dev", iface])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("inet ") {
+            // `inet 10.134.2.3/24 brd 10.134.2.255 scope global tun0`
+            let cidr = rest.split_whitespace().next()?;
+            return Some(cidr.split('/').next()?.to_string());
+        }
+    }
+    None
+}
+
+/// Read all routes installed on `iface` via `ip route show dev <iface>`.
+async fn read_iface_routes(iface: &str) -> Vec<String> {
+    let out = match tokio::process::Command::new("ip")
+        .args(["route", "show", "dev", iface])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .filter(|net| net.contains('/') || net.contains('.'))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// VpnBackend impl
+// ---------------------------------------------------------------------------
+
 #[async_trait]
 impl VpnBackend for AzureBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
@@ -632,15 +779,18 @@ impl VpnBackend for AzureBackend {
             _ => return Err(BackendError::Interface("wrong profile type for AzureBackend".into())),
         };
 
-        info!("Azure: connecting profile '{}'", profile.name);
+        info!("Azure: connecting profile '{}' via openvpn3", profile.name);
 
-        // ── Step 1: Authenticate (cached refresh token or device-code flow) ──
+        // ── Step 1: Authenticate (cached refresh token or PKCE) ─────────────
         let access_token =
             authenticate(&profile.id, &cfg.tenant_id, &cfg.client_id, &self.auth_tx)
                 .await?;
 
         let upn = jwt_upn(&access_token);
-        info!("Azure: authenticated as '{upn}'");
+        info!(
+            "Azure: authenticated as '{upn}' (access token {} bytes)",
+            access_token.len()
+        );
 
         // ── Step 2: Write temporary files ────────────────────────────────────
         let tmp_dir = if nix::unistd::getuid().is_root() {
@@ -652,7 +802,6 @@ impl VpnBackend for AzureBackend {
         tokio::fs::create_dir_all(&tmp_dir).await.map_err(BackendError::Io)?;
 
         let key_path = tmp_dir.join("tls-auth.key");
-        let auth_path = tmp_dir.join("auth.txt");
         let ovpn_path = tmp_dir.join("client.ovpn");
 
         // tls-auth static key (direction 1, SHA256)
@@ -660,162 +809,152 @@ impl VpnBackend for AzureBackend {
             .await
             .map_err(BackendError::Io)?;
 
-        // auth-user-pass: <upn>\n<access_token>  (mode 0600)
-        tokio::fs::write(&auth_path, format!("{upn}\n{access_token}\n"))
-            .await
-            .map_err(BackendError::Io)?;
-        tokio::fs::set_permissions(
-            &auth_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .await
-        .map_err(BackendError::Io)?;
-
-        // openvpn config
         let ovpn_text = build_ovpn_config(
             cfg,
             "",
             &key_path.to_string_lossy(),
-            &auth_path.to_string_lossy(),
             profile.full_tunnel,
         );
         tokio::fs::write(&ovpn_path, &ovpn_text).await.map_err(BackendError::Io)?;
 
-        info!(
-            "Azure: temp files written to {}",
-            tmp_dir.display()
-        );
+        info!("Azure: temp files written to {}", tmp_dir.display());
 
-        // ── Step 3: Launch openvpn ────────────────────────────────────────────
-        let mut child = tokio::process::Command::new("openvpn")
-            .arg("--config")
-            .arg(&ovpn_path)
-            // The systemd unit uses PrivateTmp / ReadOnlyPaths so /tmp is
-            // read-only; point openvpn at our already-writable run directory.
-            .arg("--tmp-dir")
-            .arg(&tmp_dir)
+        // ── Step 3: Tear down any pre-existing openvpn3 sessions ─────────────
+        // A stale session from a prior crash holds the tun device and would
+        // collide with our new one.
+        for stale in list_openvpn3_sessions().await {
+            warn!("Azure: cleaning up stale openvpn3 session {}", stale.path);
+            disconnect_openvpn3_session(&stale.path).await;
+        }
+
+        // ── Step 4: Launch `openvpn3 session-start` with creds via stdin ─────
+        // Username is the literal string "AzureAD" (Azure VPN gateway expects
+        // this constant, not the UPN).  Password is the AAD access token JWT.
+        // openvpn3 handles the large JWT cleanly — stock openvpn 2.x truncates
+        // it at USER_PASS_LEN and produces "Key Method #2 write failed".
+        let mut child = tokio::process::Command::new("openvpn3")
+            .arg("session-start")
+            .arg("--config").arg(&ovpn_path)
+            .arg("--timeout").arg("30")
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     BackendError::Interface(
-                        "openvpn not found — install the 'openvpn' package \
-                         (Azure VPN requires the classic openvpn binary, not openvpn3)".into(),
+                        "openvpn3 not found — install with: sudo dnf install openvpn3-client".into(),
                     )
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
                     BackendError::Interface(
-                        "permission denied running openvpn — the daemon must run as root".into(),
+                        "permission denied running openvpn3 — the daemon must run as root".into(),
                     )
                 } else {
                     BackendError::Io(e)
                 }
             })?;
 
-        // ── Step 4: Wait for "Initialization Sequence Completed" ─────────────
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BackendError::Interface("openvpn stdout pipe unavailable".into())
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            BackendError::Interface("openvpn stderr pipe unavailable".into())
-        })?;
+        // Pipe credentials in the order openvpn3 prompts for them.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                BackendError::Interface("openvpn3 stdin pipe unavailable".into())
+            })?;
+            let creds = format!("AzureAD\n{access_token}\n");
+            stdin.write_all(creds.as_bytes()).await.map_err(BackendError::Io)?;
+            stdin.flush().await.map_err(BackendError::Io)?;
+            // Drop closes stdin — openvpn3 takes that as end of credentials.
+        }
 
-        // Merge stdout + stderr into a single line stream.
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut out_lines = BufReader::new(stdout).lines();
-        let mut err_lines = BufReader::new(stderr).lines();
+        // Wait for session-start to finish.  It returns once the connection
+        // attempt is complete (success or failure within --timeout); the actual
+        // tunnel keeps running in openvpn3-service-client.
+        let output_result = tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            child.wait_with_output(),
+        ).await;
 
-        let mut interface: Option<String> = None;
-        let mut virtual_ip = String::new();
-        let mut active_routes: Vec<String> = Vec::new();
-        let connect_result = tokio::time::timeout(
-            std::time::Duration::from_secs(OPENVPN_CONNECT_TIMEOUT_SECS),
-            async {
-                loop {
-                    tokio::select! {
-                        line = out_lines.next_line() => {
-                            let Some(Some(line)) = line.ok().map(|l| l) else { break };
-                            info!("openvpn: {}", line.trim());
-                            if line.contains("TUN/TAP device") {
-                                if let Some(iface) = extract_tun_iface(&line) {
-                                    interface = Some(iface);
-                                }
-                            }
-                            // "ip addr add dev tun0 10.134.2.3/24 broadcast +"
-                            if let Some(ip) = extract_virtual_ip(&line) {
-                                virtual_ip = ip;
-                            }
-                            // "ip route add 10.134.0.0/23 via 10.134.2.1"
-                            if let Some(route) = extract_pushed_route(&line) {
-                                if !active_routes.contains(&route) {
-                                    active_routes.push(route);
-                                }
-                            }
-                            if line.contains("Initialization Sequence Completed") {
-                                return Ok(());
-                            }
-                            if line.contains("AUTH_FAILED") || line.contains("auth-failure") {
-                                return Err(BackendError::ConnectionFailed(
-                                    "Azure VPN authentication failed — your Entra ID session \
-                                     may have expired or been revoked; try reconnecting to \
-                                     re-authenticate in the browser".into(),
-                                ));
-                            }
-                        }
-                        line = err_lines.next_line() => {
-                            let Some(Some(line)) = line.ok().map(|l| l) else { break };
-                            info!("openvpn stderr: {}", line.trim());
-                            if line.contains("Initialization Sequence Completed") {
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-                Err(BackendError::ConnectionFailed(
-                    "openvpn process exited before the tunnel was established — \
-                     check that the Azure VPN gateway is reachable and the \
-                     configuration (CA cert, gateway FQDN) is correct".into(),
-                ))
-            },
-        )
-        .await;
-
-        match connect_result {
-            Ok(Ok(())) => {}
+        let output = match output_result {
+            Ok(Ok(o)) => o,
             Ok(Err(e)) => {
-                let _ = child.kill().await;
-                drop(child);
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
-                return Err(e);
+                return Err(BackendError::ConnectionFailed(format!(
+                    "openvpn3 session-start failed: {e}"
+                )));
             }
             Err(_timeout) => {
-                let _ = child.kill().await;
-                drop(child);
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
                 return Err(BackendError::ConnectionFailed(
-                    "Azure VPN connection timed out after 60 s — the gateway \
+                    "Azure VPN connection timed out after 45 s — the gateway \
                      may be unreachable or firewalled; verify your network \
                      connection and the gateway address".into(),
                 ));
             }
-        }
-
-        info!("Azure: tunnel established (interface: {:?})", interface);
-
-        // ── Step 5: Configure DNS ─────────────────────────────────────────────
-        let dns_ifindex = if let Some(ref iface) = interface {
-            configure_dns_for_link(iface, &cfg.dns_servers).await
-        } else {
-            None
         };
 
-        // ── Step 6: Persist state ─────────────────────────────────────────────
+        let stdout_text = String::from_utf8_lossy(&output.stdout);
+        let stderr_text = String::from_utf8_lossy(&output.stderr);
+        for line in stdout_text.lines() {
+            if !line.trim().is_empty() {
+                info!("openvpn3: {}", line.trim());
+            }
+        }
+        for line in stderr_text.lines() {
+            if !line.trim().is_empty() {
+                info!("openvpn3 stderr: {}", line.trim());
+            }
+        }
+
+        if !output.status.success() {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            // Common failure modes have specific signatures in the output.
+            let combined = format!("{stdout_text}\n{stderr_text}");
+            if combined.contains("AUTH_FAILED") || combined.to_lowercase().contains("auth failed") {
+                return Err(BackendError::ConnectionFailed(
+                    "Azure VPN authentication failed — your Entra ID session \
+                     may have expired or been revoked; try reconnecting to \
+                     re-authenticate in the browser".into(),
+                ));
+            }
+            return Err(BackendError::ConnectionFailed(format!(
+                "openvpn3 session-start exited with status {:?}",
+                output.status.code(),
+            )));
+        }
+
+        // ── Step 5: Find the session we just started, get the tun device ─────
+        // openvpn3 prints "Connected" but not the session path; query it back.
+        let session = match find_openvpn3_session_for_remote(&cfg.gateway_fqdn).await {
+            Some(s) => s,
+            None => {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return Err(BackendError::ConnectionFailed(
+                    "openvpn3 reports session-start succeeded but no matching \
+                     active session was found — gateway may have rejected the \
+                     connection silently".into(),
+                ));
+            }
+        };
+        info!(
+            "Azure: openvpn3 session path={} device={}",
+            session.path, session.device
+        );
+
+        // ── Step 6: Discover virtual IP and routes from the tun device ───────
+        let virtual_ip = read_iface_ipv4(&session.device).await.unwrap_or_default();
+        let active_routes = read_iface_routes(&session.device).await;
+
+        // ── Step 7: Configure DNS ────────────────────────────────────────────
+        let dns_ifindex = configure_dns_for_link(&session.device, &cfg.dns_servers).await;
+
+        // ── Step 8: Persist state ────────────────────────────────────────────
         {
             let mut st = self.state.lock().await;
-            st.child = Some(child);
+            st.session_path = Some(session.path);
             st.tmp_dir = Some(tmp_dir);
             st.dns_configured_ifindex = dns_ifindex;
-            st.interface = interface;
+            st.interface = Some(session.device);
             st.virtual_ip = virtual_ip;
             st.active_routes = active_routes;
         }
@@ -824,10 +963,10 @@ impl VpnBackend for AzureBackend {
     }
 
     async fn disconnect(&self) -> Result<(), BackendError> {
-        let (child_opt, tmp_dir_opt, dns_ifindex, _iface) = {
+        let (session_path_opt, tmp_dir_opt, dns_ifindex, _iface) = {
             let mut st = self.state.lock().await;
             (
-                st.child.take(),
+                st.session_path.take(),
                 st.tmp_dir.take(),
                 st.dns_configured_ifindex.take(),
                 st.interface.take(),
@@ -839,26 +978,9 @@ impl VpnBackend for AzureBackend {
             revert_link_dns(ifindex).await;
         }
 
-        // Send SIGTERM first so openvpn can clean up routes gracefully,
-        // then wait briefly before falling back to SIGKILL.
-        if let Some(mut child) = child_opt {
-            info!("Azure: stopping openvpn child");
-            // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            );
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                child.wait(),
-            ).await {
-                Ok(_) => info!("Azure: openvpn exited cleanly"),
-                Err(_) => {
-                    warn!("Azure: openvpn did not exit in 5 s, killing");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
+        if let Some(path) = session_path_opt {
+            info!("Azure: disconnecting openvpn3 session {path}");
+            disconnect_openvpn3_session(&path).await;
         }
 
         // Remove temp files.
@@ -874,29 +996,20 @@ impl VpnBackend for AzureBackend {
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
-        let mut st = self.state.lock().await;
+        let st = self.state.lock().await;
 
-        let Some(child) = st.child.as_mut() else {
+        let Some(ref _path) = st.session_path else {
             return Ok(BackendStatus::Inactive);
         };
 
-        // Non-blocking check: did the process exit?
-        match child.try_wait().map_err(BackendError::Io)? {
-            Some(exit) => {
-                warn!("Azure: openvpn exited unexpectedly: {exit}");
-                Ok(BackendStatus::Inactive)
-            }
-            None => {
-                let iface = st.interface.clone().unwrap_or_default();
-                let stats = super::read_iface_stats(&iface);
-                Ok(BackendStatus::Active {
-                    interface: iface,
-                    stats,
-                    virtual_ip: st.virtual_ip.clone(),
-                    active_routes: st.active_routes.clone(),
-                })
-            }
-        }
+        let iface = st.interface.clone().unwrap_or_default();
+        let stats = super::read_iface_stats(&iface);
+        Ok(BackendStatus::Active {
+            interface: iface,
+            stats,
+            virtual_ip: st.virtual_ip.clone(),
+            active_routes: st.active_routes.clone(),
+        })
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -914,66 +1027,3 @@ impl VpnBackend for AzureBackend {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Parse the tun interface name from an openvpn log line such as:
-/// `TUN/TAP device tun0 opened`
-fn extract_tun_iface(line: &str) -> Option<String> {
-    let prefix = "TUN/TAP device ";
-    let start = line.find(prefix)? + prefix.len();
-    let rest = &line[start..];
-    let end = rest.find(' ').unwrap_or(rest.len());
-    let name = rest[..end].trim().to_owned();
-    if name.is_empty() { None } else { Some(name) }
-}
-
-/// Parse the virtual IP from an openvpn log line.
-///
-/// OpenVPN 2.6: `/usr/bin/ip addr add dev tun0 10.134.2.3/24 broadcast +`
-/// OpenVPN 2.7: `net_addr_v4_add: 10.134.2.2/24 dev tun0`
-fn extract_virtual_ip(line: &str) -> Option<String> {
-    // OpenVPN 2.7+ format: "net_addr_v4_add: <cidr> dev <iface>"
-    if let Some(idx) = line.find("net_addr_v4_add: ") {
-        let rest = &line[idx + "net_addr_v4_add: ".len()..];
-        let cidr = rest.split_whitespace().next()?;
-        if cidr.contains('.') {
-            return Some(cidr.to_owned());
-        }
-    }
-    // OpenVPN 2.6 format: "ip addr add dev <iface> <cidr>"
-    if let Some(idx) = line.find("ip addr add dev ") {
-        let rest = &line[idx + "ip addr add dev ".len()..];
-        let rest = rest.splitn(2, ' ').nth(1)?.trim();
-        let cidr = rest.split_whitespace().next()?;
-        if cidr.contains('.') || cidr.contains(':') {
-            return Some(cidr.to_owned());
-        }
-    }
-    None
-}
-
-/// Parse a pushed route from an openvpn log line.
-///
-/// OpenVPN 2.6: `/usr/bin/ip route add 10.134.0.0/23 via 10.134.2.1`
-/// OpenVPN 2.7: `net_route_v4_add: 10.134.0.0/23 via 10.134.2.1 dev [NULL] table 0 metric -1`
-fn extract_pushed_route(line: &str) -> Option<String> {
-    // OpenVPN 2.7+ format: "net_route_v4_add: <dest> via ..."
-    if let Some(idx) = line.find("net_route_v4_add: ") {
-        let rest = &line[idx + "net_route_v4_add: ".len()..];
-        let dest = rest.split_whitespace().next()?;
-        if dest.contains('.') || dest.contains(':') {
-            return Some(dest.to_owned());
-        }
-    }
-    // OpenVPN 2.6 format: "ip route add <dest> via ..."
-    if let Some(idx) = line.find("ip route add ") {
-        let rest = &line[idx + "ip route add ".len()..];
-        let dest = rest.split_whitespace().next()?;
-        if dest.contains('.') || dest.contains(':') {
-            return Some(dest.to_owned());
-        }
-    }
-    None
-}

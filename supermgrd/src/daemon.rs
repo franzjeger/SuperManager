@@ -110,6 +110,13 @@ pub struct DaemonState {
     /// dropping or aborting it tears down the forward.
     pub port_forwards: std::collections::HashMap<String, PortForwardEntry>,
 
+    /// In-flight VPN connect task, if any.  Stored so `disconnect()` can abort
+    /// it — necessary because the Azure backend's OAuth flow binds
+    /// `localhost:2023` and waits up to 20 minutes for a browser callback;
+    /// without aborting, that listener stays held and a subsequent connect
+    /// fails with EADDRINUSE.
+    pub connect_task: Option<tokio::task::JoinHandle<()>>,
+
     // ---- Webhook notification settings (set via D-Bus) ----
 
     /// Webhook URL for outgoing notifications (Slack/Teams/Discord).
@@ -141,6 +148,7 @@ impl DaemonState {
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
+            connect_task: None,
         }
     }
 
@@ -449,9 +457,14 @@ impl DaemonService {
         #[zbus(signal_context)] ctx: SignalContext<'_>,
     ) -> fdo::Result<()> {
         crate::audit::log_event("VPN_DISCONNECT", "");
-        let backend = {
+        let (backend, connect_task) = {
             let mut state = self.state.lock().await;
-            match state.active_backend.take() {
+            // Always abort an in-flight connect task, even if active_backend is
+            // already None.  The Azure OAuth flow binds localhost:2023 and waits
+            // up to 20 minutes for a browser callback; without aborting, the
+            // listener stays held and the next connect fails with EADDRINUSE.
+            let connect_task = state.connect_task.take();
+            let backend = match state.active_backend.take() {
                 Some(b) => {
                     let profile_id = state.vpn_state.profile_id();
                     state.vpn_state = VpnState::Disconnecting {
@@ -463,8 +476,20 @@ impl DaemonService {
                 // kill switch is still active.  Clean up and set Disconnected
                 // so the user is not permanently blocked.
                 None => None,
-            }
+            };
+            (backend, connect_task)
         };
+
+        // Abort the connect task and wait briefly for the future to be dropped
+        // so any held resources (notably the OAuth listener on :2023) are
+        // released before a subsequent connect attempt tries to rebind.
+        if let Some(handle) = connect_task {
+            handle.abort();
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                handle,
+            ).await;
+        }
 
         let state_arc = Arc::clone(&self.state);
         let ctx_owned = ctx.to_owned();
@@ -5056,7 +5081,8 @@ pub async fn connect_profile(
     // Run the actual connect in a background task.
     let state_arc = Arc::clone(&state);
     let ctx_owned = ctx.to_owned();
-    tokio::spawn(async move {
+    let task_state_arc = Arc::clone(&state);
+    let handle = tokio::spawn(async move {
         // Feature 4: retry transient errors up to 3 times.
         let result = 'retry: {
             for attempt in 0..3u32 {
@@ -5228,7 +5254,19 @@ pub async fn connect_profile(
         if let Ok(json) = state_to_json(&s.vpn_state) {
             let _ = DaemonService::state_changed(&ctx_owned, json).await;
         }
+        // Clear our own handle from state so disconnect() doesn't try to
+        // abort an already-finished task.  Use Arc::clone of the state arc
+        // captured by the closure to avoid a move conflict with the outer
+        // `state` used after spawn().
+        drop(s);
+        task_state_arc.lock().await.connect_task = None;
     });
+
+    // Replace any stale handle (idleness check above prevents a live one,
+    // but a previously-completed one may still be parked here).
+    if let Some(stale) = state.lock().await.connect_task.replace(handle) {
+        stale.abort();
+    }
 
     Ok(())
 }
