@@ -13,7 +13,7 @@ depends=(
     'sshpass'
     'wireguard-tools'
     'strongswan'
-    'openvpn'
+    'openvpn3'
     'nftables'
     'openssh'
 )
@@ -26,7 +26,6 @@ makedepends=(
 provides=('supermanager')
 conflicts=('supermanager')
 optdepends=(
-    'openvpn3: OpenVPN profiles via openvpn3 CLI (AUR)'
     'networkmanager: auto-connect on network change'
     'freerdp: RDP remote desktop sessions'
     'remmina: alternative RDP/VNC client'

@@ -633,19 +633,25 @@ struct OpenVpn3Session {
     path: String,
     /// Kernel device name, e.g. `tun0`.
     device: String,
-    /// Session name (typically `<host>_<port>`).
-    session_name: String,
+    /// Path to the .ovpn config file the session was started from.
+    /// Field label varies by openvpn3 version: v27 prints `Config name:`,
+    /// older versions printed `Session name:`.
+    config_name: String,
+    /// `tcp:<ip>:<port>` style remote.  v27 prints `Connected to:` for active
+    /// sessions; absent for sessions still in the connecting phase.
+    connected_to: String,
 }
 
 /// Run `openvpn3 sessions-list` and parse all active sessions.
 ///
-/// The list output has a fixed-width pretty-printed format:
+/// The v27 output looks like:
 /// ```text
 /// -----------------------------------------------------------------------------
 ///         Path: /net/openvpn/v3/sessions/<id>
 ///      Created: <date>            PID: <pid>
-///        Owner: <user>                 Device: tun0
-/// Session name: gw.example.com_443
+///        Owner: root                  Device: tun0
+///  Config name: /run/supermgrd/azure-<uuid>/client.ovpn  (Config not available)
+/// Connected to: tcp:104.214.227.71:443
 ///       Status: Connection, Client connected
 /// -----------------------------------------------------------------------------
 /// ```
@@ -661,43 +667,59 @@ async fn list_openvpn3_sessions() -> Vec<OpenVpn3Session> {
 
     let text = String::from_utf8_lossy(&out.stdout);
     let mut sessions = Vec::new();
-    let mut path = String::new();
-    let mut device = String::new();
-    let mut name = String::new();
+    let mut cur: Option<OpenVpn3Session> = None;
+
+    let flush = |cur: &mut Option<OpenVpn3Session>, sessions: &mut Vec<OpenVpn3Session>| {
+        if let Some(s) = cur.take() {
+            if !s.path.is_empty() {
+                sessions.push(s);
+            }
+        }
+    };
 
     for line in text.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("Path:") {
-            // Starting a new entry — flush any pending one.
-            if !path.is_empty() {
-                sessions.push(OpenVpn3Session {
-                    path: std::mem::take(&mut path),
-                    device: std::mem::take(&mut device),
-                    session_name: std::mem::take(&mut name),
-                });
-            }
-            path = rest.trim().to_string();
-        } else if let Some(idx) = trimmed.find("Device:") {
-            // Device may share a line with Owner: skip past the marker.
-            device = trimmed[idx + "Device:".len()..].trim().to_string();
+            flush(&mut cur, &mut sessions);
+            cur = Some(OpenVpn3Session {
+                path: rest.trim().to_string(),
+                device: String::new(),
+                config_name: String::new(),
+                connected_to: String::new(),
+            });
+            continue;
+        }
+        let Some(s) = cur.as_mut() else { continue };
+        if let Some(idx) = trimmed.find("Device:") {
+            // `Device:` shares a line with `Owner:` in v27 — skip past the marker.
+            s.device = trimmed[idx + "Device:".len()..].trim().to_string();
+        } else if let Some(rest) = trimmed.strip_prefix("Config name:") {
+            // v27 strips the trailing "(Config not available)" annotation.
+            let val = rest.trim();
+            let val = val.split_whitespace().next().unwrap_or(val);
+            s.config_name = val.to_string();
         } else if let Some(rest) = trimmed.strip_prefix("Session name:") {
-            name = rest.trim().to_string();
+            // Older openvpn3 versions used this label for the same field.
+            if s.config_name.is_empty() {
+                s.config_name = rest.trim().to_string();
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("Connected to:") {
+            s.connected_to = rest.trim().to_string();
         }
     }
-    if !path.is_empty() {
-        sessions.push(OpenVpn3Session { path, device, session_name: name });
-    }
+    flush(&mut cur, &mut sessions);
     sessions
 }
 
-/// Find the session matching `gateway_fqdn` in its session name.
+/// Find the session that was started from `ovpn_path`.
 ///
 /// Polls for up to 5 s — on a fresh `session-start` the session can take a
-/// moment to register with the session manager.
-async fn find_openvpn3_session_for_remote(gateway_fqdn: &str) -> Option<OpenVpn3Session> {
+/// moment to register with the session manager and acquire its tun device.
+async fn find_openvpn3_session_for_config(ovpn_path: &std::path::Path) -> Option<OpenVpn3Session> {
+    let target = ovpn_path.to_string_lossy().into_owned();
     for _ in 0..10 {
         for s in list_openvpn3_sessions().await {
-            if s.session_name.contains(gateway_fqdn) && !s.device.is_empty() {
+            if s.config_name == target && !s.device.is_empty() {
                 return Some(s);
             }
         }
@@ -924,21 +946,22 @@ impl VpnBackend for AzureBackend {
         }
 
         // ── Step 5: Find the session we just started, get the tun device ─────
-        // openvpn3 prints "Connected" but not the session path; query it back.
-        let session = match find_openvpn3_session_for_remote(&cfg.gateway_fqdn).await {
+        // Match by config-file path (we know it; uniquely identifies the
+        // session we just started even if the user has other openvpn3 sessions
+        // running for unrelated VPNs).
+        let session = match find_openvpn3_session_for_config(&ovpn_path).await {
             Some(s) => s,
             None => {
                 let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
                 return Err(BackendError::ConnectionFailed(
                     "openvpn3 reports session-start succeeded but no matching \
-                     active session was found — gateway may have rejected the \
-                     connection silently".into(),
+                     active session was found in `openvpn3 sessions-list`".into(),
                 ));
             }
         };
         info!(
-            "Azure: openvpn3 session path={} device={}",
-            session.path, session.device
+            "Azure: openvpn3 session path={} device={} connected_to={}",
+            session.path, session.device, session.connected_to
         );
 
         // ── Step 6: Discover virtual IP and routes from the tun device ───────
