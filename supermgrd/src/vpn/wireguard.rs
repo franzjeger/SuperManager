@@ -1188,6 +1188,15 @@ impl VpnBackend for WireGuardBackend {
             }
         }
 
+        // Steps 1-3: Aggressive teardown — never bail early.  Each step's
+        // failure is logged and stashed; the first error (if any) is returned
+        // at the end so the caller learns SOMETHING failed, but the system
+        // gets cleaned up as completely as possible regardless.  Returning
+        // early on, say, a transient EBUSY from the netlink interface delete
+        // would leave the saved default route un-restored, which means the
+        // user has to reboot or manually `ip route` to get back online.
+        let mut first_err: Option<BackendError> = None;
+
         // Step 1: Delete the WireGuard interface.  The kernel automatically
         // removes all routes whose `dev` is that interface (AllowedIPs routes,
         // the tunnel default route, etc.).
@@ -1196,7 +1205,10 @@ impl VpnBackend for WireGuardBackend {
             Err(BackendError::Interface(ref msg)) if msg.contains("not found") => {
                 warn!("delete_interface: {msg} — interface already gone, continuing disconnect");
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                warn!("delete_interface failed: {e} — continuing with route cleanup");
+                first_err = Some(e);
+            }
         }
 
         // Step 2: Remove endpoint host routes via rtnetlink.  These were
@@ -1209,11 +1221,20 @@ impl VpnBackend for WireGuardBackend {
         }
 
         // Step 3: Restore the original default routes via rtnetlink.
+        // Failures here are the most painful for the user — losing the IPv4
+        // default means no internet at all — so always attempt both and only
+        // surface the first error after state has been cleared.
         if let Some(ref saved) = saved_v4 {
-            restore_default_route(saved).await?;
+            if let Err(e) = restore_default_route(saved).await {
+                warn!("restore IPv4 default route failed: {e}");
+                first_err.get_or_insert(e);
+            }
         }
         if let Some(ref saved) = saved_v6 {
-            restore_default_route(saved).await?;
+            if let Err(e) = restore_default_route(saved).await {
+                warn!("restore IPv6 default route failed: {e}");
+                first_err.get_or_insert(e);
+            }
         }
 
         {
@@ -1225,6 +1246,10 @@ impl VpnBackend for WireGuardBackend {
             state.dns_configured_ifindex = None;
         }
 
+        if let Some(e) = first_err {
+            warn!("WireGuard tunnel {iface_name} torn down with errors: {e}");
+            return Err(e);
+        }
         info!("WireGuard tunnel {} torn down", iface_name);
         Ok(())
     }

@@ -986,9 +986,21 @@ impl VpnBackend for FortiGateBackend {
         // kernel needs explicit routes that force traffic to use the VIP as
         // source address, otherwise packets leave with the physical IP and
         // bypass the tunnel entirely.
-        // Parse VIP from the initiate output (already confirmed above).
+        //
+        // Two-step VIP discovery:
+        //   1. Parse the `installing new virtual IP <ip>` line from the
+        //      `--initiate` output (the canonical, fastest path).
+        //   2. If that fails (different strongSwan version, charon log format
+        //      change, missing line in output buffering), fall back to
+        //      `swanctl --list-sas` which always reports the VIP for an
+        //      established SA.
+        //
+        // Failing to find the VIP means we can't install the source-routed
+        // routes the tunnel needs to actually carry traffic.  Don't silently
+        // proceed in that case — roll back the SA and surface a real error,
+        // otherwise the user sees "Connected" with zero reachability.
         let stdout_str = String::from_utf8_lossy(&out.stdout);
-        let vip: Option<std::net::IpAddr> = stdout_str
+        let vip_inline: Option<std::net::IpAddr> = stdout_str
             .lines()
             .find(|l| l.contains("installing new virtual IP"))
             .and_then(|l| {
@@ -996,6 +1008,43 @@ impl VpnBackend for FortiGateBackend {
                     .nth(1)
                     .and_then(|s| s.trim().parse().ok())
             });
+        let vip: Option<std::net::IpAddr> = if vip_inline.is_some() {
+            vip_inline
+        } else {
+            warn!(
+                "FortiGate: VIP not found in --initiate output for {conn_name}; \
+                 falling back to swanctl --list-sas"
+            );
+            match run_swanctl(&["--list-sas", "--ike", &conn_name]).await {
+                Ok(list_out) if list_out.status.success() => {
+                    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+                    parse_virtual_ip(&list_stdout)
+                }
+                Ok(_) | Err(_) => None,
+            }
+        };
+
+        if vip.is_none() {
+            warn!(
+                "FortiGate: virtual IP unavailable from both --initiate and \
+                 --list-sas for {conn_name}; tearing down — without a VIP the \
+                 tunnel cannot carry traffic"
+            );
+            rollback_after_initiate(
+                &conn_name,
+                &endpoint_host_routes,
+                &tunnel_routes,
+                &saved_default_route,
+                &config_path,
+            )
+            .await;
+            return Err(BackendError::ConnectionFailed(
+                "FortiGate SA is up but the gateway did not assign a virtual IP \
+                 (mode-config payload missing) — check `vips = 0.0.0.0` in the \
+                 connection profile and verify the gateway has IP-pool config"
+                    .into(),
+            ));
+        }
 
         if let Some(vip) = vip {
             // The outbound interface comes from the captured default route's
@@ -1203,14 +1252,22 @@ impl VpnBackend for FortiGateBackend {
         // charon removes the XFRM policies and any tunnel routes it installed
         // (including the tunnel default route), restoring the original routing
         // table automatically.
-        let out = run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "10"]).await?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            warn!(
-                "swanctl --terminate --ike {} failed: {} (proceeding with cleanup)",
-                conn_name,
-                stderr.trim()
-            );
+        //
+        // Don't propagate subprocess-spawn errors with `?` — if `swanctl` is
+        // missing or wedged we still need to delete config + restore routes
+        // below.  Returning early here would leave the system with a stale
+        // tunnel default route and no way to recover without manual `ip route`.
+        match run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "10"]).await {
+            Ok(out) if !out.status.success() => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                warn!(
+                    "swanctl --terminate --ike {} failed: {} (proceeding with cleanup)",
+                    conn_name,
+                    stderr.trim()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => warn!("swanctl --terminate spawn error: {e} (proceeding with cleanup)"),
         }
 
         // Step 2: Delete config fragment.
@@ -1225,12 +1282,13 @@ impl VpnBackend for FortiGateBackend {
         }
 
         // Step 3: Reload strongSwan (removes the terminated connection from charon).
-        let out = run_swanctl(&["--load-all"]).await?;
-        if !out.status.success() {
-            warn!(
+        match run_swanctl(&["--load-all"]).await {
+            Ok(out) if !out.status.success() => warn!(
                 "swanctl --load-all after disconnect failed: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
-            );
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("swanctl --load-all spawn error: {e} (proceeding with cleanup)"),
         }
 
         // Step 3b: Remove tunnel routes we added and restore original default.

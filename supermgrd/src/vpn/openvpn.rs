@@ -511,19 +511,29 @@ impl VpnBackend for OpenVpnBackend {
             (st.session_path.take(), st.config_name.take())
         };
 
+        // Aggressive teardown: every step is best-effort and logs its own
+        // failure.  Returning early on a subprocess-spawn error from
+        // `run_openvpn3` (e.g. PATH glitch, transient EAGAIN) would leave the
+        // imported config profile orphaned in the openvpn3 config manager,
+        // which then collides on the next connect attempt for the same
+        // profile.  Disconnect must always run to completion.
         if let Some(ref path) = session_path {
             info!("OpenVPN3: disconnecting session {path}");
 
             // First try a clean disconnect.
-            let (_, stderr, ok) = run_openvpn3(&[
+            match run_openvpn3(&[
                 "session-manage",
                 "--session-path",
                 path,
                 "--disconnect",
             ])
-            .await?;
-            if !ok {
-                warn!("openvpn3 session-manage disconnect: {}", stderr.trim());
+            .await
+            {
+                Ok((_, stderr, ok)) if !ok => {
+                    warn!("openvpn3 session-manage disconnect: {}", stderr.trim());
+                }
+                Ok(_) => {}
+                Err(e) => warn!("openvpn3 session-manage disconnect spawn error: {e}"),
             }
 
             // Verify the session is gone.  If it's still present (e.g. stuck in
@@ -532,15 +542,19 @@ impl VpnBackend for OpenVpnBackend {
             let (list_out, _, _) = run_openvpn3(&["sessions-list"]).await.unwrap_or_default();
             if list_out.contains(path.as_str()) {
                 info!("OpenVPN3: session still present after disconnect; sending --abort");
-                let (_, stderr, ok) = run_openvpn3(&[
+                match run_openvpn3(&[
                     "session-manage",
                     "--session-path",
                     path,
                     "--abort",
                 ])
-                .await?;
-                if !ok {
-                    warn!("openvpn3 session-manage abort: {}", stderr.trim());
+                .await
+                {
+                    Ok((_, stderr, ok)) if !ok => {
+                        warn!("openvpn3 session-manage abort: {}", stderr.trim());
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("openvpn3 session-manage abort spawn error: {e}"),
                 }
             }
         } else {
@@ -548,12 +562,15 @@ impl VpnBackend for OpenVpnBackend {
         }
 
         // Remove the imported config profile from the openvpn3 config manager.
+        // Same reasoning as above — never bail early.
         if let Some(ref name) = config_name {
             info!("OpenVPN3: removing config '{name}'");
-            let (_, stderr, ok) =
-                run_openvpn3(&["config-remove", "--config", name, "--force"]).await?;
-            if !ok {
-                warn!("openvpn3 config-remove: {}", stderr.trim());
+            match run_openvpn3(&["config-remove", "--config", name, "--force"]).await {
+                Ok((_, stderr, ok)) if !ok => {
+                    warn!("openvpn3 config-remove: {}", stderr.trim());
+                }
+                Ok(_) => {}
+                Err(e) => warn!("openvpn3 config-remove spawn error: {e}"),
             }
         }
 
