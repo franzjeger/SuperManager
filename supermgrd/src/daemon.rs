@@ -4894,7 +4894,11 @@ fn sanitize_fortigate_host(raw: &str) -> String {
 /// All rules are applied atomically via a single `nft -f -` invocation so
 /// there is no window where the DROP policy is active but the allow rules
 /// are not yet installed.
-async fn install_kill_switch(mode: &KillSwitchMode) {
+/// Install the nftables kill-switch.  Returns `Err` with a human-readable
+/// reason when nft is missing, the script fails, or the table couldn't be
+/// loaded — callers must use that to decide whether to record an active
+/// kill-switch mode in `DaemonState`.
+async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
     use tokio::io::AsyncWriteExt as _;
 
     // Best-effort removal of any stale table from a previous run.
@@ -4959,34 +4963,37 @@ async fn install_kill_switch(mode: &KillSwitchMode) {
     let mut child = match spawn_result {
         Ok(c) => c,
         Err(e) => {
-            warn!("kill-switch: nft -f - spawn failed: {e}");
-            return;
+            return Err(format!("nft -f - spawn failed: {e}"));
         }
     };
 
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(script.as_bytes()).await {
+            // Don't return yet — wait() must reap the child either way.
             warn!("kill-switch: nft stdin write failed: {e}");
         }
     }
 
     match child.wait().await {
-        Ok(s) if s.success() => match mode {
-            KillSwitchMode::Interface { iface, allowed_ips } => {
-                info!(
-                    "kill-switch installed (iface={iface}, {} extra server IP(s))",
-                    allowed_ips.len()
-                );
+        Ok(s) if s.success() => {
+            match mode {
+                KillSwitchMode::Interface { iface, allowed_ips } => {
+                    info!(
+                        "kill-switch installed (iface={iface}, {} extra server IP(s))",
+                        allowed_ips.len()
+                    );
+                }
+                KillSwitchMode::IPsec { server_ip, allowed_ips } => {
+                    info!(
+                        "kill-switch installed (IPsec, server={server_ip}, {} extra DNS IP(s))",
+                        allowed_ips.len()
+                    );
+                }
             }
-            KillSwitchMode::IPsec { server_ip, allowed_ips } => {
-                info!(
-                    "kill-switch installed (IPsec, server={server_ip}, {} extra DNS IP(s))",
-                    allowed_ips.len()
-                );
-            }
-        },
-        Ok(s) => warn!("kill-switch: nft -f - exited {s}; kill-switch may not be active"),
-        Err(e) => warn!("kill-switch: nft -f - wait error: {e}"),
+            Ok(())
+        }
+        Ok(s) => Err(format!("nft -f - exited {s}; kill-switch did NOT load")),
+        Err(e) => Err(format!("nft -f - wait error: {e}")),
     }
 }
 
@@ -5083,17 +5090,22 @@ pub async fn connect_profile(
     let ctx_owned = ctx.to_owned();
     let task_state_arc = Arc::clone(&state);
     let handle = tokio::spawn(async move {
-        // Feature 4: retry transient errors up to 3 times.
+        // Retry transient errors up to 3 times.  Terminal errors (bad config,
+        // invalid credentials, gateway-side auth rejection) skip the retry —
+        // they have no chance of succeeding on retry and the wait wastes time.
         let result = 'retry: {
             for attempt in 0..3u32 {
                 match backend.connect(&profile).await {
                     Ok(()) => break 'retry Ok(()),
                     Err(e) => {
-                        let transient = !matches!(
-                            e,
-                            supermgr_core::error::BackendError::AlreadyConnected
-                        );
-                        if !transient || attempt == 2 {
+                        if e.is_terminal() {
+                            info!(
+                                "connect attempt {} failed with terminal error: {e}",
+                                attempt + 1
+                            );
+                            break 'retry Err(e);
+                        }
+                        if attempt == 2 {
                             break 'retry Err(e);
                         }
                         warn!(
@@ -5119,15 +5131,25 @@ pub async fn connect_profile(
                         let mut endpoint_ips: Vec<String> = Vec::new();
                         for peer in &wg_cfg.peers {
                             if let Some(ref ep) = peer.endpoint {
-                                match tokio::net::lookup_host(ep.as_str()).await {
-                                    Ok(mut addrs) => {
+                                // Cap each lookup at 5 s — without this, a
+                                // hung resolver wedges the connect indefinitely.
+                                let lookup = tokio::time::timeout(
+                                    std::time::Duration::from_secs(5),
+                                    tokio::net::lookup_host(ep.as_str()),
+                                )
+                                .await;
+                                match lookup {
+                                    Ok(Ok(mut addrs)) => {
                                         if let Some(addr) = addrs.next() {
                                             endpoint_ips.push(addr.ip().to_string());
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!("kill-switch: could not resolve WireGuard endpoint '{ep}': {e}");
-                                    }
+                                    Ok(Err(e)) => warn!(
+                                        "kill-switch: could not resolve WireGuard endpoint '{ep}': {e}"
+                                    ),
+                                    Err(_) => warn!(
+                                        "kill-switch: DNS lookup for WireGuard endpoint '{ep}' timed out"
+                                    ),
                                 }
                             }
                         }
@@ -5141,9 +5163,13 @@ pub async fn connect_profile(
                     (iface, mode)
                 }
                 ProfileConfig::FortiGate(fg) => {
-                    let server_ip = tokio::net::lookup_host(format!("{}:500", fg.host))
-                        .await
-                        .ok()
+                    let server_ip = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        tokio::net::lookup_host(format!("{}:500", fg.host)),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
                         .and_then(|mut it| it.next())
                         .map(|sa| sa.ip().to_string())
                         .unwrap_or_else(|| fg.host.clone());
@@ -5222,12 +5248,25 @@ pub async fn connect_profile(
                         warn!("failed to persist last_connected_at for '{}': {e}", profile.name);
                     }
                 }
-                // Feature 3: install kill switch if enabled.
+                // Install kill switch if enabled.  Only record an active mode
+                // if nft actually loaded the rules — recording it on failure
+                // would cause disconnect to call `nft delete table` later for
+                // a table that was never created and confuse the log output.
                 if let Some(mode) = kill_mode {
                     drop(s); // release the lock before the subprocess
-                    install_kill_switch(&mode).await;
+                    let result = install_kill_switch(&mode).await;
                     s = state_arc.lock().await;
-                    s.active_kill_switch_mode = Some(mode);
+                    match result {
+                        Ok(()) => s.active_kill_switch_mode = Some(mode),
+                        Err(reason) => {
+                            warn!(
+                                "kill-switch install failed for '{}': {reason}; \
+                                 tunnel is up but traffic is NOT fenced",
+                                profile.name
+                            );
+                            s.active_kill_switch_mode = None;
+                        }
+                    }
                 }
             }
             Err(e) => {

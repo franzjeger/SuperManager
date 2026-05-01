@@ -514,7 +514,20 @@ fn build_ovpn_config(
     s.push_str("auth-user-pass\n");
     s.push_str(&format!("tls-auth {key_path} 1\n"));
 
-    if full_tunnel || cfg.routes.is_empty() {
+    // Routing decision matrix:
+    //   full_tunnel=true                 → redirect-gateway, ignore route list
+    //                                      (the user explicitly asked for "all
+    //                                      traffic over VPN").
+    //   full_tunnel=false, routes given  → push only those routes; LAN +
+    //                                      internet stay on the local link.
+    //   full_tunnel=false, routes empty  → push nothing locally; rely on
+    //                                      whatever the gateway pushes via
+    //                                      `push "route ..."`.  Do NOT silently
+    //                                      promote to full-tunnel: Azure
+    //                                      gateways don't NAT egress and the
+    //                                      result is "VPN connected, internet
+    //                                      dies" with no explanation.
+    if full_tunnel {
         s.push_str("redirect-gateway def1\n");
     } else {
         for route in &cfg.routes {
@@ -826,10 +839,19 @@ impl VpnBackend for AzureBackend {
         let key_path = tmp_dir.join("tls-auth.key");
         let ovpn_path = tmp_dir.join("client.ovpn");
 
-        // tls-auth static key (direction 1, SHA256)
+        // tls-auth static key (direction 1, SHA256).  Tighten permissions —
+        // this file embeds the gateway's pre-shared HMAC key, so even though
+        // the daemon runs as root and `tmp_dir` is mode 0750, defense-in-
+        // depth: belt + braces against an accidentally-permissive umask.
         tokio::fs::write(&key_path, hex_to_openvpn_key(&cfg.server_secret_hex))
             .await
             .map_err(BackendError::Io)?;
+        tokio::fs::set_permissions(
+            &key_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .await
+        .map_err(BackendError::Io)?;
 
         let ovpn_text = build_ovpn_config(
             cfg,
@@ -841,12 +863,20 @@ impl VpnBackend for AzureBackend {
 
         info!("Azure: temp files written to {}", tmp_dir.display());
 
-        // ── Step 3: Tear down any pre-existing openvpn3 sessions ─────────────
-        // A stale session from a prior crash holds the tun device and would
-        // collide with our new one.
+        // ── Step 3: Tear down stale openvpn3 sessions FROM THIS PROFILE ──────
+        // A previous crash or interrupted connect can leave a session running
+        // for the same profile (same tmp_dir).  Match by tmp_dir prefix so we
+        // never touch unrelated openvpn3 sessions (other VPNs, manually-
+        // imported configs, etc.).
+        let tmp_dir_prefix = format!("{}/", tmp_dir.display());
         for stale in list_openvpn3_sessions().await {
-            warn!("Azure: cleaning up stale openvpn3 session {}", stale.path);
-            disconnect_openvpn3_session(&stale.path).await;
+            if stale.config_name.starts_with(&tmp_dir_prefix) {
+                warn!(
+                    "Azure: cleaning up stale openvpn3 session {} (config={})",
+                    stale.path, stale.config_name
+                );
+                disconnect_openvpn3_session(&stale.path).await;
+            }
         }
 
         // ── Step 4: Launch `openvpn3 session-start` with creds via stdin ─────

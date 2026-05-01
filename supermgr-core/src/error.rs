@@ -63,6 +63,40 @@ pub enum BackendError {
     Io(#[from] std::io::Error),
 }
 
+impl BackendError {
+    /// Returns `true` when retrying the same operation has no chance of
+    /// succeeding without operator intervention (bad config, invalid
+    /// credentials, permission errors, gateway-side auth rejection).
+    ///
+    /// Callers (notably the connect-retry loop in the daemon) skip
+    /// exponential backoff on terminal errors and surface them immediately,
+    /// avoiding 30-second user-visible latency on a typo.
+    #[must_use]
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            BackendError::AlreadyConnected
+            | BackendError::Config(_)
+            | BackendError::Key(_)
+            | BackendError::Permission(_) => true,
+            // ConnectionFailed is overloaded — it covers both transient
+            // network failures and authoritative gateway rejections.
+            // Treat AAA failures (server-side auth) as terminal since the
+            // same credentials will keep failing on retry.
+            BackendError::ConnectionFailed(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                lower.contains("auth_failed")
+                    || lower.contains("auth-failure")
+                    || lower.contains("authentication failed")
+                    || lower.contains("authentication required")
+                    || lower.contains("invalid credentials")
+                    || lower.contains("token has expired")
+                    || lower.contains("session may have expired")
+            }
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Profile / store errors
 // ---------------------------------------------------------------------------
