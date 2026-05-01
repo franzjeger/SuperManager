@@ -183,9 +183,28 @@ impl DaemonState {
     /// The caller is responsible for ensuring `profile_dir` exists before
     /// calling this (see `import_wireguard` for the `create_dir_all` call).
     pub fn save_profile(&self, profile: &Profile) -> anyhow::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
         let path = self.profile_dir.join(format!("{}.toml", profile.id));
         let text = toml::to_string_pretty(profile)?;
-        std::fs::write(&path, text)?;
+        // Atomic write-temp-rename: a daemon crash mid-write must NOT corrupt
+        // an existing profile file.  Rename(2) is atomic on POSIX, so either
+        // the new content lands fully or the previous version stays intact.
+        // Mode 0600 — profiles can embed secret refs and route topology that
+        // shouldn't be world-readable even when the daemon's profile_dir
+        // (0750) accidentally drifts.
+        let tmp_path = path.with_extension("toml.tmp");
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &path)?;
         Ok(())
     }
 
@@ -4077,6 +4096,18 @@ impl DaemonService {
         tokio::fs::write(&filepath, &body)
             .await
             .map_err(|e| fdo::Error::Failed(format!("write backup: {e}")))?;
+        // Tighten mode — FortiGate exports embed VPN PSKs, firewall rules and
+        // user databases; world-readable backup files are a real disclosure
+        // risk on shared boxes.
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            tokio::fs::set_permissions(
+                &filepath,
+                std::fs::Permissions::from_mode(0o640),
+            )
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("chmod backup: {e}")))?;
+        }
 
         info!("fortigate_backup_config: saved {filepath:?} ({} bytes)", body.len());
         Ok(filename)
