@@ -823,10 +823,17 @@ pub trait Daemon {
 
     /// Download the FortiGate running config and save it to disk.
     ///
-    /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and writes
+    /// Calls `POST /api/v2/monitor/system/config/backup?scope=global` and writes
     /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
     /// Returns the filename on success.
     async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
+    /// Composite FortiGate status snapshot for the dashboard.
+    ///
+    /// Returns the `fortigate::FortiGateStatus` struct serialised as JSON.
+    /// Mirrors `opnsense_get_status` — individual underlying endpoint
+    /// failures surface as missing fields rather than failing the call.
+    async fn fortigate_get_status(&self, host_id: &str) -> fdo::Result<String>;
 
     /// Run CIS benchmark compliance checks against a FortiGate device via SSH.
     ///

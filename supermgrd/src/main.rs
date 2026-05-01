@@ -32,6 +32,7 @@ mod daemon;
 mod secrets;
 mod backup_retention;
 mod docs;
+mod fortigate;
 mod opnsense;
 mod sophos;
 mod tailscale;

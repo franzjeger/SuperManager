@@ -420,6 +420,50 @@ impl DaemonService {
         })?;
         Ok((hostname, port, creds))
     }
+
+    /// Look up a FortiGate host's stored API token and connection details.
+    ///
+    /// Returns `(hostname, port, credentials)`. The FortiGate token is stored
+    /// as a raw UTF-8 byte blob (no JSON envelope), keyed at
+    /// `supermgr/fg/<uuid>/api_token`.
+    async fn load_fortigate_creds(
+        &self,
+        id: &Uuid,
+    ) -> fdo::Result<(String, u16, crate::fortigate::Credentials)> {
+        let (hostname, port, label) = {
+            let state = self.state.lock().await;
+            let host = state
+                .hosts
+                .get(id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+            let label = host
+                .api_token_ref
+                .as_ref()
+                .ok_or_else(|| {
+                    fdo::Error::Failed("no API token configured for this host".into())
+                })?
+                .label()
+                .to_owned();
+            (
+                host.hostname.clone(),
+                host.api_port.unwrap_or(443),
+                label,
+            )
+        };
+
+        let bytes = secrets::retrieve_secret(&label)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("retrieve API token: {e}")))?;
+        let token = String::from_utf8(bytes)
+            .map_err(|e| fdo::Error::Failed(format!("invalid API token encoding: {e}")))?;
+        Ok((
+            hostname,
+            port,
+            crate::fortigate::Credentials {
+                token: token.trim().to_owned(),
+            },
+        ))
+    }
 }
 
 #[interface(name = "org.supermgr.Daemon1")]
@@ -2570,6 +2614,11 @@ impl DaemonService {
     }
 
     /// Call the FortiGate REST API on a host.
+    ///
+    /// Thin shim over [`crate::fortigate::request`]; this method exists to
+    /// authenticate the caller, look up the stored token, log an audit
+    /// event, and translate the HTTP body / status into a `Result` shaped
+    /// for D-Bus.
     async fn fortigate_api(
         &self,
         host_id: &str,
@@ -2580,99 +2629,27 @@ impl DaemonService {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
-        let (hostname, api_port, _api_verify_tls, token_label) = {
-            let state = self.state.lock().await;
-            let host = state.hosts.get(&id)
-                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
-            let label = host.api_token_ref.as_ref()
-                .ok_or_else(|| fdo::Error::Failed("no API token configured for this host".into()))?
-                .label()
-                .to_owned();
-            (
-                host.hostname.clone(),
-                host.api_port.unwrap_or(443),
-                host.api_verify_tls,
-                label,
-            )
-        };
+        let (hostname, api_port, creds) = self.load_fortigate_creds(&id).await?;
 
-        let token_bytes = secrets::retrieve_secret(&token_label)
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("retrieve API token: {e}")))?;
-        let token = String::from_utf8(token_bytes)
-            .map_err(|e| fdo::Error::Failed(format!("invalid API token encoding: {e}")))?;
-        let token = token.trim().to_owned();
+        info!("fortigate_api: {method} https://{hostname}:{api_port}{path}");
+        crate::audit::log_event(
+            "FG_API",
+            &format!("{method} https://{hostname}:{api_port}{path}"),
+        );
 
-        let url = format!("https://{hostname}:{api_port}{path}");
-        info!("fortigate_api: {method} {url}");
-        crate::audit::log_event("FG_API", &format!("{method} {url}"));
+        let resp = crate::fortigate::request(
+            &hostname, api_port, &creds, method, path, body,
+        )
+        .await
+        .map_err(fdo::Error::Failed)?;
 
-        let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!("fortigate_api: client build failed: {e:#}");
-                return Err(fdo::Error::Failed(format!("HTTP client build failed: {e}")));
-            }
-        };
-
-        let mut req = match method.to_uppercase().as_str() {
-            "GET" => client.get(&url),
-            "POST" => client.post(&url),
-            "PUT" => client.put(&url),
-            "DELETE" => client.delete(&url),
-            _ => return Err(fdo::Error::InvalidArgs(format!("invalid method: {method}"))),
-        };
-
-        req = req.header("Authorization", format!("Bearer {token}"));
-        if !body.is_empty() && method.to_uppercase() != "GET" {
-            req = req
-                .header("Content-Type", "application/json")
-                .body(body.to_owned());
+        if resp.status >= 400 {
+            return Err(fdo::Error::Failed(crate::fortigate::status_error(
+                resp.status,
+                &resp.body,
+            )));
         }
-
-        let resp = req.send().await
-            .map_err(|e| {
-                let msg = e.to_string().replace(&token, "***");
-                error!("fortigate_api: send failed: {msg}");
-                error!("fortigate_api: is_connect={} is_timeout={} is_request={}",
-                    e.is_connect(), e.is_timeout(), e.is_request());
-                if e.is_timeout() {
-                    fdo::Error::Failed(format!(
-                        "FortiGate API request timed out: the device at {hostname}:{api_port} \
-                         did not respond within 30 s — verify the host is reachable"
-                    ))
-                } else if e.is_connect() {
-                    fdo::Error::Failed(format!(
-                        "cannot connect to FortiGate at {hostname}:{api_port}: {msg} — \
-                         check that the device is online and the API port is correct"
-                    ))
-                } else {
-                    fdo::Error::Failed(format!("FortiGate API request failed: {msg}"))
-                }
-            })?;
-
-        let status = resp.status().as_u16();
-        let resp_body = resp.text().await
-            .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
-
-        if status >= 400 {
-            let detail = match status {
-                401 => "authentication failed: invalid or expired API token".to_owned(),
-                403 => "permission denied: the API token lacks required privileges for this operation".to_owned(),
-                404 => "API endpoint not found: check the FortiGate firmware version and API path".to_owned(),
-                405 => "method not allowed: this API endpoint does not support the requested HTTP method".to_owned(),
-                424 => format!("failed dependency: a prerequisite was not met — {}", &resp_body[..resp_body.len().min(200)]),
-                s if s >= 500 => format!("FortiGate internal error ({s}): try again later"),
-                _ => format!("HTTP {status}: {}", &resp_body[..resp_body.len().min(300)]),
-            };
-            return Err(fdo::Error::Failed(detail));
-        }
-
-        Ok(resp_body)
+        Ok(resp.body)
     }
 
     /// Push an SSH public key to a FortiGate admin user via REST API.
@@ -3985,107 +3962,34 @@ impl DaemonService {
 
     /// Download the FortiGate running config and save it to disk.
     ///
-    /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and
-    /// saves to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
+    /// Hits `POST /api/v2/monitor/system/config/backup?scope=global` via
+    /// [`crate::fortigate::backup_config`] and saves the body to
+    /// `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
     async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
-        let (hostname, api_port, token_label) = {
-            let state = self.state.lock().await;
-            let host = state
-                .hosts
-                .get(&id)
-                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
-            let label = host
-                .api_token_ref
-                .as_ref()
-                .ok_or_else(|| {
-                    fdo::Error::Failed("no API token configured for this host".into())
-                })?
-                .label()
-                .to_owned();
-            (
-                host.hostname.clone(),
-                host.api_port.unwrap_or(443),
-                label,
-            )
-        };
+        let (hostname, api_port, creds) = self.load_fortigate_creds(&id).await?;
 
-        let token_bytes = secrets::retrieve_secret(&token_label)
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("retrieve API token: {e}")))?;
-        let token = String::from_utf8(token_bytes)
-            .map_err(|e| fdo::Error::Failed(format!("invalid API token encoding: {e}")))?;
-        let token = token.trim().to_owned();
-
-        let url = format!(
-            "https://{hostname}:{api_port}/api/v2/monitor/system/config/backup?scope=global"
+        info!(
+            "fortigate_backup_config: POST https://{hostname}:{api_port}\
+             /api/v2/monitor/system/config/backup?scope=global"
         );
-        info!("fortigate_backup_config: POST {url}");
-        crate::audit::log_event("FG_BACKUP", &format!("POST {url}"));
+        crate::audit::log_event(
+            "FG_BACKUP",
+            &format!("POST https://{hostname}:{api_port}/api/v2/monitor/system/config/backup"),
+        );
 
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(|e| fdo::Error::Failed(format!("HTTP client build failed: {e}")))?;
-
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Length", "0")
-            .send()
+        let body = crate::fortigate::backup_config(&hostname, api_port, &creds)
             .await
-            .map_err(|e| {
-                let msg = e.to_string().replace(&token, "***");
-                error!("fortigate_backup_config: request failed: {msg}");
-                if e.is_timeout() {
-                    fdo::Error::Failed(format!(
-                        "backup request timed out: the FortiGate at {hostname}:{api_port} \
-                         did not respond within 60 s — the device may be under heavy load"
-                    ))
-                } else if e.is_connect() {
-                    fdo::Error::Failed(format!(
-                        "cannot connect to FortiGate at {hostname}:{api_port}: {msg} — \
-                         check that the device is online and the API port is correct"
-                    ))
-                } else {
-                    fdo::Error::Failed(format!("backup request failed: {msg}"))
-                }
-            })?;
+            .map_err(fdo::Error::Failed)?;
 
-        let status = resp.status().as_u16();
-        info!("fortigate_backup_config: HTTP {status}");
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| fdo::Error::Failed(format!("read response: {e}")))?;
-
-        if status >= 400 {
-            error!("fortigate_backup_config: API error {status}: {}", &body[..body.len().min(200)]);
-            let detail = match status {
-                401 => "authentication failed: invalid or expired API token",
-                403 => "permission denied: the API token lacks backup privileges",
-                404 => "backup endpoint not found: check FortiGate firmware version",
-                _ if status >= 500 => "FortiGate internal error: try again later",
-                _ => "",
-            };
-            return Err(fdo::Error::Failed(if detail.is_empty() {
-                format!("FortiGate backup API error (HTTP {status}): {}", &body[..body.len().min(200)])
-            } else {
-                format!("FortiGate backup failed: {detail} (HTTP {status})")
-            }));
-        }
-
-        // Save to /etc/supermgrd/backups/
         let backup_dir = PathBuf::from("/etc/supermgrd/backups");
         tokio::fs::create_dir_all(&backup_dir)
             .await
             .map_err(|e| fdo::Error::Failed(format!("create backup dir: {e}")))?;
 
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        // Sanitise hostname for use in filename.
         let safe_host: String = hostname
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
@@ -4096,9 +4000,9 @@ impl DaemonService {
         tokio::fs::write(&filepath, &body)
             .await
             .map_err(|e| fdo::Error::Failed(format!("write backup: {e}")))?;
-        // Tighten mode — FortiGate exports embed VPN PSKs, firewall rules and
-        // user databases; world-readable backup files are a real disclosure
-        // risk on shared boxes.
+        // FortiGate exports embed VPN PSKs, firewall rules, and user
+        // databases; world-readable backup files are a real disclosure risk
+        // on shared boxes.
         {
             use std::os::unix::fs::PermissionsExt as _;
             tokio::fs::set_permissions(
@@ -4111,6 +4015,21 @@ impl DaemonService {
 
         info!("fortigate_backup_config: saved {filepath:?} ({} bytes)", body.len());
         Ok(filename)
+    }
+
+    /// Composite FortiGate status snapshot for the dashboard.
+    ///
+    /// Returns the [`crate::fortigate::FortiGateStatus`] struct serialised
+    /// as JSON. Mirrors `opnsense_get_status`: individual underlying
+    /// endpoint failures are tolerated and surface as missing fields rather
+    /// than failing the whole call.
+    async fn fortigate_get_status(&self, host_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let (hostname, port, creds) = self.load_fortigate_creds(&id).await?;
+        let status = crate::fortigate::get_status(&hostname, port, &creds).await;
+        serde_json::to_string(&status)
+            .map_err(|e| fdo::Error::Failed(format!("serialise status: {e}")))
     }
 
     // =======================================================================
