@@ -80,6 +80,12 @@ pub struct FortiGateStatus {
     pub sessions: Option<u64>,
     /// Whether `/api/v2/monitor/system/firmware` lists any upgrade candidate.
     pub updates_available: Option<bool>,
+    /// Latest available firmware version string (e.g. `v7.4.6`), if any. Set
+    /// only when [`updates_available`](Self::updates_available) is `Some(true)`.
+    pub latest_firmware: Option<String>,
+    /// HA cluster mode (`a-p`, `a-a`, `standalone`, …) as reported by
+    /// `system/status`. Some firmware versions omit this key — `None` then.
+    pub ha_mode: Option<String>,
 }
 
 /// Build a reqwest client suitable for talking to a FortiGate.
@@ -255,40 +261,24 @@ pub async fn get_status(
                     .get("serial")
                     .and_then(|x| x.as_str())
                     .map(str::to_owned);
+                s.ha_mode = r
+                    .get("ha_mode")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_owned);
+                // Some firmware versions (notably 6.4 / 7.0) include cpu /
+                // mem / ram directly in `results` rather than exposing them
+                // through resource/usage — pick them up here as a starting
+                // point; resource/usage will overwrite if it succeeds.
+                let direct = |key: &str| r.get(key).and_then(|x| x.as_u64());
+                s.cpu_pct = direct("cpu");
+                s.memory_pct = direct("mem").or_else(|| direct("ram"));
             }
         } else {
             warn!("fortigate system/status returned HTTP {}", resp.status);
         }
     }
 
-    if let Ok(resp) = request(
-        hostname,
-        port,
-        creds,
-        "GET",
-        "/api/v2/monitor/system/resource/usage",
-        "",
-    )
-    .await
-    {
-        if resp.status == 200 {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
-                // Each resource field is a list of samples; the most recent
-                // sample is at index 0 and exposes a `current` value.
-                let pick = |key: &str| -> Option<u64> {
-                    v.pointer("/results")
-                        .and_then(|res| res.get(key))
-                        .and_then(|arr| arr.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|sample| sample.get("current"))
-                        .and_then(|x| x.as_u64())
-                };
-                s.cpu_pct = pick("cpu");
-                s.memory_pct = pick("mem");
-                s.sessions = pick("session");
-            }
-        }
-    }
+    populate_resource_usage(hostname, port, creds, &mut s).await;
 
     if let Ok(resp) = request(
         hostname,
@@ -302,15 +292,84 @@ pub async fn get_status(
     {
         if resp.status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
-                s.updates_available = v
+                let available = v
                     .pointer("/results/available")
-                    .and_then(|x| x.as_array())
-                    .map(|arr| !arr.is_empty());
+                    .and_then(|x| x.as_array());
+                s.updates_available = available.map(|arr| !arr.is_empty());
+                if let Some(arr) = available {
+                    s.latest_firmware = arr
+                        .first()
+                        .and_then(|first| first.get("version"))
+                        .and_then(|x| x.as_str())
+                        .map(str::to_owned);
+                }
             }
         }
     }
 
     s
+}
+
+/// Fill in `cpu_pct` / `memory_pct` / `sessions` on `s` by querying the
+/// firmware-version-appropriate resource endpoint.
+///
+/// FortiOS exposes per-second sampled metrics at
+/// `/api/v2/monitor/system/resource/usage` on 7.x and at
+/// `/api/v2/monitor/system/performance/status` on older firmware. Either
+/// endpoint may be absent depending on the build, so we try both and
+/// keep whichever responds with the expected shape.
+async fn populate_resource_usage(
+    hostname: &str,
+    port: u16,
+    creds: &Credentials,
+    s: &mut FortiGateStatus,
+) {
+    for path in [
+        "/api/v2/monitor/system/resource/usage",
+        "/api/v2/monitor/system/performance/status",
+    ] {
+        let Ok(resp) = request(hostname, port, creds, "GET", path, "").await else {
+            continue;
+        };
+        if resp.status != 200 {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) else {
+            continue;
+        };
+        let res = v.get("results").unwrap_or(&v);
+        // Each metric is a list of samples; the most recent sample (index 0)
+        // exposes a `current` value. On firmware that already ships the
+        // metric as a flat number, fall back to that.
+        let pick = |key: &str| -> Option<u64> {
+            if let Some(n) = res
+                .get(key)
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|sample| sample.get("current"))
+                .and_then(|x| x.as_u64())
+            {
+                return Some(n);
+            }
+            res.get(key).and_then(|x| x.as_u64())
+        };
+        let cpu = pick("cpu");
+        let mem = pick("mem").or_else(|| pick("ram"));
+        let sess = pick("session");
+        if cpu.is_none() && mem.is_none() && sess.is_none() {
+            continue;
+        }
+        if cpu.is_some() {
+            s.cpu_pct = cpu;
+        }
+        if mem.is_some() {
+            s.memory_pct = mem;
+        }
+        if sess.is_some() {
+            s.sessions = sess;
+        }
+        return;
+    }
 }
 
 /// Download the running config and return it verbatim.
@@ -364,6 +423,8 @@ mod tests {
         assert!(s.memory_pct.is_none());
         assert!(s.sessions.is_none());
         assert!(s.updates_available.is_none());
+        assert!(s.latest_firmware.is_none());
+        assert!(s.ha_mode.is_none());
     }
 
     #[test]

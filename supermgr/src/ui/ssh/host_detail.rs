@@ -781,6 +781,12 @@ pub fn show_add_port_forward_dialog(
 
 /// Kick off an async fetch of the FortiGate system status and send the result
 /// back to the GTK main thread via `AppMsg::FortigateStatus`.
+///
+/// Delegates to the daemon's `fortigate_get_status`, which composes the
+/// status / resource-usage / firmware queries and tolerates per-endpoint
+/// failures. The GUI keeps a 3 s TCP pre-check so an unreachable host
+/// doesn't drag the whole dashboard refresh into the daemon's 30 s HTTP
+/// timeout.
 pub fn refresh_fortigate_dashboard(
     host_id: String,
     hostname: String,
@@ -790,16 +796,15 @@ pub fn refresh_fortigate_dashboard(
 ) {
     let tx = tx.clone();
     rt.spawn(async move {
-        // Quick TCP check before making the full API call — avoids a 30s
-        // timeout when the host is unreachable (e.g. VPN not connected).
         let addr = format!("{hostname}:{api_port}");
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio::net::TcpStream::connect(&addr),
-        ).await {
-            Ok(Ok(_)) => {} // reachable, proceed
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
             _ => {
-                // Not reachable — show "Unreachable" without error toast.
                 let _ = tx.send(AppMsg::FortigateStatus {
                     host_id,
                     data: serde_json::json!({ "error": "host unreachable" }),
@@ -811,91 +816,31 @@ pub fn refresh_fortigate_dashboard(
         let result = async {
             let conn = zbus::Connection::system().await?;
             let proxy = DaemonProxy::new(&conn).await?;
-            // Fetch system status (hostname, firmware, serial).
             let resp = proxy
-                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/status", "")
+                .fortigate_get_status(&host_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut data: Value = serde_json::from_str(&resp)
+            let data: Value = serde_json::from_str(&resp)
                 .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
-            info!("FortiGate status top-level: {:?}",
-                data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
-            if let Some(r) = data.get("results") {
-                info!("FortiGate status results: {r}");
-            }
-
-            // Try multiple endpoints for CPU/memory (varies by firmware version).
-            let mut found_resource = false;
-            for ep in &[
-                "/api/v2/monitor/system/resource/usage",
-                "/api/v2/monitor/system/performance/status",
-            ] {
-                if let Ok(res_resp) = proxy.fortigate_api(&host_id, "GET", ep, "").await {
-                    if let Ok(res_data) = serde_json::from_str::<Value>(&res_resp) {
-                        let res = res_data.get("results").unwrap_or(&res_data);
-                        if res.get("cpu").is_some() || res.get("mem").is_some() {
-                            data["resource"] = res.clone();
-                            found_resource = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Fallback: some FortiGate versions include cpu/ram directly in the
-            // main status response under "results".
-            if !found_resource {
-                if let Some(results) = data.get("results") {
-                    let has_cpu = results.get("cpu").is_some();
-                    let has_mem = results.get("mem").is_some()
-                        || results.get("ram").is_some();
-                    if has_cpu || has_mem {
-                        data["resource"] = results.clone();
-                    }
-                }
-            }
-
-            // Fetch firmware upgrade availability (informational only).
-            if let Ok(fw_resp) = proxy
-                .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/firmware", "")
-                .await
-            {
-                if let Ok(fw_data) = serde_json::from_str::<Value>(&fw_resp) {
-                    let results = fw_data.get("results").unwrap_or(&fw_data);
-                    // The firmware endpoint returns "available" array when updates exist.
-                    let has_update = results
-                        .get("available")
-                        .and_then(|a| a.as_array())
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false);
-                    if has_update {
-                        data["firmware_update_available"] = Value::Bool(true);
-                        // Include the latest available version for display.
-                        if let Some(latest) = results
-                            .get("available")
-                            .and_then(|a| a.as_array())
-                            .and_then(|a| a.first())
-                        {
-                            data["firmware_update_version"] = latest.clone();
-                        }
-                    }
-                }
-            }
-
+            info!(
+                "FortiGate status fields populated: {:?}",
+                data.as_object().map(|o| {
+                    o.iter()
+                        .filter(|(_, v)| !v.is_null())
+                        .map(|(k, _)| k.as_str())
+                        .collect::<Vec<_>>()
+                })
+            );
             Ok::<Value, anyhow::Error>(data)
         }
         .await;
 
         match result {
             Ok(data) => {
-                let _ = tx.send(AppMsg::FortigateStatus {
-                    host_id,
-                    data,
-                });
+                let _ = tx.send(AppMsg::FortigateStatus { host_id, data });
             }
             Err(e) => {
                 warn!("FortiGate dashboard fetch failed for {host_id}: {e}");
-                // Show "Unreachable" in dashboard instead of noisy error toast.
                 let _ = tx.send(AppMsg::FortigateStatus {
                     host_id,
                     data: serde_json::json!({ "error": e.to_string() }),
@@ -906,8 +851,12 @@ pub fn refresh_fortigate_dashboard(
 }
 
 /// Apply FortiGate status data to the dashboard rows.
+///
+/// Reads the flat shape produced by the daemon's `fortigate_get_status`
+/// (`fortigate::FortiGateStatus` serialised as JSON). An empty/None field
+/// is rendered as `--`; an `error` key means the call failed and every row
+/// gets a `Unreachable` placeholder.
 pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
-    // Handle error case — show "Unreachable" in all fields.
     if data.get("error").is_some() {
         let msg = "Unreachable";
         detail.fg_firmware_row.set_subtitle(msg);
@@ -920,70 +869,49 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
         return;
     }
 
-    // FortiGate /api/v2/monitor/system/status puts some fields at top level
-    // (version, serial, build) and others inside "results" (hostname, etc.).
-    let results = data.get("results").unwrap_or(data);
-
-    // Helper: check both top-level and results for a field.
-    let get_str = |key: &str| -> &str {
+    let str_or_dash = |key: &str| -> String {
         data.get(key)
             .and_then(|v| v.as_str())
-            .or_else(|| results.get(key).and_then(|v| v.as_str()))
+            .filter(|s| !s.is_empty())
             .unwrap_or("--")
+            .to_owned()
+    };
+    let pct_or_dash = |key: &str| -> String {
+        data.get(key)
+            .and_then(|v| v.as_u64())
+            .map(|n| format!("{n}%"))
+            .unwrap_or_else(|| "--".to_owned())
     };
 
-    let version = get_str("version");
+    let version = str_or_dash("version");
     let build = data.get("build").and_then(|v| v.as_u64()).unwrap_or(0);
-    let firmware = if build > 0 {
+    let firmware = if build > 0 && version != "--" {
         format!("{version} (build {build})")
     } else {
-        version.to_string()
+        version
     };
     detail.fg_firmware_row.set_subtitle(&firmware);
 
-    // Show "Update available" badge if firmware update info is present.
     let has_fw_update = data
-        .get("firmware_update_available")
+        .get("updates_available")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     detail.fg_update_badge.set_visible(has_fw_update);
     if has_fw_update {
-        if let Some(ver) = data.get("firmware_update_version") {
-            let ver_str = ver
-                .get("version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("new version");
-            detail
-                .fg_update_badge
-                .set_tooltip_text(Some(&format!("Available: {ver_str}")));
-        }
+        let ver_str = data
+            .get("latest_firmware")
+            .and_then(|v| v.as_str())
+            .unwrap_or("new version");
+        detail
+            .fg_update_badge
+            .set_tooltip_text(Some(&format!("Available: {ver_str}")));
     }
 
-    detail.fg_hostname_row.set_subtitle(get_str("hostname"));
-    detail.fg_serial_row.set_subtitle(get_str("serial"));
-    detail.fg_ha_row.set_subtitle(get_str("ha_mode"));
-
-    // CPU/Memory — check multiple locations (varies by firmware version).
-    let resource = data.get("resource");
-    let cpu = resource
-        .and_then(|r| r.get("cpu"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| results.get("cpu").and_then(|v| v.as_u64()))
-        .or_else(|| data.get("cpu").and_then(|v| v.as_u64()))
-        .map(|v| format!("{v}%"))
-        .unwrap_or_else(|| "--".to_owned());
-    detail.fg_cpu_row.set_subtitle(&cpu);
-
-    // Memory — also check "ram" key used by some firmware versions.
-    let mem = resource
-        .and_then(|r| r.get("mem").or_else(|| r.get("ram")))
-        .and_then(|v| v.as_u64())
-        .or_else(|| results.get("mem").and_then(|v| v.as_u64()))
-        .or_else(|| results.get("ram").and_then(|v| v.as_u64()))
-        .or_else(|| data.get("mem").and_then(|v| v.as_u64()))
-        .map(|v| format!("{v}%"))
-        .unwrap_or_else(|| "--".to_owned());
-    detail.fg_memory_row.set_subtitle(&mem);
+    detail.fg_hostname_row.set_subtitle(&str_or_dash("hostname"));
+    detail.fg_serial_row.set_subtitle(&str_or_dash("serial"));
+    detail.fg_ha_row.set_subtitle(&str_or_dash("ha_mode"));
+    detail.fg_cpu_row.set_subtitle(&pct_or_dash("cpu_pct"));
+    detail.fg_memory_row.set_subtitle(&pct_or_dash("memory_pct"));
 }
 
 // ---------------------------------------------------------------------------

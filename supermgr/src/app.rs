@@ -181,7 +181,9 @@ pub enum AppMsg {
     FortigateStatus {
         /// UUID string of the host.
         host_id: String,
-        /// Parsed JSON response from `/api/v2/monitor/system/status`.
+        /// Either the `FortiGateStatus` struct serialised as JSON (when the
+        /// daemon's `fortigate_get_status` succeeds) or `{ "error": "..." }`
+        /// when the host is unreachable / the call failed.
         data: Value,
     },
 
