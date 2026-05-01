@@ -26,8 +26,31 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=-/tmp/supermgrd -/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
+# PrivateTmp=false is intentional: ssh_connect_command writes per-session
+# password / private-key temp files in /tmp/supermgrd that the GUI's terminal
+# subprocess (running as the unprivileged user) must read.  Once those temp
+# files are moved to /run/user/$UID and chowned to the caller, this can flip
+# to PrivateTmp=true.
 PrivateTmp=false
-NoNewPrivileges=false
+# NoNewPrivileges=true blocks setuid/setcap escalation in any subprocess we
+# spawn (nft, swanctl, ip, openvpn3, ssh).  None of the spawned binaries need
+# to acquire new privileges — they either run with our inherited caps or
+# unprivileged.  The previous `false` was a regression and let a compromised
+# subprocess chain to root via a setuid helper.
+NoNewPrivileges=true
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+KeyringMode=private
+# AF_NETLINK is required for nftables / rtnetlink (kill-switch, route ops).
+# AF_PACKET is NOT in the list — we never craft raw packets; if WireGuard or
+# anything else later needs it, expand this list explicitly.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

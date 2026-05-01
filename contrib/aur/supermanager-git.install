@@ -1,5 +1,13 @@
 post_install() {
+    # `supermgr` group — see contrib/dbus/org.supermgr.Daemon.conf.  The
+    # daemon's D-Bus policy denies everyone outside this group, so the
+    # desktop user has to be a member or the GUI can't talk to the daemon.
+    if ! getent group supermgr >/dev/null 2>&1; then
+        groupadd --system supermgr
+    fi
+
     systemctl daemon-reload
+    systemctl reload dbus.service 2>/dev/null || true
     systemctl enable --now strongswan.service >/dev/null 2>&1 || true
     systemctl enable --now supermgrd.service >/dev/null 2>&1 || true
     cat <<EOF
@@ -10,8 +18,10 @@ SuperManager installed.
   Daemon status:     systemctl status supermgrd
   Daemon logs:       journalctl -u supermgrd -f
 
+Add your desktop user to the 'supermgr' group (then log out and back in):
+  sudo usermod -aG supermgr \$USER
+
 Optional:
-  - openvpn3 (AUR) for non-Azure OpenVPN profiles
   - networkmanager (enabled) for auto-connect on network change
 
 EOF

@@ -259,10 +259,33 @@ install -Dm644 contrib/dbus/org.supermgr.Daemon.service \
 install -dm750 /etc/supermgrd
 
 # ---------------------------------------------------------------------------
+# `supermgr` group — see the comment in
+# contrib/dbus/org.supermgr.Daemon.conf.  The system D-Bus policy denies
+# `org.supermgr.Daemon` to every caller outside this group, so the desktop
+# user must be a member or the GUI / supermgr-mcp can't reach the daemon.
+# ---------------------------------------------------------------------------
+if ! getent group supermgr >/dev/null 2>&1; then
+    echo "==> Creating system group 'supermgr'"
+    groupadd --system supermgr
+fi
+
+INVOKING_USER="${SUDO_USER:-}"
+if [[ -n "$INVOKING_USER" && "$INVOKING_USER" != "root" ]]; then
+    if ! id -nG "$INVOKING_USER" | grep -qw supermgr; then
+        echo "==> Adding '$INVOKING_USER' to the supermgr group"
+        usermod -aG supermgr "$INVOKING_USER"
+        ADDED_USER="$INVOKING_USER"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Enable services
 # ---------------------------------------------------------------------------
 echo "==> Enabling services"
 systemctl daemon-reload
+systemctl reload dbus.service 2>/dev/null || \
+    systemctl reload-or-restart dbus.socket 2>/dev/null || \
+    true
 systemctl enable --now strongswan.service >/dev/null 2>&1 || true
 if systemctl is-active --quiet supermgrd.service; then
     systemctl restart supermgrd.service
@@ -279,3 +302,13 @@ SuperManager installed.
   Daemon logs:       journalctl -u supermgrd -f
 
 EOF
+
+if [[ -n "${ADDED_USER:-}" ]]; then
+    cat <<EOF
+NOTE: Added '$ADDED_USER' to the 'supermgr' group.  Group membership only
+takes effect on a fresh login session — log out and back in (or run
+\`newgrp supermgr\`) before launching the GUI, otherwise D-Bus calls will
+return "AccessDenied".
+
+EOF
+fi
