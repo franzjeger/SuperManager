@@ -9,6 +9,18 @@ members = [
     "supermgr-mcp",
     "supermanager-helper",
 ]
+# `cargo build` / `cargo test` (no -p / --workspace) only touches
+# this list. The Mac-only crates (supermgr-engine, supermgrd-mac,
+# supermanager-helper) stay out so the Linux CI image — which has
+# no security-framework, no launchd, no Xcode — doesn't try to
+# compile them. Run `cargo build --workspace` explicitly on macOS
+# to build everything.
+default-members = [
+    "supermgr-core",
+    "supermgrd",
+    "supermgr",
+    "supermgr-mcp",
+]
 
 # ---------------------------------------------------------------------------
 # Shared dependency versions — all workspace members inherit from here.

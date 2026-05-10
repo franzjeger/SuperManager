@@ -15,9 +15,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libssl-dev pkg-config
+      # All three steps respect `default-members` in the workspace
+      # Cargo.toml — they touch only Linux crates (supermgr-core,
+      # supermgrd, supermgr, supermgr-mcp) and skip the Mac stack.
       - name: Build
         run: cargo build --release
       - name: Clippy
         run: cargo clippy -- -W warnings
       - name: Tests
-        run: cargo test --all
+        run: cargo test
