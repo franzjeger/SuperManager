@@ -19,6 +19,22 @@ struct AddVpnProfileSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Sheet title — without it the form just starts at
+            // "Profile" and there's no signal what kind of profile
+            // this sheet creates (the dropdown that opens it is
+            // narrower than the sheet itself).
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(.tint)
+                    .font(.title2)
+                Text("New IKEv2 profile")
+                    .font(.title2.weight(.semibold))
+                Spacer()
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .padding(.bottom, 6)
+
             Form {
                 Section("Profile") {
                     TextField("Name", text: $name)
