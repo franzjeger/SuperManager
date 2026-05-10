@@ -36,7 +36,11 @@ struct AuditSettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .frame(width: 140)
+                // Wider than 140 — "All actions" plus the picker
+                // chevron just fit at 140, so the label was being
+                // truncated to "All actio…". 200 leaves comfortable
+                // headroom for longer action names too.
+                .frame(width: 200)
 
                 Toggle("Failures only", isOn: $showOnlyFailures)
                     .toggleStyle(.checkbox)
@@ -56,9 +60,14 @@ struct AuditSettingsView: View {
 
             // Footer
             HStack(spacing: 12) {
-                Text("\(filtered.count) of \(entries.count) entries")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // Hide the entry-count line when there are zero
+                // total entries — "0 of 0 entries" is just noise
+                // alongside the empty-state already saying so.
+                if !entries.isEmpty {
+                    Text("\(filtered.count) of \(entries.count) entries")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Reveal in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([AuditLog.path])
