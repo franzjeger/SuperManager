@@ -1,4 +1,4 @@
-//! `supermgr-core` — shared types, traits, and D-Bus interface definitions.
+//! `supermgr-core` — shared types, traits, and interface definitions.
 //!
 //! This crate is the shared vocabulary for the SuperManager workspace:
 //!
@@ -7,12 +7,13 @@
 //! | [`vpn`]      | VPN profile types, state machine, backend trait |
 //! | [`host`]     | Managed-device model (`Host`, `HostSummary`) — used for SSH boxes, firewalls, controllers, anything we manage |
 //! | [`ssh`]      | SSH-specific types: keys, audit log, authentication method |
-//! | [`dbus`]     | D-Bus interface constants, client proxy, error mapping |
+//! | [`dbus`]     | D-Bus interface constants, client proxy, error mapping (Linux only) |
 //! | [`error`]    | Unified error hierarchy (VPN + SSH) |
-//! | [`keyring`]  | Secret store trait and libsecret implementation |
+//! | [`keyring`]  | Secret store trait and platform implementations |
 
 #![warn(missing_docs)]
 
+#[cfg(target_os = "linux")]
 pub mod dbus;
 pub mod error;
 pub mod host;

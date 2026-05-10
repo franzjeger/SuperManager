@@ -1,0 +1,22 @@
+[package]
+name        = "supermgrd-mac"
+version     = "0.1.0"
+edition     = "2021"
+description = "SuperManager daemon for macOS — JSON-RPC server over Unix socket"
+license     = "GPL-3.0-or-later"
+
+[[bin]]
+name = "supermgrd-mac"
+path = "src/main.rs"
+
+[dependencies]
+supermgr-core   = { path = "../supermgr-core" }
+supermgr-engine = { path = "../supermgr-engine" }
+
+anyhow          = { workspace = true }
+tokio           = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

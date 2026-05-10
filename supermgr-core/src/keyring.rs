@@ -1,9 +1,12 @@
 //! Keyring integration — secure storage for secrets.
 //!
-//! Provides [`SecretStore`], a thin async trait over the system
-//! [Secret Service](https://specifications.freedesktop.org/secret-service/)
-//! D-Bus protocol, and [`LibsecretStore`], its production implementation
-//! backed by the `secret-service` crate (GNOME Keyring, KWallet, …).
+//! Provides [`SecretStore`], a thin async trait over the system secret store,
+//! with platform-specific implementations:
+//!
+//! - **Linux**: [`LibsecretStore`] backed by the D-Bus Secret Service protocol
+//!   (GNOME Keyring, KWallet).
+//! - **macOS**: [`KeychainStore`] backed by the macOS Keychain via the
+//!   `security-framework` crate.
 //!
 //! # Secret lifecycle
 //!
@@ -14,23 +17,12 @@
 //! 2. **Connect** — the backend calls [`SecretStore::retrieve`] to get the bytes
 //!    back as a [`ZeroizingSecret`], which zeroes its heap buffer on drop so the
 //!    key material cannot linger in memory after use.
-//!
-//! # Transport security
-//!
-//! [`LibsecretStore`] opens every D-Bus session with [`EncryptionType::Dh`] so
-//! secret bytes are Diffie-Hellman-encrypted in transit over the session socket
-//! and never transmitted in the clear.
-//!
-//! # Item identification
-//!
-//! Every keyring item written by supermgr carries the attribute
-//! `supermgr_label = <label>` (see [`ATTR_KEY`]).  This allows exact lookups via
-//! `search_items` even if the item's human-readable display name is changed by
-//! an external tool.
 
+#[cfg(target_os = "linux")]
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+#[cfg(target_os = "linux")]
 use secret_service::{EncryptionType, SecretService};
 use zeroize::Zeroize;
 
@@ -45,21 +37,6 @@ use crate::error::SecretError;
 /// All secret bytes returned from [`SecretStore::retrieve`] are wrapped in
 /// this type.  Callers should consume (e.g. parse) the contents and let the
 /// wrapper drop naturally — no explicit scrubbing is needed.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// # async fn example() -> Result<(), supermgr_core::SecretError> {
-/// use supermgr_core::keyring::{LibsecretStore, SecretStore};
-///
-/// let store = LibsecretStore::new();
-/// let secret = store.retrieve("supermgr/wg/abc/privkey").await?;
-/// // Use the key bytes via Deref to [u8]:
-/// println!("{} bytes", secret.len());
-/// // Buffer is zeroed here when `secret` is dropped.
-/// # Ok(())
-/// # }
-/// ```
 pub struct ZeroizingSecret(Vec<u8>);
 
 impl ZeroizingSecret {
@@ -67,7 +44,7 @@ impl ZeroizingSecret {
     ///
     /// The buffer will be zeroed when the returned `ZeroizingSecret` is dropped.
     #[must_use]
-    pub(crate) fn from_vec(bytes: Vec<u8>) -> Self {
+    pub fn from_vec(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 }
@@ -110,41 +87,21 @@ impl std::fmt::Debug for ZeroizingSecret {
 #[async_trait]
 pub trait SecretStore: Send + Sync {
     /// Persist `secret` bytes under `label`, replacing any existing value.
-    ///
-    /// The label is an opaque string used as a lookup key.  By convention
-    /// supermgr uses slash-separated paths such as `"supermgr/wg/<uuid>/privkey"`
-    /// or `"supermgr/ssh/<uuid>/privkey"`.
-    ///
-    /// # Errors
-    ///
-    /// - [`SecretError::ServiceUnavailable`] — the secret service is unreachable
-    ///   or the default collection could not be unlocked.
-    /// - [`SecretError::StoreFailed`] — the service rejected the write.
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError>;
 
     /// Retrieve the bytes stored under `label`.
-    ///
-    /// Returns the bytes wrapped in a [`ZeroizingSecret`] that zeroes its
-    /// buffer on drop.
-    ///
-    /// # Errors
-    ///
-    /// - [`SecretError::NotFound`] — no item with this label exists in the
-    ///   default collection.
-    /// - [`SecretError::ServiceUnavailable`] — the service is unreachable or
-    ///   the collection could not be unlocked.
     async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError>;
+
+    /// Delete the secret stored under `label`.
+    async fn delete(&self, label: &str) -> Result<(), SecretError>;
 }
 
 // ---------------------------------------------------------------------------
-// LibsecretStore
+// Linux: LibsecretStore
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "linux")]
 /// D-Bus attribute key that identifies supermgr items in the keyring.
-///
-/// Every item stored by supermgr has the attribute `"supermgr_label" = <label>`
-/// so that [`SecretStore::retrieve`] can find it with a targeted `search_items`
-/// call without scanning all keyring items.
 const ATTR_KEY: &str = "supermgr_label";
 
 /// Production [`SecretStore`] backed by the system Secret Service D-Bus API.
@@ -152,50 +109,29 @@ const ATTR_KEY: &str = "supermgr_label";
 /// Works with any compliant service: GNOME Keyring, KWallet (via
 /// `kwallet-secrets`), or any daemon that implements
 /// `org.freedesktop.secrets`.
-///
-/// DH-encrypted sessions (`EncryptionType::Dh`) are used for every operation
-/// so secret bytes are never transmitted in the clear over the session bus,
-/// even if the bus itself is unencrypted.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// # async fn example() -> Result<(), supermgr_core::SecretError> {
-/// use supermgr_core::keyring::{LibsecretStore, SecretStore};
-///
-/// let store = LibsecretStore::new();
-/// store.store("supermgr/wg/abc123/privkey", b"base64keyhere==").await?;
-/// let secret = store.retrieve("supermgr/wg/abc123/privkey").await?;
-/// // secret is zeroed automatically when dropped
-/// # Ok(())
-/// # }
-/// ```
+#[cfg(target_os = "linux")]
 pub struct LibsecretStore;
 
+#[cfg(target_os = "linux")]
 impl LibsecretStore {
     /// Create a new `LibsecretStore`.
-    ///
-    /// No I/O is performed at construction time; a D-Bus connection is opened
-    /// on the first call to [`store`](SecretStore::store) or
-    /// [`retrieve`](SecretStore::retrieve).
     #[must_use]
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Default for LibsecretStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl SecretStore for LibsecretStore {
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
-        // A new SecretService connection is created per operation.  Collection
-        // and Item objects borrow from it via the 'ss lifetime, so all three
-        // must live in the same stack frame.
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
@@ -205,7 +141,6 @@ impl SecretStore for LibsecretStore {
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
-        // The default collection may be locked after a screen-lock event.
         collection
             .unlock()
             .await
@@ -218,11 +153,11 @@ impl SecretStore for LibsecretStore {
 
         collection
             .create_item(
-                label,                      // human-readable display name
-                attrs,                      // searchable attributes
-                secret,                     // the secret bytes
-                true,                       // replace = overwrite any existing item
-                "application/octet-stream", // content type
+                label,
+                attrs,
+                secret,
+                true,
+                "application/octet-stream",
             )
             .await
             .map_err(|e| SecretError::StoreFailed {
@@ -258,8 +193,6 @@ impl SecretStore for LibsecretStore {
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
-        // Take the first match; duplicate labels should not exist in practice
-        // because store() always sets replace = true.
         let item = items
             .into_iter()
             .next()
@@ -273,5 +206,122 @@ impl SecretStore for LibsecretStore {
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
         Ok(ZeroizingSecret::from_vec(bytes))
+    }
+
+    async fn delete(&self, label: &str) -> Result<(), SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
+
+        let collection = ss
+            .get_default_collection()
+            .await
+            .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
+
+        collection
+            .unlock()
+            .await
+            .map_err(|e| {
+                SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
+            })?;
+
+        let mut attrs = HashMap::new();
+        attrs.insert(ATTR_KEY, label);
+
+        let items = collection
+            .search_items(attrs)
+            .await
+            .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
+
+        for item in items {
+            item.delete()
+                .await
+                .map_err(|e| SecretError::StoreFailed {
+                    label: label.to_owned(),
+                    reason: e.to_string(),
+                })?;
+        }
+
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// macOS: KeychainStore
+// ---------------------------------------------------------------------------
+
+/// Production [`SecretStore`] backed by the macOS Keychain.
+///
+/// Uses `security-framework` to store and retrieve generic password items.
+/// Items are identified by service name `"com.sybr.supermanager"` and
+/// account name set to the label.
+#[cfg(target_os = "macos")]
+pub struct KeychainStore;
+
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "com.sybr.supermanager";
+
+#[cfg(target_os = "macos")]
+impl KeychainStore {
+    /// Create a new `KeychainStore`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Default for KeychainStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait]
+impl SecretStore for KeychainStore {
+    async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
+        use security_framework::passwords::{set_generic_password, delete_generic_password};
+
+        // Delete existing item first (set_generic_password fails on duplicates)
+        let _ = delete_generic_password(KEYCHAIN_SERVICE, label);
+
+        set_generic_password(KEYCHAIN_SERVICE, label, secret)
+            .map_err(|e| SecretError::StoreFailed {
+                label: label.to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
+    }
+
+    async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
+        use security_framework::passwords::get_generic_password;
+
+        let bytes = get_generic_password(KEYCHAIN_SERVICE, label)
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("-25300") || msg.contains("ItemNotFound") {
+                    SecretError::NotFound {
+                        label: label.to_owned(),
+                    }
+                } else {
+                    SecretError::ServiceUnavailable(msg)
+                }
+            })?;
+
+        Ok(ZeroizingSecret::from_vec(bytes))
+    }
+
+    async fn delete(&self, label: &str) -> Result<(), SecretError> {
+        use security_framework::passwords::delete_generic_password;
+
+        delete_generic_password(KEYCHAIN_SERVICE, label)
+            .map_err(|e| SecretError::StoreFailed {
+                label: label.to_owned(),
+                reason: e.to_string(),
+            })?;
+
+        Ok(())
     }
 }

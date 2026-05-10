@@ -1,0 +1,176 @@
+# XcodeGen spec for the SuperManager macOS app.
+#
+# Why an Xcode project on top of a SwiftPM package?
+#
+# SwiftPM has no first-class story for code signing, entitlements, or
+# provisioning profiles on macOS — those are Xcode features. While
+# we're ad-hoc-signed the cost was tolerable; with Apple Developer
+# enrollment in motion we need real signing, and that means Xcode is
+# the source of truth for the build.
+#
+# This file generates `SuperManager.xcodeproj` from the existing
+# Swift sources in `SuperManagerMac/` (no source-tree migration), wires
+# up Signing & Capabilities (Personal Team automatic, with the
+# `keychain-access-groups` entitlement that DPK requires), and runs
+# `cargo build` for the two Rust binaries (user-space daemon + privileged
+# helper) as part of the build, embedding them into the produced .app
+# bundle and re-signing them with the same identity + entitlements.
+#
+# Regenerate after editing: `cd SuperManagerMac && xcodegen generate`.
+# (Adding/removing source files is detected automatically by globbing
+# the `Sources` path; only structural changes need a regen.)
+
+name: SuperManager
+
+options:
+  bundleIdPrefix: com.sybr
+  deploymentTarget:
+    macOS: "14.0"
+  developmentLanguage: en
+  generateEmptyDirectories: true
+  # Don't synthesise an Info.plist — we want the keys we control below.
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Personal Team Team ID. Distinct from the parenthesised value in
+    # `Apple Development: <email> (...)`, which is the Apple ID suffix —
+    # for code signing we need the OU value from the cert. Xcode picks
+    # this up automatically once Signing & Capabilities is configured.
+    DEVELOPMENT_TEAM: LY6LJ395B8
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    # Enable hardened runtime — required for notarisation later. Doesn't
+    # affect local development since we're signed by a real identity.
+    ENABLE_HARDENED_RUNTIME: YES
+    # Suppress the SwiftUI-Preview debug stub (Xcode-15+ "Debug Dylib"
+    # feature). It writes an unsigned `__preview.dylib` into Contents/
+    # MacOS that breaks our re-sign-with---deep step. We don't use
+    # SwiftUI Previews in this app — the daemon socket dependency makes
+    # them useless — so disabling is free.
+    ENABLE_DEBUG_DYLIB: NO
+    ENABLE_PREVIEWS: NO
+
+targets:
+  SuperManagerMac:
+    type: application
+    platform: macOS
+    sources:
+      - path: SuperManagerMac
+        # Globs the whole tree (App, Models, Services, Views, Resources).
+    info:
+      path: SuperManagerMac/Info.plist
+      properties:
+        CFBundleName: SuperManager
+        CFBundleIdentifier: com.sybr.supermanager
+        CFBundleVersion: "1.0"
+        CFBundleShortVersionString: "1.0"
+        LSMinimumSystemVersion: "14.0"
+        NSHighResolutionCapable: true
+        NSSupportsAutomaticTermination: false
+        # No NSAppSandbox — the app spawns a privileged helper and
+        # talks to a user-space daemon socket; sandboxing would block
+        # both. We're not targeting the Mac App Store; outside-store
+        # distribution doesn't require sandboxing.
+
+
+    # Xcode-managed entitlements file. The `$(AppIdentifierPrefix)`
+    # token is substituted at sign time with `<TEAM_ID>.`, producing
+    # `RYS5AACGS6.com.sybr.supermanager` — the access group both this
+    # app and the user-space daemon share.
+    entitlements:
+      path: Signing/SuperManagerMac.entitlements
+      properties:
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.sybr.supermanager
+        com.apple.security.app-sandbox: false
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sybr.supermanager
+        DEVELOPMENT_TEAM: LY6LJ395B8
+        CODE_SIGN_STYLE: Automatic
+        # Embed a `Library/LaunchDaemons/...plist` at this path inside
+        # the bundle. SMAppService.daemon() resolves it.
+        # (Xcode normally generates `Resources/`; we override.)
+        INFOPLIST_FILE: SuperManagerMac/Info.plist
+
+    # Build phases run in declaration order. We:
+    #   1. Compile Swift sources (implicit; Xcode does this first)
+    #   2. Run cargo to build the two Rust binaries
+    #   3. Copy the Rust binaries + LaunchDaemons plist into the .app
+    #   4. Re-sign each embedded binary with the same identity +
+    #      per-binary entitlements (so the daemon also gets DPK access)
+    preBuildScripts:
+      - name: Build Rust binaries via cargo
+        # Runs on every build. Critical: do NOT specify outputFiles —
+        # Xcode would skip the script when those output paths exist,
+        # which means a Rust source-only edit (no Swift change) wouldn't
+        # rebuild the daemon binary. Cargo is incremental, so on a
+        # no-op rebuild this is ~100 ms; the trade-off vs missing a
+        # daemon update is wildly in favour of always running.
+        script: |
+          set -euo pipefail
+          cd "${SRCROOT}/.."
+          # Use the same toolchain as a manual `cargo build` would.
+          # Honour PATH so /opt/homebrew/bin and ~/.cargo/bin are visible.
+          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin"
+          cargo build --release --bin supermgrd-mac --bin supermanager-helper
+
+    postBuildScripts:
+      - name: Embed Rust binaries and LaunchDaemons plist
+        # Copies the cargo-built binaries into the .app/Contents/MacOS
+        # directory and re-signs them with the project's signing
+        # identity + their own entitlements files. The LaunchDaemon
+        # plist goes into Contents/Library/LaunchDaemons so SMAppService
+        # can find it.
+        script: |
+          set -euo pipefail
+          APP="${TARGET_BUILD_DIR}/${PRODUCT_NAME}.app"
+          mkdir -p "${APP}/Contents/Library/LaunchDaemons"
+
+          cp "${SRCROOT}/../target/release/supermgrd-mac"          \
+             "${APP}/Contents/MacOS/supermgrd-mac"
+          cp "${SRCROOT}/../target/release/supermanager-helper"    \
+             "${APP}/Contents/MacOS/com.sybr.supermanager.helper"
+          cp "${SRCROOT}/Signing/com.sybr.supermanager.helper.plist" \
+             "${APP}/Contents/Library/LaunchDaemons/com.sybr.supermanager.helper.plist"
+
+          # Sign the daemon with an *empty* entitlements plist. It
+          # cannot carry `keychain-access-groups` because it has no
+          # provisioning profile (a raw CLI binary in Contents/MacOS
+          # can't embed one). All keychain access happens in the GUI;
+          # the daemon receives secrets over RPC.
+          codesign --force --options runtime \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --identifier com.sybr.supermanager.daemon \
+              --entitlements "${SRCROOT}/Signing/supermgrd-mac.entitlements" \
+              "${APP}/Contents/MacOS/supermgrd-mac"
+
+          codesign --force --options runtime \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --identifier com.sybr.supermanager.helper \
+              --entitlements "${SRCROOT}/Signing/supermanager-helper.entitlements" \
+              "${APP}/Contents/MacOS/com.sybr.supermanager.helper"
+
+          # Re-seal the bundle so its `_CodeSignature/CodeResources`
+          # reflects the embedded Rust binaries. NO `--deep` — that
+          # would propagate the bundle's entitlements down to nested
+          # binaries and clobber the per-binary entitlements we just
+          # set above. The bundle re-sign alone refreshes
+          # `_CodeSignature/CodeResources` against the already-signed
+          # nested binaries; we don't need to walk into them.
+          #
+          # Crucially, pass Xcode's *resolved* `.xcent` rather than the
+          # source `Signing/*.entitlements` file. The source file uses
+          # `$(AppIdentifierPrefix)` placeholders that only get
+          # team-id-substituted by Xcode's ProcessProductPackaging
+          # phase (which produces the .xcent). If we re-sign with the
+          # source file, the placeholders stay literal, the
+          # `keychain-access-groups` entry becomes invalid, and amfid
+          # SIGKILLs the app on launch.
+          codesign --force --options runtime \
+              --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
+              --entitlements "${TARGET_TEMP_DIR}/${PRODUCT_NAME}.app.xcent" \
+              "${APP}"

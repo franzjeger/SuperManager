@@ -2,9 +2,12 @@
 resolver = "2"
 members = [
     "supermgr-core",
+    "supermgr-engine",
     "supermgrd",
+    "supermgrd-mac",
     "supermgr",
     "supermgr-mcp",
+    "supermanager-helper",
 ]
 
 # ---------------------------------------------------------------------------
@@ -57,6 +60,11 @@ russh-sftp  = "2.0"
 russh-keys  = "0.46"
 # Random number generation
 rand        = "0.8"
+# Template engine for FortiGate / UniFi configuration generation.
+# Tera is Jinja-like, supports loops + conditionals + filters,
+# and is embedded so users can ship custom templates as plain
+# `.tera` files in `~/Library/Application Support/SuperManager/templates/`.
+tera        = { version = "1.20", default-features = false, features = ["builtins"] }
 
 # ---------------------------------------------------------------------------
 # Workspace-wide lint configuration

@@ -218,11 +218,13 @@ pub enum CoreError {
     #[error("ssh: {0}")]
     Ssh(#[from] SshError),
 
-    /// D-Bus communication error.
+    /// D-Bus communication error (Linux only).
+    #[cfg(target_os = "linux")]
     #[error("D-Bus: {0}")]
     DBus(#[from] zbus::Error),
 
-    /// D-Bus FDO error (returned by method handlers to callers).
+    /// D-Bus FDO error (returned by method handlers to callers, Linux only).
+    #[cfg(target_os = "linux")]
     #[error("D-Bus FDO: {0}")]
     DBusFdo(#[from] zbus::fdo::Error),
 

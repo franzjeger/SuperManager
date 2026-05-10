@@ -9,7 +9,6 @@ license     = "GPL-3.0-or-later"
 async-trait    = { workspace = true }
 chrono         = { workspace = true }
 ipnet          = { workspace = true }
-secret-service = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 ssh-key        = { workspace = true }
@@ -17,8 +16,16 @@ thiserror      = { workspace = true }
 tokio          = { workspace = true }
 tracing        = { workspace = true }
 uuid           = { workspace = true }
-zbus           = { workspace = true }
 zeroize        = { workspace = true }
+
+# macOS: use security-framework for Keychain access
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.2"
+
+# Linux: D-Bus and Secret Service (GNOME Keyring)
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { workspace = true }
+zbus           = { workspace = true }
 
 [lints]
 workspace = true

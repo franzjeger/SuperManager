@@ -1,0 +1,43 @@
+[package]
+name        = "supermanager-helper"
+version     = "0.1.0"
+edition     = "2021"
+description = "Privileged helper daemon for SuperManager Mac. Runs as root, accepts JSON-RPC over Unix socket, controls strongSwan to bring up FortiGate IPSec/IKEv2 tunnels."
+license     = "GPL-3.0-or-later"
+
+[[bin]]
+name = "supermanager-helper"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enables the `deploy_self` RPC, which lets an admin-group user replace
+# the root-owned helper binary without an admin auth prompt. NEVER ship
+# this in a production build — it's strictly a dev-iteration shortcut.
+dev-rpc = []
+
+[dependencies]
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+libc               = "0.2"
+# WireGuard module hashes profile UUIDs into a 12-char interface name
+# (kernel's IFNAMSIZ-1 limit). Workspace already pins SHA-256.
+sha2               = { workspace = true }
+
+# Helper needs `unsafe` for libc::geteuid / chown / getgrnam — there's no
+# safe-Rust equivalent for "what is my effective UID" or chown-by-path.
+# Inheriting the workspace lints would `forbid` unsafe; we explicitly allow it
+# here and re-enable the rest of the workspace clippy lints by hand.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"

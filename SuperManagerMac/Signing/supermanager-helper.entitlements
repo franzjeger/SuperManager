@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the privileged LaunchDaemon `supermanager-helper`.
+
+  The helper does NOT touch the keychain — every secret it needs (VPN
+  password, PSK) arrives as an RPC argument from the GUI, which already
+  unwrapped it from DPK. So no `keychain-access-groups` here.
+
+  We still need to sign with Developer ID (so SMAppService accepts the
+  registration) and we still need an explicit entitlements plist —
+  signing with the empty entitlements file keeps codesign happy and is
+  the documented "no entitlements required" form. Add specific
+  hardened-runtime exemptions here if and when the helper grows a need
+  for them.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
