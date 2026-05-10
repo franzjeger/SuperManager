@@ -132,6 +132,14 @@ struct SuperManagerApp: App {
                         NSWorkspace.shared.activateFileViewerSelecting([dir])
                     }
                 }
+                Divider()
+                // Surface the support bundle from a top-level menu
+                // so it's reachable when the user is reporting an
+                // issue, not buried inside the Tailscale overflow
+                // menu (where it currently is the only entry-point).
+                Button("Save Support Bundle…") {
+                    Task { _ = await SupportBundle.saveInteractive(appState: appState) }
+                }
             }
         }
 
