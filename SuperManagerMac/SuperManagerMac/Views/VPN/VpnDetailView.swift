@@ -820,6 +820,15 @@ struct VpnDetailView: View {
                     : "\(liveVirtualIp) → \(liveVirtualGateway)"
                 row("Assigned IP", assigned)
             }
+            // Connection-uptime row, ticking every second via
+            // TimelineView. Sourced from the latest
+            // `.connectSucceeded` activity event — same source the
+            // Recent activity row uses, so the two stay in sync.
+            // Hidden if we can't determine a connect time (e.g.
+            // tunnel was already up when the app launched).
+            if let connectedAt = latestConnectTime {
+                connectedDurationRow(since: connectedAt)
+            }
             // Throughput is rendered once, by the existing
             // `bandwidthRow` near the top of the detail view —
             // it reads the same `vpnByteCounters` AppState exposes
@@ -900,6 +909,53 @@ struct VpnDetailView: View {
         }
         .font(.callout)
         .help("Total bytes received (↓) and sent (↑) on this tunnel since connect, with current rate in parentheses. Updated every poll cycle (~3 s).")
+    }
+
+    /// Walk this profile's ActivityLog from newest backwards. The
+    /// most recent `.connectSucceeded` is the start of the active
+    /// session — UNLESS a disconnect/forceDisconnect/connectFailed
+    /// has fired since, which would mean the session ended. Returns
+    /// `nil` when we can't tell (no events recorded yet, or the
+    /// last event isn't a connect).
+    private var latestConnectTime: Date? {
+        let events = ActivityLog.shared.events(for: profileId)  // newest first
+        for ev in events {
+            switch ev.kind {
+            case .connectSucceeded:
+                return ev.timestamp
+            case .disconnectComplete, .disconnectRequested,
+                 .forceDisconnect, .panicReset, .connectFailed:
+                return nil
+            default:
+                continue  // ignore connectStarted, killSwitch*, etc.
+            }
+        }
+        return nil
+    }
+
+    /// "Connected for 5m 12s" row, ticks every second via
+    /// TimelineView. Same pattern as `handshakeRow` for WG.
+    private func connectedDurationRow(since start: Date) -> some View {
+        TimelineView(.periodic(from: .now, by: 1.0)) { context in
+            let age = max(0, Int(context.date.timeIntervalSince(start)))
+            let label: String = {
+                if age < 60 { return "\(age)s" }
+                if age < 3600 { return "\(age / 60)m \(age % 60)s" }
+                let hours = age / 3600
+                let mins = (age % 3600) / 60
+                return "\(hours)h \(mins)m"
+            }()
+            HStack(alignment: .firstTextBaseline) {
+                Text("Connected for")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 120, alignment: .leading)
+                Text(label)
+                    .monospacedDigit()
+                Spacer()
+            }
+            .font(.callout)
+            .help("Time since the tunnel reached `connected`. Sourced from the local activity log; resets on disconnect/reconnect.")
+        }
     }
 
     /// "Last handshake" row that ticks every second so the operator

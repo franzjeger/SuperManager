@@ -356,7 +356,7 @@ async fn open_session(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
     host_id: uuid::Uuid,
-) -> Result<(supermgr_core::ssh::host::SshHost, SshSession)> {
+) -> Result<(supermgr_core::host::Host, SshSession)> {
     crate::server::connect_to_host_owned(state, secrets, host_id)
         .await
         .map_err(|e| anyhow!("ssh connect: {e}"))

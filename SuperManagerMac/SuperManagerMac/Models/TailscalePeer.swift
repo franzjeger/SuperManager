@@ -114,6 +114,22 @@ struct TailscalePeer: Identifiable, Hashable, Decodable {
         if s.hasSuffix(".") { s.removeLast() }
         return s.isEmpty ? hostName : s
     }
+
+    /// Parsed `LastSeen` timestamp. Tailscale uses Go's zero-time
+    /// (`0001-01-01T00:00:00Z`) when the peer has never communicated
+    /// since this client started — we treat that as "no data" and
+    /// return nil. Otherwise returns the actual Date.
+    var lastSeen: Date? {
+        guard let iso = lastSeenIso, !iso.isEmpty else { return nil }
+        if iso.hasPrefix("0001-") { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: iso) { return d }
+        // Fall back without fractional seconds — Tailscale sometimes
+        // emits whole-second timestamps for older state.
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: iso)
+    }
 }
 
 /// The bits we surface from `tailscale status --json`. Drops the

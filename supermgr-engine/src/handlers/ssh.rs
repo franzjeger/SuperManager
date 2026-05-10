@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use supermgr_core::ssh::host::{SshHost, SshHostSummary};
+use supermgr_core::host::{Host, HostSummary};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 
 use crate::protocol::{self, Response};
@@ -195,7 +195,7 @@ impl EngineServer {
             Some(j) => j,
             None => {
                 // Try parsing params directly as a host.
-                match serde_json::from_value::<SshHost>(params.clone()) {
+                match serde_json::from_value::<Host>(params.clone()) {
                     Ok(mut host) => {
                         host.id = uuid::Uuid::new_v4();
                         host.created_at = chrono::Utc::now();
@@ -213,7 +213,7 @@ impl EngineServer {
             }
         };
 
-        let mut host: SshHost = match serde_json::from_str(host_json) {
+        let mut host: Host = match serde_json::from_str(host_json) {
             Ok(h) => h,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("invalid host JSON: {e}")),
         };
@@ -257,7 +257,7 @@ impl EngineServer {
 
         // Parse the incoming JSON as an arbitrary object so we can MERGE the
         // editable fields into the existing host instead of replacing the
-        // whole record. The previous "deserialize-as-SshHost-and-replace"
+        // whole record. The previous "deserialize-as-Host-and-replace"
         // approach silently clobbered fields that the GUI doesn't send
         // (auth_password_ref, vpn_profile_id, has_api, pinned, created_at,
         // …), destroying stored secrets and pin state on every edit.
@@ -285,7 +285,7 @@ impl EngineServer {
 
     pub(crate) async fn handle_ssh_list_hosts(&self, id: u64) -> Response {
         let state = self.state.lock().await;
-        let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
+        let summaries: Vec<HostSummary> = state.ssh_hosts.values().map(HostSummary::from).collect();
         match serde_json::to_value(&summaries) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -331,7 +331,7 @@ impl EngineServer {
             let host_clone = host.clone();
             let _ = state.save_ssh_host(&host_clone);
         }
-        let summaries: Vec<SshHostSummary> = state.ssh_hosts.values().map(SshHostSummary::from).collect();
+        let summaries: Vec<HostSummary> = state.ssh_hosts.values().map(HostSummary::from).collect();
         match serde_json::to_value(&summaries) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),

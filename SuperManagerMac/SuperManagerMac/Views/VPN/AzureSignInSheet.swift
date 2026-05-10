@@ -103,6 +103,14 @@ struct AzureSignInSheet: View {
         DebugLog.write("[AzureSignIn] BEGIN profileId=\(profileId) tenant=\(summary.tenantId.prefix(8))… audience=\(summary.clientId.prefix(8))…")
         phase = .awaitingBrowser
         task?.cancel()
+        // Record the start of the connect attempt so the
+        // detail-view's Recent activity row reflects it even if
+        // the user closes the sheet before it completes.
+        ActivityLog.shared.record(
+            profileId: profileId,
+            kind: .connectStarted,
+            message: "Azure VPN: sign-in started"
+        )
 
         let token: AzureOAuth.AccessToken
         do {
@@ -117,10 +125,20 @@ struct AzureSignInSheet: View {
                 dismiss()
                 return
             }
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: sign-in failed — \(err.errorDescription ?? "unknown")"
+            )
             phase = .error(err.errorDescription ?? "Sign-in failed.")
             return
         } catch {
             DebugLog.write("[AzureSignIn] auth FAILED (untyped): \(error)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: sign-in failed — \(error.localizedDescription)"
+            )
             phase = .error(error.localizedDescription)
             return
         }
@@ -147,6 +165,11 @@ struct AzureSignInSheet: View {
             DebugLog.write("[AzureSignIn] daemon rendered .ovpn (\(render.ovpnBody.count) chars, has_ca=\(render.ovpnBody.contains("<ca>")), has_tls_auth=\(render.ovpnBody.contains("<tls-auth>")))")
         } catch {
             DebugLog.write("[AzureSignIn] vpn_render_azure_ovpn RPC FAILED: \(error)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: render failed — \(error.localizedDescription)"
+            )
             phase = .error("Couldn't render the OpenVPN config: \(error.localizedDescription)")
             return
         }
@@ -169,12 +192,22 @@ struct AzureSignInSheet: View {
             DebugLog.write("[AzureSignIn] wrote .ovpn to \(ovpnPath.path) (mode 0644)")
         } catch {
             DebugLog.write("[AzureSignIn] failed to write \(ovpnPath.path): \(error)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: stage .ovpn failed — \(error.localizedDescription)"
+            )
             phase = .error("Couldn't stage the OpenVPN config on disk: \(error.localizedDescription)")
             return
         }
 
         let reachable = await HelperClient.shared.isReachable()
         guard reachable else {
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: privileged helper unreachable"
+            )
             phase = .error("The privileged helper isn't reachable. Approve it in System Settings → General → Login Items, then try again.")
             return
         }
@@ -198,6 +231,11 @@ struct AzureSignInSheet: View {
             DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?"), log_path=\(connectResult["log_path"] ?? "?")")
         } catch {
             DebugLog.write("[AzureSignIn] helper.ovpnConnect RPC threw: \(error)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: helper RPC failed — \(error.localizedDescription)"
+            )
             phase = .error("Helper RPC failed: \(error.localizedDescription)")
             return
         }
@@ -210,6 +248,11 @@ struct AzureSignInSheet: View {
         if let ok = connectResult["success"] as? Bool, !ok {
             let msg = (connectResult["message"] as? String) ?? "openvpn refused to start"
             DebugLog.write("[AzureSignIn] helper reported success=false: \(msg)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: openvpn refused to start"
+            )
             phase = .error(msg)
             return
         }
@@ -253,6 +296,11 @@ struct AzureSignInSheet: View {
                 logTail = "\n\nLast 15 lines of \(p):\n\(lines)"
             }
             DebugLog.write("[AzureSignIn] tunnel never reached connected (last status=\(lastStatus))\(logTail)")
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: tunnel never reached connected (last: \(lastStatus))"
+            )
             phase = .error("openvpn started but the tunnel never reached `connected` (last status: \(lastStatus)).\(logTail)")
             return
         }
@@ -260,7 +308,7 @@ struct AzureSignInSheet: View {
         DebugLog.write("[AzureSignIn] SUCCESS — tunnel up as \(token.username)")
         ActivityLog.shared.record(
             profileId: profileId,
-            kind: .connectStarted,
+            kind: .connectSucceeded,
             message: "Azure VPN: tunnel up as \(token.username)"
         )
         onConnected()

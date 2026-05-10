@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use supermgr_core::keyring::SecretStore;
-use supermgr_core::ssh::host::SshHost;
+use supermgr_core::host::Host;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -181,7 +181,7 @@ pub async fn generate_token(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
     session: &SshSession,
-    host: &SshHost,
+    host: &Host,
     api_user: &str,
 ) -> Result<(String, String)> {
     info!(

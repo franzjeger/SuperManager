@@ -154,10 +154,25 @@ struct TailscaleListView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(peer.hostName)
                     .fontWeight(isSelf ? .semibold : .regular)
-                if let ip = peer.primaryIP {
-                    Text(ip)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.tertiary)
+                HStack(spacing: 6) {
+                    if let ip = peer.primaryIP {
+                        Text(ip)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                    // Last-seen pill for offline peers — answers
+                    // "is this 5 minutes stale or 2 weeks gone?"
+                    // without drilling into peer detail. Online
+                    // peers don't need it; the green dot already
+                    // means "right now".
+                    if !peer.online, let seen = peer.lastSeen {
+                        Text("·")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text(seen, format: .relative(presentation: .numeric))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
             if peer.exitNode {

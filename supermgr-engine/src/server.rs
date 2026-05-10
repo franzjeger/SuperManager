@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use supermgr_core::keyring::SecretStore;
-use supermgr_core::ssh::host::{AuthMethod, SshHost};
+use supermgr_core::host::{AuthMethod, Host};
 
 use crate::protocol::{self, Request, Response};
 use crate::ssh::connection::SshSession;
@@ -314,7 +314,7 @@ impl EngineServer {
     /// Connect to an SSH host using its stored credentials. Trampolines
     /// into the free-function form so spawned tasks (which can't easily
     /// borrow `&self`) can share the same code path.
-    pub(crate) async fn connect_to_host(&self, host_id: uuid::Uuid) -> Result<(SshHost, SshSession), String> {
+    pub(crate) async fn connect_to_host(&self, host_id: uuid::Uuid) -> Result<(Host, SshSession), String> {
         connect_to_host_owned(&self.state, &self.secrets, host_id).await
     }
 }
@@ -328,7 +328,7 @@ pub async fn connect_to_host_owned(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
     host_id: uuid::Uuid,
-) -> Result<(SshHost, SshSession), String> {
+) -> Result<(Host, SshSession), String> {
     // Snapshot the host AND the known-hosts handle in one lock pass. The
     // handle is cheap (`Arc::clone`) and lets us drop the state mutex
     // before we make the (potentially slow) network call.
@@ -393,6 +393,13 @@ pub async fn connect_to_host_owned(
             .await
             .map_err(|e| e.to_string())?
         }
+        AuthMethod::Certificate => {
+            // Certificate auth (SSH cert signed by a CA) is a Linux
+            // path that hasn't been ported to the Mac engine yet.
+            // Fail loudly rather than silently mis-route to one of
+            // the other arms.
+            return Err("ssh certificate auth not yet implemented in supermgr-engine".to_string());
+        }
     };
 
     Ok((host, session))
@@ -436,14 +443,14 @@ pub(crate) fn parse_ipnet_list(v: Option<&serde_json::Value>) -> Vec<ipnet::IpNe
 /// only the fields the user can change in that form (`label`, `hostname`,
 /// `port`, `username`, `group`, `device_type`, `auth_method`,
 /// `auth_key_id`, `vpn_profile_id`). Every other field on the existing
-/// `SshHost` — `auth_password_ref`, `pinned`, `created_at`, `has_api`,
+/// `Host` — `auth_password_ref`, `pinned`, `created_at`, `has_api`,
 /// `api_token_ref`, etc. — is preserved.
 ///
-/// The previous "deserialize the JSON as a whole `SshHost` and replace"
+/// The previous "deserialize the JSON as a whole `Host` and replace"
 /// approach silently destroyed those fields on every edit, which meant
 /// editing a host's port wiped its stored password. We now whitelist the
 /// editable fields explicitly.
-pub fn merge_host_update(host: &mut SshHost, incoming: &serde_json::Value) {
+pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
     if let Some(s) = incoming.get("label").and_then(|v| v.as_str()) {
         host.label = s.to_owned();
     }
@@ -480,7 +487,7 @@ pub fn merge_host_update(host: &mut SshHost, incoming: &serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use supermgr_core::ssh::host::AuthMethod;
+    use supermgr_core::host::AuthMethod;
     use supermgr_core::ssh::device_type::DeviceType;
     use supermgr_core::vpn::profile::SecretRef;
 
@@ -491,10 +498,10 @@ mod tests {
         SecretRef("supermgr/ssh/host/<id>/api_token".to_owned())
     }
 
-    fn full_host() -> SshHost {
+    fn full_host() -> Host {
         // A "richly populated" host that exercises every field the merge
         // logic could be tempted to clobber.
-        SshHost {
+        Host {
             id: uuid::Uuid::nil(),
             label: "old-label".to_owned(),
             hostname: "10.0.0.1".to_owned(),

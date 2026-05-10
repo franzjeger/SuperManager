@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use supermgr_core::ssh::host::SshHost;
+use supermgr_core::host::Host;
 use supermgr_core::ssh::key::SshKey;
 use supermgr_core::vpn::profile::Profile;
 use supermgr_core::vpn::state::VpnState;
@@ -32,7 +32,7 @@ pub struct DaemonState {
     pub ssh_keys: HashMap<Uuid, SshKey>,
 
     /// SSH hosts, keyed by UUID.
-    pub ssh_hosts: HashMap<Uuid, SshHost>,
+    pub ssh_hosts: HashMap<Uuid, Host>,
 
     /// SSH host health (reachability) map: host UUID → reachable.
     pub host_health: HashMap<Uuid, bool>,
@@ -164,7 +164,7 @@ impl DaemonState {
     /// Load all `.toml` SSH host files.
     pub fn load_ssh_hosts(&mut self) -> anyhow::Result<()> {
         load_toml_dir(&self.ssh_host_dir, |text, path| {
-            match toml::from_str::<SshHost>(&text) {
+            match toml::from_str::<Host>(&text) {
                 Ok(host) => {
                     info!("loaded SSH host '{}' from {:?}", host.label, path);
                     self.ssh_hosts.insert(host.id, host);
@@ -177,7 +177,7 @@ impl DaemonState {
     }
 
     /// Persist a single SSH host to disk.
-    pub fn save_ssh_host(&self, host: &SshHost) -> anyhow::Result<()> {
+    pub fn save_ssh_host(&self, host: &Host) -> anyhow::Result<()> {
         save_toml(&self.ssh_host_dir, &host.id.to_string(), host)
     }
 

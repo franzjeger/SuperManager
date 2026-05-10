@@ -116,7 +116,11 @@ targets:
           # Use the same toolchain as a manual `cargo build` would.
           # Honour PATH so /opt/homebrew/bin and ~/.cargo/bin are visible.
           export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin"
-          cargo build --release --bin supermgrd-mac --bin supermanager-helper
+          # `-p` is required: the workspace's `default-members`
+          # excludes the Mac crates so Linux CI can build cleanly,
+          # which means a bare `--bin <name>` lookup doesn't see
+          # them. `-p <crate>` builds the package's only bin.
+          cargo build --release -p supermgrd-mac -p supermanager-helper
 
     postBuildScripts:
       - name: Embed Rust binaries and LaunchDaemons plist

@@ -278,9 +278,10 @@ struct ProvisioningView: View {
                     Button {
                         showingAddExtra = true
                     } label: {
-                        Label("Add extra…", systemImage: "plus")
+                        Label("Add template variable…", systemImage: "plus")
                     }
                     .controlSize(.small)
+                    .help("Add a custom key/value pair the template can interpolate via {{ extra.key }}. Useful for tenant-specific values not in the standard schema (NTP server, syslog target, etc.).")
                 }
                 Spacer()
                 if let activeSite = site {

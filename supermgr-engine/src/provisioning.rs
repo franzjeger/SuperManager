@@ -739,7 +739,7 @@ async fn open_session(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
     host_id: uuid::Uuid,
-) -> Result<(supermgr_core::ssh::host::SshHost, crate::ssh::connection::SshSession)> {
+) -> Result<(supermgr_core::host::Host, crate::ssh::connection::SshSession)> {
     crate::server::connect_to_host_owned(state, secrets, host_id)
         .await
         .map_err(|e| anyhow!("ssh connect: {e}"))

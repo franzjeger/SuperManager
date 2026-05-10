@@ -302,7 +302,7 @@ pub async fn render_customer_report(
     customer_slug: &str,
 ) -> Result<String> {
     let customer = load(customer_slug)?;
-    let host_lookup: std::collections::HashMap<uuid::Uuid, supermgr_core::ssh::host::SshHost> = {
+    let host_lookup: std::collections::HashMap<uuid::Uuid, supermgr_core::host::Host> = {
         let st = state.lock().await;
         st.ssh_hosts
             .values()
@@ -518,8 +518,10 @@ fn format_device_type(t: supermgr_core::ssh::DeviceType) -> &'static str {
         DeviceType::Linux => "Linux",
         DeviceType::UniFi => "UniFi",
         DeviceType::PfSense => "pfSense",
+        DeviceType::OpnSense => "OPNsense",
         DeviceType::OpenWrt => "OpenWrt",
         DeviceType::Fortigate => "FortiGate",
+        DeviceType::Sophos => "Sophos",
         DeviceType::Windows => "Windows",
         DeviceType::Custom => "Custom",
     }
@@ -530,6 +532,7 @@ fn format_auth_method(m: supermgr_core::ssh::AuthMethod) -> &'static str {
     match m {
         AuthMethod::Key => "SSH key",
         AuthMethod::Password => "Password",
+        AuthMethod::Certificate => "SSH certificate",
     }
 }
 
