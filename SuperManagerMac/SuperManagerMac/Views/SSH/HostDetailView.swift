@@ -173,7 +173,13 @@ struct HostDetailView: View {
                         Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 8) {
                             GridRow {
                                 Text("Group").foregroundStyle(.secondary)
-                                Text(host.group.isEmpty ? "—" : host.group)
+                                if host.group.isEmpty {
+                                    Text("Ungrouped")
+                                        .foregroundStyle(.tertiary)
+                                        .italic()
+                                } else {
+                                    Text(host.group)
+                                }
                             }
                             GridRow {
                                 Text("Device Type").foregroundStyle(.secondary)
