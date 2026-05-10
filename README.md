@@ -1,8 +1,10 @@
 # SuperManager
 
-A unified SSH, VPN, and network device management application for Linux, built with Rust, GTK4, and libadwaita.
+A unified SSH, VPN, and network device management application for **Linux** (GTK4) and **macOS** (SwiftUI), built with a shared Rust core.
 
 SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec, OpenVPN, Azure VPN), network device monitoring, and remote desktop into a single desktop application with an integrated AI assistant.
+
+The Linux client uses GTK4 + libadwaita and a `supermgrd` D-Bus system daemon. The macOS client is a native SwiftUI app talking to a privileged `supermanager-helper` LaunchDaemon over a Unix socket. Both share `supermgr-core` (types, traits, keychain abstraction) and `supermgr-engine` (renderers, scan logic, RPC handlers).
 
 ## Features
 
@@ -92,17 +94,34 @@ SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiG
 ## Architecture
 
 ```
-supermgr-core/    Shared types, D-Bus interface definitions, error hierarchy
-supermgrd/        Privileged daemon (runs as root via systemd)
-supermgr/         GTK4/Adwaita GUI (runs as user)
-supermgr-mcp/     MCP server for Claude Code integration
+supermgr-core/         Shared types, D-Bus interface definitions, keychain
+                       abstraction (Linux: secret-service, macOS: Keychain),
+                       error hierarchy
+supermgr-engine/       Shared engine — renderers (Azure VPN, OpenVPN), scan
+                       logic, JSON-RPC handlers (used by macOS daemon)
+supermgr-mcp/          MCP server for Claude Code integration
+
+# Linux
+supermgrd/             Privileged daemon (runs as root via systemd, D-Bus)
+supermgr/              GTK4/Adwaita GUI (runs as user)
+
+# macOS
+supermgrd-mac/         User-space daemon — wraps supermgr-engine, JSON-RPC
+                       over Unix socket
+supermanager-helper/   Privileged helper (LaunchDaemon, JSON-RPC over Unix
+                       socket, ovpncli/openvpn/strongSwan supervision)
+SuperManagerMac/       Native SwiftUI app
 ```
 
-The GUI communicates with the daemon over D-Bus on the system bus. The daemon handles all privileged operations: network interface creation, secret storage, SSH connections, and VPN management.
+**Linux:** the GUI talks to `supermgrd` over D-Bus on the system bus. The daemon handles privileged operations: network interface creation, secret storage (Secret Service), SSH connections, and VPN management.
+
+**macOS:** the SwiftUI app talks to `supermgrd-mac` (user) and `supermanager-helper` (root) over Unix sockets. The helper supervises VPN tunnels (`ovpncli` for OpenVPN3 / `openvpn` for 2.x, `strongSwan` for IKEv2, kernel `wg` for WireGuard). Secrets live in the macOS Keychain via `security-framework`.
 
 ## Building
 
-### Dependencies
+### Linux
+
+#### Dependencies
 
 <details>
 <summary><b>Arch Linux / CachyOS</b></summary>
@@ -143,7 +162,7 @@ sudo apt install -y rustc cargo build-essential pkg-config \
 If your distro's `rustc` is older than the workspace MSRV, install via [rustup](https://rustup.rs) instead.
 </details>
 
-### Build
+#### Build
 
 ```bash
 cargo build --release
@@ -163,26 +182,84 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now strongswan supermgrd
 ```
 
-### AUR (Arch Linux)
+#### AUR (Arch Linux)
 
 ```bash
 cd contrib/aur
 makepkg -si
 ```
 
+### macOS
+
+#### Dependencies
+
+```bash
+# Required for any build
+brew install xcodegen openssl@3 lz4
+
+# OpenVPN3 (ovpncli) — required for Azure VPN with Entra ID, since
+# Microsoft's gateway rejects OpenVPN 2.x clients in the AAD flow.
+# No Homebrew formula exists; the contrib script clones upstream
+# and builds it for you.
+./contrib/build-openvpn3-mac.sh
+
+# OpenVPN 2.x — fallback for non-Azure profiles
+brew install openvpn
+
+# strongSwan — for FortiGate IPsec/IKEv2
+brew install strongswan
+```
+
+Xcode 15+ with the macOS SDK is required for the SwiftUI app build.
+
+#### Build
+
+```bash
+cd SuperManagerMac
+./build.sh                # debug build
+./build.sh --release      # release build
+./build.sh --run          # build + relaunch
+```
+
+The build script regenerates `SuperManager.xcodeproj` from `project.yml` via `xcodegen`, runs `cargo build --release` for the Rust binaries (`supermgrd-mac`, `supermanager-helper`), and bundles everything into `SuperManagerMac.app` under DerivedData.
+
+#### Helper install
+
+The privileged helper needs to be installed once into `/Library/PrivilegedHelperTools/`:
+
+```bash
+./SuperManagerMac/Signing/install_helper.sh
+```
+
+This requires `sudo` for the install + `launchctl bootstrap`. Re-run after pulling helper-side changes; subsequent builds can hot-swap the helper via the dev-rpc `deploy_self` path with no admin prompt.
+
+For a smoother dev loop, pre-authorise the specific commands the install script uses:
+
+```bash
+./SuperManagerMac/Signing/enable_nopasswd.sh   # writes /etc/sudoers.d/supermanager-dev
+```
+
+(Disable with `disable_nopasswd.sh` when done.)
+
 ## Usage
 
 ```bash
+# Linux
 supermgr          # Launch the GUI (daemon starts automatically via D-Bus activation)
+
+# macOS
+open /Applications/SuperManagerMac.app   # or via Spotlight
 ```
 
 ## Tech Stack
 
-- **Language:** Rust
-- **GUI:** GTK4 + libadwaita (Adwaita design language)
-- **D-Bus:** zbus (tokio backend)
+- **Languages:** Rust (core, daemons, helpers, MCP), Swift / SwiftUI (macOS app)
+- **GUI (Linux):** GTK4 + libadwaita (Adwaita design language)
+- **GUI (macOS):** SwiftUI (Sequoia/Tahoe), AppKit interop
+- **IPC:** zbus D-Bus on Linux, JSON-RPC over Unix sockets on macOS
 - **SSH:** russh (pure Rust, async)
-- **VPN:** WireGuard netlink, strongSwan swanctl, OpenVPN CLI, Azure Entra ID OAuth2
+- **VPN:** WireGuard netlink (Linux) / kernel `wg` (macOS), strongSwan swanctl, OpenVPN3 `ovpncli` (macOS Azure path) + OpenVPN 2.x CLI, Azure Entra ID OAuth2 (PKCE)
+- **Keychain:** Secret Service / GNOME Keyring on Linux, `security-framework` on macOS
 - **AI:** Anthropic Claude API + Claude Code CLI
 - **HTTP:** reqwest (native-tls)
 - **Cloud:** UI.com Site Manager API (UniFi)
