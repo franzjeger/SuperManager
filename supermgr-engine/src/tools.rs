@@ -150,23 +150,54 @@ pub async fn status() -> Vec<ToolInfo> {
 }
 
 async fn probe_one(spec: &'static Spec) -> ToolInfo {
+    // 1. PATH lookup via `which`. This picks up tools shipped with
+    //    macOS (in `/usr/bin`) but misses Homebrew tools when the
+    //    helper is launched by launchd, because launchd's default
+    //    PATH is `/usr/bin:/bin:/usr/sbin:/sbin` — no
+    //    `/opt/homebrew/bin`. So a `brew install pandoc` works for
+    //    the user but the helper-side `which pandoc` returns
+    //    nothing, and the panel keeps nagging "Install: brew
+    //    install pandoc" forever. Step 2 below covers that.
     let path_result = tokio::time::timeout(
         Duration::from_secs(2),
         tokio::process::Command::new("which").arg(spec.name).output(),
     )
     .await;
-    let path = match path_result {
+    let mut path: Option<String> = match path_result {
         Ok(Ok(out)) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
             if s.is_empty() { None } else { Some(s) }
         }
         _ => None,
     };
+    // 2. Fallback to known Homebrew + MacPorts prefixes when PATH
+    //    didn't resolve. Order matters: prefer Apple-Silicon brew
+    //    over Intel brew over MacPorts. We don't dedupe — first hit
+    //    wins.
+    if path.is_none() {
+        const FALLBACK_PREFIXES: &[&str] = &[
+            "/opt/homebrew/bin",     // Apple Silicon brew (default)
+            "/opt/homebrew/sbin",    // Apple Silicon brew (sbin variants)
+            "/usr/local/bin",        // Intel brew (default)
+            "/usr/local/sbin",       // Intel brew (sbin variants)
+            "/opt/local/bin",        // MacPorts
+        ];
+        for prefix in FALLBACK_PREFIXES {
+            let candidate = format!("{prefix}/{}", spec.name);
+            if std::path::Path::new(&candidate).exists() {
+                path = Some(candidate);
+                break;
+            }
+        }
+    }
 
-    let version = if path.is_some() {
+    // Run the actual binary to fetch the version. Use the absolute
+    // path we resolved above — `Command::new(spec.name)` would
+    // hit the same `which` PATH issue we just worked around.
+    let version = if let Some(ref p) = path {
         let res = tokio::time::timeout(
             Duration::from_secs(2),
-            tokio::process::Command::new(spec.name).args(spec.args).output(),
+            tokio::process::Command::new(p).args(spec.args).output(),
         )
         .await;
         match res {
