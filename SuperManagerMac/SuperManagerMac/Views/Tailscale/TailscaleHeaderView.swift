@@ -112,17 +112,24 @@ struct TailscaleHeaderView: View {
     }
 
     private var identityBlock: some View {
+        // Tooltip on hover surfaces the full tailnet + device
+        // strings — the visible labels truncate (`franzje…ail.com`)
+        // because the column is narrow, so without this the
+        // operator can't tell which account is signed in.
         VStack(alignment: .leading, spacing: 2) {
             Text(tailnetLabel)
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .textSelection(.enabled)
             Text(deviceLabel)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .textSelection(.enabled)
         }
+        .help("\(tailnetLabel)\n\(deviceLabel)")
     }
 
     /// Right-side buttons. The exact set depends on whether the

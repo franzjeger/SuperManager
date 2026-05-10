@@ -98,9 +98,13 @@ struct ContentView: View {
             }
             // Global customer-context picker — sits next to the
             // connection pill so the operator always sees which
-            // customer they're acting on.
+            // customer they're acting on. Hidden on Tailscale: the
+            // tailnet is a per-account concept with no customer
+            // scope, so showing the picker there is misleading.
             ToolbarItem(placement: .navigation) {
-                GlobalCustomerPicker()
+                if appState.selectedSection != .tailscale {
+                    GlobalCustomerPicker()
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 if appState.selectedSection == .ssh {
@@ -465,8 +469,20 @@ struct ContentView: View {
             }
             if shouldGroup {
                 ForEach(backendOrder, id: \.self) { group in
-                    Section(group) {
-                        ForEach(backendGroups[group] ?? []) { vpnProfileRow($0) }
+                    let profiles = backendGroups[group] ?? []
+                    // Count badge in the section header — operator
+                    // can see at a glance how many of each backend
+                    // they have without reading the rows.
+                    Section {
+                        ForEach(profiles) { vpnProfileRow($0) }
+                    } header: {
+                        HStack {
+                            Text(group)
+                            Spacer()
+                            Text("\(profiles.count)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                 }
             } else {
@@ -757,19 +773,38 @@ struct ContentView: View {
 
     @ViewBuilder
     private var hostList: some View {
-        if appState.sshHosts.isEmpty {
+        if filteredHosts.isEmpty {
+            // Predicate is `filteredHosts`, not the unfiltered
+            // `sshHosts` — otherwise a customer with zero hosts
+            // shows the empty list silently while another customer
+            // has hosts (the global pool is non-empty so the
+            // empty-state branch never fires).
+            let isSearching = !searchText.isEmpty
+            let customerSlug = appState.globalCustomerSlug
             ContentUnavailableView {
-                Label("No SSH Hosts", systemImage: "terminal")
+                Label(
+                    isSearching ? "No matches"
+                        : !customerSlug.isEmpty ? "No hosts for this customer"
+                        : "No SSH hosts",
+                    systemImage: isSearching ? "magnifyingglass" : "terminal"
+                )
             } description: {
-                Text("Add a host to keep its credentials, run remote commands, and push SSH keys from the keys tab.")
+                Text(isSearching
+                     ? "No SSH host matches “\(searchText)”."
+                     : "Add a host to keep its credentials, run remote commands, and push SSH keys from the keys tab.")
             } actions: {
-                Button {
-                    showingAddHost = true
-                } label: {
-                    Label("Add host…", systemImage: "plus")
+                if isSearching {
+                    Button("Clear search") { searchText = "" }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button {
+                        showingAddHost = true
+                    } label: {
+                        Label("Add host…", systemImage: "plus")
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
                 }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
             }
         } else {
             hostListContent

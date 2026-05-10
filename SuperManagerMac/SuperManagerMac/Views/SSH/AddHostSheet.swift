@@ -4,12 +4,22 @@ struct AddHostSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
 
+    /// Caller can pre-select a device type (e.g. Compliance opens
+    /// the sheet with `.fortigate` already chosen so the operator
+    /// doesn't have to walk through the picker). Defaults to
+    /// `.linux` to preserve the existing toolbar-`+` behaviour.
+    let defaultDeviceType: DeviceType
+    init(defaultDeviceType: DeviceType = .linux) {
+        self.defaultDeviceType = defaultDeviceType
+        _deviceType = State(initialValue: defaultDeviceType)
+    }
+
     @State private var label = ""
     @State private var hostname = ""
     @State private var port: UInt16 = 22
     @State private var username = "root"
     @State private var group = ""
-    @State private var deviceType: DeviceType = .linux
+    @State private var deviceType: DeviceType
     @State private var authMethod: AuthMethod = .key
     @State private var selectedKeyId: String?
     @State private var password = ""

@@ -270,9 +270,16 @@ struct FleetView: View {
     @ViewBuilder
     private func customerCard(_ row: Row) -> some View {
         Button {
+            // Set the global customer scope so the rest of the
+            // app (SSH list, VPN list, Compliance, Provisioning,
+            // Security) filters to this customer. We deliberately
+            // DO NOT change the active section — earlier behavior
+            // jumped to Security on customer click, which surprised
+            // users who expected the click to "open this customer"
+            // (and there's no Fleet-detail view that would justify
+            // the chevron either). Use the sidebar to navigate.
             appState.globalCustomerSlug = row.customer.slug
             UserDefaults.standard.set(row.customer.slug, forKey: "globalCustomerSlug")
-            appState.selectedSection = .security
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "building.2.fill")
@@ -307,10 +314,9 @@ struct FleetView: View {
                     riskBadge(row)
                 }
                 severityPills(row.summary)
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
+                // No chevron — the click only switches global
+                // customer scope, it doesn't navigate anywhere,
+                // so a chevron would mislead about drill-in.
             }
             .padding(12)
             .background(.background.secondary)

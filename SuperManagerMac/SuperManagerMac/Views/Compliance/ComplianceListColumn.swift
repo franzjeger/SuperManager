@@ -14,6 +14,7 @@ struct ComplianceListColumn: View {
     @Environment(AppState.self) private var appState
 
     @State private var showingChecksLibrary = false
+    @State private var showingAddHost = false
     @State private var scanAllResultBanner: String?
 
     /// FortiGate hosts only — compliance checks target FortiOS.
@@ -30,7 +31,15 @@ struct ComplianceListColumn: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            actionsBar
+            // Only show the actions bar when there's something to
+            // act on. Previously it rendered above the empty state
+            // with a lone Library button floating in the upper
+            // right — looked disconnected from anything. The
+            // Library now lives as a secondary CTA inside the
+            // empty state itself.
+            if !fortigateHosts.isEmpty {
+                actionsBar
+            }
             if let banner = scanAllResultBanner {
                 Text(banner)
                     .font(.caption)
@@ -42,14 +51,27 @@ struct ComplianceListColumn: View {
                 ContentUnavailableView {
                     Label("No FortiGate hosts", systemImage: "shield.lefthalf.filled")
                 } description: {
-                    Text("Compliance scans require a FortiGate host with a REST API token. Add a host in the SSH section, set its device type to FortiGate, and generate a token.")
+                    Text("Compliance scans require a FortiGate host with a REST API token. Add the host below — device type is pre-set to FortiGate; once it's created, drop into the host's API panel to generate the token.")
                 } actions: {
-                    Button {
-                        appState.selectedSection = .ssh
-                    } label: {
-                        Label("Go to SSH", systemImage: "terminal")
+                    VStack(spacing: 8) {
+                        // Primary CTA: open AddHostSheet with the
+                        // device type pre-set to FortiGate. Saves
+                        // the operator from walking through the
+                        // picker manually.
+                        Button {
+                            showingAddHost = true
+                        } label: {
+                            Label("Add FortiGate host…", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button {
+                            showingChecksLibrary = true
+                        } label: {
+                            Label("Browse checks library", systemImage: "books.vertical")
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundStyle(.tint)
                     }
-                    .buttonStyle(.borderedProminent)
                 }
             } else {
                 List(selection: Binding(
@@ -75,6 +97,15 @@ struct ComplianceListColumn: View {
         }
         .sheet(isPresented: $showingChecksLibrary) {
             ChecksLibrarySheet()
+        }
+        .sheet(isPresented: $showingAddHost) {
+            // Pre-select the device type so the operator drops
+            // directly into the FortiGate-shaped form. After save,
+            // the new host appears in the SSH list AND in the
+            // compliance list (via the deviceType==.fortigate
+            // filter), so the empty state self-replaces with the
+            // host row + scan-all action bar.
+            AddHostSheet(defaultDeviceType: .fortigate)
         }
     }
 
