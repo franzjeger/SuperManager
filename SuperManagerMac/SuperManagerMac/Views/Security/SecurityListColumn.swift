@@ -29,11 +29,15 @@ struct SecurityListColumn: View {
     var body: some View {
         VStack(spacing: 0) {
             if filtered.isEmpty {
+                // No footer when the empty state already shows its
+                // own primary `+ New engagement…` CTA — otherwise
+                // the column has two side-by-side buttons asking
+                // the same thing.
                 emptyState
             } else {
                 list
+                footer
             }
-            footer
         }
         .sheet(isPresented: $showingAdd) {
             EngagementEditSheet(engagement: nil)

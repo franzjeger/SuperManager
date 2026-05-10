@@ -108,6 +108,7 @@ struct FleetView: View {
             } description: {
                 Text("Create a customer in the Provisioning section to start tracking findings here.")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
                 VStack(spacing: 8) {
@@ -127,11 +128,16 @@ struct FleetView: View {
         // context to be set so we don't try to aggregate an
         // unbounded stream across all customers.
         if appState.globalCustomerSlug.isEmpty {
+            // Force the empty state to expand into the remaining
+            // vertical space — without this the VStack containing
+            // header + tabBar + ContentUnavailableView centers
+            // vertically and the header floats away from the top.
             ContentUnavailableView {
                 Label("Pick a customer to view activity", systemImage: "person.crop.rectangle.stack")
             } description: {
                 Text("Set the global customer context (toolbar) to see a unified timeline of scans, deploys, and finding state changes for that customer.")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if loadingTimeline {
             ProgressView("Loading timeline…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -141,6 +147,7 @@ struct FleetView: View {
             } description: {
                 Text("Run a scan, deploy a config, or change a finding's disposition to populate the timeline.")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
