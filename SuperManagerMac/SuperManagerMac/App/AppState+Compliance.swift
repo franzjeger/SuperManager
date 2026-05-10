@@ -91,6 +91,90 @@ extension AppState {
         }
     }
 
+    /// Concurrent client-side fan-out version of scan-all. Calls
+    /// `compliance_run` per host in parallel (limited to 4 in
+    /// flight at a time so we don't hammer the daemon's SSH pool)
+    /// and updates `complianceScanProgress` as each host
+    /// transitions queued → scanning → done/failed. The UI uses
+    /// that map to render a per-host progress strip instead of
+    /// the opaque single-spinner that `runComplianceScanAll`
+    /// produces.
+    ///
+    /// Skips hosts that lack an API token — same as the daemon's
+    /// scan-all does.
+    @discardableResult
+    func runComplianceScanAllConcurrent() async -> [ComplianceScanAllResult] {
+        guard !complianceScanAllInFlight else { return [] }
+        complianceScanAllInFlight = true
+        defer {
+            complianceScanAllInFlight = false
+            // Leave progress visible briefly so the user can see
+            // the final state; clear from caller via
+            // `clearComplianceScanProgress()` after toast settles.
+        }
+        let hosts = sshHosts.filter { $0.deviceType == .fortigate && $0.hasApi }
+        guard !hosts.isEmpty else { return [] }
+        // Reset progress map: every host starts queued.
+        complianceScanProgress = Dictionary(uniqueKeysWithValues:
+            hosts.map { ($0.id, "queued") })
+
+        // Bounded-concurrency TaskGroup. 4 = matches the daemon's
+        // SSH pool default; higher and we'd queue inside the
+        // daemon for no observable speedup.
+        let maxConcurrent = 4
+        var results: [ComplianceScanAllResult] = []
+        await withTaskGroup(of: ComplianceScanAllResult.self) { group in
+            var iterator = hosts.makeIterator()
+            // Prime the pump.
+            for _ in 0..<maxConcurrent {
+                if let host = iterator.next() {
+                    group.addTask { [self] in
+                        await scanOneHostForFanOut(host)
+                    }
+                }
+            }
+            // As each finishes, kick off the next.
+            while let r = await group.next() {
+                results.append(r)
+                if let host = iterator.next() {
+                    group.addTask { [self] in
+                        await scanOneHostForFanOut(host)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
+    private func scanOneHostForFanOut(_ host: SshHostSummary) async -> ComplianceScanAllResult {
+        complianceScanProgress[host.id] = "scanning"
+        if let run = await runCompliance(hostId: host.id) {
+            complianceScanProgress[host.id] = "done"
+            return ComplianceScanAllResult(
+                hostId: host.id,
+                hostLabel: host.label,
+                runId: run.id,
+                score: run.score,
+                error: nil
+            )
+        }
+        complianceScanProgress[host.id] = "failed"
+        return ComplianceScanAllResult(
+            hostId: host.id,
+            hostLabel: host.label,
+            runId: nil,
+            score: nil,
+            error: "scan failed"
+        )
+    }
+
+    /// Wipe the progress map. The UI surfaces it briefly after
+    /// completion so the user sees the final state; the column
+    /// view calls this after a few seconds.
+    func clearComplianceScanProgress() {
+        complianceScanProgress = [:]
+    }
+
     /// Run compliance against every FortiGate host with an API
     /// token. `unconditional == false` skips hosts whose last
     /// run is < 24h old (matches the auto-scan-on-launch path).

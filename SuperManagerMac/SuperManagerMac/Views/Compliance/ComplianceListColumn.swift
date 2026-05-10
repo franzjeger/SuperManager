@@ -126,9 +126,18 @@ struct ComplianceListColumn: View {
                     Task { await runScanAll() }
                 } label: {
                     if appState.complianceScanAllInFlight {
+                        // Live counter: how many hosts done / total.
+                        // The progress map is updated as each per-
+                        // host fan-out completes, so the user sees
+                        // "Scanning 3/12" instead of an opaque spinner.
+                        let total = appState.complianceScanProgress.count
+                        let done = appState.complianceScanProgress.values
+                            .filter { $0 == "done" || $0 == "failed" }
+                            .count
                         HStack(spacing: 4) {
                             ProgressView().controlSize(.small)
-                            Text("Scanning…")
+                            Text(total > 0 ? "Scanning \(done)/\(total)" : "Scanning…")
+                                .monospacedDigit()
                         }
                     } else {
                         Label("Scan all", systemImage: "checkmark.shield.fill")
@@ -144,20 +153,21 @@ struct ComplianceListColumn: View {
 
     private func runScanAll() async {
         scanAllResultBanner = nil
-        guard let results = await appState.runComplianceScanAll(unconditional: true) else {
-            return
-        }
+        // Use the concurrent fan-out variant so the per-host
+        // progress map fills in incrementally — drives the
+        // "Scanning 3/12" counter on the toolbar button.
+        let results = await appState.runComplianceScanAllConcurrent()
         let succeeded = results.filter { $0.runId != nil }.count
         let failed = results.filter { $0.error != nil && $0.runId == nil }.count
         scanAllResultBanner =
             "Scanned \(succeeded) host\(succeeded == 1 ? "" : "s")"
             + (failed > 0 ? ", \(failed) failed" : "")
-        // Auto-dismiss the banner after a few seconds so it
-        // doesn't persist forever; users can re-trigger to see
-        // updated text.
+        // Auto-dismiss the banner + clear progress after a few
+        // seconds so the toolbar button returns to its idle state.
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(8))
             scanAllResultBanner = nil
+            appState.clearComplianceScanProgress()
         }
     }
 

@@ -724,6 +724,12 @@ class AppState {
     /// True while a fleet-wide scan is in flight. Drives the
     /// "Run all" button's spinner and disables it during a run.
     var complianceScanAllInFlight = false
+    /// Per-host status during a fleet-wide scan, keyed by hostId.
+    /// Populated when `runComplianceScanAllConcurrent` starts and
+    /// cleared on completion. Values: "queued", "scanning", "done",
+    /// "failed". Drives a fan-out progress display so the user
+    /// sees which hosts are stuck rather than watching a spinner.
+    var complianceScanProgress: [String: String] = [:]
 
     // MARK: - Provisioning (customers + templates)
     //
