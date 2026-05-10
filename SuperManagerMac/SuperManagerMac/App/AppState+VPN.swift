@@ -488,6 +488,11 @@ extension AppState {
         // `pollAllVpnStates()` at the bottom of this method, which
         // either confirms or corrects.
         vpnConnectionStates[profileId] = "connecting"
+        // Drop poll cadence to 500 ms for the next 30 s so the
+        // user sees the dot flip green within half a second of
+        // the tunnel actually coming up, not after the next 4 s
+        // tick.
+        bumpVpnFastPolling()
         do {
             struct RenderedConf: Decodable {
                 let conf: String
@@ -571,6 +576,7 @@ extension AppState {
         // the dot to leave green so the user sees the action took
         // effect somewhere. The poll afterwards reconciles.
         vpnConnectionStates[profileId] = "disconnected"
+        bumpVpnFastPolling()
         // Tear down kill-switch first so the user isn't trapped
         // with a tunnel down + pf blocking everything. Idempotent.
         _ = try? await HelperClient.shared.killSwitchDisable()
@@ -605,6 +611,7 @@ extension AppState {
         let password = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")
 
         vpnConnectionStates[profileId] = "connecting"
+        bumpVpnFastPolling()
         do {
             let result = try await HelperClient.shared.ovpnConnect(
                 profileId: profileId,
@@ -635,6 +642,7 @@ extension AppState {
     @discardableResult
     func openVPNDisconnect(profileId: String) async -> (success: Bool, message: String) {
         vpnConnectionStates[profileId] = "disconnected"
+        bumpVpnFastPolling()
         _ = try? await HelperClient.shared.killSwitchDisable()
         do {
             let result = try await HelperClient.shared.ovpnDisconnect(profileId: profileId)
@@ -687,6 +695,7 @@ extension AppState {
 
     func forceDisconnect(profileId: String) async {
         _logForceDisconnect(profileId)
+        bumpVpnFastPolling()
         if let summary = vpnProfiles.first(where: { $0.id == profileId }) {
             await dispatchDisconnect(profileId: profileId, backend: summary.backend)
         } else {

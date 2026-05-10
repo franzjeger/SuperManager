@@ -111,6 +111,10 @@ struct AzureSignInSheet: View {
             kind: .connectStarted,
             message: "Azure VPN: sign-in started"
         )
+        // Bump VPN poll cadence so the dot flips green within
+        // half a second of the tunnel actually coming up rather
+        // than the next 4 s tick.
+        appState.bumpVpnFastPolling()
 
         let token: AzureOAuth.AccessToken
         do {

@@ -88,6 +88,12 @@ class AppState {
     /// Started by `connectToDaemon`; cancelled on app shutdown by
     /// SwiftUI's normal lifecycle.
     private var vpnStatusPollTask: Task<Void, Never>?
+    /// Deadline for the "fast-poll window". When set in the future,
+    /// the VPN-status poll loop drops to 500 ms cadence so the UI
+    /// updates within half a second of a user-initiated connect /
+    /// disconnect / etc. Cleared (read as "in the past") once the
+    /// window expires; the loop falls back to 4 s polling.
+    var vpnFastPollUntil: Date?
 
     /// Connect to the daemon and load initial data.
     func connectToDaemon() async {
@@ -253,7 +259,18 @@ class AppState {
         Task { @MainActor in await pollAllVpnStates() }
         vpnStatusPollTask = Task { @MainActor in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(4))
+                // Adaptive cadence: 4 s normally, 500 ms while a
+                // user action is "still settling" (the helper just
+                // accepted a connect / disconnect / etc and the
+                // tunnel state is mid-transition). The fast window
+                // is bounded so we drop back to 4 s once nothing
+                // is changing — keeps idle CPU low while making
+                // the UI feel instant right after user action.
+                let interval: Duration =
+                    (vpnFastPollUntil ?? .distantPast) > Date()
+                        ? .milliseconds(500)
+                        : .seconds(4)
+                try? await Task.sleep(for: interval)
                 await pollAllVpnStates()
                 // Surface helper-side events (auto-reconnect
                 // succeeded, panic_reset escalation) as user
@@ -261,6 +278,16 @@ class AppState {
                 await pollHelperEventsForNotifications()
             }
         }
+    }
+
+    /// Trigger a 30-second window of fast (500 ms) VPN-status
+    /// polling. Call after any user action that will cause the
+    /// helper to start/stop a tunnel — connect, disconnect,
+    /// force-disconnect, panic-reset, profile import. The poll
+    /// loop reads `vpnFastPollUntil` on each iteration; it does
+    /// NOT need to be cancelled — the window expires by itself.
+    func bumpVpnFastPolling(seconds: TimeInterval = 30) {
+        vpnFastPollUntil = Date().addingTimeInterval(seconds)
     }
 
     /// Track whether we've already wired up sleep/wake observers
