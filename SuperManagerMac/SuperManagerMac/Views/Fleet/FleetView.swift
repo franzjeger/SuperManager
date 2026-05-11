@@ -39,10 +39,16 @@ struct FleetView: View {
         var id: String { customer.slug }
 
         var totalActive: UInt32 {
-            (summary?.critical ?? 0)
-                + (summary?.high ?? 0)
-                + (summary?.medium ?? 0)
-                + (summary?.low ?? 0)
+            // Spelt out with explicit local bindings — the inline
+            // 4-way `+` of optional-unwrapped UInt32 expressions
+            // exceeds Swift 5.9's type-inference budget on CI
+            // runners (compiles locally but times out on the
+            // macOS-latest image).
+            let c: UInt32 = summary?.critical ?? 0
+            let h: UInt32 = summary?.high ?? 0
+            let m: UInt32 = summary?.medium ?? 0
+            let l: UInt32 = summary?.low ?? 0
+            return c + h + m + l
         }
 
         /// Customer-level risk = max host risk (the worst host
