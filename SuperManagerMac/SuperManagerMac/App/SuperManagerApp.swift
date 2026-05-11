@@ -84,6 +84,12 @@ struct SuperManagerApp: App {
                     )
                 }
             }
+            // "Check for Updates…" — appears between "About" and
+            // "Settings" in the app menu, matching macOS convention.
+            // Sparkle handles the rest (download, verify, install).
+            CommandGroup(after: .appInfo) {
+                CheckForUpdatesView()
+            }
             // Help menu — replaces the default "SuperManager Help"
             // (which points to a Help Book we don't ship) with a
             // small set of useful links. Opens in the user's
@@ -336,5 +342,22 @@ struct SuperManagerApp: App {
             }
         }
         return result == 0
+    }
+}
+
+/// "Check for Updates…" menu item, wired up to `SparkleUpdater`.
+///
+/// Lives in its own `View` because `Button` inside a `CommandGroup`
+/// needs to subscribe to `@StateObject` / `@ObservedObject` to disable
+/// itself while a check is in flight. Sparkle's `canCheckForUpdates`
+/// is observed through `SparkleUpdater.shared`.
+private struct CheckForUpdatesView: View {
+    @ObservedObject private var updater = SparkleUpdater.shared
+
+    var body: some View {
+        Button("Check for Updates…") {
+            updater.checkForUpdates()
+        }
+        .disabled(!updater.canCheckForUpdates)
     }
 }

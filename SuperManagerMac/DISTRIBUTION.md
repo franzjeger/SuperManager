@@ -82,46 +82,90 @@ It's a one-shot 1-2 day sprint that doesn't gate the current daily-use
 workflow on this machine. Brew is installed; rolling our own strongSwan
 build is best done after the Developer ID path is committed.
 
-## The Developer ID path (real-product milestone)
+## The Developer ID path (current — Apple Developer Program enrolled)
 
-Steps:
+### One-time setup (done once per developer machine)
 
-1. Buy Apple Developer Program — $99/yr.
-2. Create a "Developer ID Application" certificate from
-   https://developer.apple.com/account/resources/certificates.
-3. `codesign --sign "Developer ID Application: <YOUR NAME>" --options runtime
-   --entitlements SuperManager.entitlements --deep --force SuperManager.app`.
-4. Notarise: `xcrun notarytool submit SuperManager.zip
-   --keychain-profile SM-Notarisation --wait`.
-5. Staple: `xcrun stapler staple SuperManager.app`.
-6. Distribute via a `.dmg` with a code-signed `pkg` installer that drops
-   the bundle into `/Applications/`.
+1. **Create the Developer ID Application certificate.**
+   - https://developer.apple.com/account/resources/certificates
+   - "Create a Certificate" → "Developer ID Application" → upload a CSR
+     generated from Keychain Access → download + install the .cer.
+   - Verify with `security find-identity -p codesigning -v` — should show
+     a line like `"Developer ID Application: Frank Liaaen (LY6LJ395B8)"`.
 
-`SuperManager.entitlements` should contain only the absolute minimum:
+2. **Create an App Store Connect API key for notarisation.**
+   - https://appstoreconnect.apple.com/access/integrations/api
+   - Generate a key with the "Developer" role.
+   - Download the `AuthKey_XXXXXX.p8` file (one-time download — re-create
+     the key if you lose it).
+   - Note the Key ID + Issuer ID printed alongside.
 
-```xml
-<dict>
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <false/>
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <false/>
-</dict>
+3. **Export the API key env vars in your shell profile** (`~/.zshenv`):
+   ```sh
+   export DEVELOPER_ID_APP="Developer ID Application: Frank Liaaen (LY6LJ395B8)"
+   export AC_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_ABCD123456.p8"
+   export AC_API_KEY_ID="ABCD123456"
+   export AC_API_ISSUER_ID="00000000-0000-0000-0000-000000000000"
+   ```
+
+4. **Generate the Sparkle EdDSA keypair** (one-time):
+   ```sh
+   ./scripts/sparkle-keygen.sh
+   ```
+   This stores the private key in your Mac Keychain and prints a public
+   key. Paste the public key into `SUPublicEDKey` in
+   `SuperManagerMac/project.yml`, then `xcodegen generate`.
+
+5. **Update `project.yml`'s `DEVELOPMENT_TEAM`** if your paid Team ID
+   differs from the Personal Team ID currently baked in.
+
+### Per-release flow
+
+```sh
+./scripts/release.sh 1.0.0
 ```
 
-We do NOT need the Personal VPN entitlement
-(`com.apple.developer.networking.vpn.api`) because the bundled-strongSwan
-+ root-helper architecture does not call NEVPNManager.
+The script:
+1. Bumps `CFBundleShortVersionString` + `CFBundleVersion` in `project.yml`.
+2. Regenerates `.xcodeproj` via xcodegen.
+3. `xcodebuild build` in Release config.
+4. Re-signs the app + embedded daemon + helper with the Developer ID
+   identity (hardened runtime, secure timestamp).
+5. Submits to Apple's notary via `notarytool` and waits for verdict.
+6. Staples the notarisation ticket onto the .app.
+7. Zips for distribution → `dist/SuperManager-<version>.zip`.
+8. Signs the zip with Sparkle's `sign_update` → appcast signature.
+9. Generates `dist/appcast.xml` pointing at the GitHub Releases download URL.
 
-### Auto-update
+Then manually:
+```sh
+git commit -am "chore: release v1.0.0"
+git tag v1.0.0 && git push origin main v1.0.0
+gh release create v1.0.0 dist/SuperManager-1.0.0.zip dist/appcast.xml \
+    --title "v1.0.0" --notes-file CHANGELOG.md
+```
 
-Use **Sparkle 2** with EdDSA-signed appcasts. Host the appcast on
-`https://supermanager.sybr.no/appcast.xml`. EdDSA keys generated with
-`generate_keys` from Sparkle's tools.
+Sparkle picks up the new appcast within `SUScheduledCheckInterval` (1 day)
+or immediately when the user clicks **SuperManager → Check for Updates…**.
 
-### Why we haven't done it yet
+### Auto-update internals
 
-The user has explicitly opted not to pay Apple. The path is documented
-here for the day they change their mind.
+The app reads `SUFeedURL` from Info.plist on launch. Sparkle polls that
+URL for `appcast.xml`, compares versions, and — if newer — verifies the
+appcast's EdDSA signature against `SUPublicEDKey` (also in Info.plist)
+before offering the update. An attacker who controls the feed URL cannot
+ship a malicious update without the matching private key.
+
+The release script is the only path that signs an update for production.
+Lose the Sparkle private key → can't ship updates until you generate a new
+keypair + ship a new public-key bake-in (which breaks existing installs'
+ability to auto-update; they'd have to manually download the next signed
+release).
+
+`SUPublicEDKey` lives in `project.yml` → `SuperManagerMac.info.properties.SUPublicEDKey`.
+The string `REPLACE_ME_RUN_sparkle-keygen.sh` is the placeholder shipped
+in source — Sparkle will refuse to install anything until it's replaced
+with the real key from `sparkle-keygen.sh`.
 
 ## The MAS / NEVPNManager path (revisited)
 
