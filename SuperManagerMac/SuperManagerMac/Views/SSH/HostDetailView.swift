@@ -64,17 +64,35 @@ struct HostDetailView: View {
 
                         Button("Test Connection") {
                             Task {
-                                connectionStatus = "Testing..."
-                                let result = await appState.testConnection(hostId: hostId)
-                                connectionStatus = result
+                                connectionStatus = "Testing…"
+                                // The daemon now reports structured kinds —
+                                // map each to a clear UI string + icon so
+                                // the operator can act:
+                                //   .authFailed     → "Auth failed" (red, key icon)
+                                //   .networkFailed  → "Unreachable" (orange,
+                                //                     wifi-slash icon — hints
+                                //                     at "connect VPN first")
+                                //   .otherFailure   → "Failed: <msg>" (red)
+                                switch await appState.testConnection(hostId: hostId) {
+                                case .ok:
+                                    connectionStatus = "ok"
+                                case .authFailed(let msg):
+                                    connectionStatus = "auth: \(msg)"
+                                case .networkFailed(let msg):
+                                    connectionStatus = "network: \(msg)"
+                                case .otherFailure(let msg):
+                                    connectionStatus = msg
+                                }
                             }
                         }
 
                         if let status = connectionStatus {
                             HStack(spacing: 4) {
-                                Image(systemName: status == "ok" ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                    .foregroundStyle(status == "ok" ? .green : .red)
+                                Image(systemName: connectionStatusIcon(status))
+                                    .foregroundStyle(connectionStatusColor(status))
                                 Text(status)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                             }
                         }
 
@@ -309,5 +327,25 @@ struct HostDetailView: View {
         }
         .buttonStyle(.plain)
         .help("Compliance score \(score)/100 — click to view breakdown")
+    }
+
+    /// SF Symbol for the connection-status pill. We branch on the
+    /// stable `kind`-derived prefix the test-connection task writes
+    /// ("auth:", "network:", "ok") rather than parsing the human
+    /// message — same idea as the daemon-side EngineError.kind
+    /// design, applied to the view-state string.
+    private func connectionStatusIcon(_ status: String) -> String {
+        if status == "ok" { return "checkmark.circle.fill" }
+        if status.hasPrefix("Testing") { return "ellipsis.circle" }
+        if status.hasPrefix("auth:") { return "key.fill" }
+        if status.hasPrefix("network:") { return "wifi.exclamationmark" }
+        return "xmark.circle.fill"
+    }
+
+    private func connectionStatusColor(_ status: String) -> Color {
+        if status == "ok" { return .green }
+        if status.hasPrefix("Testing") { return .secondary }
+        if status.hasPrefix("network:") { return .orange }
+        return .red
     }
 }

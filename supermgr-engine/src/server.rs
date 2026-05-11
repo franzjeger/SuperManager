@@ -327,6 +327,123 @@ impl EngineServer {
     pub(crate) async fn connect_to_host(&self, host_id: uuid::Uuid) -> Result<(Host, SshSession), String> {
         connect_to_host_owned(&self.state, &self.secrets, host_id).await
     }
+
+    /// Same as `connect_to_host` but surfaces a structured
+    /// `EngineError` so the handler can emit
+    /// `Response::err_engine` with a stable `kind` (e.g.
+    /// `ssh_auth` vs `ssh_network`). Existing call sites stay
+    /// on the String-returning variant until they're migrated
+    /// to structured errors individually.
+    pub(crate) async fn connect_to_host_typed(
+        &self,
+        host_id: uuid::Uuid,
+    ) -> Result<(Host, SshSession), crate::error::EngineError> {
+        connect_to_host_owned_typed(&self.state, &self.secrets, host_id).await
+    }
+}
+
+/// Same as `connect_to_host_owned` but returns a structured
+/// `EngineError` instead of a stringified error. Used by handlers
+/// that emit `Response::err_engine` so the Swift client can
+/// distinguish `ssh_auth` (wrong creds — show retry) from
+/// `ssh_network` (host unreachable — suggest VPN) without
+/// regex-matching the human message.
+pub async fn connect_to_host_owned_typed(
+    state: &Arc<Mutex<DaemonState>>,
+    secrets: &Arc<dyn SecretStore>,
+    host_id: uuid::Uuid,
+) -> Result<(Host, SshSession), crate::error::EngineError> {
+    use crate::error::EngineError;
+    use supermgr_core::error::SshError;
+
+    let (host, known_hosts) = {
+        let st = state.lock().await;
+        let host = st
+            .ssh_hosts
+            .get(&host_id)
+            .cloned()
+            .ok_or_else(|| EngineError::Other(anyhow::anyhow!("host not found: {host_id}")))?;
+        (host, Arc::clone(&st.known_hosts))
+    };
+
+    let session = match host.auth_method {
+        AuthMethod::Password => {
+            let password_ref = host.auth_password_ref.as_ref().ok_or_else(|| {
+                EngineError::Other(anyhow::anyhow!("no password configured"))
+            })?;
+            let password_bytes = secrets.retrieve(&password_ref.0).await.map_err(|e| {
+                EngineError::Other(anyhow::anyhow!("retrieve password: {e}"))
+            })?;
+            let password = String::from_utf8_lossy(&password_bytes).to_string();
+            SshSession::connect_password(
+                &host.hostname,
+                host.port,
+                &host.username,
+                &password,
+                10,
+                known_hosts,
+            )
+            .await
+            .map_err(|e| ssh_error_to_engine(&host.hostname, e))?
+        }
+        AuthMethod::Key => {
+            let key_id = host.auth_key_id.ok_or_else(|| {
+                EngineError::Other(anyhow::anyhow!("no SSH key configured"))
+            })?;
+            let privkey_pem = {
+                let st = state.lock().await;
+                let ssh_key = st.ssh_keys.get(&key_id).ok_or_else(|| {
+                    EngineError::Other(anyhow::anyhow!("SSH key not found: {key_id}"))
+                })?;
+                let priv_ref = ssh_key.private_key_ref.0.clone();
+                drop(st);
+                let privkey_bytes = secrets.retrieve(&priv_ref).await.map_err(|e| {
+                    EngineError::Other(anyhow::anyhow!("retrieve private key: {e}"))
+                })?;
+                String::from_utf8_lossy(&privkey_bytes).to_string()
+            };
+            SshSession::connect_key(
+                &host.hostname,
+                host.port,
+                &host.username,
+                &privkey_pem,
+                10,
+                known_hosts,
+            )
+            .await
+            .map_err(|e| ssh_error_to_engine(&host.hostname, e))?
+        }
+        AuthMethod::Certificate => {
+            return Err(EngineError::Other(anyhow::anyhow!(
+                "ssh certificate auth not yet implemented in supermgr-engine"
+            )));
+        }
+    };
+
+    Ok((host, session))
+}
+
+/// Maps `SshError` → `EngineError` for the typed connect path.
+/// The shape of `SshError` already distinguishes auth-vs-network
+/// failures, so we just route each variant to the matching
+/// `EngineError` kind. Other / unknown variants fall through to
+/// `Other` so the existing UI behaviour is preserved.
+fn ssh_error_to_engine(
+    host: &str,
+    err: supermgr_core::error::SshError,
+) -> crate::error::EngineError {
+    use crate::error::EngineError;
+    use supermgr_core::error::SshError;
+    match err {
+        SshError::AuthFailed(reason) => EngineError::SshAuth { reason },
+        SshError::ConnectionFailed { reason, .. } => EngineError::SshNetwork { reason },
+        // SshError has no explicit "session closed mid-handshake"
+        // variant — the russh client surfaces those as either
+        // AuthFailed or ConnectionFailed. SshDisconnected on
+        // EngineError stays in the enum for future use; nothing
+        // produces it from this path today.
+        other => EngineError::Other(anyhow::anyhow!("{host}: {other}")),
+    }
 }
 
 /// Free-function variant of `EngineServer::connect_to_host` that takes the

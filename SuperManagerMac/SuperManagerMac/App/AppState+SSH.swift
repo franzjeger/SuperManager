@@ -101,16 +101,42 @@ extension AppState {
         }
     }
 
-    func testConnection(hostId: String) async -> String? {
+    /// Typed result for SSH test-connection. The daemon now
+    /// emits structured errors (`ssh_auth` vs `ssh_network` vs
+    /// `other`) so the UI can react accordingly — e.g. surface a
+    /// "Re-enter password" sheet on auth failure vs a "Connect VPN"
+    /// suggestion on network failure.
+    enum SshTestResult: Equatable {
+        case ok
+        case authFailed(String)
+        case networkFailed(String)
+        case otherFailure(String)
+    }
+
+    func testConnection(hostId: String) async -> SshTestResult {
         do {
             let result: [String: String] = try await client.call(
                 "ssh_test_connection",
                 params: ["host_id": hostId]
             )
-            return result["ssh"]
+            // Daemon returns `{"ssh": "ok"}` on success — anything
+            // else means the typed error path is no longer wired
+            // up correctly. Treat as success since the call didn't
+            // throw.
+            return result["ssh"] == "ok"
+                ? .ok
+                : .otherFailure(result["ssh"] ?? "Unknown")
+        } catch let err as ServiceError {
+            if case .rpcError(let info) = err {
+                switch info.kind {
+                case "ssh_auth":     return .authFailed(info.message)
+                case "ssh_network":  return .networkFailed(info.message)
+                default:             return .otherFailure(info.message)
+                }
+            }
+            return .otherFailure(err.localizedDescription)
         } catch {
-            handleError(error)
-            return nil
+            return .otherFailure(error.localizedDescription)
         }
     }
 
