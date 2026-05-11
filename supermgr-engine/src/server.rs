@@ -500,7 +500,9 @@ mod tests {
 
     fn full_host() -> Host {
         // A "richly populated" host that exercises every field the merge
-        // logic could be tempted to clobber.
+        // logic could be tempted to clobber. New `Host` fields should
+        // be added here too — this is the canonical "all fields
+        // populated" fixture.
         Host {
             id: uuid::Uuid::nil(),
             label: "old-label".to_owned(),
@@ -512,13 +514,19 @@ mod tests {
             auth_method: AuthMethod::Password,
             auth_key_id: None,
             auth_password_ref: Some(password_ref()),
+            auth_cert_ref: None,
             vpn_profile_id: Some(uuid::Uuid::nil()),
             api_port: None,
             api_token_ref: Some(api_ref()),
             api_verify_tls: true,
             unifi_controller_url: None,
             unifi_api_token_ref: None,
+            rdp_port: None,
+            vnc_port: None,
+            port_forwards: Vec::new(),
+            proxy_jump: None,
             pinned: true,
+            customer: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
