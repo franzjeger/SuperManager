@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import WebKit
 
 /// Renders the engagement report (Markdown) and lets the user
 /// copy to clipboard or save to disk. Pandoc-friendly so a future
@@ -125,23 +124,44 @@ struct EngagementReportSheet: View {
     private func exportPdf() async {
         exportingPdf = true
         defer { exportingPdf = false }
+        DebugLog.write("[PDF] exportPdf: trying server PDF (silent)")
         // First try the server-side pandoc+LaTeX path — gives the
         // best typography when BasicTeX / tectonic is installed.
-        var pdfData = await appState.renderEngagementPdf(engagementId: engagementId)
-        var sourceNote: String?
+        // `silent: true` so the global "no PDF engine" error
+        // dialog doesn't fire before we get a chance to fall
+        // back to the WebKit renderer.
+        var pdfData = await appState.renderEngagementPdf(
+            engagementId: engagementId,
+            silent: true
+        )
+        // Stash whatever message the silent call left in errorMessage —
+        // we'll surface it ONLY if the fallback also fails.
+        let serverErr = appState.errorMessage
+        DebugLog.write("[PDF] exportPdf: server PDF returned \(pdfData?.count ?? 0) bytes; serverErr='\(serverErr)'")
+        var htmlErr = ""
         if pdfData == nil {
             // No LaTeX engine? Fall back to the HTML path: ask
             // pandoc for HTML (no engine needed), render in
-            // WKWebView, and export PDF locally. The user always
-            // gets a PDF as long as pandoc itself is installed.
-            sourceNote = appState.errorMessage
-            if let html = await appState.renderEngagementHtml(engagementId: engagementId) {
-                pdfData = await Self.htmlToPdf(html)
+            // WKWebView, and export PDF locally. Always silent —
+            // we handle the combined failure below.
+            DebugLog.write("[PDF] exportPdf: server PDF failed, trying HTML+WebKit fallback")
+            if let html = await appState.renderEngagementHtml(
+                engagementId: engagementId,
+                silent: true
+            ) {
+                DebugLog.write("[PDF] exportPdf: got HTML (\(html.count) chars), rendering")
+                pdfData = Self.htmlToPdf(html)
+                DebugLog.write("[PDF] exportPdf: htmlToPdf returned \(pdfData?.count ?? 0) bytes")
+            } else {
+                htmlErr = appState.errorMessage
+                DebugLog.write("[PDF] exportPdf: HTML endpoint FAILED: \(htmlErr)")
             }
         }
         guard let pdf = pdfData else {
-            let hint = (sourceNote?.isEmpty == false ? "\n\n" + (sourceNote ?? "") : "")
-            error = "Could not generate PDF. Install pandoc + a PDF engine (`brew install --cask basictex` or `brew install tectonic`) and retry.\(hint)"
+            let detail = !htmlErr.isEmpty
+                ? "\n\nHTML endpoint failed: \(htmlErr)"
+                : (serverErr.isEmpty ? "" : "\n\nDaemon: \(serverErr)")
+            error = "Could not generate PDF. Check Console.app logs (filter \"SuperManagerMac\") for [PDF] entries.\(detail)"
             return
         }
         let panel = NSSavePanel()
@@ -157,34 +177,87 @@ struct EngagementReportSheet: View {
         }
     }
 
-    /// Render an HTML string to PDF via an offscreen `WKWebView`.
-    /// Used as the no-LaTeX fallback for PDF export.
+    /// HTML → PDF via macOS-native `NSAttributedString(html:)` +
+    /// `NSPrintOperation`. Synchronous, no async timing dance, no
+    /// off-screen WKWebView in a fake window.
+    ///
+    /// Tradeoff: NSAttributedString's HTML import is older WebKit
+    /// (NSHTMLReader) and handles CSS less faithfully than WKWebView.
+    /// For an engagement report (headings, paragraphs, tables, code
+    /// blocks) it's perfectly readable, and unlike the WKWebView
+    /// path it actually works from a SwiftUI Task without window
+    /// hosting tricks.
     @MainActor
-    private static func htmlToPdf(_ html: String) async -> Data? {
-        let config = WKWebViewConfiguration()
-        let webView = WKWebView(
-            frame: NSRect(x: 0, y: 0, width: 816, height: 1056), // ~US Letter @ 96 dpi
-            configuration: config
-        )
-        webView.loadHTMLString(html, baseURL: nil)
-        // Wait for the page to finish loading before printing —
-        // KVO on `isLoading` is the most reliable signal across
-        // the WKWebView lifecycle.
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            var token: NSKeyValueObservation? = nil
-            token = webView.observe(\.isLoading, options: [.initial, .new]) { wv, _ in
-                if !wv.isLoading {
-                    token?.invalidate()
-                    cont.resume()
-                }
-            }
+    private static func htmlToPdf(_ html: String) -> Data? {
+        DebugLog.write("[PDF] htmlToPdf: starting, html size=\(html.count)")
+        guard let htmlData = html.data(using: .utf8) else {
+            DebugLog.write("[PDF] htmlToPdf: UTF-8 encode failed")
+            return nil
         }
-        // Tiny extra delay so any deferred layout settles before
-        // we snapshot. PDF render fails silently if layout isn't
-        // complete.
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        let pdfConfig = WKPDFConfiguration()
-        return try? await webView.pdf(configuration: pdfConfig)
+
+        let attr: NSAttributedString
+        do {
+            attr = try NSAttributedString(
+                data: htmlData,
+                options: [
+                    .documentType: NSAttributedString.DocumentType.html,
+                    .characterEncoding: String.Encoding.utf8.rawValue,
+                ],
+                documentAttributes: nil
+            )
+        } catch {
+            DebugLog.write("[PDF] htmlToPdf: NSAttributedString HTML parse failed: \(error)")
+            return nil
+        }
+        DebugLog.write("[PDF] htmlToPdf: parsed HTML to \(attr.length) chars of attributed text")
+
+        // US Letter @ 72 dpi (PDF native units).
+        let pageSize = NSSize(width: 612, height: 792)
+        let margin: CGFloat = 36
+        let contentWidth = pageSize.width - 2 * margin
+
+        // Tall throwaway NSTextView. `sizeToFit` packs the content
+        // height; NSPrintOperation paginates by `verticalPagination`.
+        let textView = NSTextView(
+            frame: NSRect(x: 0, y: 0, width: contentWidth, height: 10_000)
+        )
+        textView.isEditable = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.textContainer?.containerSize = NSSize(
+            width: contentWidth,
+            height: .greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        textView.textStorage?.setAttributedString(attr)
+        textView.sizeToFit()
+
+        let printInfo = NSPrintInfo()
+        printInfo.paperSize = pageSize
+        printInfo.orientation = .portrait
+        printInfo.topMargin = margin
+        printInfo.bottomMargin = margin
+        printInfo.leftMargin = margin
+        printInfo.rightMargin = margin
+        printInfo.horizontalPagination = .fit
+        printInfo.verticalPagination = .automatic
+
+        let data = NSMutableData()
+        let op = NSPrintOperation.pdfOperation(
+            with: textView,
+            inside: textView.bounds,
+            to: data,
+            printInfo: printInfo
+        )
+        op.showsPrintPanel = false
+        op.showsProgressPanel = false
+
+        guard op.run() else {
+            DebugLog.write("[PDF] htmlToPdf: NSPrintOperation.run() returned false")
+            return nil
+        }
+        DebugLog.write("[PDF] htmlToPdf: NSPrintOperation produced \(data.length) bytes")
+        return data as Data
     }
 
     private func load() async {
@@ -212,3 +285,4 @@ struct EngagementReportSheet: View {
         }
     }
 }
+

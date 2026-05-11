@@ -226,76 +226,83 @@ struct EngagementEditSheet: View {
     }
 
     private var scopePane: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Scope")
-                .font(.headline)
+        // ScrollView so the techniques list + three text editors
+        // can't push the footer (Save button) below the sheet's
+        // 620-pt fixed height. Before this wrap, the user opened
+        // "New engagement" and saw scope panes but no Save button —
+        // the button was rendered, just clipped off-screen.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Scope")
+                    .font(.headline)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("In-scope CIDRs")
-                    .font(.subheadline.weight(.semibold))
-                Text("One per line. Examples: `10.0.0.0/16`, `192.168.50.0/24`")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                TextEditor(text: $scopeCidrsText)
-                    .frame(minHeight: 60)
-                    .font(.system(.caption, design: .monospaced))
-                    .background(.background.tertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("In-scope CIDRs")
+                        .font(.subheadline.weight(.semibold))
+                    Text("One per line. Examples: `10.0.0.0/16`, `192.168.50.0/24`")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    TextEditor(text: $scopeCidrsText)
+                        .frame(minHeight: 60)
+                        .font(.system(.caption, design: .monospaced))
+                        .background(.background.tertiary)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("In-scope hostnames")
-                    .font(.subheadline.weight(.semibold))
-                TextEditor(text: $scopeHostsText)
-                    .frame(minHeight: 50)
-                    .font(.system(.caption, design: .monospaced))
-                    .background(.background.tertiary)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("In-scope hostnames")
+                        .font(.subheadline.weight(.semibold))
+                    TextEditor(text: $scopeHostsText)
+                        .frame(minHeight: 50)
+                        .font(.system(.caption, design: .monospaced))
+                        .background(.background.tertiary)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Exclusions")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.red)
-                Text("Trumps scope. Critical infrastructure that must not be probed.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                TextEditor(text: $exclusionsText)
-                    .frame(minHeight: 50)
-                    .font(.system(.caption, design: .monospaced))
-                    .background(.red.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-            }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Exclusions")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.red)
+                    Text("Trumps scope. Critical infrastructure that must not be probed.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    TextEditor(text: $exclusionsText)
+                        .frame(minHeight: 50)
+                        .font(.system(.caption, design: .monospaced))
+                        .background(.red.opacity(0.05))
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                }
 
-            Divider()
+                Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Allowed techniques")
-                    .font(.subheadline.weight(.semibold))
-                ForEach(SecurityTechnique.allCases, id: \.self) { tech in
-                    Toggle(
-                        tech.label,
-                        isOn: Binding(
-                            get: { allowedTechniques.contains(tech) },
-                            set: { on in
-                                if on { allowedTechniques.insert(tech) }
-                                else  { allowedTechniques.remove(tech) }
-                            }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Allowed techniques")
+                        .font(.subheadline.weight(.semibold))
+                    ForEach(SecurityTechnique.allCases, id: \.self) { tech in
+                        Toggle(
+                            tech.label,
+                            isOn: Binding(
+                                get: { allowedTechniques.contains(tech) },
+                                set: { on in
+                                    if on { allowedTechniques.insert(tech) }
+                                    else  { allowedTechniques.remove(tech) }
+                                }
+                            )
                         )
-                    )
-                    .toggleStyle(.checkbox)
-                    .disabled(tech == .wireless || tech == .dosTest)
-                    if tech == .wireless || tech == .dosTest {
-                        Text("(reserved — not implemented)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 22)
+                        .toggleStyle(.checkbox)
+                        .disabled(tech == .wireless || tech == .dosTest)
+                        if tech == .wireless || tech == .dosTest {
+                            Text("(reserved — not implemented)")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 22)
+                        }
                     }
                 }
             }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var footer: some View {

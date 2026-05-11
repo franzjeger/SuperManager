@@ -301,7 +301,12 @@ extension AppState {
         }
     }
 
-    func renderEngagementPdf(engagementId: String) async -> Data? {
+    /// `silent: true` suppresses the global error dialog on failure —
+    /// used by callers that have a fallback path and don't want
+    /// the user to see a transient "LaTeX missing" alert before
+    /// the WebKit-based fallback kicks in. Caller still gets `nil`
+    /// back, plus the message via `appState.errorMessage`.
+    func renderEngagementPdf(engagementId: String, silent: Bool = false) async -> Data? {
         struct Resp: Codable {
             let pdfBase64: String
             let size: Int
@@ -317,7 +322,11 @@ extension AppState {
             )
             return Data(base64Encoded: r.pdfBase64)
         } catch {
-            handleError(error)
+            if silent {
+                errorMessage = error.localizedDescription
+            } else {
+                handleError(error)
+            }
             return nil
         }
     }
@@ -325,7 +334,7 @@ extension AppState {
     /// Returns the engagement report as a standalone HTML document.
     /// Used as a PDF fallback when no LaTeX engine is installed —
     /// the caller renders this in `WKWebView` and calls `createPDF`.
-    func renderEngagementHtml(engagementId: String) async -> String? {
+    func renderEngagementHtml(engagementId: String, silent: Bool = false) async -> String? {
         struct Resp: Codable { let html: String }
         do {
             let r: Resp = try await client.call(
@@ -334,7 +343,11 @@ extension AppState {
             )
             return r.html
         } catch {
-            handleError(error)
+            if silent {
+                errorMessage = error.localizedDescription
+            } else {
+                handleError(error)
+            }
             return nil
         }
     }
