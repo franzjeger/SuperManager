@@ -81,9 +81,9 @@ jobs:
       # embedded by the build phases are already built above and
       # will be re-built by the xcodebuild run (idempotent via cargo).
       #
-      # `set -o pipefail` is essential: without it the shell would
-      # only check xcbeautify's exit code (always 0) and silently
-      # ignore xcodebuild failures.
+      # Pipe raw xcodebuild output to a log file as well as
+      # xcbeautify — the GitHub-actions renderer hides the actual
+      # error text and we need the raw form when a compile fails.
       - name: Build (SwiftUI app)
         shell: bash
         run: |
@@ -97,5 +97,15 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            build \
-            | xcbeautify --renderer github-actions
+            build 2>&1 \
+            | tee /tmp/xcodebuild.log \
+            | xcbeautify --renderer github-actions \
+            || {
+                echo "::group::Raw xcodebuild output (last 200 lines)"
+                tail -200 /tmp/xcodebuild.log
+                echo "::endgroup::"
+                echo "::group::Compile errors only"
+                grep -E "error:|warning:" /tmp/xcodebuild.log | head -50 || true
+                echo "::endgroup::"
+                exit 1
+            }
