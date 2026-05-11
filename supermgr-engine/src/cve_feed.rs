@@ -241,22 +241,60 @@ pub fn match_banner(banner: &str) -> Vec<&'static FeedEntry> {
     Vec::new() // wired up via cve_feed_match below
 }
 
+/// OS/vendor names that are too generic to identify a vulnerable
+/// product by themselves. CVEs from the NVD often carry CPEs
+/// like `cpe:/o:freebsd:freebsd:2.1.5` for OS-level bugs — the
+/// "product" field IS just the OS name. Without a version
+/// constraint, matching any banner containing "freebsd" flags
+/// every FreeBSD-derived banner against every FreeBSD CVE ever
+/// published. Caused dozens of 1999-era CVEs (rdist, lpr, suidperl,
+/// Z-Modem, etc.) to surface against modern OpenSSH banners.
+///
+/// Strategy: when the ONLY product keyword that matched is on
+/// this list AND there's no version constraint to narrow the
+/// match, drop the CVE. Real product-specific keywords like
+/// "openssh", "apache", "wordpress" still match as expected.
+fn is_generic_os_keyword(k: &str) -> bool {
+    matches!(
+        k.to_lowercase().as_str(),
+        "freebsd" | "openbsd" | "netbsd" | "dragonfly"
+        | "linux" | "linux_kernel" | "linux kernel"
+        | "debian" | "ubuntu" | "redhat" | "red hat" | "centos"
+        | "fedora" | "gentoo" | "suse" | "opensuse" | "arch"
+        | "windows" | "macos" | "mac os x" | "macosx"
+        | "darwin" | "unix" | "kernel" | "os"
+    )
+}
+
 /// Public matcher with explicit cache passed in (avoids leaking
 /// a 'static-cached singleton; matches one-Arc-per-scan pattern).
 pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
     let lc = banner.to_lowercase();
     let mut hits: Vec<FeedEntry> = Vec::new();
     for e in &cache.entries {
-        let kw_match = e
+        // Per-keyword match record — we need to know which
+        // keyword(s) matched so we can apply the "generic OS"
+        // demotion below.
+        let matched_keywords: Vec<&String> = e
             .product_keywords
             .iter()
-            .any(|k| lc.contains(&k.to_lowercase()));
-        if !kw_match {
+            .filter(|k| lc.contains(&k.to_lowercase()))
+            .collect();
+        if matched_keywords.is_empty() {
+            continue;
+        }
+        // If EVERY matched keyword is a generic OS/vendor name,
+        // require a version-substring hit to narrow it. Without
+        // that the match is "this OS exists" → useless.
+        let all_generic = matched_keywords
+            .iter()
+            .all(|k| is_generic_os_keyword(k));
+        if all_generic && e.version_substrings.is_empty() {
             continue;
         }
         // Version-substring match — if no versions specified,
-        // we trust the keyword match alone. Otherwise require at
-        // least one version-string hit.
+        // we trust the (non-generic) keyword match alone. Otherwise
+        // require at least one version-string hit.
         let ver_match = e.version_substrings.is_empty()
             || e.version_substrings.iter().any(|v| banner.contains(v));
         if !ver_match {
