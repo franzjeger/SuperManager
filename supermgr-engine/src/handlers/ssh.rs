@@ -398,14 +398,18 @@ impl EngineServer {
             Err(r) => return r,
         };
 
-        match self.connect_to_host(host_id).await {
+        // Use the typed connect path so the Swift client can
+        // distinguish `ssh_auth` (wrong password — pop a re-enter
+        // sheet) from `ssh_network` (host unreachable — suggest
+        // connecting the VPN). Previously this swallowed the error
+        // into the *success* payload with `{"ssh": e}` so the UI
+        // had to string-match.
+        match self.connect_to_host_typed(host_id).await {
             Ok((_host, session)) => {
                 let _ = session.disconnect().await;
                 Response::ok(id, serde_json::json!({"ssh": "ok"}))
             }
-            Err(e) => {
-                Response::ok(id, serde_json::json!({"ssh": e}))
-            }
+            Err(e) => Response::err_engine(id, &e),
         }
     }
 
