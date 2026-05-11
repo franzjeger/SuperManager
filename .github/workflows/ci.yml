@@ -47,14 +47,27 @@ jobs:
           brew update
           brew install xcodegen pandoc xcbeautify
 
-      # Build every workspace crate, including the Mac-only ones
-      # that the Linux job skips. `--workspace` overrides
-      # `default-members`.
-      - name: Build (Rust, full workspace)
-        run: cargo build --workspace --release
+      # Build the Mac stack explicitly. We can't use `--workspace`
+      # because that would also pull in `supermgr` (the Linux GTK
+      # GUI) which depends on `pango-sys`/`gtk4-rs` — Homebrew's
+      # gtk4 layout doesn't satisfy the Linux-flavoured pkg-config
+      # those crates expect on macOS. Listing the Mac crates by
+      # `-p` is the same trick the local `build.sh` uses.
+      - name: Build (Mac crates)
+        run: |
+          cargo build --release \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgrd-mac \
+            -p supermanager-helper
 
-      - name: Tests (Rust, full workspace)
-        run: cargo test --workspace
+      - name: Tests (Mac crates)
+        run: |
+          cargo test \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgrd-mac \
+            -p supermanager-helper
 
       # Generate the Xcode project from project.yml.
       - name: xcodegen
