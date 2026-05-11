@@ -34,10 +34,18 @@ import SwiftUI
 final class SparkleUpdater: ObservableObject {
     static let shared = SparkleUpdater()
 
-    /// Sparkle's controller. `startingUpdater: true` kicks the
-    /// background scheduled-check timer on instantiation, so the
-    /// operator gets update offers without ever opening the menu.
-    private let controller: SPUStandardUpdaterController
+    /// Sparkle's controller, only initialised when a real
+    /// `SUPublicEDKey` is set in Info.plist. Until the developer
+    /// runs `scripts/sparkle-keygen.sh` and pastes the public key
+    /// into `project.yml`, Sparkle's init fails ("EdDSA public key
+    /// is not valid") and the controller is left nil.
+    private let controller: SPUStandardUpdaterController?
+
+    /// Reason Sparkle is disabled, if any. Surfaced in the
+    /// "Check for Updates…" dialog so the operator sees an
+    /// actionable message instead of Sparkle's "updater failed
+    /// to start" generic alert.
+    private(set) var disabledReason: String?
 
     /// `canCheckForUpdates` is published so SwiftUI menu items can
     /// gate themselves while a check is in-flight. Sparkle exposes
@@ -55,19 +63,36 @@ final class SparkleUpdater: ObservableObject {
         // `checkForUpdates()` is still available from the menu.
         let underXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+        // Fail-soft on the placeholder public key. Sparkle 2's init
+        // refuses to start with an unparseable EdDSA key (correct
+        // security default), but unhandled it produces a generic
+        // "updater failed to start" alert that gives the operator
+        // no clue what's wrong. Skip Sparkle entirely until a real
+        // key is in place; the menu item then shows a one-liner
+        // pointing at the keygen script.
+        let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String ?? ""
+        let isPlaceholder = publicKey.isEmpty || publicKey.hasPrefix("REPLACE_ME_")
+        if isPlaceholder {
+            controller = nil
+            disabledReason = "Auto-updates are not configured yet. Run scripts/sparkle-keygen.sh and paste the public key into SuperManagerMac/project.yml's SUPublicEDKey."
+            return
+        }
+
         // `userDriverDelegate: nil` and `delegate: nil` use Sparkle's
         // standard UI + behaviour. If we ever need to customise
         // (e.g. add telemetry on update success) those land here.
-        controller = SPUStandardUpdaterController(
+        let ctl = SPUStandardUpdaterController(
             startingUpdater: !underXCTest,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        controller = ctl
+        disabledReason = nil
 
         // Mirror Sparkle's KVO property onto our `@Published` so
         // SwiftUI rebinds correctly. Capture self weakly — the
         // observer outlives the init scope.
-        observation = controller.updater.observe(
+        observation = ctl.updater.observe(
             \.canCheckForUpdates,
             options: [.initial, .new]
         ) { [weak self] updater, _ in
@@ -79,10 +104,14 @@ final class SparkleUpdater: ObservableObject {
 
     /// User-initiated update check. Pops Sparkle's standard UI if a
     /// newer version is found, or a "you're up to date" alert if not.
-    /// Distinct from the scheduled background check (which silently
-    /// just downloads + offers when applicable).
+    /// When Sparkle is disabled (placeholder key in dev builds) we
+    /// show a clearer message instead of "updater failed to start".
     func checkForUpdates() {
-        controller.checkForUpdates(nil)
+        if let ctl = controller {
+            ctl.checkForUpdates(nil)
+        } else {
+            showSparkleDisabledAlert()
+        }
     }
 
     /// Returns the configured feed URL for diagnostics / about-pane
@@ -90,5 +119,17 @@ final class SparkleUpdater: ObservableObject {
     /// what Sparkle actually polls.
     var feedURL: String {
         (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String) ?? "(unset)"
+    }
+
+    /// Standalone alert shown when the operator hits Check for
+    /// Updates on a build without a real Sparkle public key.
+    private func showSparkleDisabledAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Auto-updates not configured"
+        alert.informativeText = disabledReason
+            ?? "Sparkle is disabled for this build."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 }
