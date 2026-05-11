@@ -127,21 +127,31 @@ struct EngagementReportSheet: View {
         defer { exportingPdf = false }
         // First try the server-side pandoc+LaTeX path — gives the
         // best typography when BasicTeX / tectonic is installed.
-        var pdfData = await appState.renderEngagementPdf(engagementId: engagementId)
-        var sourceNote: String?
+        // `silent: true` so the global "no PDF engine" error
+        // dialog doesn't fire before we get a chance to fall
+        // back to the WebKit renderer.
+        var pdfData = await appState.renderEngagementPdf(
+            engagementId: engagementId,
+            silent: true
+        )
+        // Stash whatever message the silent call left in errorMessage —
+        // we'll surface it ONLY if the fallback also fails.
+        let serverErr = appState.errorMessage
         if pdfData == nil {
             // No LaTeX engine? Fall back to the HTML path: ask
             // pandoc for HTML (no engine needed), render in
-            // WKWebView, and export PDF locally. The user always
-            // gets a PDF as long as pandoc itself is installed.
-            sourceNote = appState.errorMessage
-            if let html = await appState.renderEngagementHtml(engagementId: engagementId) {
+            // WKWebView, and export PDF locally. Always silent —
+            // we handle the combined failure below.
+            if let html = await appState.renderEngagementHtml(
+                engagementId: engagementId,
+                silent: true
+            ) {
                 pdfData = await Self.htmlToPdf(html)
             }
         }
         guard let pdf = pdfData else {
-            let hint = (sourceNote?.isEmpty == false ? "\n\n" + (sourceNote ?? "") : "")
-            error = "Could not generate PDF. Install pandoc + a PDF engine (`brew install --cask basictex` or `brew install tectonic`) and retry.\(hint)"
+            let hint = serverErr.isEmpty ? "" : "\n\nDaemon said: \(serverErr)"
+            error = "Could not generate PDF. Ensure pandoc is installed (Settings → Integrations).\(hint)"
             return
         }
         let panel = NSSavePanel()
@@ -158,33 +168,38 @@ struct EngagementReportSheet: View {
     }
 
     /// Render an HTML string to PDF via an offscreen `WKWebView`.
-    /// Used as the no-LaTeX fallback for PDF export.
+    ///
+    /// We use `WKNavigationDelegate.didFinish` rather than KVO on
+    /// `isLoading` because the latter races: with `.initial` the
+    /// observer fires synchronously at attach time (before
+    /// `loadHTMLString` flips `isLoading=true`), so the continuation
+    /// resumed instantly and `pdf(configuration:)` ran against an
+    /// empty WebView. The user got the daemon's "no PDF engine"
+    /// dialog and then nothing — the fallback silently produced
+    /// empty/nil data.
     @MainActor
     private static func htmlToPdf(_ html: String) async -> Data? {
-        let config = WKWebViewConfiguration()
         let webView = WKWebView(
             frame: NSRect(x: 0, y: 0, width: 816, height: 1056), // ~US Letter @ 96 dpi
-            configuration: config
+            configuration: WKWebViewConfiguration()
         )
-        webView.loadHTMLString(html, baseURL: nil)
-        // Wait for the page to finish loading before printing —
-        // KVO on `isLoading` is the most reliable signal across
-        // the WKWebView lifecycle.
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-            var token: NSKeyValueObservation? = nil
-            token = webView.observe(\.isLoading, options: [.initial, .new]) { wv, _ in
-                if !wv.isLoading {
-                    token?.invalidate()
-                    cont.resume()
-                }
-            }
+        // Strong-hold the delegate for the lifetime of the await —
+        // WKWebView only weakly references it.
+        let delegate = HtmlToPdfDelegate()
+        webView.navigationDelegate = delegate
+
+        let loaded: Bool = await withCheckedContinuation { cont in
+            delegate.onFinish = { cont.resume(returning: true) }
+            delegate.onFail = { _ in cont.resume(returning: false) }
+            webView.loadHTMLString(html, baseURL: nil)
         }
-        // Tiny extra delay so any deferred layout settles before
-        // we snapshot. PDF render fails silently if layout isn't
-        // complete.
-        try? await Task.sleep(nanoseconds: 250_000_000)
-        let pdfConfig = WKPDFConfiguration()
-        return try? await webView.pdf(configuration: pdfConfig)
+        guard loaded else { return nil }
+
+        // Let one runloop tick pass so deferred layout (web-fonts,
+        // image decoding) settles before we snapshot.
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        return try? await webView.pdf(configuration: WKPDFConfiguration())
     }
 
     private func load() async {
@@ -210,5 +225,35 @@ struct EngagementReportSheet: View {
         } catch {
             self.error = "Could not save: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Bridges `WKNavigationDelegate` to async closures. Used by the
+/// PDF-fallback path in `EngagementReportSheet.htmlToPdf` to await
+/// page-load completion via the proper navigation API rather than
+/// racing against `isLoading` KVO. Lives outside the View struct
+/// because `WKWebView.navigationDelegate` is `weak` — the delegate
+/// has to outlive the assignment, which a stored property on a
+/// SwiftUI View wouldn't.
+private final class HtmlToPdfDelegate: NSObject, WKNavigationDelegate {
+    var onFinish: (() -> Void)?
+    var onFail: ((Error) -> Void)?
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        onFinish?()
+    }
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        onFail?(error)
+    }
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        onFail?(error)
     }
 }
