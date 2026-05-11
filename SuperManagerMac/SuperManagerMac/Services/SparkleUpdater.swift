@@ -47,11 +47,19 @@ final class SparkleUpdater: ObservableObject {
     private var observation: NSKeyValueObservation?
 
     private init() {
+        // Detect XCTest. When the test runner launches the host app
+        // briefly to load the test bundle, an active Sparkle scheduler
+        // fires a network update check that can hang indefinitely on
+        // a network-isolated CI runner (macos-latest images).
+        // Don't start the auto-check timer under tests — manual
+        // `checkForUpdates()` is still available from the menu.
+        let underXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
         // `userDriverDelegate: nil` and `delegate: nil` use Sparkle's
         // standard UI + behaviour. If we ever need to customise
         // (e.g. add telemetry on update success) those land here.
         controller = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: !underXCTest,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
