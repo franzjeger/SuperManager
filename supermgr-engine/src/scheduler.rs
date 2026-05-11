@@ -79,11 +79,17 @@ async fn tick() -> anyhow::Result<()> {
         // Run the scan. We deliberately do NOT cap targets via
         // expand_targets's max_targets here — assume the customer
         // configured a sane scope. (UI's manual button uses 256.)
+        // Scheduler-driven scans aren't currently cancellable from
+        // the UI (no operation_list registration). The same scan
+        // started manually IS cancellable — see
+        // handle_discovery_active_scan. If/when the UI grows a
+        // "stop scheduled scan" button this becomes `Some(token)`.
         let res = crate::discovery::active_scan(
             &targets,
             crate::probes::COMMON_PORTS,
             customer,
             Some(&engagement_id),
+            None,
         )
         .await;
         match res {

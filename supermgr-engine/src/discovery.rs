@@ -773,26 +773,70 @@ pub async fn active_scan(
     ports: &[u16],
     customer_slug: Option<&str>,
     engagement_id: Option<&str>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<ActiveScanResult> {
+    use std::sync::atomic::Ordering;
+
     let started_at = chrono::Utc::now();
     let host_sema = Arc::new(tokio::sync::Semaphore::new(32));
     let mut futs = Vec::new();
     for ip in targets {
+        // Skip remaining targets if cancellation was requested
+        // before we even queued them. The fan-out loop is fast
+        // so this only matters when the user clicks Stop within
+        // the first few hundred ms.
+        if let Some(c) = &cancel {
+            if c.load(Ordering::Acquire) {
+                break;
+            }
+        }
         let ip = ip.clone();
         let ports: Vec<u16> = ports.to_vec();
         let host_sema = Arc::clone(&host_sema);
+        let cancel_clone = cancel.clone();
         futs.push(tokio::spawn(async move {
+            // Honour cancel at the front of the host scan so a
+            // mid-scan Stop short-circuits before opening any
+            // new TCP connections for this host.
+            if let Some(c) = &cancel_clone {
+                if c.load(Ordering::Acquire) {
+                    return None;
+                }
+            }
             let _permit = host_sema.acquire_owned().await.ok()?;
-            scan_host_active(&ip, &ports).await
+            // Pass cancel through so port-probe fan-out inside
+            // a host scan also honours the flag — without this,
+            // a host that's already started its 105-port sweep
+            // would run to completion even after cancellation.
+            scan_host_active(&ip, &ports, cancel_clone).await
         }));
     }
     let mut hosts: Vec<ActiveHost> = Vec::new();
     let mut findings: Vec<crate::vuln::Finding> = Vec::new();
+    let mut was_cancelled = false;
     for f in futs {
+        // Don't `await` a join handle whose work we no longer
+        // want — abort it so the connection workers drop out
+        // immediately. New code below: track that we cancelled
+        // so the caller can distinguish "complete" from "cut
+        // short" in the audit log.
+        if let Some(c) = &cancel {
+            if c.load(Ordering::Acquire) {
+                was_cancelled = true;
+                f.abort();
+                continue;
+            }
+        }
         if let Ok(Some(active)) = f.await {
             findings.extend(crate::vuln::analyse_host(&active.ip, &active.probes));
             hosts.push(active);
         }
+    }
+    if was_cancelled {
+        tracing::info!(
+            "active_scan cancelled mid-flight after {} hosts",
+            hosts.len()
+        );
     }
     // Update finding-count on each host post-aggregation.
     let mut by_ip: HashMap<String, u32> = HashMap::new();
@@ -913,21 +957,48 @@ pub async fn active_scan(
     Ok(result)
 }
 
-async fn scan_host_active(ip: &str, ports: &[u16]) -> Option<ActiveHost> {
+async fn scan_host_active(
+    ip: &str,
+    ports: &[u16],
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Option<ActiveHost> {
     use crate::probes::probe_port;
+    use std::sync::atomic::Ordering;
+
     let port_sema = Arc::new(tokio::sync::Semaphore::new(16));
     let mut futs = Vec::with_capacity(ports.len());
     for port in ports {
+        // Cheap front-of-queue check so we don't even queue port
+        // futures for cancelled hosts.
+        if let Some(c) = &cancel {
+            if c.load(Ordering::Acquire) {
+                break;
+            }
+        }
         let ip = ip.to_owned();
         let port = *port;
         let sema = Arc::clone(&port_sema);
+        let c = cancel.clone();
         futs.push(tokio::spawn(async move {
+            if let Some(c) = &c {
+                if c.load(Ordering::Acquire) {
+                    return None;
+                }
+            }
             let _permit = sema.acquire_owned().await.ok()?;
             probe_port(&ip, port).await
         }));
     }
     let mut probes: Vec<crate::probes::PortProbe> = Vec::new();
     for f in futs {
+        // Bail out of joins once cancel fires — already-running
+        // probe_port calls finish, but pending ones get aborted.
+        if let Some(c) = &cancel {
+            if c.load(Ordering::Acquire) {
+                f.abort();
+                continue;
+            }
+        }
         if let Ok(Some(p)) = f.await {
             probes.push(p);
         }

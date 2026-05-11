@@ -880,6 +880,27 @@ class AppState {
     var lastActiveScan: ActiveScanResult?
     var activeScanInFlight = false
 
+    /// Running long-running operations, refreshed by
+    /// `pollOperations()` while `activeScanInFlight` (and friends)
+    /// is true. Drives the Stop button + "Cancelling…" indicator.
+    var runningOperations: [RunningOperation] = []
+
+    struct RunningOperation: Codable, Identifiable, Equatable {
+        let id: String
+        let kind: String
+        let label: String
+        let startedAt: Date
+        let cancelRequested: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case kind
+            case label
+            case startedAt = "started_at"
+            case cancelRequested = "cancel_requested"
+        }
+    }
+
     // MARK: Provisioning — diff preview + deploy
 
     enum SectionStatus: String, Codable {

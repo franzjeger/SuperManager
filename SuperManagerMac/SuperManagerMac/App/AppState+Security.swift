@@ -80,7 +80,15 @@ extension AppState {
     ) async -> ActiveScanResult? {
         guard !activeScanInFlight else { return nil }
         activeScanInFlight = true
-        defer { activeScanInFlight = false }
+        // Kick off operation polling alongside the scan so the
+        // Stop button can target whichever operation_id the
+        // engine assigns. Cancelled when the scan task exits.
+        let pollTask = Task { await pollOperationsWhileScanning() }
+        defer {
+            activeScanInFlight = false
+            pollTask.cancel()
+            runningOperations = []
+        }
         var params: [String: Any] = ["targets": targets, "max_targets": 256]
         if let s = customerSlug { params["customer_slug"] = s }
         if let e = engagementId { params["engagement_id"] = e }
@@ -94,6 +102,54 @@ extension AppState {
         } catch {
             handleError(error)
             return nil
+        }
+    }
+
+    /// Snapshot the current running long-running operations.
+    /// UI uses this to populate the Stop button + per-op tooltips.
+    func loadRunningOperations() async -> [RunningOperation]? {
+        do {
+            return try await client.call("operation_list")
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    /// Request cooperative cancellation of an operation. The
+    /// worker honours the request at its next safe checkpoint;
+    /// this call returns as soon as the flag is set, NOT after
+    /// the worker has stopped.
+    @discardableResult
+    func cancelOperation(id: String) async -> Bool {
+        struct Resp: Codable { let cancelled: Bool }
+        do {
+            let r: Resp = try await client.call(
+                "operation_cancel",
+                params: ["id": id]
+            )
+            // Refresh the local snapshot immediately so the UI
+            // can show "Cancelling…" without waiting for the
+            // next poll tick.
+            if let ops = await loadRunningOperations() {
+                runningOperations = ops
+            }
+            return r.cancelled
+        } catch {
+            handleError(error)
+            return false
+        }
+    }
+
+    /// Poll `operation_list` ~every 500 ms while a scan is in
+    /// flight. The Task is cancelled by the scan-runner when the
+    /// scan exits, so this terminates cleanly.
+    private func pollOperationsWhileScanning() async {
+        while !Task.isCancelled {
+            if let ops = await loadRunningOperations() {
+                runningOperations = ops
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
