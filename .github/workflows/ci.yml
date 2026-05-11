@@ -6,7 +6,12 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  # Linux build — exercises the `default-members` crates only
+  # (supermgr-core, supermgrd, supermgr, supermgr-mcp). The Mac stack
+  # (supermgr-engine, supermgrd-mac, supermanager-helper, SuperManagerMac)
+  # is platform-gated out via target_os and is covered by the
+  # `mac` job below.
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,11 +21,68 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libssl-dev pkg-config
       # All three steps respect `default-members` in the workspace
-      # Cargo.toml — they touch only Linux crates (supermgr-core,
-      # supermgrd, supermgr, supermgr-mcp) and skip the Mac stack.
+      # Cargo.toml — they touch only Linux crates and skip the Mac stack.
       - name: Build
         run: cargo build --release
       - name: Clippy
         run: cargo clippy -- -W warnings
       - name: Tests
         run: cargo test
+
+  # macOS build — exercises the full Rust workspace (incl. Mac-only
+  # crates) plus the SwiftUI app via xcodebuild. Signing is disabled
+  # because GitHub-hosted runners have no Apple Developer identity.
+  # We're not shipping artefacts from CI yet — this job catches
+  # compile/link/test regressions on the Mac stack only.
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # xcodegen turns `SuperManagerMac/project.yml` → `.xcodeproj`.
+      # pandoc is the engagement-report renderer; install so report
+      # tests (if/when added) don't get skipped.
+      - name: Install build deps
+        run: |
+          brew update
+          brew install xcodegen pandoc xcbeautify
+
+      # Build every workspace crate, including the Mac-only ones
+      # that the Linux job skips. `--workspace` overrides
+      # `default-members`.
+      - name: Build (Rust, full workspace)
+        run: cargo build --workspace --release
+
+      - name: Tests (Rust, full workspace)
+        run: cargo test --workspace
+
+      # Generate the Xcode project from project.yml.
+      - name: xcodegen
+        run: |
+          cd SuperManagerMac
+          xcodegen generate
+
+      # Build the SwiftUI app. Signing is disabled because the
+      # runner has no Apple Developer identity — we're only checking
+      # that the project compiles and links. The Rust binaries
+      # embedded by the build phases are already built above and
+      # will be re-built by the xcodebuild run (idempotent via cargo).
+      #
+      # `set -o pipefail` is essential: without it the shell would
+      # only check xcbeautify's exit code (always 0) and silently
+      # ignore xcodebuild failures.
+      - name: Build (SwiftUI app)
+        shell: bash
+        run: |
+          set -o pipefail
+          cd SuperManagerMac
+          xcodebuild \
+            -project SuperManager.xcodeproj \
+            -scheme SuperManagerMac \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build \
+            | xcbeautify --renderer github-actions
