@@ -141,6 +141,19 @@ targets:
           cp "${SRCROOT}/Signing/com.sybr.supermanager.helper.plist" \
              "${APP}/Contents/Library/LaunchDaemons/com.sybr.supermanager.helper.plist"
 
+          # CI runs with `CODE_SIGNING_REQUIRED=NO` (no Apple
+          # Developer identity on GitHub-hosted runners). When
+          # signing is disabled, Xcode never sets
+          # `EXPANDED_CODE_SIGN_IDENTITY`, and `set -u` would
+          # blow up the moment we reference it. Bail out early —
+          # the build artefact is invalid for distribution but
+          # the type-check / link integrity is what we're after.
+          if [ "${CODE_SIGNING_REQUIRED:-YES}" = "NO" ] || \
+             [ "${CODE_SIGNING_ALLOWED:-YES}" = "NO" ]; then
+              echo "→ Code signing disabled (CI / unsigned build) — skipping per-binary resign + bundle re-seal."
+              exit 0
+          fi
+
           # Sign the daemon with an *empty* entitlements plist. It
           # cannot carry `keychain-access-groups` because it has no
           # provisioning profile (a raw CLI binary in Contents/MacOS

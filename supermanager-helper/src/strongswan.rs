@@ -522,6 +522,7 @@ mod tests {
             password: password.to_owned(),
             shared_secret: psk.to_owned(),
             full_tunnel: true,
+            routes: Vec::new(),
         }
     }
 
