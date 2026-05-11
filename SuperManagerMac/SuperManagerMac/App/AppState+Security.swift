@@ -301,12 +301,18 @@ extension AppState {
         }
     }
 
-    /// `silent: true` suppresses the global error dialog on failure —
-    /// used by callers that have a fallback path and don't want
-    /// the user to see a transient "LaTeX missing" alert before
-    /// the WebKit-based fallback kicks in. Caller still gets `nil`
-    /// back, plus the message via `appState.errorMessage`.
-    func renderEngagementPdf(engagementId: String, silent: Bool = false) async -> Data? {
+    /// Result type that lets the caller distinguish "no PDF engine
+    /// installed" (silent → WebKit fallback) from any other failure
+    /// (still surface to the user). Uses the structured `rpcKind`
+    /// from `ServiceError` now that the daemon emits
+    /// `data.kind = "pdf_engine_missing"` for this specific case.
+    enum PdfRenderResult {
+        case ok(Data)
+        case engineMissing(serverMessage: String)
+        case otherFailure(Error)
+    }
+
+    func renderEngagementPdf(engagementId: String) async -> PdfRenderResult {
         struct Resp: Codable {
             let pdfBase64: String
             let size: Int
@@ -320,14 +326,22 @@ extension AppState {
                 "engagement_report_pdf",
                 params: ["engagement_id": engagementId]
             )
-            return Data(base64Encoded: r.pdfBase64)
-        } catch {
-            if silent {
-                errorMessage = error.localizedDescription
-            } else {
-                handleError(error)
+            guard let data = Data(base64Encoded: r.pdfBase64) else {
+                return .otherFailure(ServiceError.noResult)
             }
-            return nil
+            return .ok(data)
+        } catch let err as ServiceError {
+            // Structured-kind branch: the engine sets data.kind to
+            // "pdf_engine_missing" when no LaTeX/wkhtml engine is on
+            // PATH. The caller silently falls back to the WebKit /
+            // NSPrintOperation path. All other RPC errors are
+            // genuine failures the user should know about.
+            if case .rpcError(let info) = err, info.kind == "pdf_engine_missing" {
+                return .engineMissing(serverMessage: info.message)
+            }
+            return .otherFailure(err)
+        } catch {
+            return .otherFailure(error)
         }
     }
 

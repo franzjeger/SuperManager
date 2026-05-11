@@ -55,6 +55,14 @@ pub fn render_markdown(input: &ReportInput<'_>) -> Result<String> {
 /// Temp paths use `tempfile::NamedTempFile` (mode 0o600, random
 /// suffix, auto-cleanup on drop) so a local attacker can't symlink-
 /// hijack a predictable filename in /tmp.
+/// Returns `EngineError::PdfEngineMissing` (downcastable via
+/// `anyhow::Error::downcast_ref::<EngineError>`) when no LaTeX /
+/// HTML-PDF engine is on PATH. All other failures (timeouts,
+/// pandoc-rejected the markdown, tempfile IO) come through as
+/// regular `anyhow::Error`. The handler downcasts at the boundary
+/// to emit a structured RPC error for the pdf-engine-missing case
+/// — that's the case the Mac client wants to handle differently
+/// (silent WebKit fallback vs. hard dialog).
 pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     use std::io::Write;
     use std::time::Duration;
@@ -70,11 +78,10 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     //   4. `wkhtmltopdf`/`weasyprint` — HTML→PDF, no LaTeX needed
     let engine = match pick_pdf_engine() {
         Some(e) => e,
-        None => anyhow::bail!(
-            "no PDF engine on PATH — install one of: `brew install --cask basictex` \
-             (then add /Library/TeX/texbin to PATH), or `brew install tectonic`, \
-             or `brew install wkhtmltopdf`. Pandoc alone cannot produce PDF."
-        ),
+        // anyhow::Error::new() wraps the EngineError so the handler
+        // can `downcast_ref::<EngineError>()` to recognise this
+        // specific case structurally — not by error-message regex.
+        None => return Err(anyhow::Error::new(crate::error::EngineError::PdfEngineMissing)),
     };
 
     // Markdown input — written + closed before invoking pandoc.

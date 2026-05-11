@@ -66,6 +66,16 @@ pub enum EngineError {
     #[error("{tool} failed: {output}")]
     ToolFailed { tool: String, output: String },
 
+    // --- PDF / report ---
+    /// Pandoc is present but no PDF engine (tectonic / xelatex /
+    /// pdflatex / wkhtmltopdf / weasyprint) is on PATH. The Mac
+    /// client treats this specially — a WebKit-based fallback
+    /// path runs locally, so the operator never sees a hard error
+    /// dialog. The structured kind lets the Swift side recognise
+    /// this case instead of regex-matching the error message.
+    #[error("no PDF engine on PATH (pandoc alone cannot produce PDF)")]
+    PdfEngineMissing,
+
     // --- Generic fallback for paths we haven't structured yet ---
     /// Wrap an `anyhow::Error` for callers still on the
     /// unstructured path. Bridges old + new code during the
@@ -90,7 +100,42 @@ impl EngineError {
             Self::InvalidScope { .. }    => -32022,
             Self::ToolMissing { .. }     => -32030,
             Self::ToolFailed { .. }      => -32031,
+            Self::PdfEngineMissing       => -32040,
             Self::Other(_)               => -32099,
         }
+    }
+
+    /// Stable machine-readable category string. The Mac client
+    /// matches on this rather than on the human message so that
+    /// rephrasing the error text never silently breaks the UI's
+    /// per-category branching.
+    ///
+    /// Format: `lower_snake_case`, never localised.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SshAuth { .. }         => "ssh_auth",
+            Self::SshNetwork { .. }      => "ssh_network",
+            Self::SshDisconnected { .. } => "ssh_disconnected",
+            Self::FindingsIo { .. }      => "findings_io",
+            Self::FindingsParse { .. }   => "findings_parse",
+            Self::InvalidScope { .. }    => "invalid_scope",
+            Self::ToolMissing { .. }     => "tool_missing",
+            Self::ToolFailed { .. }      => "tool_failed",
+            Self::PdfEngineMissing       => "pdf_engine_missing",
+            Self::Other(_)               => "other",
+        }
+    }
+
+    /// True for errors the operator can fix by installing /
+    /// configuring something, vs. transient (retry-now) and
+    /// truly-fatal kinds. UI uses this to pick between
+    /// "Try again", "Open Settings", and a plain "Dismiss" button.
+    #[must_use]
+    pub fn is_actionable(&self) -> bool {
+        matches!(
+            self,
+            Self::ToolMissing { .. } | Self::PdfEngineMissing | Self::SshAuth { .. }
+        )
     }
 }
