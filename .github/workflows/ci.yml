@@ -29,11 +29,9 @@ jobs:
       - name: Tests
         run: cargo test
 
-  # macOS build — exercises the full Rust workspace (incl. Mac-only
-  # crates) plus the SwiftUI app via xcodebuild. Signing is disabled
+  # macOS build + test — exercises the Mac-only Rust crates plus
+  # the SwiftUI app via `xcodebuild test`. Signing is disabled
   # because GitHub-hosted runners have no Apple Developer identity.
-  # We're not shipping artefacts from CI yet — this job catches
-  # compile/link/test regressions on the Mac stack only.
   mac:
     runs-on: macos-latest
     steps:
@@ -49,10 +47,8 @@ jobs:
 
       # Build the Mac stack explicitly. We can't use `--workspace`
       # because that would also pull in `supermgr` (the Linux GTK
-      # GUI) which depends on `pango-sys`/`gtk4-rs` — Homebrew's
-      # gtk4 layout doesn't satisfy the Linux-flavoured pkg-config
-      # those crates expect on macOS. Listing the Mac crates by
-      # `-p` is the same trick the local `build.sh` uses.
+      # GUI) whose pango-sys dependency doesn't build on macOS.
+      # Same `-p <crate>` list the local `build.sh` uses.
       - name: Build (Mac crates)
         run: |
           cargo build --release \
@@ -75,29 +71,27 @@ jobs:
           cd SuperManagerMac
           xcodegen generate
 
-      # Build the SwiftUI app. Signing is disabled because the
-      # runner has no Apple Developer identity — we're only checking
-      # that the project compiles and links. The Rust binaries
-      # embedded by the build phases are already built above and
-      # will be re-built by the xcodebuild run (idempotent via cargo).
+      # Run the Swift unit-test target (`SuperManagerMacTests`).
+      # `xcodebuild test` builds the host app AND the test bundle,
+      # then runs every XCTest in the test target. Signing disabled
+      # because the runner has no Developer identity.
       #
       # Pipe raw xcodebuild output to a log file as well as
       # xcbeautify — the GitHub-actions renderer hides the actual
       # error text and we need the raw form when a compile fails.
-      - name: Build (SwiftUI app)
+      - name: Test (SwiftUI + XCTest)
         shell: bash
         run: |
           set -o pipefail
           cd SuperManagerMac
-          xcodebuild \
+          xcodebuild test \
             -project SuperManager.xcodeproj \
             -scheme SuperManagerMac \
-            -configuration Debug \
             -destination 'platform=macOS' \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            build 2>&1 \
+            2>&1 \
             | tee /tmp/xcodebuild.log \
             | xcbeautify --renderer github-actions \
             || {
