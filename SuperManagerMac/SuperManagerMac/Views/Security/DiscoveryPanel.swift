@@ -200,6 +200,33 @@ struct DiscoveryPanel: View {
                     : "Sweep all in-scope CIDRs for services, banners, TLS issues, and known CVEs."
             )
 
+            // Stop button — only visible while an active scan
+            // operation is running. Cancellation is cooperative
+            // (engine polls the flag at host-batch boundaries),
+            // so this is "request stop" rather than "kill now".
+            if appState.activeScanInFlight,
+               let op = appState.runningOperations.first(where: { $0.kind == "active_scan" }) {
+                Button {
+                    Task { await appState.cancelOperation(id: op.id) }
+                } label: {
+                    if op.cancelRequested {
+                        HStack(spacing: 4) {
+                            ProgressView().controlSize(.small)
+                            Text("Cancelling…")
+                        }
+                    } else {
+                        Label("Stop", systemImage: "stop.circle.fill")
+                    }
+                }
+                .controlSize(.regular)
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .disabled(op.cancelRequested)
+                .help(op.cancelRequested
+                    ? "Cancellation requested — waiting for the current batch to finish."
+                    : "Stop the active scan at its next safe checkpoint.")
+            }
+
             Menu {
                 Button {
                     showReport = true

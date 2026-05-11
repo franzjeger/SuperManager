@@ -17,6 +17,7 @@ pub mod discovery;
 pub mod findings;
 pub mod tools;
 pub mod notifications;
+pub mod operations;
 pub mod timeline;
 pub mod security_ops;
 pub mod vpn;

@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::host::{AuthMethod, Host};
 
+use crate::operations::OperationRegistry;
 use crate::protocol::{self, Request, Response};
 use crate::ssh::connection::SshSession;
 use crate::state::DaemonState;
@@ -25,6 +26,11 @@ use crate::state::DaemonState;
 pub struct EngineServer {
     pub state: Arc<Mutex<DaemonState>>,
     pub secrets: Arc<dyn SecretStore>,
+    /// Process-wide registry of cancellable long-running operations.
+    /// Handlers register here at the start of an active scan,
+    /// compliance run, etc.; the UI lists + cancels via the
+    /// `operation_list` / `operation_cancel` RPC methods.
+    pub operations: Arc<OperationRegistry>,
 }
 
 impl EngineServer {
@@ -33,6 +39,7 @@ impl EngineServer {
         Self {
             state: Arc::new(Mutex::new(state)),
             secrets,
+            operations: Arc::new(OperationRegistry::new()),
         }
     }
 
@@ -301,6 +308,8 @@ impl EngineServer {
             "asset_enrich" => self.handle_asset_enrich(id, req.params).await,
             "engagement_report_pdf" => self.handle_engagement_report_pdf(id, req.params).await,
             "engagement_report_html" => self.handle_engagement_report_html(id, req.params).await,
+            "operation_list" => self.handle_operation_list(id).await,
+            "operation_cancel" => self.handle_operation_cancel(id, req.params).await,
             "activity_timeline" => self.handle_activity_timeline(id, req.params).await,
             "remediation_script" => self.handle_remediation_script(id, req.params).await,
 

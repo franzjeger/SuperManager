@@ -78,11 +78,22 @@ impl EngineServer {
                 "no targets after expansion".to_owned(),
             );
         }
+        // Register the scan as a cancellable operation. The guard
+        // unregisters on drop so we don't have to remember to
+        // clean up on error paths.
+        let label = format!(
+            "Active scan — {} targets, {} ports",
+            targets.len(),
+            ports.len(),
+        );
+        let guard = self.operations.start("active_scan", label);
+        let cancel = Some(guard.cancel_flag());
         match crate::discovery::active_scan(
             &targets,
             &ports,
             customer_slug.as_deref(),
             engagement_id.as_deref(),
+            cancel,
         )
         .await
         {
