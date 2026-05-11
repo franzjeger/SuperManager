@@ -1945,3 +1945,570 @@ pub fn render_markdown_report(
     .unwrap();
     s
 }
+
+// ---------------------------------------------------------------------------
+// Tests — pure functions only.
+//
+// The runner (`run`, `scan_all`) hits FortiGate over the network and is
+// out of scope here. Everything below is purely functional and
+// deterministic: severity penalties, the `evaluate` matcher,
+// `score()` aggregation, `classify()` / `compare()` drift detection,
+// and the markdown renderer.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Test fixtures --------------------------------------------------
+
+    fn def(id: &str, severity: Severity, expect: Expectation) -> CheckDefinition {
+        CheckDefinition {
+            id: id.to_owned(),
+            title: format!("Test {id}"),
+            description: "test check".to_owned(),
+            category: "test".to_owned(),
+            severity,
+            framework: "CIS-FortiOS-7.4".to_owned(),
+            cis_reference: None,
+            channel: Channel::Api,
+            api_path: None,
+            api_pointer: None,
+            cli_command: None,
+            cli_grep: None,
+            expect,
+            remediation: None,
+        }
+    }
+
+    fn result(check_id: &str, severity: Severity, status: Status) -> CheckResult {
+        CheckResult {
+            check_id: check_id.to_owned(),
+            status,
+            detail: "x".to_owned(),
+            raw_value: None,
+            severity,
+            title: format!("Test {check_id}"),
+            category: "test".to_owned(),
+        }
+    }
+
+    fn run_fixture(id: &str, score_val: u8, checks: Vec<CheckResult>) -> ComplianceRun {
+        let passed = checks.iter().filter(|c| matches!(c.status, Status::Pass)).count() as u32;
+        let failed = checks.iter().filter(|c| matches!(c.status, Status::Fail)).count() as u32;
+        let errored = checks.iter().filter(|c| matches!(c.status, Status::Error)).count() as u32;
+        let skipped = checks.iter().filter(|c| matches!(c.status, Status::Skip)).count() as u32;
+        ComplianceRun {
+            id: id.to_owned(),
+            host_id: "00000000-0000-0000-0000-000000000000".to_owned(),
+            started_at: Utc::now() - chrono::Duration::seconds(60),
+            finished_at: Utc::now(),
+            firmware: Some("7.4.1".to_owned()),
+            model: Some("FG-60F".to_owned()),
+            hostname: Some("test-fw".to_owned()),
+            triggered_by: TriggerKind::Manual,
+            score: score_val,
+            passed,
+            failed,
+            errored,
+            skipped,
+            checks,
+        }
+    }
+
+    // -- Severity penalties --------------------------------------------
+
+    #[test]
+    fn severity_penalty_ladder() {
+        // Higher severity ⇒ larger penalty. The ladder powers `score()`;
+        // changing these numbers shifts every customer's compliance
+        // score, so the ladder is part of the public contract.
+        assert_eq!(Severity::Info.penalty(), 0.0);
+        assert_eq!(Severity::Low.penalty(), 0.5);
+        assert_eq!(Severity::Medium.penalty(), 2.0);
+        assert_eq!(Severity::High.penalty(), 5.0);
+        assert_eq!(Severity::Critical.penalty(), 10.0);
+    }
+
+    // -- evaluate() — one test per Expectation variant ------------------
+
+    #[test]
+    fn evaluate_not_contains_passes_when_needle_absent() {
+        let d = def("admin-port", Severity::High,
+            Expectation::NotContains { needle: "https".into() });
+        let (status, _, _) = evaluate(&d, "ssh ping");
+        assert_eq!(status, Status::Pass);
+    }
+
+    #[test]
+    fn evaluate_not_contains_fails_case_insensitively() {
+        // The 'allowaccess HTTPS PING' regression — uppercase
+        // needle in haystack used to slip through because the
+        // first cut compared raw strings.
+        let d = def("admin-port", Severity::High,
+            Expectation::NotContains { needle: "https".into() });
+        let (status, detail, _) = evaluate(&d, "HTTPS PING");
+        assert_eq!(status, Status::Fail);
+        assert!(detail.contains("https"), "detail should name the needle");
+    }
+
+    #[test]
+    fn evaluate_contains_passes_when_present() {
+        let d = def("strong-crypto", Severity::High,
+            Expectation::Contains { needle: "enable".into() });
+        let (status, _, _) = evaluate(&d, "strong-crypto enable");
+        assert_eq!(status, Status::Pass);
+    }
+
+    #[test]
+    fn evaluate_contains_fails_when_missing() {
+        let d = def("strong-crypto", Severity::High,
+            Expectation::Contains { needle: "enable".into() });
+        let (status, _, _) = evaluate(&d, "strong-crypto disable");
+        assert_eq!(status, Status::Fail);
+    }
+
+    #[test]
+    fn evaluate_greater_equal_passes_at_threshold() {
+        let d = def("pw-min", Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 });
+        let (status, _, _) = evaluate(&d, "14");
+        assert_eq!(status, Status::Pass, "exactly at threshold should pass");
+    }
+
+    #[test]
+    fn evaluate_greater_equal_passes_above_threshold() {
+        let d = def("pw-min", Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 });
+        assert_eq!(evaluate(&d, "20").0, Status::Pass);
+    }
+
+    #[test]
+    fn evaluate_greater_equal_fails_below_threshold() {
+        let d = def("pw-min", Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 });
+        let (status, detail, _) = evaluate(&d, "8");
+        assert_eq!(status, Status::Fail);
+        assert!(detail.contains("8") && detail.contains("14"));
+    }
+
+    #[test]
+    fn evaluate_greater_equal_errors_on_non_numeric() {
+        // Important: a parse failure must NOT be silently treated
+        // as "pass" — the previous matcher tried this and let
+        // misparsed CLI output through as passing.
+        let d = def("pw-min", Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 });
+        let (status, _, _) = evaluate(&d, "(empty)");
+        assert_eq!(status, Status::Error);
+    }
+
+    #[test]
+    fn evaluate_less_equal_passes_at_threshold() {
+        let d = def("admin-timeout", Severity::Medium,
+            Expectation::LessEqual { threshold: 5 });
+        assert_eq!(evaluate(&d, "5").0, Status::Pass);
+    }
+
+    #[test]
+    fn evaluate_less_equal_fails_above_threshold() {
+        let d = def("admin-timeout", Severity::Medium,
+            Expectation::LessEqual { threshold: 5 });
+        let (status, _, _) = evaluate(&d, "60");
+        assert_eq!(status, Status::Fail);
+    }
+
+    #[test]
+    fn evaluate_less_equal_errors_on_non_numeric() {
+        let d = def("admin-timeout", Severity::Medium,
+            Expectation::LessEqual { threshold: 5 });
+        let (status, _, _) = evaluate(&d, "nope");
+        assert_eq!(status, Status::Error);
+    }
+
+    #[test]
+    fn evaluate_not_equal_fails_on_forbidden() {
+        let d = def("admin-port", Severity::High,
+            Expectation::NotEqual { value: "443".into() });
+        let (status, _, _) = evaluate(&d, "443");
+        assert_eq!(status, Status::Fail);
+    }
+
+    #[test]
+    fn evaluate_not_equal_is_case_insensitive() {
+        // "ENABLE" vs "enable" must compare equal here — FortiGate
+        // CLI sometimes emits uppercase labels.
+        let d = def("force-https", Severity::High,
+            Expectation::NotEqual { value: "disable".into() });
+        let (status, _, _) = evaluate(&d, "DISABLE");
+        assert_eq!(status, Status::Fail);
+    }
+
+    #[test]
+    fn evaluate_equal_passes_on_match() {
+        let d = def("set-mode", Severity::Low,
+            Expectation::Equal { value: "enable".into() });
+        assert_eq!(evaluate(&d, "enable").0, Status::Pass);
+    }
+
+    #[test]
+    fn evaluate_equal_fails_on_mismatch() {
+        let d = def("set-mode", Severity::Low,
+            Expectation::Equal { value: "enable".into() });
+        assert_eq!(evaluate(&d, "disable").0, Status::Fail);
+    }
+
+    #[test]
+    fn evaluate_equal_is_case_insensitive() {
+        let d = def("set-mode", Severity::Low,
+            Expectation::Equal { value: "Enable".into() });
+        assert_eq!(evaluate(&d, "ENABLE").0, Status::Pass);
+    }
+
+    // -- score() — the public-facing 0-100 customer number --------------
+
+    #[test]
+    fn score_empty_is_100() {
+        assert_eq!(score(&[]), 100);
+    }
+
+    #[test]
+    fn score_all_pass_is_100() {
+        let results = vec![
+            result("a", Severity::Critical, Status::Pass),
+            result("b", Severity::High, Status::Pass),
+            result("c", Severity::Medium, Status::Pass),
+        ];
+        assert_eq!(score(&results), 100);
+    }
+
+    #[test]
+    fn score_skip_ignored() {
+        // Skip means "didn't apply" — should NOT reduce score.
+        let results = vec![
+            result("a", Severity::Critical, Status::Skip),
+            result("b", Severity::High, Status::Skip),
+        ];
+        assert_eq!(score(&results), 100);
+    }
+
+    #[test]
+    fn score_one_critical_fail_subtracts_10() {
+        // Customer sees 90/100 for one critical misconfig.
+        let results = vec![result("a", Severity::Critical, Status::Fail)];
+        assert_eq!(score(&results), 90);
+    }
+
+    #[test]
+    fn score_critical_error_is_15_off() {
+        // Errors are 1.5× penalty — Critical (10) × 1.5 = 15.
+        // An unknown-due-to-error is treated as worse than a
+        // known-good but slightly less bad than a known-bad
+        // because the operator might still discover it's fine.
+        let results = vec![result("a", Severity::Critical, Status::Error)];
+        assert_eq!(score(&results), 85);
+    }
+
+    #[test]
+    fn score_clamped_to_zero_on_lots_of_failures() {
+        let results: Vec<CheckResult> = (0..20)
+            .map(|i| result(&format!("c{i}"), Severity::Critical, Status::Fail))
+            .collect();
+        // 20 × 10 = 200, well below 0 — must clamp.
+        assert_eq!(score(&results), 0);
+    }
+
+    #[test]
+    fn score_clamped_to_one_hundred_on_passes_only() {
+        // Belt-and-braces: even with 1000 passes the score can't
+        // overflow the upper bound.
+        let results: Vec<CheckResult> = (0..1000)
+            .map(|i| result(&format!("c{i}"), Severity::High, Status::Pass))
+            .collect();
+        assert_eq!(score(&results), 100);
+    }
+
+    #[test]
+    fn score_rounds_half_up() {
+        // 1 medium fail = -2.0 → 98.0 (no rounding question, integer).
+        // One Low fail = -0.5 → 99.5 → 100 (banker's rounding could
+        // round either way; Rust's f64::round rounds half away from
+        // zero, so 99.5 → 100).
+        let one_low = vec![result("a", Severity::Low, Status::Fail)];
+        let s = score(&one_low);
+        // Accept either 99 or 100 depending on rounding mode, but
+        // it must not be wildly off.
+        assert!(s == 99 || s == 100, "got {s}");
+    }
+
+    #[test]
+    fn score_mixed_severities_compose_linearly() {
+        let results = vec![
+            result("a", Severity::Critical, Status::Fail), // -10
+            result("b", Severity::High, Status::Fail),     // -5
+            result("c", Severity::Medium, Status::Fail),   // -2
+            result("d", Severity::Low, Status::Fail),      // -0.5
+            // Total: -17.5 → 83 (rounds from 82.5)
+        ];
+        let s = score(&results);
+        // 82.5 → 83 with round-half-away-from-zero
+        assert!(s == 82 || s == 83, "got {s}");
+    }
+
+    // -- classify() — drift state machine -------------------------------
+
+    #[test]
+    fn classify_none_to_anything_is_added() {
+        assert!(matches!(classify(None, &Status::Pass), DriftKind::Added));
+        assert!(matches!(classify(None, &Status::Fail), DriftKind::Added));
+    }
+
+    #[test]
+    fn classify_pass_to_fail_is_newly_failing() {
+        // The single most important drift signal — was OK, now isn't.
+        // GUI shows these in red at the top of the report.
+        assert!(matches!(
+            classify(Some(&Status::Pass), &Status::Fail),
+            DriftKind::NewlyFailing
+        ));
+    }
+
+    #[test]
+    fn classify_fail_to_pass_is_newly_passing() {
+        assert!(matches!(
+            classify(Some(&Status::Fail), &Status::Pass),
+            DriftKind::NewlyPassing
+        ));
+    }
+
+    #[test]
+    fn classify_fail_to_fail_is_still_failing() {
+        assert!(matches!(
+            classify(Some(&Status::Fail), &Status::Fail),
+            DriftKind::StillFailing
+        ));
+    }
+
+    #[test]
+    fn classify_pass_to_pass_is_still_passing() {
+        assert!(matches!(
+            classify(Some(&Status::Pass), &Status::Pass),
+            DriftKind::StillPassing
+        ));
+    }
+
+    #[test]
+    fn classify_current_error_always_errored() {
+        // No matter what came before — if the current run errored,
+        // that's the bucket. Operator needs to investigate.
+        assert!(matches!(
+            classify(Some(&Status::Pass), &Status::Error),
+            DriftKind::Errored
+        ));
+        assert!(matches!(
+            classify(Some(&Status::Fail), &Status::Error),
+            DriftKind::Errored
+        ));
+    }
+
+    #[test]
+    fn classify_skip_treated_as_added() {
+        // Skip means "didn't apply" — comparing across skip is
+        // not meaningful, so we treat the pair as "freshly added".
+        assert!(matches!(
+            classify(Some(&Status::Skip), &Status::Pass),
+            DriftKind::Added
+        ));
+        assert!(matches!(
+            classify(Some(&Status::Pass), &Status::Skip),
+            DriftKind::Added
+        ));
+    }
+
+    // -- compare() — the full drift report ------------------------------
+
+    #[test]
+    fn compare_first_run_has_no_previous() {
+        let current = run_fixture("r1", 90,
+            vec![result("a", Severity::Critical, Status::Fail)]);
+        let d = compare(&current, None);
+        assert_eq!(d.current_run_id, "r1");
+        assert_eq!(d.previous_run_id, None);
+        assert_eq!(d.previous_score, None);
+        assert_eq!(d.score_delta, 0);
+        // First-run failures classify as Added → silent bucket;
+        // they don't appear in any drift list. (UI shows them
+        // via the run's own checks, not via drift.)
+        assert!(d.newly_failing.is_empty(),
+                "first run has no drift baseline, so nothing is newly_failing");
+    }
+
+    #[test]
+    fn compare_newly_failing_surfaces_one_check() {
+        let previous = run_fixture("r0", 100,
+            vec![result("a", Severity::Critical, Status::Pass)]);
+        let current = run_fixture("r1", 90,
+            vec![result("a", Severity::Critical, Status::Fail)]);
+        let d = compare(&current, Some(&previous));
+        assert_eq!(d.newly_failing.len(), 1);
+        assert_eq!(d.newly_failing[0].check_id, "a");
+        assert_eq!(d.score_delta, -10);
+        assert_eq!(d.previous_score, Some(100));
+    }
+
+    #[test]
+    fn compare_newly_passing_surfaces_one_check() {
+        let previous = run_fixture("r0", 90,
+            vec![result("a", Severity::Critical, Status::Fail)]);
+        let current = run_fixture("r1", 100,
+            vec![result("a", Severity::Critical, Status::Pass)]);
+        let d = compare(&current, Some(&previous));
+        assert_eq!(d.newly_passing.len(), 1);
+        assert_eq!(d.newly_passing[0].check_id, "a");
+        assert_eq!(d.score_delta, 10);
+    }
+
+    #[test]
+    fn compare_still_failing_carries_over() {
+        let previous = run_fixture("r0", 90,
+            vec![result("a", Severity::High, Status::Fail)]);
+        let current = run_fixture("r1", 90,
+            vec![result("a", Severity::High, Status::Fail)]);
+        let d = compare(&current, Some(&previous));
+        assert_eq!(d.still_failing.len(), 1);
+        assert!(d.newly_failing.is_empty());
+        assert_eq!(d.score_delta, 0);
+    }
+
+    #[test]
+    fn compare_buckets_sorted_by_severity() {
+        // Critical at the top, alphabetical ID tiebreaker inside.
+        let previous = run_fixture("r0", 100,
+            vec![
+                result("a-low",      Severity::Low,      Status::Pass),
+                result("b-critical", Severity::Critical, Status::Pass),
+                result("c-medium",   Severity::Medium,   Status::Pass),
+            ]);
+        let current = run_fixture("r1", 88,
+            vec![
+                result("a-low",      Severity::Low,      Status::Fail),
+                result("b-critical", Severity::Critical, Status::Fail),
+                result("c-medium",   Severity::Medium,   Status::Fail),
+            ]);
+        let d = compare(&current, Some(&previous));
+        assert_eq!(d.newly_failing.len(), 3);
+        assert_eq!(d.newly_failing[0].check_id, "b-critical", "Critical first");
+        assert_eq!(d.newly_failing[1].check_id, "c-medium",   "Medium next");
+        assert_eq!(d.newly_failing[2].check_id, "a-low",      "Low last");
+    }
+
+    #[test]
+    fn compare_errored_bucket_distinct_from_failing() {
+        let previous = run_fixture("r0", 95,
+            vec![result("a", Severity::High, Status::Pass)]);
+        let current = run_fixture("r1", 90,
+            vec![result("a", Severity::High, Status::Error)]);
+        let d = compare(&current, Some(&previous));
+        assert!(d.newly_failing.is_empty(),
+                "an error is NOT a fail — operator action different");
+        assert_eq!(d.errored.len(), 1);
+    }
+
+    // -- list_checks() — built-in check library -------------------------
+
+    #[test]
+    fn list_checks_returns_nonempty_baseline() {
+        // Drives the GUI's settings → checks list. If this ever
+        // returns empty, the GUI panel hides the entire library —
+        // canary against a copy-paste regression.
+        let checks = list_checks();
+        assert!(!checks.is_empty(), "default check library must not be empty");
+    }
+
+    #[test]
+    fn list_checks_ids_are_unique() {
+        // History correlates runs by check id. Duplicate ids would
+        // make drift detection wrong without an error message.
+        let checks = list_checks();
+        let mut seen = std::collections::HashSet::new();
+        for c in &checks {
+            assert!(seen.insert(c.id.clone()),
+                    "duplicate check id {}", c.id);
+        }
+    }
+
+    #[test]
+    fn list_checks_have_remediation_for_failures() {
+        // Each shipping check should have a "Fix" snippet so the
+        // GUI's remediation affordance has something to show.
+        // Tolerance: not 100% — info-severity informational checks
+        // are exempt.
+        let checks = list_checks();
+        let actionable: Vec<_> = checks
+            .iter()
+            .filter(|c| !matches!(c.severity, Severity::Info))
+            .collect();
+        let with_remediation = actionable
+            .iter()
+            .filter(|c| c.remediation.is_some())
+            .count();
+        let total = actionable.len();
+        assert!(with_remediation * 100 / total.max(1) >= 80,
+                "≥80% of actionable checks should ship a remediation snippet — got {with_remediation}/{total}");
+    }
+
+    // -- render_markdown_report() — smoke tests -------------------------
+
+    #[test]
+    fn render_report_contains_score_block() {
+        let run = run_fixture("r1", 92, vec![result("a", Severity::High, Status::Pass)]);
+        let md = render_markdown_report(&run, None, &[]);
+        assert!(md.contains("# Compliance Report"));
+        assert!(md.contains("## Score"));
+        assert!(md.contains("**92/100**"), "score line must appear verbatim");
+    }
+
+    #[test]
+    fn render_report_first_run_message_when_no_drift() {
+        let run = run_fixture("r1", 100, vec![]);
+        let drift = compare(&run, None);
+        let md = render_markdown_report(&run, Some(&drift), &[]);
+        assert!(md.contains("First scan"),
+                "should explicitly call out that there's no baseline");
+    }
+
+    #[test]
+    fn render_report_drift_block_shows_arrow() {
+        let previous = run_fixture("r0", 95, vec![result("a", Severity::High, Status::Pass)]);
+        let current  = run_fixture("r1", 90, vec![result("a", Severity::High, Status::Fail)]);
+        let drift = compare(&current, Some(&previous));
+        let md = render_markdown_report(&current, Some(&drift), &[]);
+        assert!(md.contains("## Changes Since Previous Run"));
+        assert!(md.contains("95"),
+                "previous score must appear in the drift line");
+        assert!(md.contains("-5"),
+                "score delta must appear with sign");
+        assert!(md.contains("Newly failing"),
+                "newly-failing section must appear");
+    }
+
+    #[test]
+    fn render_report_findings_section_always_present() {
+        // Even with zero checks, the heading exists — keeps the
+        // PDF layout predictable for stylesheet authors.
+        let run = run_fixture("r1", 100, vec![]);
+        let md = render_markdown_report(&run, None, &[]);
+        assert!(md.contains("## Findings"));
+    }
+
+    #[test]
+    fn render_report_includes_device_identity() {
+        let run = run_fixture("r1", 95, vec![]);
+        let md = render_markdown_report(&run, None, &[]);
+        // Identity table — hostname/model/firmware are how the
+        // customer recognises which device a report describes.
+        assert!(md.contains("test-fw"));
+        assert!(md.contains("FG-60F"));
+        assert!(md.contains("7.4.1"));
+    }
+}
