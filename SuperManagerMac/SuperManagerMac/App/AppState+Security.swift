@@ -266,6 +266,23 @@ extension AppState {
         }
     }
 
+    /// Returns the engagement report as a standalone HTML document.
+    /// Used as a PDF fallback when no LaTeX engine is installed —
+    /// the caller renders this in `WKWebView` and calls `createPDF`.
+    func renderEngagementHtml(engagementId: String) async -> String? {
+        struct Resp: Codable { let html: String }
+        do {
+            let r: Resp = try await client.call(
+                "engagement_report_html",
+                params: ["engagement_id": engagementId]
+            )
+            return r.html
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
     @discardableResult
     func setEngagementSchedule(
         engagementId: String,

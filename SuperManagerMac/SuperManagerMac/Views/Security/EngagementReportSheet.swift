@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import WebKit
 
 /// Renders the engagement report (Markdown) and lets the user
 /// copy to clipboard or save to disk. Pandoc-friendly so a future
@@ -112,7 +113,7 @@ struct EngagementReportSheet: View {
                 }
             }
             .disabled(markdown.isEmpty || exportingPdf)
-            .help("Renders via pandoc — install with `brew install pandoc basictex` if missing.")
+            .help("Renders via pandoc. For typographic quality install `tectonic` or `basictex`; otherwise falls back to a built-in WebKit renderer.")
 
             Button("Close") { dismiss() }
                 .keyboardShortcut(.defaultAction)
@@ -124,8 +125,23 @@ struct EngagementReportSheet: View {
     private func exportPdf() async {
         exportingPdf = true
         defer { exportingPdf = false }
-        guard let pdf = await appState.renderEngagementPdf(engagementId: engagementId) else {
-            error = "PDF rendering failed — verify pandoc is installed (Settings → Integrations)."
+        // First try the server-side pandoc+LaTeX path — gives the
+        // best typography when BasicTeX / tectonic is installed.
+        var pdfData = await appState.renderEngagementPdf(engagementId: engagementId)
+        var sourceNote: String?
+        if pdfData == nil {
+            // No LaTeX engine? Fall back to the HTML path: ask
+            // pandoc for HTML (no engine needed), render in
+            // WKWebView, and export PDF locally. The user always
+            // gets a PDF as long as pandoc itself is installed.
+            sourceNote = appState.errorMessage
+            if let html = await appState.renderEngagementHtml(engagementId: engagementId) {
+                pdfData = await Self.htmlToPdf(html)
+            }
+        }
+        guard let pdf = pdfData else {
+            let hint = (sourceNote?.isEmpty == false ? "\n\n" + (sourceNote ?? "") : "")
+            error = "Could not generate PDF. Install pandoc + a PDF engine (`brew install --cask basictex` or `brew install tectonic`) and retry.\(hint)"
             return
         }
         let panel = NSSavePanel()
@@ -139,6 +155,36 @@ struct EngagementReportSheet: View {
         } catch {
             self.error = "Could not save PDF: \(error.localizedDescription)"
         }
+    }
+
+    /// Render an HTML string to PDF via an offscreen `WKWebView`.
+    /// Used as the no-LaTeX fallback for PDF export.
+    @MainActor
+    private static func htmlToPdf(_ html: String) async -> Data? {
+        let config = WKWebViewConfiguration()
+        let webView = WKWebView(
+            frame: NSRect(x: 0, y: 0, width: 816, height: 1056), // ~US Letter @ 96 dpi
+            configuration: config
+        )
+        webView.loadHTMLString(html, baseURL: nil)
+        // Wait for the page to finish loading before printing —
+        // KVO on `isLoading` is the most reliable signal across
+        // the WKWebView lifecycle.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            var token: NSKeyValueObservation? = nil
+            token = webView.observe(\.isLoading, options: [.initial, .new]) { wv, _ in
+                if !wv.isLoading {
+                    token?.invalidate()
+                    cont.resume()
+                }
+            }
+        }
+        // Tiny extra delay so any deferred layout settles before
+        // we snapshot. PDF render fails silently if layout isn't
+        // complete.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        let pdfConfig = WKPDFConfiguration()
+        return try? await webView.pdf(configuration: pdfConfig)
     }
 
     private func load() async {

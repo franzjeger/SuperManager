@@ -138,6 +138,37 @@ impl EngineServer {
         }
     }
 
+    pub(crate) async fn handle_engagement_report_html(&self, id: u64, params: serde_json::Value) -> Response {
+        let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing engagement_id".to_owned()),
+        };
+        let engagement = match crate::engagement::load(&engagement_id) {
+            Ok(e) => e,
+            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        };
+        let scope = if engagement.customer_slug.is_empty() {
+            engagement_id.clone()
+        } else {
+            engagement.customer_slug.clone()
+        };
+        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let customer_slug = if engagement.customer_slug.is_empty() {
+            None
+        } else {
+            Some(engagement.customer_slug.as_str())
+        };
+        let input = crate::report::ReportInput {
+            engagement: &engagement,
+            customer_slug,
+            findings,
+        };
+        match crate::report::render_html(&input).await {
+            Ok(html) => Response::ok(id, serde_json::json!({ "html": html })),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
     pub(crate) async fn handle_engagement_report_pdf(&self, id: u64, params: serde_json::Value) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),

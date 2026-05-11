@@ -300,6 +300,7 @@ impl EngineServer {
             "subdomain_enum" => self.handle_subdomain_enum(id, req.params).await,
             "asset_enrich" => self.handle_asset_enrich(id, req.params).await,
             "engagement_report_pdf" => self.handle_engagement_report_pdf(id, req.params).await,
+            "engagement_report_html" => self.handle_engagement_report_html(id, req.params).await,
             "activity_timeline" => self.handle_activity_timeline(id, req.params).await,
             "remediation_script" => self.handle_remediation_script(id, req.params).await,
 

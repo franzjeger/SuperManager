@@ -47,7 +47,9 @@ pub fn render_markdown(input: &ReportInput<'_>) -> Result<String> {
 }
 
 /// Render the engagement report to PDF via pandoc shell-out.
-/// Requires `pandoc` on PATH (probed by `tools::status`).
+/// Requires `pandoc` on PATH (probed by `tools::status`) **plus**
+/// at least one PDF-engine — `tectonic`, `xelatex`, `pdflatex`,
+/// `lualatex`, `wkhtmltopdf`, or `weasyprint` (tried in that order).
 /// Returns the PDF bytes — the caller writes to disk via NSSavePanel.
 ///
 /// Temp paths use `tempfile::NamedTempFile` (mode 0o600, random
@@ -58,6 +60,22 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     use std::time::Duration;
 
     let markdown = render_markdown(input)?;
+
+    // Pick the first available PDF engine. We probe binaries here
+    // (rather than at startup) so a freshly-installed `brew install
+    // basictex` is picked up without a daemon restart. Ordering:
+    //   1. `tectonic`   — self-contained, ~80 MB, "just works"
+    //   2. `xelatex`/`lualatex` — Unicode-friendly LaTeX (MacTeX)
+    //   3. `pdflatex`   — classic, ASCII-only (BasicTeX)
+    //   4. `wkhtmltopdf`/`weasyprint` — HTML→PDF, no LaTeX needed
+    let engine = match pick_pdf_engine() {
+        Some(e) => e,
+        None => anyhow::bail!(
+            "no PDF engine on PATH — install one of: `brew install --cask basictex` \
+             (then add /Library/TeX/texbin to PATH), or `brew install tectonic`, \
+             or `brew install wkhtmltopdf`. Pandoc alone cannot produce PDF."
+        ),
+    };
 
     // Markdown input — written + closed before invoking pandoc.
     // `NamedTempFile` ships the file mode at 0o600 by default and
@@ -87,19 +105,115 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     // remains; we'll re-read it after pandoc finishes.
     drop(out_file);
 
+    let mut cmd = tokio::process::Command::new("pandoc");
+    cmd.args([
+        "--from=gfm",
+        "--standalone",
+        "--metadata",
+        &format!("title={}", input.engagement.title),
+        "-V",
+        "geometry:margin=2cm",
+        "-V",
+        "colorlinks=true",
+    ]);
+    cmd.arg(format!("--pdf-engine={engine}"));
+    cmd.arg("-o").arg(&out_path).arg(&in_path);
+
+    let res = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+        .await
+        .context("pandoc timeout")??;
+
+    if !res.status.success() {
+        let stderr = String::from_utf8_lossy(&res.stderr);
+        // Cleanup the (possibly-empty) output before bailing.
+        let _ = std::fs::remove_file(&out_path);
+        anyhow::bail!("pandoc ({engine}) failed: {stderr}");
+    }
+
+    let bytes = std::fs::read(&out_path)
+        .with_context(|| format!("read pdf output {out_path:?}"))?;
+    let _ = std::fs::remove_file(&out_path);
+    // `in_file` (still held) drops here and unlinks the markdown.
+    Ok(bytes)
+}
+
+/// Probe PATH + the usual Homebrew/MacTeX prefixes for a usable
+/// PDF engine. Returns the engine *name* (not path) so pandoc can
+/// resolve it the same way as a manual invocation — we just need
+/// to confirm one exists. Order matters: lighter / more-likely
+/// engines first.
+fn pick_pdf_engine() -> Option<&'static str> {
+    const ENGINES: &[&str] = &[
+        "tectonic",
+        "xelatex",
+        "lualatex",
+        "pdflatex",
+        "wkhtmltopdf",
+        "weasyprint",
+    ];
+    // Same fallback prefixes as `tools::probe_one` — launchd's
+    // default PATH misses /opt/homebrew and /Library/TeX/texbin.
+    const PREFIXES: &[&str] = &[
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/local/sbin",
+        "/Library/TeX/texbin",
+        "/opt/local/bin",
+    ];
+    for engine in ENGINES {
+        // First check PATH via `which`-like resolution.
+        if let Ok(path) = std::env::var("PATH") {
+            for dir in path.split(':') {
+                let candidate = std::path::Path::new(dir).join(engine);
+                if candidate.exists() {
+                    return Some(engine);
+                }
+            }
+        }
+        // Fallback to known install prefixes.
+        for prefix in PREFIXES {
+            let candidate = std::path::Path::new(prefix).join(engine);
+            if candidate.exists() {
+                return Some(engine);
+            }
+        }
+    }
+    None
+}
+
+/// Render the engagement report to a self-contained HTML document.
+/// Used as a fallback when no LaTeX/PDF engine is installed — the
+/// Mac client renders this via WKWebView and prints to PDF locally.
+///
+/// Only depends on `pandoc` itself (no LaTeX), so it always works
+/// on a fresh Homebrew install.
+pub async fn render_html(input: &ReportInput<'_>) -> Result<String> {
+    use std::io::Write;
+    use std::time::Duration;
+
+    let markdown = render_markdown(input)?;
+    let mut in_file = tempfile::Builder::new()
+        .prefix("supermgr-report-")
+        .suffix(".md")
+        .tempfile()
+        .context("create temp md")?;
+    in_file.write_all(markdown.as_bytes()).context("write md")?;
+    in_file.flush().ok();
+    let in_path = in_file.path().to_path_buf();
+
     let res = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_secs(30),
         tokio::process::Command::new("pandoc")
             .args([
                 "--from=gfm",
+                "--to=html5",
                 "--standalone",
+                "--embed-resources",
                 "--metadata",
                 &format!("title={}", input.engagement.title),
-                "-V", "geometry:margin=2cm",
-                "-V", "colorlinks=true",
-                "-o",
+                "--css=data:text/css;base64,",
             ])
-            .arg(&out_path)
             .arg(&in_path)
             .output(),
     )
@@ -108,16 +222,37 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
 
     if !res.status.success() {
         let stderr = String::from_utf8_lossy(&res.stderr);
-        // Cleanup the (possibly-empty) output before bailing.
-        let _ = std::fs::remove_file(&out_path);
-        anyhow::bail!("pandoc failed: {stderr}");
+        anyhow::bail!("pandoc html failed: {stderr}");
     }
+    let html = String::from_utf8(res.stdout).context("pandoc html output not utf-8")?;
+    // Inline a small style block so the WKWebView render looks
+    // tidy without an external CSS file. Pandoc emits `<head>`
+    // around line 6 — splice ours just before `</head>`.
+    let styled = inject_default_style(&html);
+    Ok(styled)
+}
 
-    let bytes = std::fs::read(&out_path)
-        .with_context(|| format!("read pdf output {out_path:?}"))?;
-    let _ = std::fs::remove_file(&out_path);
-    // `in_file` (still held) drops here and unlinks the markdown.
-    Ok(bytes)
+fn inject_default_style(html: &str) -> String {
+    const STYLE: &str = r#"<style>
+body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;color:#1d1d1f;max-width:780px;margin:2em auto;padding:0 1.5em;line-height:1.55;font-size:11pt}
+h1{font-size:24pt;margin-top:0;border-bottom:1px solid #d2d2d7;padding-bottom:0.3em}
+h2{font-size:16pt;margin-top:1.6em;border-bottom:1px solid #e5e5ea;padding-bottom:0.2em}
+h3{font-size:13pt;margin-top:1.2em}
+h4{font-size:11pt;margin-top:1em;color:#0a64f3}
+table{border-collapse:collapse;margin:1em 0}
+th,td{border:1px solid #d2d2d7;padding:4px 8px;text-align:left;vertical-align:top}
+th{background:#f5f5f7}
+code{font-family:'SF Mono',Menlo,Consolas,monospace;background:#f5f5f7;padding:1px 4px;border-radius:3px;font-size:10pt}
+pre{background:#f5f5f7;padding:8px;border-radius:6px;overflow-x:auto;font-size:9.5pt}
+hr{border:0;border-top:1px solid #d2d2d7;margin:2em 0}
+@media print{body{margin:0;max-width:none;padding:0 1cm}h1,h2,h3{page-break-after:avoid}}
+</style>"#;
+    if let Some(idx) = html.find("</head>") {
+        let (head, tail) = html.split_at(idx);
+        format!("{head}{STYLE}{tail}")
+    } else {
+        format!("{STYLE}{html}")
+    }
 }
 
 fn title_block(out: &mut String, input: &ReportInput<'_>) {
