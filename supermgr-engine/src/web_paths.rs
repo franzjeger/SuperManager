@@ -46,6 +46,24 @@ pub struct PathProbe {
     pub matched: bool,
 }
 
+/// What kind of response we expect a real hit to produce.
+/// Used to reject false positives from catch-all redirects
+/// (e.g. Synology DSM port-80 stub that returns the same
+/// HTML for every path).
+#[derive(Clone, Copy, PartialEq)]
+enum ExpectedKind {
+    /// Any 200/403 with non-empty body is acceptable, subject
+    /// to signature checks below. Used for path probes where
+    /// the response is HTML (admin consoles, error pages, etc).
+    Any,
+    /// Response MUST be a non-text content type — `text/html`,
+    /// `text/plain`, `application/xml` reject. Used for binary
+    /// resources like heapdumps, zip/tar archives, SQL dumps
+    /// where any text-shaped response is a catch-all redirect,
+    /// not the real resource.
+    Binary,
+}
+
 /// Curated list of paths to check, with the body-substring
 /// signature used to confirm the hit isn't an SPA fall-through.
 struct PathRule {
@@ -53,6 +71,10 @@ struct PathRule {
     /// Body must contain ANY of these substrings (case-insensitive)
     /// for the finding to fire. Empty list = match any 200/403.
     signatures: &'static [&'static str],
+    /// What Content-Type shape we expect from a real hit.
+    /// Defaults to `Any`. Set `Binary` for endpoints where a
+    /// text/html response is by definition a false positive.
+    expected_kind: ExpectedKind,
     severity: Severity,
     cvss: f32,
     finding_id: &'static str,
@@ -69,6 +91,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.git/HEAD",
         signatures: &["ref: refs/", "ref:refs/"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.git-exposed",
@@ -80,6 +103,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.git/config",
         signatures: &["[core]", "[remote", "repositoryformatversion"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.git-config",
@@ -92,6 +116,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.svn/entries",
         signatures: &["dir\n", "12\n"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.5,
         finding_id: "web.svn-exposed",
@@ -104,6 +129,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.env",
         signatures: &["DB_", "APP_KEY", "SECRET", "API_KEY", "AWS_", "DATABASE_URL"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.env-exposed",
@@ -115,6 +141,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.env.local",
         signatures: &["DB_", "APP_KEY", "SECRET", "API_KEY"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.env-local-exposed",
@@ -126,6 +153,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/config.php.bak",
         signatures: &["<?php", "DB_", "$config"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.config-bak",
@@ -138,6 +166,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.DS_Store",
         signatures: &["Bud1"], // .DS_Store magic header
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Medium,
         cvss: 4.0,
         finding_id: "web.ds-store",
@@ -150,6 +179,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/phpinfo.php",
         signatures: &["phpinfo()", "PHP Version"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.5,
         finding_id: "web.phpinfo",
@@ -161,6 +191,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/info.php",
         signatures: &["phpinfo()", "PHP Version"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.5,
         finding_id: "web.info-php",
@@ -173,6 +204,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/server-status",
         signatures: &["Apache Server Status", "Server Version"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.5,
         finding_id: "web.apache-status",
@@ -184,6 +216,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/server-info",
         signatures: &["Apache Server Information", "Server Version"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.0,
         finding_id: "web.apache-info",
@@ -196,6 +229,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/wp-login.php",
         signatures: &["WordPress", "wp-login", "User_login"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Low,
         cvss: 3.0,
         finding_id: "web.wp-login",
@@ -207,6 +241,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/wp-config.php.bak",
         signatures: &["DB_NAME", "DB_PASSWORD", "AUTH_KEY"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.wp-config-bak",
@@ -219,6 +254,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/swagger.json",
         signatures: &["\"swagger\":", "\"openapi\":", "\"paths\":"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Medium,
         cvss: 5.0,
         finding_id: "web.swagger-exposed",
@@ -230,6 +266,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/api-docs",
         signatures: &["\"swagger\":", "\"openapi\":"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Medium,
         cvss: 5.0,
         finding_id: "web.api-docs",
@@ -241,6 +278,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/v2/api-docs",
         signatures: &["\"swagger\":", "\"openapi\":"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Medium,
         cvss: 5.0,
         finding_id: "web.api-docs-v2",
@@ -253,6 +291,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/backup.zip",
         signatures: &[], // Any 200 with binary content is suspicious here
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 8.0,
         finding_id: "web.backup-zip",
@@ -264,6 +303,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/backup.tar.gz",
         signatures: &[],
+        expected_kind: ExpectedKind::Binary,
         severity: Severity::High,
         cvss: 8.0,
         finding_id: "web.backup-targz",
@@ -275,6 +315,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/db.sql",
         signatures: &["INSERT INTO", "CREATE TABLE", "-- MySQL dump", "SQL DUMP"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.sql-dump",
@@ -286,6 +327,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/database.sql",
         signatures: &["INSERT INTO", "CREATE TABLE"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.5,
         finding_id: "web.database-sql",
@@ -298,6 +340,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/manager/html",
         signatures: &["Tomcat Web Application Manager", "Manager Login"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 7.5,
         finding_id: "web.tomcat-manager",
@@ -309,6 +352,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/jmx-console",
         signatures: &["JBoss", "JMX Console"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.jboss-jmx",
@@ -320,6 +364,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/actuator/env",
         signatures: &["activeProfiles", "propertySources"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.spring-actuator-env",
@@ -331,6 +376,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/actuator/heapdump",
         signatures: &[], // binary; just status check
+        expected_kind: ExpectedKind::Binary,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.spring-actuator-heapdump",
@@ -345,6 +391,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/test.php",
         signatures: &["<?php", "test"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Low,
         cvss: 3.0,
         finding_id: "web.test-php",
@@ -356,6 +403,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.htpasswd",
         signatures: &[":$", ":apr1$", ":$2y$", ":$1$"],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::Critical,
         cvss: 9.0,
         finding_id: "web.htpasswd",
@@ -367,6 +415,7 @@ const PATH_RULES: &[PathRule] = &[
     PathRule {
         path: "/.htaccess",
         signatures: &["RewriteEngine", "AuthType", "Order ", "Require "],
+        expected_kind: ExpectedKind::Any,
         severity: Severity::High,
         cvss: 6.0,
         finding_id: "web.htaccess",
@@ -443,9 +492,32 @@ async fn check_one(
     let mut should_flag = false;
 
     if status == 200 {
-        if rule.signatures.is_empty() {
-            // No signature required — flag any 200 OK with non-trivial size.
-            // Skip if obviously HTML index page (SPA fallback).
+        // Content-Type guard for Binary-expected rules. Catch-all
+        // redirects (Synology DSM port-80 stub, SPAs that return
+        // index.html for any path, error-page-on-200 misconfigs)
+        // all serve HTML. A real heapdump / zip / tar.gz never
+        // comes back as text/*; if it does, this is a false
+        // positive and we drop the rule on the floor.
+        let content_type_lc = content_type
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase();
+        let is_text_response = content_type_lc.starts_with("text/")
+            || content_type_lc.starts_with("application/xml")
+            || content_type_lc.starts_with("application/xhtml")
+            || content_type_lc.starts_with("application/json");
+        let kind_rejects = rule.expected_kind == ExpectedKind::Binary && is_text_response;
+
+        if kind_rejects {
+            // Don't flag, don't even mark `matched` — this is
+            // clearly the catch-all path, not the actual resource.
+        } else if rule.signatures.is_empty() {
+            // No signature required — flag any 200 OK with
+            // non-trivial size, after we've passed the Content-Type
+            // shape check above.
+            // Also skip the "obviously index.html" heuristic for
+            // belt-and-braces on legacy rules that haven't been
+            // promoted to ExpectedKind::Binary yet.
             let lc = body_text.to_lowercase();
             let is_spa_fallback = lc.contains("<!doctype html") && lc.contains("<title>");
             if !is_spa_fallback && size > 0 {
