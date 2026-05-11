@@ -200,7 +200,17 @@ impl EngineServer {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 Response::ok(id, serde_json::json!({ "pdf_base64": b64, "size": bytes.len() }))
             }
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            Err(e) => {
+                // Downcast to recognise structured EngineError variants.
+                // The Mac client switches on `data.kind` so a
+                // `pdf_engine_missing` triggers the silent WebKit
+                // fallback instead of a scary error dialog.
+                if let Some(eng) = e.downcast_ref::<crate::error::EngineError>() {
+                    Response::err_engine(id, eng)
+                } else {
+                    Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}"))
+                }
+            }
         }
     }
 }

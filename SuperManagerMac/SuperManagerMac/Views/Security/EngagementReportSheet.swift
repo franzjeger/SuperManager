@@ -124,27 +124,32 @@ struct EngagementReportSheet: View {
     private func exportPdf() async {
         exportingPdf = true
         defer { exportingPdf = false }
-        DebugLog.write("[PDF] exportPdf: trying server PDF (silent)")
-        // First try the server-side pandoc+LaTeX path — gives the
-        // best typography when BasicTeX / tectonic is installed.
-        // `silent: true` so the global "no PDF engine" error
-        // dialog doesn't fire before we get a chance to fall
-        // back to the WebKit renderer.
-        var pdfData = await appState.renderEngagementPdf(
-            engagementId: engagementId,
-            silent: true
-        )
-        // Stash whatever message the silent call left in errorMessage —
-        // we'll surface it ONLY if the fallback also fails.
-        let serverErr = appState.errorMessage
-        DebugLog.write("[PDF] exportPdf: server PDF returned \(pdfData?.count ?? 0) bytes; serverErr='\(serverErr)'")
-        var htmlErr = ""
+        DebugLog.write("[PDF] exportPdf: trying server PDF")
+
+        // Server-side pandoc+LaTeX is the best typography when an
+        // engine (tectonic / basictex / wkhtmltopdf) is installed.
+        // The daemon emits `data.kind = "pdf_engine_missing"` when
+        // no engine is present — we catch that specific kind and
+        // silently fall through to the WebKit path. Other failures
+        // surface to the user.
+        var pdfData: Data? = nil
+        var serverErr = ""
+        switch await appState.renderEngagementPdf(engagementId: engagementId) {
+        case .ok(let data):
+            DebugLog.write("[PDF] exportPdf: server PDF returned \(data.count) bytes")
+            pdfData = data
+        case .engineMissing(let msg):
+            DebugLog.write("[PDF] exportPdf: server reported pdf_engine_missing; falling through to WebKit")
+            serverErr = msg
+        case .otherFailure(let err):
+            DebugLog.write("[PDF] exportPdf: server PDF FAILED (non-engine): \(err.localizedDescription)")
+            error = "PDF generation failed: \(err.localizedDescription)"
+            return
+        }
+
         if pdfData == nil {
-            // No LaTeX engine? Fall back to the HTML path: ask
-            // pandoc for HTML (no engine needed), render in
-            // WKWebView, and export PDF locally. Always silent —
-            // we handle the combined failure below.
-            DebugLog.write("[PDF] exportPdf: server PDF failed, trying HTML+WebKit fallback")
+            // Try HTML+NSPrintOperation — pandoc-only, no LaTeX.
+            DebugLog.write("[PDF] exportPdf: trying HTML+NSPrintOperation fallback")
             if let html = await appState.renderEngagementHtml(
                 engagementId: engagementId,
                 silent: true
@@ -153,15 +158,12 @@ struct EngagementReportSheet: View {
                 pdfData = Self.htmlToPdf(html)
                 DebugLog.write("[PDF] exportPdf: htmlToPdf returned \(pdfData?.count ?? 0) bytes")
             } else {
-                htmlErr = appState.errorMessage
-                DebugLog.write("[PDF] exportPdf: HTML endpoint FAILED: \(htmlErr)")
+                DebugLog.write("[PDF] exportPdf: HTML endpoint FAILED: \(appState.errorMessage)")
             }
         }
         guard let pdf = pdfData else {
-            let detail = !htmlErr.isEmpty
-                ? "\n\nHTML endpoint failed: \(htmlErr)"
-                : (serverErr.isEmpty ? "" : "\n\nDaemon: \(serverErr)")
-            error = "Could not generate PDF. Check Console.app logs (filter \"SuperManagerMac\") for [PDF] entries.\(detail)"
+            let hint = serverErr.isEmpty ? "" : "\n\nDaemon: \(serverErr)"
+            error = "Could not generate PDF. Ensure pandoc is installed (Settings → Integrations).\(hint)"
             return
         }
         let panel = NSSavePanel()

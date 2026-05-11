@@ -78,6 +78,34 @@ impl Response {
             id,
         }
     }
+
+    /// Create an error response from a structured `EngineError`.
+    ///
+    /// Compared to plain `err(id, code, msg)`, this:
+    ///   - derives the JSON-RPC `code` from `EngineError::rpc_code()`
+    ///   - puts the stable `kind` string + the human message in
+    ///     the `data` field as `{"kind": "...", "message": "..."}`
+    ///
+    /// The Swift client can then `switch` on `data.kind` to pick
+    /// per-category UX (toast vs. inline-banner vs. install-link
+    /// vs. retry-button) without regex-matching the human message.
+    /// Existing callers that pass raw `(code, message)` still work
+    /// — they just don't carry the structured `data` payload.
+    pub fn err_engine(id: u64, err: &crate::error::EngineError) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            result: None,
+            error: Some(RpcError {
+                code: err.rpc_code(),
+                message: err.to_string(),
+                data: Some(serde_json::json!({
+                    "kind": err.kind(),
+                    "actionable": err.is_actionable(),
+                })),
+            }),
+            id,
+        }
+    }
 }
 
 impl Notification {

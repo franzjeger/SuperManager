@@ -102,7 +102,7 @@ actor ServiceClient {
         let jsonResp = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
 
         if let error = jsonResp?["error"] as? [String: Any] {
-            throw ServiceError.rpcError(error["message"] as? String ?? "Unknown error")
+            throw ServiceError.rpcError(parseRpcErrorPayload(error))
         }
 
         guard let result = jsonResp?["result"] else {
@@ -154,8 +154,26 @@ actor ServiceClient {
 
         let jsonResp = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
         if let error = jsonResp?["error"] as? [String: Any] {
-            throw ServiceError.rpcError(error["message"] as? String ?? "Unknown error")
+            throw ServiceError.rpcError(parseRpcErrorPayload(error))
         }
+    }
+
+    /// Lift `error.data.{kind,actionable}` (when the daemon used
+    /// `Response::err_engine`) into a structured `RpcErrorInfo`.
+    /// Older handlers that still use plain `Response::err` produce
+    /// `data == nil`, so `kind` falls back to `"other"`.
+    private func parseRpcErrorPayload(_ obj: [String: Any]) -> RpcErrorInfo {
+        let message = obj["message"] as? String ?? "Unknown error"
+        let code = obj["code"] as? Int ?? -32603
+        let data = obj["data"] as? [String: Any]
+        let kind = data?["kind"] as? String ?? "other"
+        let actionable = data?["actionable"] as? Bool ?? false
+        return RpcErrorInfo(
+            code: code,
+            message: message,
+            kind: kind,
+            actionable: actionable
+        )
     }
 
     func disconnect() {
@@ -196,11 +214,29 @@ actor ServiceClient {
     }
 }
 
+/// Structured payload extracted from a daemon JSON-RPC error.
+///
+/// `kind` is the stable machine-readable category (e.g.
+/// `"pdf_engine_missing"`, `"ssh_auth"`, `"tool_missing"`) — the
+/// Mac UI switches on it for category-specific UX. `"other"` is
+/// the catch-all for handlers that haven't been migrated to
+/// `Response::err_engine` yet.
+struct RpcErrorInfo: Hashable {
+    let code: Int
+    let message: String
+    let kind: String
+    let actionable: Bool
+}
+
 enum ServiceError: LocalizedError {
     case notConnected
     case disconnected
     case connectionFailed(String)
-    case rpcError(String)
+    /// RPC error from the daemon. The associated `RpcErrorInfo`
+    /// carries the structured kind/actionable so callers can
+    /// branch on category — see `RpcErrorInfo.kind` for the
+    /// known values.
+    case rpcError(RpcErrorInfo)
     case noResult
     case messageTooLarge(Int)
 
@@ -209,11 +245,20 @@ enum ServiceError: LocalizedError {
         case .notConnected: return "Not connected to daemon"
         case .disconnected: return "Connection to daemon lost"
         case .connectionFailed(let msg): return "Connection failed: \(msg)"
-        case .rpcError(let msg): return "Daemon error: \(msg)"
+        case .rpcError(let info): return "Daemon error: \(info.message)"
         case .noResult: return "No result from daemon"
         case .messageTooLarge(let n):
             return "Daemon response exceeded 256 MB limit (\(n) bytes); refusing to allocate."
         }
+    }
+
+    /// Convenience accessor for the structured error kind, or
+    /// `nil` if this isn't an RPC error. Callers do
+    /// `if case .rpcError(let info) = error, info.kind == "..."`
+    /// — this is a shorthand for branch-on-kind code paths.
+    var rpcKind: String? {
+        if case .rpcError(let info) = self { return info.kind }
+        return nil
     }
 }
 
