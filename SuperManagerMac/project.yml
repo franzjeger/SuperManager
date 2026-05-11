@@ -171,6 +171,24 @@ targets:
               --entitlements "${SRCROOT}/Signing/supermanager-helper.entitlements" \
               "${APP}/Contents/MacOS/com.sybr.supermanager.helper"
 
+          # During `xcodebuild test`, Xcode pre-creates a STUB
+          # `*.xctest` directory under Contents/PlugIns/ before
+          # running the host app's post-build script — but at this
+          # point the stub only has an empty Contents/ subdirectory,
+          # no binary, no Info.plist. Re-sealing the parent then
+          # fails with "bundle format unrecognized" trying to walk
+          # the half-populated plugin.
+          #
+          # When this stub exists, Xcode will fully populate the
+          # test bundle in a later phase AND re-sign the host app
+          # after that. So our re-seal here is redundant + would
+          # fail — short-circuit out.
+          if [ -d "${APP}/Contents/PlugIns" ] && \
+             ls "${APP}/Contents/PlugIns"/*.xctest >/dev/null 2>&1; then
+              echo "→ Test plugin stub present — skipping host re-seal; Xcode handles final signing."
+              exit 0
+          fi
+
           # Re-seal the bundle so its `_CodeSignature/CodeResources`
           # reflects the embedded Rust binaries. NO `--deep` — that
           # would propagate the bundle's entitlements down to nested
@@ -191,3 +209,58 @@ targets:
               --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \
               --entitlements "${TARGET_TEMP_DIR}/${PRODUCT_NAME}.app.xcent" \
               "${APP}"
+
+  # ---------------------------------------------------------------------------
+  # Unit-test target.
+  #
+  # XCTest bundle covering pure-Swift helpers — Codable round-trips,
+  # parsing logic, view-model decisions. Anything that *requires* a
+  # live daemon or system framework stays out (those are integration
+  # tests that we don't run today).
+  #
+  # Tests link against the host app so they can `@testable import
+  # SuperManagerMac` and reach `internal` types.
+  # ---------------------------------------------------------------------------
+  SuperManagerMacTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SuperManagerMacTests
+    dependencies:
+      - target: SuperManagerMac
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sybr.supermanager.tests
+        DEVELOPMENT_TEAM: LY6LJ395B8
+        CODE_SIGN_STYLE: Automatic
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        # Test bundles need an Info.plist for signing. Xcode can
+        # synthesise a minimal one (~5 lines) — much simpler than
+        # checking in a static file we'd have to keep in sync.
+        GENERATE_INFOPLIST_FILE: YES
+        # Without TEST_HOST + BUNDLE_LOADER, `@testable import` won't
+        # resolve internal-visibility symbols from the app target.
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/SuperManagerMac.app/Contents/MacOS/SuperManagerMac"
+        # The tests don't need keychain access — leave entitlements off.
+        CODE_SIGN_ENTITLEMENTS: ""
+
+# ---------------------------------------------------------------------------
+# Schemes — wire the test target into the default `SuperManagerMac` scheme
+# so `xcodebuild test -scheme SuperManagerMac` picks it up (this is what
+# CI runs).
+# ---------------------------------------------------------------------------
+schemes:
+  SuperManagerMac:
+    build:
+      targets:
+        SuperManagerMac: all
+        SuperManagerMacTests: [test]
+    test:
+      targets:
+        - SuperManagerMacTests
+      gatherCoverageData: true
+    run:
+      config: Debug
+    archive:
+      config: Release
