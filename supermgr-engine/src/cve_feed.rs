@@ -296,6 +296,56 @@ fn is_generic_os_keyword(k: &str) -> bool {
     )
 }
 
+/// Check whether `version` appears in `haystack` as a complete
+/// version token, not as a substring of a longer dotted version.
+///
+/// Naïve `haystack.contains(version)` over-matches when the CVE's
+/// canonical version is a prefix of an unrelated longer one.
+/// Example: CVE-1999-1162 carries CPE versions `["2.0", "1.1"]`
+/// (for SCO Unix 1.1 / 2.0). A naïve match flagged a modern
+/// Apache banner — `"apache/2.4.65 (unix) openssl/1.1.1zd"` —
+/// because `"1.1"` is a literal substring of `"1.1.1zd"`.
+///
+/// Boundary rule: at the start of the match the char immediately
+/// before must NOT be `0-9` or `.`; at the end the char
+/// immediately after must NOT be `0-9` or `.`. That rejects the
+/// `1.1` inside `1.1.1zd` while still accepting `1.1` followed
+/// by whitespace, hyphen, slash, or end-of-string.
+///
+/// We deliberately allow letter suffixes after the version
+/// (`13.2a`, `5.1pl1`) to not match — those are different
+/// patch-level builds, not the canonical version.
+fn version_token_in(haystack: &str, version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    for (pos, _) in haystack.match_indices(version) {
+        let before_ok = if pos == 0 {
+            true
+        } else {
+            let prev = haystack[..pos].chars().last();
+            match prev {
+                Some(c) => !c.is_ascii_digit() && c != '.',
+                None => true,
+            }
+        };
+        let end = pos + version.len();
+        let after_ok = if end >= haystack.len() {
+            true
+        } else {
+            let next = haystack[end..].chars().next();
+            match next {
+                Some(c) => !c.is_ascii_digit() && c != '.',
+                None => true,
+            }
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 /// Public matcher with explicit cache passed in (avoids leaking
 /// a 'static-cached singleton; matches one-Arc-per-scan pattern).
 pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
@@ -343,6 +393,23 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
         // keep the existing banner-wide substring check — these
         // CVEs have product-specific keywords that already
         // anchor the match.
+        // Two-tier strictness.
+        //
+        // Specific keywords (apache, openssh, wordpress, …) anchor
+        // the match well, so we keep the cheap banner-wide
+        // `contains` check. That preserves matches like "Apache 2.4
+        // CVE" against an Apache/2.4.6 banner — the CVE's version
+        // field is `"2.4"` (NVD's prefix encoding for "all 2.4.x")
+        // and a strict boundary check would reject it.
+        //
+        // Generic OS keywords + version substrings need TWO
+        // safeguards to keep noise out:
+        //   1. Proximity — keyword + version must co-occur within
+        //      50 chars (defeats SSH-2.0 + FreeBSD-far-away).
+        //   2. Boundary  — the version must appear as a complete
+        //      token, not as a substring of a longer version
+        //      (defeats "1.1" inside "openssl/1.1.1zd" for
+        //      "SCO UNIX 1.1" CVEs).
         let ver_match = if e.version_substrings.is_empty() {
             true
         } else if all_generic {
@@ -352,7 +419,9 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
                     let end = pos + kw_lc.len();
                     let window_end = (end + 50).min(lc.len());
                     let window = &lc[end..window_end];
-                    e.version_substrings.iter().any(|v| window.contains(&v.to_lowercase()))
+                    e.version_substrings.iter().any(|v| {
+                        version_token_in(window, &v.to_lowercase())
+                    })
                 })
             })
         } else {
@@ -469,5 +538,78 @@ mod tests {
             let hits = match_with_cache("Apache/2.4 (Linux)", &cache);
             assert!(hits.is_empty(), "{name} should be treated as generic");
         }
+    }
+
+    // ─── version_token_in helper ───────────────────────────────────
+
+    #[test]
+    fn version_token_rejects_prefix_of_longer_version() {
+        // The CVE-1999-1162 regression: "1.1" must NOT match
+        // inside "openssl/1.1.1zd".
+        assert!(!version_token_in("openssl/1.1.1zd", "1.1"));
+        // Same for "2.0" inside "12.0.7" or "v2.0.1".
+        assert!(!version_token_in("server-2.0.7", "2.0"));
+        assert!(!version_token_in("12.0.4", "2.0"));
+    }
+
+    #[test]
+    fn version_token_accepts_complete_token() {
+        // Plain end-of-string / whitespace / hyphen / slash all OK.
+        assert!(version_token_in("freebsd-2.0", "2.0"));
+        assert!(version_token_in("freebsd 2.0 release", "2.0"));
+        assert!(version_token_in("freebsd-2.0-release", "2.0"));
+        assert!(version_token_in("path/2.0/etc", "2.0"));
+        assert!(version_token_in("v=2.0", "2.0"));
+        // Letter suffix is fine — version ends at non-digit/non-dot.
+        assert!(version_token_in("freebsd-13.2a", "13.2a"));
+    }
+
+    #[test]
+    fn version_token_rejects_digit_before() {
+        // "1.0" inside "11.0" — char before is digit "1".
+        assert!(!version_token_in("freebsd-11.0", "1.0"));
+        assert!(!version_token_in("v=21.0", "1.0"));
+    }
+
+    #[test]
+    fn version_token_handles_empty_inputs() {
+        assert!(!version_token_in("", "2.0"));
+        assert!(!version_token_in("freebsd-2.0", ""));
+        assert!(!version_token_in("", ""));
+    }
+
+    // ─── Regression for CVE-1999-1162 on a modern Apache host ──────
+
+    #[test]
+    fn regression_sco_unix_does_not_match_modern_apache_openssl() {
+        // CVE-1999-1162: SCO UNIX 1.1 / 2.0 passwd DoS.
+        // NVD's CPE encoding produces keywords ["unix", "open desktop"]
+        // + versions ["1.1", "2.0"]. Both keywords are generic-OS.
+        // Modern Apache+OpenSSL banner must NOT match.
+        let cache = cache_with(vec![entry(
+            "CVE-1999-1162",
+            &["unix", "open desktop"],
+            &["1.1", "2.0"],
+        )]);
+        let banner = "Apache/2.4.65 (Unix) OpenSSL/1.1.1zd";
+        let hits = match_with_cache(banner, &cache);
+        assert!(
+            hits.is_empty(),
+            "modern Apache banner with OpenSSL/1.1.1zd must NOT match SCO UNIX 1.1 CVE"
+        );
+    }
+
+    // Specific-keyword path is NOT subject to boundary check —
+    // preserves the Apache-2.4-CVE-matches-2.4.x semantic.
+    #[test]
+    fn specific_keyword_still_matches_2_4_in_2_4_6() {
+        let cache = cache_with(vec![entry(
+            "CVE-2017-XXXX",
+            &["apache"],
+            &["2.4"],
+        )]);
+        let banner = "Apache/2.4.6 (Linux)";
+        let hits = match_with_cache(banner, &cache);
+        assert_eq!(hits.len(), 1, "specific keyword should keep prefix-match behaviour");
     }
 }
