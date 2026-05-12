@@ -367,34 +367,59 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
         });
     }
 
-    // Expired or expiring soon
+    // Expired or expiring soon. Same zone-aware pattern as the
+    // other TLS findings — internal hosts get downgraded severity
+    // since users hit click-through but no real customer impact.
     if let Some(ref expires) = tls.cert_expires_iso {
         if let Some(days) = days_until_expiry(expires) {
+            let internal = !crate::asset_enrich::classify(host_ip).is_routable_externally();
             if days < 0 {
+                let (sev, cvss, title_ctx, detail_ctx, rec) = if internal {
+                    (
+                        Severity::Medium,
+                        4.5,
+                        "internal host — admin UI click-through",
+                        "Internal users hit a browser warning and click through, training warning-blindness. No customer impact.",
+                        "Renew the certificate. For single-tenant internal infrastructure issue from an internal CA (smallstep, AD-CS). For shared management planes consider Let's Encrypt with DNS-01 challenge (works on internal DNS names).",
+                    )
+                } else {
+                    (
+                        Severity::High,
+                        7.0,
+                        "public-facing — browsers refuse the connection",
+                        "Browsers and modern clients refuse the connection. Customers see scary warnings or get blocked outright.",
+                        "Renew immediately. Set up auto-renewal via cert-manager / Let's Encrypt / ACME so this doesn't recur.",
+                    )
+                };
                 out.push(Finding {
                     id: "tls.cert-expired".into(),
                     host_ip: host_ip.to_owned(),
                     port: Some(port),
                     service: Some("https".into()),
-                    severity: Severity::High,
-                    title: format!("TLS cert EXPIRED ({} days ago)", -days),
-                    detail: format!("Certificate expired on {expires}. Browsers and modern clients refuse the connection."),
-                    recommendation: "Renew immediately. Set up auto-renewal via cert-manager / Let's Encrypt / ACME.".into(),
+                    severity: sev,
+                    title: format!("TLS cert EXPIRED ({} days ago — {})", -days, title_ctx),
+                    detail: format!("Certificate expired on {expires}. {detail_ctx}"),
+                    recommendation: rec.into(),
                     cve: None,
-                    cvss: Some(7.0),
+                    cvss: Some(cvss),
                 });
             } else if days < 14 {
+                let (sev, cvss) = if internal {
+                    (Severity::Low, 2.0)
+                } else {
+                    (Severity::Medium, 4.0)
+                };
                 out.push(Finding {
                     id: "tls.cert-expiring".into(),
                     host_ip: host_ip.to_owned(),
                     port: Some(port),
                     service: Some("https".into()),
-                    severity: Severity::Medium,
+                    severity: sev,
                     title: format!("TLS cert expires in {days} days"),
                     detail: format!("Certificate expires on {expires}."),
                     recommendation: "Renew before expiry. Implement auto-renewal.".into(),
                     cve: None,
-                    cvss: Some(4.0),
+                    cvss: Some(cvss),
                 });
             }
         }
@@ -1152,6 +1177,54 @@ mod tests {
         tls_findings("10.1.0.5", 443, &tls, &mut out);
         let f = out.iter().find(|f| f.id == "tls.proto-sslv3").expect("must fire");
         assert_eq!(f.severity, Severity::Critical, "SSLv3 stays Critical even on internal — POODLE works on LANs");
+    }
+
+    #[test]
+    fn tls_cert_expired_public_is_high() {
+        // days_until_expiry parses openssl's notAfter format:
+        // e.g. "Dec 30 00:00:00 2020 GMT"
+        let past = (chrono::Utc::now() - chrono::Duration::days(100))
+            .format("%b %e %H:%M:%S %Y GMT")
+            .to_string();
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "X".into(),
+            cert_subject: None,
+            cert_issuer: None,
+            cert_san: vec![],
+            cert_expires_iso: Some(past),
+            self_signed: false,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec![],
+        };
+        let mut out = vec![];
+        tls_findings("203.0.113.5", 443, &tls, &mut out);
+        let f = out.iter().find(|f| f.id == "tls.cert-expired").expect("must fire");
+        assert_eq!(f.severity, Severity::High);
+        assert!(f.title.contains("public-facing"), "title got {}", f.title);
+    }
+
+    #[test]
+    fn tls_cert_expired_internal_is_medium() {
+        let past = (chrono::Utc::now() - chrono::Duration::days(1959))
+            .format("%b %e %H:%M:%S %Y GMT")
+            .to_string();
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "X".into(),
+            cert_subject: None,
+            cert_issuer: None,
+            cert_san: vec![],
+            cert_expires_iso: Some(past),
+            self_signed: false,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec![],
+        };
+        let mut out = vec![];
+        tls_findings("10.1.3.159", 443, &tls, &mut out);
+        let f = out.iter().find(|f| f.id == "tls.cert-expired").expect("must fire");
+        assert_eq!(f.severity, Severity::Medium);
+        assert!(f.title.contains("internal"), "title got {}", f.title);
     }
 
     #[test]
