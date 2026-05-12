@@ -74,6 +74,7 @@ enum SupportBundle {
           - network-state.txt     route + DNS + iface state at capture
           - app-state.txt         GUI's view of profiles + connection state
           - activity.log          Per-profile event history
+          - crashes/              Saved crash reports (PLCrashReporter)
 
         NOT included (privacy):
           - private keys
@@ -83,6 +84,14 @@ enum SupportBundle {
         """
         try readme.write(to: staging.appendingPathComponent("README.txt"),
                          atomically: true, encoding: .utf8)
+
+        // 1b. Crash reports (PLCrashReporter dumps). May be empty;
+        // empty directory is fine — README mentions it either way.
+        let crashSrc = CrashReporting.crashDir
+        if FileManager.default.fileExists(atPath: crashSrc.path) {
+            let crashDest = staging.appendingPathComponent("crashes")
+            try? FileManager.default.copyItem(at: crashSrc, to: crashDest)
+        }
 
         // 2. App debug log
         let debugLog = "/tmp/supermanager-debug.log"

@@ -22,6 +22,16 @@ struct SuperManagerApp: App {
     /// the user has been idle past the threshold.
     @State private var autoLockTask: Task<Void, Never>? = nil
 
+    init() {
+        // Install crash reporter handlers FIRST, before any
+        // app code runs. Catches Mach exceptions + signals from
+        // startup-time crashes (malformed preference dict, etc).
+        // Drains any pending crash from the previous run into
+        // `~/Library/Application Support/SuperManager/crashes/`
+        // where the Support Bundle picks it up.
+        CrashReporting.start()
+    }
+
     var body: some Scene {
         WindowGroup {
             // Lock-aware root. When `LockState.isLocked` is true the
