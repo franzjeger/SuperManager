@@ -983,6 +983,7 @@ mod tests {
             powered_by: None,
             tls: None,
             fingerprints: vec![],
+            waf: vec![],
             web_paths: vec![],
             smb: None,
             snmp: None,

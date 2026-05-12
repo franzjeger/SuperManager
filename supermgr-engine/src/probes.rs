@@ -156,6 +156,12 @@ pub struct PortProbe {
     /// to pass through `vuln::match_cves` for version matching.
     #[serde(default)]
     pub fingerprints: Vec<String>,
+    /// WAF / CDN / load-balancer vendors identified on this
+    /// HTTP/HTTPS endpoint (Cloudflare, AWS WAF, Akamai, …).
+    /// Empty for non-web ports. Each entry carries the evidence
+    /// (which header / cookie matched) for transparency.
+    #[serde(default)]
+    pub waf: Vec<crate::waf_detect::WafInfo>,
     /// Web path enumeration probe results — all paths checked,
     /// with their status / size / content-type / matched flag.
     #[serde(default)]
@@ -229,6 +235,7 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
         powered_by: None,
         tls: None,
         fingerprints: Vec::new(),
+        waf: Vec::new(),
         web_paths: Vec::new(),
         smb: None,
         snmp: None,
@@ -247,6 +254,8 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
                 probe.powered_by = http.powered_by;
                 probe.banner = http.first_line;
                 probe.fingerprints = http.fingerprints;
+                probe.extra_findings.extend(waf_findings(host, port, &http.waf, false));
+                probe.waf = http.waf;
             }
             // Web path enumeration — runs in parallel internally,
             // ~3s budget per host:port.
@@ -261,6 +270,8 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
                 probe.title = http.title;
                 probe.powered_by = http.powered_by;
                 probe.fingerprints = http.fingerprints;
+                probe.extra_findings.extend(waf_findings(host, port, &http.waf, true));
+                probe.waf = http.waf;
             }
             let (paths, findings) = crate::web_paths::enumerate(host, port, true).await;
             probe.web_paths = paths;
@@ -392,6 +403,11 @@ pub struct HttpResult {
     /// flow through `vuln::match_cves` for version-based CVE
     /// matching.
     pub fingerprints: Vec<String>,
+    /// WAF / CDN / load-balancer vendors identified from the
+    /// response. Surfaced separately from `fingerprints` because
+    /// these are network-edge components, not application-layer
+    /// frameworks — different remediation surface.
+    pub waf: Vec<crate::waf_detect::WafInfo>,
 }
 
 /// HTTP / HTTPS GET / and parse common fingerprinting fields.
@@ -419,6 +435,25 @@ pub async fn http_probe(host: &str, port: u16, tls: bool) -> Result<HttpResult> 
     let body = resp.text().await.unwrap_or_default();
     let title = extract_title(&body);
     let fingerprints = fingerprint_web(&headers, &body, &title);
+
+    // WAF / CDN detection — collect a flat (name, value) list of
+    // every response header + every Set-Cookie name, hand it to
+    // the matcher. Costs nothing extra over the same request we
+    // already made; surfaces context up-front so the operator
+    // knows whether they're talking to the edge or the origin.
+    let header_pairs: Vec<(String, String)> = headers
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
+        .collect();
+    let cookie_names: Vec<String> = headers
+        .get_all("set-cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        // The name is everything before the first `=`.
+        .filter_map(|s| s.split_once('=').map(|(name, _)| name.trim().to_owned()))
+        .collect();
+    let waf = crate::waf_detect::detect(&header_pairs, &cookie_names);
+
     Ok(HttpResult {
         status,
         server,
@@ -426,7 +461,62 @@ pub async fn http_probe(host: &str, port: u16, tls: bool) -> Result<HttpResult> 
         powered_by,
         first_line: Some(format!("HTTP/{status}")),
         fingerprints,
+        waf,
     })
+}
+
+/// Turn WAF/CDN identifications into informational findings so
+/// they surface in the SwiftUI alongside everything else. These
+/// are Info severity by design — they're context, not vulnerabilities.
+/// The operator uses them to understand audit scope (e.g.
+/// "this site is behind Cloudflare so my port scans probably
+/// hit the edge, not the origin").
+fn waf_findings(
+    host: &str,
+    port: u16,
+    hits: &[crate::waf_detect::WafInfo],
+    tls: bool,
+) -> Vec<crate::vuln::Finding> {
+    hits.iter()
+        .map(|w| {
+            let evidence = w.evidence.join(", ");
+            crate::vuln::Finding {
+                id: format!("recon.waf-{}", w.vendor.to_lowercase().replace([' ', '(', ')', '/'], "-")),
+                host_ip: host.to_owned(),
+                port: Some(port),
+                service: Some(if tls { "https".into() } else { "http".into() }),
+                severity: crate::vuln::Severity::Info,
+                title: format!("{} {} identified", w.vendor, match w.kind {
+                    crate::waf_detect::WafKind::Cdn => "CDN",
+                    crate::waf_detect::WafKind::Waf => "WAF",
+                    crate::waf_detect::WafKind::LoadBalancer => "load balancer",
+                    crate::waf_detect::WafKind::ReverseProxy => "reverse proxy",
+                }),
+                detail: format!(
+                    "Response signatures matched {}: {evidence}. \
+                     This is informational context — when an edge \
+                     service fronts the host, port-scan results may \
+                     reflect the edge rather than the origin, and \
+                     finding-level remediations sometimes target the \
+                     edge config (firewall rules, WAF rulesets) \
+                     rather than the application.",
+                    w.vendor
+                ),
+                recommendation: format!(
+                    "No action required — informational. \
+                     If origin-bypass is a concern (i.e. the origin \
+                     should NOT be reachable directly), verify by \
+                     resolving the host's underlying IP via SAN/cert \
+                     analysis + crt.sh history, then attempting direct \
+                     connection. {} typically offers origin-allowlist \
+                     features to lock down origins to edge IPs only.",
+                    w.vendor
+                ),
+                cve: None,
+                cvss: Some(0.0),
+            }
+        })
+        .collect()
 }
 
 /// Wappalyzer-style web framework / CMS detection.

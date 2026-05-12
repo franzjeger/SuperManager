@@ -273,6 +273,9 @@ impl EngineServer {
             "discovery_findings" => {
                 self.handle_discovery_findings(id, req.params).await
             }
+            "discovery_dns_axfr" => {
+                self.handle_discovery_dns_axfr(id, req.params).await
+            }
             "security_test_default_creds" => {
                 self.handle_security_test_default_creds(id, req.params).await
             }
