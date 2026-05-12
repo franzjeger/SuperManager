@@ -308,8 +308,8 @@ const PATH_RULES: &[PathRule] = &[
         cvss: 8.0,
         finding_id: "web.backup-targz",
         title: "backup.tar.gz reachable",
-        detail: "Backup archive at guessable URL.",
-        recommendation: "Move outside web root.",
+        detail: "A backup archive at a guessable URL is one of the top causes of mass data leaks. Often contains DB dumps + source.",
+        recommendation: "Move backups outside the web root. Never store backups under `/`. Audit the web access log for prior downloads.",
         flag_on_403: false,
     },
     PathRule {
@@ -381,8 +381,8 @@ const PATH_RULES: &[PathRule] = &[
         cvss: 9.0,
         finding_id: "web.spring-actuator-heapdump",
         title: "Spring Boot actuator /heapdump exposed",
-        detail: "Heap dump exposes credentials, session tokens, request bodies — gold mine for attackers.",
-        recommendation: "Disable in production.",
+        detail: "Heap dump exposes credentials, session tokens, request bodies — gold mine for attackers. The heap snapshot contains every secret the JVM loaded in memory.",
+        recommendation: "In application.properties: set `management.endpoint.heapdump.enabled=false` (or restrict via `management.endpoints.web.exposure.include` allowlist). Restart the app. Confirm the endpoint returns 404 afterward. Rotate any credentials exposed in the captured dump.",
         flag_on_403: false,
     },
     // -------- Robots / informational (NOT findings, just data) --------
