@@ -27,3 +27,4 @@ SuperManagerMac/build/
 SuperManagerMac/**/xcuserdata/
 SuperManagerMac/**/*.xcuserstate
 .DS_Store
+dist/
