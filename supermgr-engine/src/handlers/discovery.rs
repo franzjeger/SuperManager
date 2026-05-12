@@ -169,6 +169,31 @@ impl EngineServer {
         }
     }
 
+    /// DNS zone-transfer (AXFR) probe — Kali-style recon. Tries
+    /// to pull the full zone from each of the domain's authoritative
+    /// nameservers. Returns one finding per leaking NS.
+    pub(crate) async fn handle_discovery_dns_axfr(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let domain = match params.get("domain").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing or empty `domain` parameter".to_owned(),
+                );
+            }
+        };
+        let findings = crate::dns_axfr::check(&domain).await;
+        match serde_json::to_value(&findings) {
+            Ok(v) => Response::ok(id, serde_json::json!({"findings": v})),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
     pub(crate) async fn handle_discovery_inventory(
         &self,
         id: u64,
