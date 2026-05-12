@@ -636,8 +636,27 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
 
 /// Probe whether the server accepts a particular cipher family.
 /// Uses `openssl s_client -cipher <family>` and looks at the
-/// resulting handshake status. Returns `true` on a successful
-/// handshake (server agreed to use the family), `false` otherwise.
+/// resulting handshake status.
+///
+/// Two-stage check:
+///   1. Reject obvious failures (`(NONE)`, `no cipher available`,
+///      explicit handshake failure).
+///   2. Extract the negotiated cipher name and verify it matches
+///      the requested family.
+///
+/// Step 2 is critical — without it we false-positive in two
+/// situations:
+///   a. The local openssl was compiled without the requested
+///      cipher family (e.g. modern LibreSSL has no NULL ciphers).
+///      In that case `-cipher NULL` silently degrades to "no
+///      constraint" and the server picks a strong cipher.
+///   b. The handshake falls through to TLS 1.3, where `-cipher`
+///      doesn't apply (TLS 1.3 uses a separate `-ciphersuites`
+///      list). A TLS 1.3 handshake against `-cipher NULL` returns
+///      a strong AEAD cipher.
+///
+/// Without verifying the cipher name, a healthy modern server
+/// gets flagged as accepting NULL/RC4/etc. — completely wrong.
 async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
     let target = format!("{host}:{port}");
     let mut child = tokio::process::Command::new("openssl")
@@ -662,13 +681,91 @@ async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // s_client prints "Cipher    : <name>" on a successful handshake.
-    // "(NONE)" or "no ciphers available" → server rejected the family.
-    let combined = format!("{stdout}\n{stderr}").to_lowercase();
-    if combined.contains("(none)") || combined.contains("no cipher") {
+    let combined = format!("{stdout}\n{stderr}");
+    let lc = combined.to_lowercase();
+
+    // Stage 1: explicit failure markers.
+    if lc.contains("(none)")
+        || lc.contains("no cipher")
+        || lc.contains("handshake failure")
+        || lc.contains("no ciphers available")
+    {
         return Ok(false);
     }
-    Ok(combined.contains("cipher    : ") || combined.contains("cipher: "))
+
+    // Stage 2: must extract a real negotiated cipher AND it must
+    // belong to the requested family. If we can't pin a family
+    // (e.g. unrecognised name in `family`), be conservative and
+    // return false — we'd rather miss a weak-cipher finding than
+    // emit a false one.
+    match extract_negotiated_cipher(&combined) {
+        Some(name) => Ok(cipher_matches_family(&name, family)),
+        None => Ok(false),
+    }
+}
+
+/// Extract the negotiated cipher name from `openssl s_client` output.
+///
+/// Two output formats coexist across openssl versions:
+///   - `New, TLSv1.2, Cipher is AES256-SHA` (top line)
+///   - `    Cipher    : AES256-SHA`         (SSL-Session block)
+///
+/// Returns `None` if no cipher was actually negotiated (handshake
+/// failed → `(NONE)`).
+fn extract_negotiated_cipher(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let trim = line.trim();
+
+        // Format A: "Cipher    : <NAME>" / "Cipher: <NAME>"
+        if let Some(rest) = trim.strip_prefix("Cipher") {
+            let cleaned = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+            if let Some(name) = cleaned.split_whitespace().next() {
+                if !name.eq_ignore_ascii_case("(NONE)") && !name.is_empty() {
+                    // Guard against matching the "Cipher is X" line here —
+                    // that path is handled in format B below to avoid
+                    // returning "is" as the name.
+                    if name != "is" {
+                        return Some(name.to_owned());
+                    }
+                }
+            }
+        }
+
+        // Format B: "New, TLSv1.2, Cipher is <NAME>"
+        if let Some(idx) = trim.find(", Cipher is ") {
+            let rest = &trim[idx + ", Cipher is ".len()..];
+            if let Some(name) = rest.split_whitespace().next() {
+                if !name.eq_ignore_ascii_case("(NONE)") && !name.is_empty() {
+                    return Some(name.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check whether an openssl cipher name belongs to the requested
+/// weak-cipher family. The family arg is the same string passed
+/// to `-cipher` (e.g. "RC4", "NULL", "3DES", "EXP", "aNULL").
+///
+/// Naming conventions used by openssl:
+///   - NULL family   → cipher names contain "NULL"
+///   - RC4 family    → contain "RC4"
+///   - 3DES family   → contain "3DES" or "DES-CBC3"
+///   - EXPORT family → contain "EXP"
+///   - aNULL family  → contain "ADH", "AECDH", or "ANON"
+fn cipher_matches_family(cipher_name: &str, family: &str) -> bool {
+    let name = cipher_name.to_uppercase();
+    match family {
+        "RC4"   => name.contains("RC4"),
+        "3DES"  => name.contains("3DES") || name.contains("DES-CBC3"),
+        "NULL"  => name.contains("NULL"),
+        "EXP" | "EXPORT" => name.contains("EXP"),
+        "aNULL" | "ANULL" => {
+            name.contains("ADH") || name.contains("AECDH") || name.contains("ANON")
+        }
+        _ => false,
+    }
 }
 
 /// Probe whether the server accepts a particular protocol version.
@@ -800,4 +897,143 @@ pub async fn snmp_sysdescr(host: &str) -> Result<String> {
         }
     }
     Err(anyhow!("snmpget did not respond on public/private"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── extract_negotiated_cipher ─────────────────────────────────────
+
+    #[test]
+    fn extract_cipher_from_session_block() {
+        // Real `openssl s_client` SSL-Session block output.
+        let out = "
+---
+New, TLSv1.2, Cipher is AES256-SHA
+Server public key is 2048 bit
+Secure Renegotiation IS supported
+SSL-Session:
+    Protocol  : TLSv1.2
+    Cipher    : AES256-SHA
+    Session-ID: ABCD
+";
+        let name = extract_negotiated_cipher(out);
+        assert_eq!(name.as_deref(), Some("AES256-SHA"));
+    }
+
+    #[test]
+    fn extract_cipher_from_new_line_only() {
+        // Truncated output where the SSL-Session block didn't print
+        // (early disconnect). Falls back to the "Cipher is X" line.
+        let out = "New, TLSv1.2, Cipher is ECDHE-RSA-AES128-GCM-SHA256\n";
+        let name = extract_negotiated_cipher(out);
+        assert_eq!(name.as_deref(), Some("ECDHE-RSA-AES128-GCM-SHA256"));
+    }
+
+    #[test]
+    fn extract_cipher_tls13_aead() {
+        // TLS 1.3 handshake — openssl substitutes a strong cipher
+        // because `-cipher` doesn't apply to TLS 1.3.
+        let out = "New, TLSv1/SSLv3, Cipher is AEAD-AES256-GCM-SHA384\n    Protocol  : TLSv1.3\n    Cipher    : AEAD-AES256-GCM-SHA384\n";
+        let name = extract_negotiated_cipher(out);
+        assert_eq!(name.as_deref(), Some("AEAD-AES256-GCM-SHA384"));
+    }
+
+    #[test]
+    fn extract_cipher_none_returns_none() {
+        // Failed handshake — both formats show (NONE).
+        let out = "
+---
+New, (NONE), Cipher is (NONE)
+    Cipher    : (NONE)
+";
+        let name = extract_negotiated_cipher(out);
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn extract_cipher_empty_input() {
+        assert_eq!(extract_negotiated_cipher(""), None);
+    }
+
+    // ─── cipher_matches_family ─────────────────────────────────────────
+
+    #[test]
+    fn match_null_family() {
+        assert!(cipher_matches_family("NULL-SHA", "NULL"));
+        assert!(cipher_matches_family("NULL-MD5", "NULL"));
+        assert!(cipher_matches_family("ECDHE-RSA-NULL-SHA", "NULL"));
+        // Strong cipher must NOT match.
+        assert!(!cipher_matches_family("AEAD-AES256-GCM-SHA384", "NULL"));
+        assert!(!cipher_matches_family("ECDHE-RSA-AES256-GCM-SHA384", "NULL"));
+    }
+
+    #[test]
+    fn match_rc4_family() {
+        assert!(cipher_matches_family("RC4-MD5", "RC4"));
+        assert!(cipher_matches_family("RC4-SHA", "RC4"));
+        assert!(cipher_matches_family("ECDHE-RSA-RC4-SHA", "RC4"));
+        assert!(!cipher_matches_family("AES256-SHA", "RC4"));
+    }
+
+    #[test]
+    fn match_3des_family() {
+        assert!(cipher_matches_family("DES-CBC3-SHA", "3DES"));
+        assert!(cipher_matches_family("ECDHE-RSA-DES-CBC3-SHA", "3DES"));
+        assert!(!cipher_matches_family("AES256-SHA", "3DES"));
+        // DES (single) is not 3DES.
+        assert!(!cipher_matches_family("DES-CBC-SHA", "3DES"));
+    }
+
+    #[test]
+    fn match_export_family() {
+        assert!(cipher_matches_family("EXP-RC4-MD5", "EXP"));
+        assert!(cipher_matches_family("EXP-DES-CBC-SHA", "EXP"));
+        assert!(cipher_matches_family("EXP-RC4-MD5", "EXPORT"));
+        assert!(!cipher_matches_family("AES256-SHA", "EXP"));
+    }
+
+    #[test]
+    fn match_anonymous_family() {
+        assert!(cipher_matches_family("ADH-AES256-SHA", "aNULL"));
+        assert!(cipher_matches_family("AECDH-AES256-SHA", "aNULL"));
+        assert!(cipher_matches_family("ADH-AES256-SHA", "ANULL"));
+        assert!(!cipher_matches_family("AES256-SHA", "aNULL"));
+        // ECDHE is NOT anonymous (it has authentication).
+        assert!(!cipher_matches_family("ECDHE-RSA-AES256-GCM-SHA384", "aNULL"));
+    }
+
+    #[test]
+    fn match_unknown_family_rejects() {
+        // Defence in depth: unknown family → always false.
+        assert!(!cipher_matches_family("NULL-SHA", "BOGUS"));
+        assert!(!cipher_matches_family("RC4-MD5", ""));
+    }
+
+    // ─── Regression for the .111:5001 bug ──────────────────────────────
+
+    #[test]
+    fn regression_tls13_substitution_does_not_match_null() {
+        // openssl shell-out scenario: we asked for `-cipher NULL`
+        // but the handshake fell through to TLS 1.3 which ignores
+        // -cipher. openssl reports a strong AEAD cipher. The probe
+        // must NOT flag this as "server accepts NULL".
+        let out = "
+---
+Verification error: self signed certificate
+---
+New, TLSv1/SSLv3, Cipher is AEAD-AES256-GCM-SHA384
+    Protocol  : TLSv1.3
+    Cipher    : AEAD-AES256-GCM-SHA384
+";
+        let name = extract_negotiated_cipher(out).expect("should extract name");
+        assert_eq!(name, "AEAD-AES256-GCM-SHA384");
+        // The bug: this would have returned true under the old logic.
+        assert!(!cipher_matches_family(&name, "NULL"));
+        assert!(!cipher_matches_family(&name, "RC4"));
+        assert!(!cipher_matches_family(&name, "3DES"));
+        assert!(!cipher_matches_family(&name, "EXP"));
+        assert!(!cipher_matches_family(&name, "aNULL"));
+    }
 }
