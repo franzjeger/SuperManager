@@ -290,14 +290,14 @@ const PATH_RULES: &[PathRule] = &[
     // -------- Backup files --------
     PathRule {
         path: "/backup.zip",
-        signatures: &[], // Any 200 with binary content is suspicious here
-        expected_kind: ExpectedKind::Any,
+        signatures: &[], // No signature — relies on expected_kind: Binary to reject HTML
+        expected_kind: ExpectedKind::Binary,
         severity: Severity::High,
         cvss: 8.0,
         finding_id: "web.backup-zip",
         title: "backup.zip reachable",
         detail: "A backup archive at a guessable URL is one of the top causes of mass data leaks. Often contains DB dumps + source.",
-        recommendation: "Move backups outside the web root. Never store backups under `/`.",
+        recommendation: "Move backups outside the web root. Never store backups under `/`. Audit the web access log for prior downloads.",
         flag_on_403: false,
     },
     PathRule {
