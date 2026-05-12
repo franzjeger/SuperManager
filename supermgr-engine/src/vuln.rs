@@ -257,19 +257,44 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
         });
     }
 
-    // Self-signed cert on what looks like a real service
+    // Self-signed cert. Severity depends on whether the host is
+    // internet-routable. On a public IP, a self-signed cert means
+    // browser warnings + click-through training — Medium. On an
+    // internal RFC1918 IP, self-signed is the routine default for
+    // appliances, NAS, switch UIs, RMM agents, etc. — Low, with a
+    // recommendation that focuses on internal-PKI rather than
+    // public-CA replacement.
     if tls.self_signed {
+        let zone = crate::asset_enrich::classify(host_ip);
+        let internal = !zone.is_routable_externally();
+        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) = if internal {
+            (
+                Severity::Low,
+                2.0,
+                "Self-signed TLS certificate (internal host)",
+                "Self-signed certs on internal hosts are routine for appliances + management UIs. Risk is limited to internal users seeing browser warnings — fine for known infrastructure, but a real risk for shared/multi-tenant environments where warning fatigue trains users to click through.",
+                "Acceptable for single-tenant internal infrastructure. For shared management planes (RMM, identity, mail) issue an internal CA-signed cert: stand up a private CA (smallstep, AD-CS) or use Let's Encrypt with DNS-01 challenge for internal-only DNS names.",
+            )
+        } else {
+            (
+                Severity::Medium,
+                4.0,
+                "Self-signed TLS certificate (public-facing)",
+                "Public host serving a self-signed cert. Modern browsers refuse the connection by default; users who click through are vulnerable to MITM. Often a sign of a forgotten dev/test deployment exposed to the internet.",
+                "Replace with a Let's Encrypt or commercial CA-signed certificate. Use cert-manager / acme.sh / Caddy for auto-renewal. If this host isn't supposed to be internet-facing, restrict via firewall.",
+            )
+        };
         out.push(Finding {
             id: "tls.self-signed".into(),
             host_ip: host_ip.to_owned(),
             port: Some(port),
             service: Some("https".into()),
-            severity: Severity::Medium,
-            title: "Self-signed TLS certificate".into(),
-            detail: "Self-signed certs prevent meaningful client-side verification, train users to click-through warnings.".into(),
-            recommendation: "Replace with a Let's Encrypt or commercial CA-signed certificate. Use cert-manager for auto-renewal.".into(),
+            severity: sev,
+            title: title.into(),
+            detail: detail.into(),
+            recommendation: recommendation.into(),
             cve: None,
-            cvss: Some(4.0),
+            cvss: Some(cvss),
         });
     }
 
@@ -924,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn tls_findings_flag_self_signed() {
+    fn tls_findings_flag_self_signed_public_is_medium() {
         let tls = crate::probes::TlsInfo {
             version: "TLSv1.3".into(),
             cipher: "TLS_AES_256_GCM_SHA384".into(),
@@ -938,7 +963,41 @@ mod tests {
         };
         let mut out = vec![];
         tls_findings("1.1.1.1", 443, &tls, &mut out);
-        assert!(out.iter().any(|f| f.id == "tls.self-signed"));
+        let f = out.iter().find(|f| f.id == "tls.self-signed").expect("must fire");
+        assert_eq!(f.severity, Severity::Medium, "public IP → medium");
+        assert!(
+            f.title.contains("public-facing"),
+            "title should mention public-facing context: got {}",
+            f.title
+        );
+    }
+
+    #[test]
+    fn tls_findings_flag_self_signed_internal_is_low() {
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "TLS_AES_256_GCM_SHA384".into(),
+            cert_subject: Some("CN=nas-01".into()),
+            cert_issuer: Some("CN=nas-01".into()),
+            cert_san: vec![],
+            cert_expires_iso: None,
+            self_signed: true,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec![],
+        };
+        // RFC1918 host — internal infrastructure.
+        for ip in &["192.168.1.10", "10.0.0.5", "172.20.5.7"] {
+            let mut out = vec![];
+            tls_findings(ip, 443, &tls, &mut out);
+            let f = out.iter().find(|f| f.id == "tls.self-signed")
+                .unwrap_or_else(|| panic!("{ip}: self-signed finding must fire"));
+            assert_eq!(f.severity, Severity::Low, "{ip} → low (internal)");
+            assert!(
+                f.title.contains("internal"),
+                "{ip}: title should mention internal context: got {}",
+                f.title
+            );
+        }
     }
 
     proptest::proptest! {
