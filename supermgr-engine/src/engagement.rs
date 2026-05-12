@@ -93,6 +93,18 @@ pub struct Engagement {
     /// specified cadence and updates `next_scan_at` after each run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+
+    /// When true, active scans started under this engagement reject
+    /// any target IP that doesn't fall within `scope_cidrs`. When
+    /// false (the legacy / default), the GUI shows a soft warning
+    /// for out-of-scope targets but lets the scan proceed.
+    ///
+    /// Recommended-on for engagements where the customer signed an
+    /// authorization document limiting scope. The audit log
+    /// captures the strict-mode flag so a later legal question
+    /// ("did the scan stay within scope?") has a definite answer.
+    #[serde(default)]
+    pub strict_scope: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -203,6 +215,78 @@ pub struct EngagementEvent {
     pub action: String,                            // "passive_scan", "nuclei_run", etc.
     pub findings: u32,                             // count of new findings produced
     pub notes: String,                             // free-form summary
+}
+
+/// Filter a list of target IP strings against an engagement's
+/// `scope_cidrs` + `exclusions`. Returns the list of targets that
+/// would VIOLATE the scope:
+///   - Outside every scope CIDR, OR
+///   - Inside any exclusion CIDR.
+///
+/// Caller decides what to do with the violations:
+///   - `strict_scope = false` (default): log a warning, continue
+///   - `strict_scope = true`: reject the whole scan with
+///     `EngineError::InvalidScope`
+///
+/// Pure function — no I/O, only string parsing — so it's
+/// trivially testable. See the unit tests at the bottom of this
+/// file for the truth-table.
+///
+/// If `scope_cidrs` is empty, the engagement is ad-hoc (no scope)
+/// and we return an empty violation list regardless of strict
+/// mode. Strict mode without any scope CIDRs would lock the
+/// operator out of their own scans — there's no meaningful
+/// interpretation of "must be in scope" when there's no scope.
+pub fn targets_outside_scope(
+    targets: &[String],
+    scope_cidrs: &[String],
+    exclusions: &[String],
+) -> Vec<String> {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    if scope_cidrs.is_empty() {
+        return Vec::new();
+    }
+
+    let parsed_scope: Vec<ipnet::IpNet> = scope_cidrs
+        .iter()
+        .filter_map(|s| ipnet::IpNet::from_str(s).ok())
+        .collect();
+    let parsed_excl: Vec<ipnet::IpNet> = exclusions
+        .iter()
+        .filter_map(|s| ipnet::IpNet::from_str(s).ok())
+        .collect();
+
+    let mut violations = Vec::new();
+    for raw in targets {
+        // Accept bare IPs OR CIDRs. For a CIDR target, every host
+        // inside it must fall within some scope CIDR — we check
+        // the network address as a proxy; if `expand_targets`
+        // already exploded a CIDR into individual hosts then this
+        // simplification is moot (each host is checked).
+        let ip: Option<IpAddr> = IpAddr::from_str(raw).ok()
+            .or_else(|| ipnet::IpNet::from_str(raw).ok().map(|n| n.network()));
+        let Some(ip) = ip else {
+            // Hostname (not IP/CIDR). Skip — we'd need DNS to
+            // resolve, and forward-DNS-then-check is racy. The
+            // GUI's separate hostname validation handles this.
+            continue;
+        };
+
+        // Exclusions trump scope: any IP inside an exclusion is
+        // a violation regardless of scope.
+        if parsed_excl.iter().any(|e| e.contains(&ip)) {
+            violations.push(raw.clone());
+            continue;
+        }
+
+        // Must fall within at least one scope CIDR.
+        if !parsed_scope.iter().any(|n| n.contains(&ip)) {
+            violations.push(raw.clone());
+        }
+    }
+    violations
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +451,114 @@ mod tests {
             log: vec![],
             notes: String::new(),
             schedule: None,
+            strict_scope: false,
         }
+    }
+
+    // -- targets_outside_scope tests -----------------------------------------
+
+    #[test]
+    fn scope_empty_means_no_violations() {
+        // Ad-hoc engagement (no scope set) — strict mode is
+        // meaningless because there's nothing to enforce.
+        let violations = targets_outside_scope(
+            &["1.2.3.4".into(), "8.8.8.8".into()],
+            &[],
+            &[],
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn target_inside_scope_passes() {
+        let violations = targets_outside_scope(
+            &["10.0.0.5".into()],
+            &["10.0.0.0/16".into()],
+            &[],
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn target_outside_scope_caught() {
+        let violations = targets_outside_scope(
+            &["192.168.1.1".into()],
+            &["10.0.0.0/16".into()],
+            &[],
+        );
+        assert_eq!(violations, vec!["192.168.1.1".to_string()]);
+    }
+
+    #[test]
+    fn exclusion_trumps_scope() {
+        // 10.0.0.5 IS inside scope-CIDR, but ALSO inside the
+        // exclusion CIDR — must be flagged. Critical pen-test
+        // safety: "scan the whole /16 except the prod payment
+        // gateway" must actually skip the gateway.
+        let violations = targets_outside_scope(
+            &["10.0.0.5".into(), "10.0.0.10".into()],
+            &["10.0.0.0/16".into()],
+            &["10.0.0.5/32".into()],
+        );
+        assert_eq!(violations, vec!["10.0.0.5".to_string()]);
+    }
+
+    #[test]
+    fn multiple_scopes_any_match_passes() {
+        // 192.168.1.1 not in first CIDR but in second → pass.
+        let violations = targets_outside_scope(
+            &["192.168.1.1".into()],
+            &["10.0.0.0/16".into(), "192.168.0.0/16".into()],
+            &[],
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn invalid_cidr_in_scope_rejects_everything() {
+        // Operator made a typo in the scope. We don't crash, but
+        // we DO reject every target — failing closed is the only
+        // safe behaviour for strict mode. Failing open (allowing
+        // everything because the scope didn't parse) would
+        // silently disable strict mode and create a security hole
+        // exactly when the operator wanted strict enforcement.
+        //
+        // The GUI's separate validation should catch CIDR typos
+        // at save-time; this test just pins the safe failure
+        // mode at the validation layer.
+        let violations = targets_outside_scope(
+            &["1.2.3.4".into()],
+            &["not-a-cidr".into()],
+            &[],
+        );
+        assert_eq!(violations, vec!["1.2.3.4".to_string()]);
+    }
+
+    #[test]
+    fn hostnames_are_skipped() {
+        // FQDN can't be checked without DNS, which we deliberately
+        // don't do (forward-then-check is racy). The hostname path
+        // is GUI's responsibility.
+        let violations = targets_outside_scope(
+            &["server.example.com".into()],
+            &["10.0.0.0/16".into()],
+            &[],
+        );
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn cidr_target_uses_network_address_for_check() {
+        // Targets can be CIDRs (e.g. operator pasted in a /24).
+        // We check the network address. If 10.0.0.0/24 is inside
+        // scope 10.0.0.0/16, allowed; if 192.168.1.0/24 is
+        // outside, violation.
+        let violations = targets_outside_scope(
+            &["10.0.0.0/24".into(), "192.168.1.0/24".into()],
+            &["10.0.0.0/16".into()],
+            &[],
+        );
+        assert_eq!(violations, vec!["192.168.1.0/24".to_string()]);
     }
 
     fn cleanup(id: &str) {
