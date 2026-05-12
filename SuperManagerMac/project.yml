@@ -48,6 +48,16 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.6.0"
+  # PLCrashReporter — captures Mach exceptions, signals, and
+  # NSException crashes to a local file on disk. We don't send
+  # crashes anywhere; the file just lands in
+  # `~/Library/Application Support/SuperManager/crashes/`, and
+  # the Support Bundle picks it up. Operator gets a stack trace
+  # to attach to a GitHub Issue. No third-party service
+  # involvement — privacy-respecting by default.
+  PLCrashReporter:
+    url: https://github.com/microsoft/plcrashreporter
+    from: "1.11.2"
 
 settings:
   base:
@@ -80,6 +90,8 @@ targets:
     dependencies:
       - package: Sparkle
         product: Sparkle
+      - package: PLCrashReporter
+        product: CrashReporter
     info:
       path: SuperManagerMac/Info.plist
       properties:
