@@ -472,7 +472,15 @@ fn cve_database() -> &'static [CveEntry] {
             cvss: 7.4,
             title: "OpenSSH agent forwarding RCE (CVE-2023-38408)",
             detail: "PKCS#11 provider remote code execution via forwarded ssh-agent. Affects OpenSSH < 9.3p2.",
-            recommendation: "Upgrade to OpenSSH 9.3p2 or later. Disable agent forwarding (-A flag) where not strictly needed.",
+            recommendation: "Upgrade to OpenSSH 9.3p2+. \
+                IMPORTANT — Debian / Ubuntu / RHEL backport security \
+                fixes WITHOUT changing the SSH banner version, so this \
+                finding can be a false-positive on a patched distro. \
+                Verify with `dpkg -l openssh-server` (Debian/Ubuntu) or \
+                `rpm -q openssh-server` (RHEL/CentOS) and compare \
+                against your distro's CVE-2023-38408 advisory. \
+                Server-side mitigation: set `AllowAgentForwarding no` \
+                in sshd_config if agent forwarding isn't required.",
         },
         CveEntry {
             id: "CVE-2024-6387",
@@ -487,7 +495,11 @@ fn cve_database() -> &'static [CveEntry] {
             cvss: 8.1,
             title: "regreSSHion: OpenSSH RCE (CVE-2024-6387)",
             detail: "Race condition in sshd's signal handler allows unauthenticated remote code execution as root. Affects OpenSSH 8.5p1 — 9.7p1.",
-            recommendation: "Upgrade to OpenSSH 9.8 or apply distro patches immediately.",
+            recommendation: "Upgrade to OpenSSH 9.8 (or distro-patched build) immediately. \
+                Debian / Ubuntu / RHEL backport fixes WITHOUT bumping the banner version. \
+                Verify with `apt list --installed openssh-server` (Debian/Ubuntu) or \
+                `rpm -q openssh-server` (RHEL/CentOS) and compare against your distro's \
+                regreSSHion advisory date.",
         },
         // Apache
         CveEntry {
@@ -545,7 +557,12 @@ fn cve_database() -> &'static [CveEntry] {
             cvss: 7.7,
             title: "nginx resolver off-by-one (CVE-2021-23017)",
             detail: "DNS resolver bug allows 1-byte memory overwrite, potentially RCE.",
-            recommendation: "Upgrade nginx to 1.20.1 / 1.21.0 or later.",
+            recommendation: "Upgrade nginx to 1.20.1 / 1.21.0+. \
+                Debian / Ubuntu / RHEL backport this fix without changing the banner \
+                version (e.g. `nginx/1.18.0` on bullseye is patched but still reports \
+                that version). Verify the distro package: `dpkg -l nginx` (Debian/Ubuntu) \
+                or `rpm -q nginx` (RHEL/CentOS) and compare against your distro's \
+                CVE-2021-23017 advisory. Most distro builds since mid-2021 are patched.",
         },
         // PHP
         CveEntry {
@@ -581,7 +598,11 @@ fn cve_database() -> &'static [CveEntry] {
             cvss: 8.8,
             title: "Microsoft Exchange ProxyNotShell SSRF (CVE-2022-41040)",
             detail: "Server-side request forgery in autodiscover lets authenticated user pivot. Chained with CVE-2022-41082 for RCE.",
-            recommendation: "Apply Microsoft Exchange November 2022 security update or later.",
+            recommendation: "Apply Microsoft Exchange November 2022 security update or later. \
+                Exchange banner detection is product-based, not patch-aware — verify the \
+                Exchange CU + SU level via Exchange Management Shell: \
+                `Get-ExchangeServer | Format-List Name,AdminDisplayVersion`. Compare \
+                AdminDisplayVersion against the patched build numbers in the MS advisory.",
         },
         // VMware ESXi
         CveEntry {
@@ -603,7 +624,13 @@ fn cve_database() -> &'static [CveEntry] {
             cvss: 9.8,
             title: "HTTP.sys remote code execution (CVE-2021-31166)",
             detail: "Use-after-free in HTTP.sys allows pre-auth RCE on Windows.",
-            recommendation: "Apply Windows May 2021 security update.",
+            recommendation: "Apply Windows May 2021 security update (KB5003173). \
+                NOTE — Microsoft does NOT change the IIS banner ('IIS/10.0') after \
+                patching, so this finding fires on every Windows Server 2016/2019/2022 \
+                regardless of patch level. Confirm with PowerShell on the server: \
+                `Get-HotFix -Id KB5003173` (returns the install date if patched) or \
+                check Windows Update history. False-positive likely on any system \
+                patched in the last 4+ years.",
         },
         // Confluence
         CveEntry {
