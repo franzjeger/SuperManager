@@ -35,6 +35,7 @@ pub mod risk;
 pub mod scheduler;
 pub mod subdomain_enum;
 pub mod secrets;
+pub mod traffic_sniff;
 pub mod server;
 pub mod smb_enum;
 pub mod snmp_walk;
