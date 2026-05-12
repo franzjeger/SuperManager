@@ -75,6 +75,37 @@ pub struct TrafficAuditResult {
 /// `pcap_path` must exist and be readable. `evidence_dir` is
 /// where redacted per-finding excerpt files are written; if it
 /// doesn't exist, it is created.
+///
+/// # Live streaming (polling pattern)
+///
+/// This function tolerates **partial pcaps** — files that are
+/// still being written by an active `tcpdump` capture. `tcpdump
+/// -r` reads from the file's start to its current EOF and
+/// returns whatever packets are complete. Truncated tail packets
+/// are skipped without erroring.
+///
+/// That makes "live streaming" of capture events a trivial
+/// polling pattern for the GUI:
+///
+/// ```text
+///   helper.traffic_capture(duration=300, output=path)  // 5-min capture, async
+///   loop every 5s:
+///       result = engine.discovery_analyse_pcap(path)
+///       ui.update_findings(result.findings)  // cumulative
+///   when capture completes:
+///       result = engine.discovery_analyse_pcap(path)  // final
+///       ui.show_completion(result)
+/// ```
+///
+/// Each call returns the cumulative set of findings observed
+/// so far. The GUI shows progressively-more-complete results
+/// during the capture and a final snapshot when the helper's
+/// tcpdump exits. No per-event streaming protocol needed —
+/// the filesystem IS the event bus.
+///
+/// This is documented + tested (see `pcap_with_only_global_header`
+/// and `pcap_with_truncated_packet_tail`) so future changes can't
+/// silently regress the live-streaming flow.
 pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<TrafficAuditResult> {
     if !pcap_path.exists() {
         return Err(anyhow!("pcap not found: {}", pcap_path.display()));
@@ -105,8 +136,15 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
     .map_err(|_| anyhow!("tcpdump -r timed out"))?
     .map_err(|e| anyhow!("spawn tcpdump: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // tcpdump returns non-zero on a truncated tail packet ("pcap_loop:
+    // truncated dump file"). That's expected during live-streaming
+    // polling — the helper is still writing as we read. We accept
+    // non-zero exit as long as some output was produced; the events
+    // we DID parse are still valid. Only fail when there's literally
+    // no usable output AND a real error in stderr.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let truncated_tail = stderr.contains("truncated dump file");
+    if !output.status.success() && !truncated_tail && output.stdout.is_empty() {
         return Err(anyhow!("tcpdump -r exited non-zero: {stderr}"));
     }
 
@@ -1292,5 +1330,83 @@ NTLMSSP....type-1 negotiate message bytes
         let events = scan_events(text);
         let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
         assert!(mqtt.is_empty(), "non-1883 ports don't flag");
+    }
+
+    // ─── Live-streaming via polling on partial pcaps ──────────────
+    //
+    // The "live streaming" pattern is documented in analyse_pcap's
+    // rustdoc. These tests pin the behaviour so the polling flow
+    // can't regress.
+
+    /// Build a minimal valid pcap (libpcap format) with the global
+    /// header only — no packets. Mirrors what tcpdump's file looks
+    /// like in the first ~milliseconds of a capture.
+    fn pcap_global_header_only() -> Vec<u8> {
+        let mut buf = Vec::with_capacity(24);
+        // Magic number: 0xa1b2c3d4 (microsecond timestamps, native endian)
+        buf.extend_from_slice(&[0xd4, 0xc3, 0xb2, 0xa1]);
+        // Version major: 2
+        buf.extend_from_slice(&[0x02, 0x00]);
+        // Version minor: 4
+        buf.extend_from_slice(&[0x04, 0x00]);
+        // Time zone offset: 0
+        buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        // Sigfigs: 0
+        buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+        // Snaplen: 262144
+        buf.extend_from_slice(&[0x00, 0x00, 0x04, 0x00]);
+        // Link type: 1 (Ethernet)
+        buf.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+        buf
+    }
+
+    #[tokio::test]
+    async fn pcap_with_only_global_header_is_ok() {
+        // tcpdump -r succeeds on this; we should return Ok with
+        // zero findings. This is the "capture just started, no
+        // packets yet" case in the polling pattern.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pcap_path = tmp.path().join("partial.pcap");
+        std::fs::write(&pcap_path, pcap_global_header_only()).expect("write pcap");
+
+        let result = analyse_pcap(&pcap_path, tmp.path()).await;
+        let r = result.expect("must not error on header-only pcap");
+        assert_eq!(r.events_matched, 0, "no packets → no events");
+        assert!(r.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pcap_with_truncated_packet_tail_is_ok() {
+        // Header + a partial per-packet record header (8 of 16
+        // bytes). tcpdump warns "Invalid header" and proceeds —
+        // we should NOT bubble that up as an error. This is the
+        // "capture is mid-write, last packet header just truncated
+        // by us reading at exactly the wrong moment" case.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pcap_path = tmp.path().join("partial.pcap");
+        let mut bytes = pcap_global_header_only();
+        // Eight bytes of a partial per-packet header — not the
+        // full 16. tcpdump tries to read more and gives up.
+        bytes.extend_from_slice(&[0u8; 8]);
+        std::fs::write(&pcap_path, bytes).expect("write pcap");
+
+        let result = analyse_pcap(&pcap_path, tmp.path()).await;
+        // Either Ok with empty/partial findings is acceptable.
+        // What's NOT acceptable: an Err that the polling loop
+        // would treat as fatal.
+        assert!(
+            result.is_ok(),
+            "partial pcap must not error — polling pattern depends on this: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pcap_does_not_exist_errors() {
+        // Sanity: a path that doesn't exist still errors so the
+        // polling loop doesn't loop forever on a typo.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pcap_path = tmp.path().join("nope.pcap");
+        let result = analyse_pcap(&pcap_path, tmp.path()).await;
+        assert!(result.is_err());
     }
 }
