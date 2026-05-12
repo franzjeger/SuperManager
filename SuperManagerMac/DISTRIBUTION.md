@@ -91,7 +91,7 @@ build is best done after the Developer ID path is committed.
    - "Create a Certificate" → "Developer ID Application" → upload a CSR
      generated from Keychain Access → download + install the .cer.
    - Verify with `security find-identity -p codesigning -v` — should show
-     a line like `"Developer ID Application: Frank Liaaen (LY6LJ395B8)"`.
+     a line like `"Developer ID Application: Your Name (LY6LJ395B8)"`.
 
 2. **Create an App Store Connect API key for notarisation.**
    - https://appstoreconnect.apple.com/access/integrations/api
@@ -102,7 +102,7 @@ build is best done after the Developer ID path is committed.
 
 3. **Export the API key env vars in your shell profile** (`~/.zshenv`):
    ```sh
-   export DEVELOPER_ID_APP="Developer ID Application: Frank Liaaen (LY6LJ395B8)"
+   export DEVELOPER_ID_APP="Developer ID Application: Your Name (LY6LJ395B8)"
    export AC_API_KEY_PATH="$HOME/.appstoreconnect/AuthKey_ABCD123456.p8"
    export AC_API_KEY_ID="ABCD123456"
    export AC_API_ISSUER_ID="00000000-0000-0000-0000-000000000000"
@@ -172,7 +172,7 @@ New repository secret**:
 |---|---|---|
 | `MACOS_CERTIFICATE` | Base64 of `.p12` export | Keychain Access → My Certificates → right-click cert → Export → .p12 → `base64 -i cert.p12 -o cert.b64` then copy contents |
 | `MACOS_CERTIFICATE_PASSWORD` | Plain string | Password you chose during the .p12 export |
-| `MACOS_DEV_ID_APP` | `Developer ID Application: Frank Lia (LY6LJ395B8)` | From `security find-identity -p codesigning -v` |
+| `MACOS_DEV_ID_APP` | `Developer ID Application: Your Name (LY6LJ395B8)` | From `security find-identity -p codesigning -v` |
 | `AC_API_KEY_BASE64` | Base64 of `AuthKey_XXXXXX.p8` | `base64 -i ~/.appstoreconnect/AuthKey_*.p8 -o ac.b64` |
 | `AC_API_KEY_ID` | 10-char key id | Already in `~/.zshenv` (`$AC_API_KEY_ID`) |
 | `AC_API_ISSUER_ID` | UUID | Already in `~/.zshenv` (`$AC_API_ISSUER_ID`) |

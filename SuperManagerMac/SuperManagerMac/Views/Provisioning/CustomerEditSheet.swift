@@ -663,8 +663,8 @@ struct CustomerEditSheet: View {
         .environment(AppState.previewSeeded)
 }
 
-#Preview("Customer — edit Aarsleff") {
-    CustomerEditSheet(customer: .previewAarsleff)
+#Preview("Customer — edit Acme") {
+    CustomerEditSheet(customer: .previewAcme)
         .environment(AppState.previewSeeded)
 }
 #endif

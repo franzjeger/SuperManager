@@ -435,7 +435,7 @@ struct FindingDetailSheet: View {
 #Preview("Finding — Open") {
     FindingDetailSheet(
         finding: .previewExampleSshOpen,
-        scope: "aarsleff-norge",
+        scope: "acme-corp",
         engagementId: "preview-eng-1",
         onSaved: { _ in }
     )
@@ -445,7 +445,7 @@ struct FindingDetailSheet: View {
 #Preview("Finding — Accepted Risk") {
     FindingDetailSheet(
         finding: .previewAccepted,
-        scope: "aarsleff-norge",
+        scope: "acme-corp",
         engagementId: "preview-eng-1",
         onSaved: { _ in }
     )

@@ -1385,10 +1385,10 @@ mod tests {
 
     #[test]
     fn parse_gateway_extracts_via_and_dev() {
-        let line = "default via 192.168.200.1 dev enp14s0 proto dhcp src 192.168.200.121 metric 100";
+        let line = "default via 192.0.2.1 dev enp14s0 proto dhcp src 192.0.2.121 metric 100";
         assert_eq!(
             parse_gateway(line),
-            Some(("192.168.200.1".into(), "enp14s0".into()))
+            Some(("192.0.2.1".into(), "enp14s0".into()))
         );
     }
 
@@ -1412,8 +1412,8 @@ mod tests {
     #[test]
     fn parse_virtual_ip_picks_last_bracket_pair_on_local_line() {
         let out = "\
-            local  'sybr_admin' @ 192.168.200.121[4500] [192.168.251.1]\n\
-            remote '79.160.88.198' @ 79.160.88.198[4500]\n";
+            local  'admin' @ 192.0.2.121[4500] [192.168.251.1]\n\
+            remote '203.0.113.10' @ 203.0.113.10[4500]\n";
         assert_eq!(
             parse_virtual_ip(out),
             Some("192.168.251.1".parse().unwrap())

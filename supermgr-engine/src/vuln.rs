@@ -1222,7 +1222,7 @@ mod tests {
             protocols_accepted: vec![],
         };
         let mut out = vec![];
-        tls_findings("10.1.3.159", 443, &tls, &mut out);
+        tls_findings("10.0.0.159", 443, &tls, &mut out);
         let f = out.iter().find(|f| f.id == "tls.cert-expired").expect("must fire");
         assert_eq!(f.severity, Severity::Medium);
         assert!(f.title.contains("internal"), "title got {}", f.title);

@@ -20,7 +20,7 @@
 //! ## How it works
 //!
 //! 1. On startup, snapshot the current `default` route's gateway
-//!    + interface (e.g. `192.168.200.1` via `en0`).
+//!    + interface (e.g. `192.0.2.1` via `en0`).
 //! 2. Every 500 ms, re-read the route table.
 //!    - Default present → update snapshot (network may have changed
 //!      legitimately, e.g. WiFi roam; we want the freshest known-good).

@@ -22,7 +22,7 @@
 //! ## Fallback list
 //!
 //! Configurable via `set_fallback_dns` RPC — defaults to
-//! `["192.168.200.23", "9.9.9.9"]` based on the current user's
+//! `["192.0.2.23", "9.9.9.9"]` based on the current user's
 //! preferences. Persisted in
 //! `/var/lib/supermanager/dns_fallbacks.json`.
 
@@ -56,12 +56,14 @@ pub fn spawn_watchdog() -> Result<()> {
         }
     }
     if FALLBACKS.lock().unwrap().is_empty() {
-        // Sensible default — user's home DNS first, Quad9 as
-        // public-DNS fallback (Cloudflare 1.1.1.1 is also fine
-        // but Quad9 is what the user told us to use).
+        // Sensible default — two well-known public resolvers.
+        // The user can override at runtime via `set_fallbacks`
+        // (e.g. to prepend an internal DNS for split-horizon
+        // domains). Defaults must be reachable everywhere so
+        // the watchdog works out of the box on any network.
         *FALLBACKS.lock().unwrap() = vec![
-            "192.168.200.23".to_string(),
-            "9.9.9.9".to_string(),
+            "1.1.1.1".to_string(),   // Cloudflare
+            "9.9.9.9".to_string(),   // Quad9
         ];
     }
 

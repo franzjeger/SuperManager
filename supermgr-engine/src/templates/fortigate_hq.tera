@@ -588,7 +588,7 @@ config vpn ipsec phase1-interface
         set save-password enable
         set client-auto-negotiate enable
         set client-keep-alive enable
-        set psksecret "{{ extras.vpn_psk | default(value='sybr_admin') }}"
+        set psksecret "{{ extras.vpn_psk | default(value='admin') }}"
         set dpd on-idle
         set dpd-retrycount 3
         set dpd-retryinterval 30

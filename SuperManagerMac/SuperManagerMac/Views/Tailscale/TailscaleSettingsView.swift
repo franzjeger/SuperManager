@@ -257,7 +257,7 @@ struct TailscaleSettingsView: View {
                     .controlSize(.small)
                     .help("Force the system resolver to this list immediately.")
                 }
-                TextField("192.168.200.23, 9.9.9.9", text: $dnsFallbacksText)
+                TextField("1.1.1.1, 9.9.9.9", text: $dnsFallbacksText)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
                 Text("DNS health watchdog uses these when the resolver gets stuck on a non-responsive nameserver.")

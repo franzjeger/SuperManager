@@ -22,13 +22,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkDetect {
-    /// Default gateway IP, e.g. "192.168.200.1".
+    /// Default gateway IP, e.g. "192.0.2.1".
     pub default_gateway: Option<String>,
     /// Primary interface name, e.g. "en0".
     pub primary_interface: Option<String>,
-    /// IPv4 + CIDR of primary interface, e.g. "192.168.200.42/24".
+    /// IPv4 + CIDR of primary interface, e.g. "192.0.2.42/24".
     pub primary_cidr: Option<String>,
-    /// LAN base derived from the primary interface, e.g. "192.168.200.0/24".
+    /// LAN base derived from the primary interface, e.g. "192.0.2.0/24".
     pub lan_base: Option<String>,
     /// MAC of the primary interface.
     pub primary_mac: Option<String>,
@@ -59,7 +59,7 @@ pub async fn detect() -> NetworkDetect {
             for line in s.lines() {
                 let trim = line.trim();
                 if let Some(rest) = trim.strip_prefix("inet ") {
-                    // "inet 192.168.200.42 netmask 0xffffff00 broadcast 192.168.200.255"
+                    // "inet 192.0.2.42 netmask 0xffffff00 broadcast 192.0.2.255"
                     let parts: Vec<&str> = rest.split_whitespace().collect();
                     if let Some(ip) = parts.first() {
                         let mask_idx = parts
