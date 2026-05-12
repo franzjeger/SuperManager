@@ -143,19 +143,44 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
         }
     }
 
-    // RDP exposed
+    // RDP exposed. Severity depends on routability:
+    //   - Public IP → High. Direct internet RDP is a top
+    //     lateral-movement vector + credential-stuffing target.
+    //   - Internal IP → Low. RDP enabled internally is routine
+    //     in MSP-managed environments (help-desk access, jump
+    //     hosts). The actionable concern is NLA + MGMT-VLAN
+    //     segmentation, not the listener itself.
     if p.service == "rdp" {
+        let zone = crate::asset_enrich::classify(host_ip);
+        let internal = !zone.is_routable_externally();
+        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) = if internal {
+            (
+                Severity::Low,
+                3.0,
+                "RDP open (internal host)",
+                "RDP enabled on an internal host. Routine for MSP-managed environments. The concrete risks are unrestricted lateral movement once an attacker is inside the LAN, and credential-stuffing from compromised endpoints — not the listener itself.",
+                "Verify Network Level Authentication (NLA) is enforced. Restrict to MGMT VLAN if not needed by general endpoints. Enable account-lockout policy + Windows Defender Credential Guard. Audit `gpresult /scope:computer` for the RDP-NLA setting.",
+            )
+        } else {
+            (
+                Severity::High,
+                7.0,
+                "RDP open (public-facing)",
+                "RDP is a primary lateral-movement vector. Direct internet exposure invites credential-stuffing + BlueKeep-style exploits. Common ransomware entry point.",
+                "Remove from public exposure IMMEDIATELY. Restrict RDP to MGMT VLAN or behind a VPN. Enable Network Level Authentication (NLA) + account-lockout. Consider Azure Bastion / AWS SSM Session Manager for managed remote access.",
+            )
+        };
         out.push(Finding {
             id: "config.rdp-exposed".into(),
             host_ip: host_ip.to_owned(),
             port: Some(p.port),
             service: Some("rdp".into()),
-            severity: Severity::High,
-            title: "RDP open".into(),
-            detail: "RDP is a primary lateral-movement vector. Direct exposure invites credential-stuffing + BlueKeep-style exploits.".into(),
-            recommendation: "Restrict RDP to MGMT VLAN or behind VPN. Enable Network Level Authentication (NLA) + lockout policies.".into(),
+            severity: sev,
+            title: title.into(),
+            detail: detail.into(),
+            recommendation: recommendation.into(),
             cve: None,
-            cvss: Some(7.0),
+            cvss: Some(cvss),
         });
     }
 
@@ -933,6 +958,29 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "config.telnet-open");
         assert_eq!(findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn config_check_rdp_public_is_high() {
+        let p = probe(3389, "rdp");
+        let mut findings = vec![];
+        configuration_checks("203.0.113.5", &p, &mut findings);
+        let f = findings.iter().find(|f| f.id == "config.rdp-exposed").expect("must fire");
+        assert_eq!(f.severity, Severity::High, "public RDP → high");
+        assert!(f.title.contains("public-facing"), "title got {}", f.title);
+    }
+
+    #[test]
+    fn config_check_rdp_internal_is_low() {
+        let p = probe(3389, "rdp");
+        for ip in &["10.1.0.5", "192.168.10.20", "172.16.5.5"] {
+            let mut findings = vec![];
+            configuration_checks(ip, &p, &mut findings);
+            let f = findings.iter().find(|f| f.id == "config.rdp-exposed")
+                .unwrap_or_else(|| panic!("{ip}: RDP finding must fire"));
+            assert_eq!(f.severity, Severity::Low, "{ip} → low (internal)");
+            assert!(f.title.contains("internal"), "{ip}: title got {}", f.title);
+        }
     }
 
     #[test]
