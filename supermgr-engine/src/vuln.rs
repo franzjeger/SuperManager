@@ -184,19 +184,51 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
         });
     }
 
-    // SMB exposed (445) → flag for SMBv1 / weak config
+    // SMB exposed. The probe classifies ports 139 AND 445 as
+    // service "smb" — they're both real attack surface but they
+    // represent different transports:
+    //   - 445: direct SMB-over-TCP (modern, what attackers
+    //     actually use for EternalBlue / SMBGhost / share enum).
+    //   - 139: NetBIOS-SSN (legacy NT4/2000-era transport). On
+    //     modern systems 139 is usually opened alongside 445;
+    //     standalone 139 implies a very old box.
+    //
+    // Pre-fix the same "SMB share-server open" title fired for
+    // both, so a host with both ports open showed two identical
+    // findings — confusing UI noise. The titles + recommendations
+    // now reflect the transport, with port 139 alone (no 445
+    // detected by this probe — the cross-port awareness lives
+    // upstream of this single-port path) flagged Low since it's
+    // a clear "very old infrastructure" smell.
     if p.service == "smb" {
+        let (title, detail, recommendation, sev, cvss): (&str, &str, &str, Severity, f32) = match p.port {
+            139 => (
+                "SMB exposed via legacy NetBIOS-SSN (port 139)",
+                "NetBIOS-SSN is the pre-Windows-2000 SMB transport. On modern hosts it's typically opened alongside port 445 — same logical service, two listeners. Worth confirming neither needs to remain reachable from arbitrary network segments.",
+                "Disable NetBIOS over TCP/IP if you don't need NT4-era client compatibility. On Windows: Adapter Settings → IPv4 → Advanced → WINS → Disable NetBIOS over TCP/IP. Restrict 139 + 445 to MGMT VLAN via firewall.",
+                Severity::Medium,
+                4.0,
+            ),
+            // 445 (and any other port we somehow classify as "smb")
+            _ => (
+                "SMB exposed via direct TCP (port 445)",
+                "SMB is high-value to attackers — EternalBlue, SMBGhost, share enumeration, NTLM-relay. Verify SMBv1 is disabled and only authenticated access is allowed.",
+                "Disable SMBv1 protocol. Restrict SMB access to internal-only via firewall. Enforce SMB signing + encryption (Group Policy: SMB server requires signing, requires encryption for sensitive shares).",
+                Severity::Medium,
+                5.0,
+            ),
+        };
         out.push(Finding {
             id: "config.smb-open".into(),
             host_ip: host_ip.to_owned(),
             port: Some(p.port),
             service: Some("smb".into()),
-            severity: Severity::Medium,
-            title: "SMB share-server open".into(),
-            detail: "SMB is high-value to attackers (EternalBlue / SMBGhost / share enumeration). Verify SMBv1 is disabled and only authenticated access allowed.".into(),
-            recommendation: "Disable SMBv1 protocol. Restrict SMB access to internal-only via firewall. Enforce signing.".into(),
+            severity: sev,
+            title: title.into(),
+            detail: detail.into(),
+            recommendation: recommendation.into(),
             cve: None,
-            cvss: Some(5.0),
+            cvss: Some(cvss),
         });
     }
 
@@ -981,6 +1013,39 @@ mod tests {
             assert_eq!(f.severity, Severity::Low, "{ip} → low (internal)");
             assert!(f.title.contains("internal"), "{ip}: title got {}", f.title);
         }
+    }
+
+    #[test]
+    fn config_check_smb_port_445_title_says_direct_tcp() {
+        let p = probe(445, "smb");
+        let mut findings = vec![];
+        configuration_checks("10.1.0.5", &p, &mut findings);
+        let f = findings.iter().find(|f| f.id == "config.smb-open").expect("must fire");
+        assert!(f.title.contains("direct TCP"), "title got {}", f.title);
+        assert!(f.title.contains("445"), "title got {}", f.title);
+    }
+
+    #[test]
+    fn config_check_smb_port_139_title_says_netbios() {
+        let p = probe(139, "smb");
+        let mut findings = vec![];
+        configuration_checks("10.1.0.5", &p, &mut findings);
+        let f = findings.iter().find(|f| f.id == "config.smb-open").expect("must fire");
+        assert!(f.title.contains("NetBIOS"), "title got {}", f.title);
+        assert!(f.title.contains("139"), "title got {}", f.title);
+    }
+
+    /// On a host with both 139 + 445 open, the two findings should
+    /// have distinct titles — the bug we shipped before fixing this
+    /// produced two identical "SMB share-server open" rows.
+    #[test]
+    fn config_check_smb_dual_port_titles_differ() {
+        let mut findings = vec![];
+        configuration_checks("10.1.0.5", &probe(445, "smb"), &mut findings);
+        configuration_checks("10.1.0.5", &probe(139, "smb"), &mut findings);
+        let smb: Vec<&Finding> = findings.iter().filter(|f| f.id == "config.smb-open").collect();
+        assert_eq!(smb.len(), 2, "both ports should fire");
+        assert_ne!(smb[0].title, smb[1].title, "titles must differ for UI clarity");
     }
 
     #[test]
