@@ -346,6 +346,29 @@ fn version_token_in(haystack: &str, version: &str) -> bool {
     false
 }
 
+/// Even worse than generic-OS: product names that are pure
+/// protocol/service descriptors. NVD encoded several 1999-era
+/// CVEs against vendor-specific products with CPE product=
+/// "web server" / "http server" / "ftp" / etc. — and the version
+/// is typically "1.0" (matching every ioT device on the planet).
+///
+/// Treatment is harsher than generic-OS: when ALL matched
+/// keywords are in this tier, drop the CVE regardless of version
+/// or proximity. The version constraint is too weak to be useful
+/// when "1.0" is the canonical match. There's no realistic way to
+/// distinguish "Novell web server 1.0" from "ioLogik Web Server/1.0"
+/// from a banner alone, and the latter outnumbers the former by
+/// many orders of magnitude in 2026.
+fn is_too_generic_keyword(k: &str) -> bool {
+    matches!(
+        k.to_lowercase().as_str(),
+        "web server" | "http server" | "ftp server" | "ftp"
+        | "mail server" | "imap server" | "pop server"
+        | "news server" | "dns server" | "smtp server"
+        | "telnet server" | "telnetd" | "rpc" | "rpcbind"
+    )
+}
+
 /// Public matcher with explicit cache passed in (avoids leaking
 /// a 'static-cached singleton; matches one-Arc-per-scan pattern).
 pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
@@ -363,12 +386,20 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
         if matched_keywords.is_empty() {
             continue;
         }
+        // Hardest-blocked tier: if every matched keyword is a
+        // pure service/protocol descriptor ("web server", "ftp",
+        // "rpc"), drop the CVE regardless of version. These match
+        // any modern device — they cannot be salvaged by version
+        // constraints because the version is invariably "1.0".
+        if matched_keywords.iter().all(|k| is_too_generic_keyword(k)) {
+            continue;
+        }
         // If EVERY matched keyword is a generic OS/vendor name,
         // require a version-substring hit to narrow it. Without
         // that the match is "this OS exists" → useless.
         let all_generic = matched_keywords
             .iter()
-            .all(|k| is_generic_os_keyword(k));
+            .all(|k| is_generic_os_keyword(k) || is_too_generic_keyword(k));
         if all_generic && e.version_substrings.is_empty() {
             continue;
         }
@@ -611,5 +642,61 @@ mod tests {
         let banner = "Apache/2.4.6 (Linux)";
         let hits = match_with_cache(banner, &cache);
         assert_eq!(hits.len(), 1, "specific keyword should keep prefix-match behaviour");
+    }
+
+    // ─── too-generic-keyword tier ──────────────────────────────────
+
+    // CVE-1999-0175: kws=["web server"] + ver=["1.0"]. Modern
+    // industrial-IO controller banner contains "web server"
+    // followed by "/1.0", satisfying every prior safeguard. Only
+    // the too-generic tier rejects this.
+    #[test]
+    fn too_generic_keyword_dropped_regardless_of_version() {
+        let cache = cache_with(vec![entry(
+            "CVE-1999-0175",
+            &["web server"],
+            &["1.0"],
+        )]);
+        let banner = "ioLogik Web Server/1.0";
+        let hits = match_with_cache(banner, &cache);
+        assert!(
+            hits.is_empty(),
+            "web-server CVE with version 1.0 must NOT match modern ioT banner"
+        );
+    }
+
+    #[test]
+    fn too_generic_keyword_drops_ftp_and_friends() {
+        for kw in &[
+            "web server", "http server", "ftp server", "ftp",
+            "mail server", "imap server", "pop server",
+            "news server", "dns server", "smtp server",
+        ] {
+            let cache = cache_with(vec![entry(
+                "CVE-1999-X",
+                &[kw],
+                &["1.0"],
+            )]);
+            let banner = format!("Some {kw}/1.0");
+            let hits = match_with_cache(&banner, &cache);
+            assert!(hits.is_empty(), "{kw} should be dropped");
+        }
+    }
+
+    // If a CVE has BOTH a too-generic AND a specific keyword,
+    // and the banner matches only the specific one, the match
+    // should still fire. Real example: CVE-1999-0067 carries
+    // ["http server", "ncsa httpd"]. An NCSA HTTPd banner
+    // matches the specific keyword.
+    #[test]
+    fn too_generic_keyword_does_not_block_specific_match() {
+        let cache = cache_with(vec![entry(
+            "CVE-1999-0067",
+            &["http server", "ncsa httpd"],
+            &["1.0.3", "1.5a"],
+        )]);
+        let banner = "NCSA HTTPd/1.5a";
+        let hits = match_with_cache(banner, &cache);
+        assert_eq!(hits.len(), 1, "specific-keyword match should still fire");
     }
 }
