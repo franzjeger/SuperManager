@@ -8,6 +8,11 @@ import ServiceManagement
 /// or Backup so the affordance lives next to the consequence.
 struct GeneralSettingsView: View {
     @State private var settings = AppSettings.shared
+    /// `@ObservedObject` because SparkleUpdater is ObservableObject
+    /// (NSObject-based for the SPUUpdaterDelegate conformance) — the
+    /// `@Observable` macro can't apply to NSObject subclasses, so the
+    /// view-binding path goes through `@ObservedObject` instead.
+    @ObservedObject private var updater = SparkleUpdater.shared
 
     /// Local mirror of the SMAppService.mainApp status. We poll
     /// it on appear and after every toggle so the displayed
@@ -53,6 +58,27 @@ struct GeneralSettingsView: View {
                 @Bindable var s = settings
                 Toggle("Show menu bar item", isOn: $s.showMenuBarItem)
                     .help("Adds a terminal icon to the menu bar for quick access.")
+            }
+
+            Section("Updates") {
+                // Beta-channel toggle. Bound directly to SparkleUpdater
+                // so flipping it triggers `resetUpdateCycle()` and the
+                // next check goes against appcast-beta.xml instead of
+                // appcast.xml. Both feeds use the same EdDSA signature
+                // so flipping back to stable doesn't require any
+                // re-verification setup.
+                Toggle("Include beta updates", isOn: $updater.includeBetaUpdates)
+                    .help("Receive pre-release builds (1.0.1-beta.2, etc.) before they ship to the stable channel. Untick to roll back to stable at the next release.")
+                if updater.includeBetaUpdates {
+                    Text("Beta builds may have bugs the stable channel filters out. Suitable for the developer/operator's primary machine; not recommended for production-customer-facing deployments.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text("Update feed: \(updater.feedURL)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
             }
 
             Section("Notifications") {

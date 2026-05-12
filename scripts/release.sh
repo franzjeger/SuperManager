@@ -183,7 +183,24 @@ echo "  $SPARKLE_SIG_LINE"
 
 # ---- 9. Appcast entry -------------------------------------------------------
 
-APPCAST="$RELEASE_DIR/appcast.xml"
+# Beta-channel detection. SemVer pre-release identifiers
+# (anything after a '-' in the version, e.g. `1.0.1-beta.2` or
+# `1.1.0-rc.1`) signal a pre-release build. We write to
+# `appcast-beta.xml` instead of `appcast.xml`, so only users
+# who opted into the beta channel in Settings → Updates pick
+# it up. Stable users keep getting `appcast.xml` updates.
+case "$VERSION" in
+    *-*)
+        APPCAST="$RELEASE_DIR/appcast-beta.xml"
+        CHANNEL_LABEL="beta"
+        ;;
+    *)
+        APPCAST="$RELEASE_DIR/appcast.xml"
+        CHANNEL_LABEL="stable"
+        ;;
+esac
+echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
+
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 LENGTH="$(stat -f%z "$DIST_ZIP")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
