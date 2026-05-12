@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Apple privacy manifest for SuperManagerMac.app.
+
+  Required by Apple since spring 2024 for App Store submissions and
+  recommended for any signed/notarised macOS app. Declares which
+  "required reason APIs" we call and which categories of data we
+  collect from the user.
+
+  See https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
+
+  Tracking-and-data summary:
+    * We do NOT track users across apps/websites (NSPrivacyTracking = false)
+    * We do NOT exfiltrate any user data to third parties
+    * All persistence is local — under
+      `~/Library/Application Support/SuperManager/` —
+      and never leaves the machine unless the operator explicitly
+      pushes a backup or report
+
+  Required-reason APIs:
+    * UserDefaults — preferences (SuperManager's own settings,
+      window state, last-selected customer)
+    * FileTimestamp — backup-rotation logic compares mtimes to
+      pick which old backups to prune
+    * SystemBootTime — only via dependency code path (Sparkle
+      reads CFAbsoluteTimeGetCurrent which the manifest analyser
+      sometimes flags). Declaring it pre-empts future "missing
+      reason" warnings.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Whether we participate in any cross-app/website tracking
+         (advertising IDs, fingerprinting, etc.). We do not. -->
+    <key>NSPrivacyTracking</key>
+    <false/>
+
+    <!-- No tracking domains because NSPrivacyTracking is false. -->
+    <key>NSPrivacyTrackingDomains</key>
+    <array/>
+
+    <!-- Data we collect from the user.
+         Note: data that NEVER leaves the device (saved locally only)
+         is NOT considered "collected" for this declaration — Apple
+         only counts data that's transmitted off-device. We don't
+         transmit any user data, so this array is empty. -->
+    <key>NSPrivacyCollectedDataTypes</key>
+    <array/>
+
+    <!-- Required-reason API declarations. Each maps to a category
+         + an explanation reason code from Apple's catalog. -->
+    <key>NSPrivacyAccessedAPITypes</key>
+    <array>
+        <!-- UserDefaults — CA92.1 = "Access info from the same app,
+             per the app's functionality." We read/write our own
+             preference keys. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>CA92.1</string>
+            </array>
+        </dict>
+        <!-- File timestamp APIs — C617.1 = "Inside app container,
+             same-app group, or referenced from outside the app." We
+             compare mtimes of customer backup files to decide which
+             to prune (backup_retention.rs). -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>C617.1</string>
+            </array>
+        </dict>
+        <!-- Disk space — 85F4.1 = "Display disk space to the user."
+             Used by SupportBundle to show "your bundle is X MB" and
+             refuse to save when disk would overflow. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>85F4.1</string>
+            </array>
+        </dict>
+        <!-- System boot time — 35F9.1 = "Measure time elapsed
+             between events in your app." Sparkle's internal
+             scheduling uses this via CoreFoundation. -->
+        <dict>
+            <key>NSPrivacyAccessedAPIType</key>
+            <string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+            <key>NSPrivacyAccessedAPITypeReasons</key>
+            <array>
+                <string>35F9.1</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
