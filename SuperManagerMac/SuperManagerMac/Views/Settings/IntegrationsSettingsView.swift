@@ -231,12 +231,47 @@ struct IntegrationsSettingsView: View {
                     icon: "clock"
                 )
             }
+            // Staleness pill — surfaces a problem the operator
+            // wouldn't otherwise notice. The daemon's scheduler
+            // auto-refreshes weekly, but if the daemon was off /
+            // network-blocked / API-limited the feed quietly
+            // ages out and scans use a stale CVE database.
+            if let lastFetched = cveStatus?.lastFetchedAt {
+                cveStalenessPill(for: lastFetched)
+            }
             if let added = lastFeedAdded {
                 Text("Added \(added) new CVE\(added == 1 ? "" : "s") in last refresh.")
                     .font(.caption)
                     .foregroundStyle(.green)
             }
         }
+    }
+
+    /// Coloured staleness indicator for the CVE feed. Buckets
+    /// match the auto-refresh cadence in the daemon
+    /// (`scheduler.rs` — weekly refresh, ~7 days):
+    ///   - < 14 days   : green  ("Fresh")
+    ///   - 14 - 30 days: orange ("Aging")
+    ///   - > 30 days   : red    ("Stale — auto-refresh has failed")
+    @ViewBuilder
+    private func cveStalenessPill(for lastFetched: Date) -> some View {
+        let days = Calendar.current.dateComponents(
+            [.day], from: lastFetched, to: Date()
+        ).day ?? 0
+        let (label, color, icon): (String, Color, String) = {
+            switch days {
+            case ..<14:  return ("Fresh", .green, "checkmark.seal.fill")
+            case 14..<30: return ("Aging — auto-refresh may be delayed", .orange, "exclamationmark.triangle.fill")
+            default:      return ("Stale — auto-refresh has not run for \(days) days", .red, "xmark.octagon.fill")
+            }
+        }()
+        Label(label, systemImage: icon)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(color.opacity(0.12))
+            .foregroundStyle(color)
+            .clipShape(Capsule())
     }
 
     private func statTile(label: String, value: String, icon: String) -> some View {
