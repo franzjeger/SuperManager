@@ -196,6 +196,27 @@ fn parse_vuln(item: &serde_json::Value) -> Option<FeedEntry> {
     let short_title = desc.lines().next().unwrap_or(&desc).chars().take(120).collect::<String>();
     let title = format!("{id}: {short_title}");
 
+    // Build a richer recommendation than the previous generic
+    // "consult vendor advisory" line. Three actionable bits the
+    // operator needs the first time they see one of these:
+    //   1. The exact upstream advisory link (NVD detail page)
+    //   2. A reminder that the match is BANNER-BASED — i.e. low
+    //      confidence — so they should verify before patching
+    //   3. Pointers to mark as False Positive when applicable
+    //
+    // Generic enough to work for any CVE, specific enough that the
+    // operator gets a place to click rather than a vague nag.
+    let recommendation = format!(
+        "1. Read the advisory: https://nvd.nist.gov/vuln/detail/{id}\n\
+         2. Verify the affected product/version is actually running on this host \
+         (this match is banner-based — low-confidence by design). \
+         Check `service --status-all` / `systemctl list-units` / the running \
+         binary's `--version`.\n\
+         3. If confirmed: apply the vendor patch or implement the workaround in the advisory.\n\
+         4. If the affected component is not present on this host: \
+         mark this finding as 'False positive' to keep your scan results clean."
+    );
+
     Some(FeedEntry {
         id,
         product_keywords: keywords.into_iter().collect(),
@@ -204,9 +225,7 @@ fn parse_vuln(item: &serde_json::Value) -> Option<FeedEntry> {
         cvss,
         title,
         detail: desc,
-        recommendation:
-            "Verify the affected version is exposed; consult vendor advisory + apply patch or mitigation."
-                .into(),
+        recommendation,
     })
 }
 
