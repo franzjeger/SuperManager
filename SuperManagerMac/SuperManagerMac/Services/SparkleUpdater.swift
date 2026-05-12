@@ -31,15 +31,30 @@ import SwiftUI
 /// `SUScheduledCheckInterval`). Used by the "Check for Updates…" menu
 /// item the operator clicks when they want to force a refresh.
 @MainActor
-final class SparkleUpdater: ObservableObject {
+final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     static let shared = SparkleUpdater()
+
+    /// UserDefaults key for the beta-channel opt-in toggle. Stable
+    /// across releases — if a user has opted into betas, they stay
+    /// opted in across upgrades unless they untick the box.
+    static let includeBetaUpdatesDefaultsKey = "supermgr.includeBetaUpdates"
+
+    /// Filename Sparkle fetches when the operator opts into betas.
+    /// We bake the stable feed URL into Info.plist
+    /// (`SUFeedURL = .../releases/latest/download/appcast.xml`) and
+    /// derive the beta URL by swapping the filename. Both files
+    /// live in the same GitHub Release directory so the swap is
+    /// just `appcast.xml` ↔ `appcast-beta.xml`.
+    private static let betaFeedFilename = "appcast-beta.xml"
 
     /// Sparkle's controller, only initialised when a real
     /// `SUPublicEDKey` is set in Info.plist. Until the developer
     /// runs `scripts/sparkle-keygen.sh` and pastes the public key
     /// into `project.yml`, Sparkle's init fails ("EdDSA public key
-    /// is not valid") and the controller is left nil.
-    private let controller: SPUStandardUpdaterController?
+    /// is not valid") and the controller is left nil. `var` (not
+    /// `let`) because NSObject ordering forces us to assign it
+    /// AFTER `super.init()` so we can pass `self` as the delegate.
+    private var controller: SPUStandardUpdaterController?
 
     /// Reason Sparkle is disabled, if any. Surfaced in the
     /// "Check for Updates…" dialog so the operator sees an
@@ -52,9 +67,24 @@ final class SparkleUpdater: ObservableObject {
     /// this on the underlying `SPUUpdater` as KVO-observable.
     @Published private(set) var canCheckForUpdates = true
 
+    /// Whether the operator has opted into beta updates. Mirrored
+    /// from UserDefaults so a SwiftUI toggle can bind both ways.
+    @Published var includeBetaUpdates: Bool {
+        didSet {
+            UserDefaults.standard.set(includeBetaUpdates, forKey: Self.includeBetaUpdatesDefaultsKey)
+            // Tell Sparkle the feed has changed so its next check
+            // sees the new URL. Without this, Sparkle would only
+            // notice on app relaunch or next scheduled check.
+            controller?.updater.resetUpdateCycle()
+        }
+    }
+
     private var observation: NSKeyValueObservation?
 
-    private init() {
+    private override init() {
+        includeBetaUpdates = UserDefaults.standard.bool(forKey: Self.includeBetaUpdatesDefaultsKey)
+        super.init()
+
         // Detect XCTest. When the test runner launches the host app
         // briefly to load the test bundle, an active Sparkle scheduler
         // fires a network update check that can hang indefinitely on
@@ -78,20 +108,17 @@ final class SparkleUpdater: ObservableObject {
             return
         }
 
-        // `userDriverDelegate: nil` and `delegate: nil` use Sparkle's
-        // standard UI + behaviour. If we ever need to customise
-        // (e.g. add telemetry on update success) those land here.
+        // Pass `self` as the updaterDelegate so Sparkle calls
+        // `feedURLString(for:)` on every check to pick stable vs
+        // beta. Init order requires super.init() before `self`,
+        // which is why we couldn't use `let controller`.
         let ctl = SPUStandardUpdaterController(
             startingUpdater: !underXCTest,
-            updaterDelegate: nil,
+            updaterDelegate: self,
             userDriverDelegate: nil
         )
         controller = ctl
-        disabledReason = nil
 
-        // Mirror Sparkle's KVO property onto our `@Published` so
-        // SwiftUI rebinds correctly. Capture self weakly — the
-        // observer outlives the init scope.
         observation = ctl.updater.observe(
             \.canCheckForUpdates,
             options: [.initial, .new]
@@ -118,7 +145,7 @@ final class SparkleUpdater: ObservableObject {
     /// display. Reads straight from Info.plist so it always matches
     /// what Sparkle actually polls.
     var feedURL: String {
-        (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String) ?? "(unset)"
+        currentFeedURLString()
     }
 
     /// Standalone alert shown when the operator hits Check for
@@ -131,5 +158,26 @@ final class SparkleUpdater: ObservableObject {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
+    }
+
+    // MARK: - SPUUpdaterDelegate
+
+    /// Sparkle calls this on every check to ask which feed URL
+    /// to fetch. We override the Info.plist default to swap in
+    /// `appcast-beta.xml` when the user has opted into betas.
+    nonisolated func feedURLString(for updater: SPUUpdater) -> String? {
+        MainActor.assumeIsolated { currentFeedURLString() }
+    }
+
+    /// Compute the effective feed URL given the current beta
+    /// toggle state. Stable: returns the Info.plist value untouched.
+    /// Beta: swaps the trailing filename to `appcast-beta.xml`.
+    private func currentFeedURLString() -> String {
+        let base = (Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String) ?? ""
+        guard includeBetaUpdates,
+              let url = URL(string: base) else { return base }
+        let betaURL = url.deletingLastPathComponent()
+            .appendingPathComponent(Self.betaFeedFilename)
+        return betaURL.absoluteString
     }
 }
