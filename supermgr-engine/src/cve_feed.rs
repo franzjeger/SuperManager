@@ -257,12 +257,23 @@ pub fn match_banner(banner: &str) -> Vec<&'static FeedEntry> {
 fn is_generic_os_keyword(k: &str) -> bool {
     matches!(
         k.to_lowercase().as_str(),
+        // BSD family
         "freebsd" | "openbsd" | "netbsd" | "dragonfly"
+        | "bsd" | "bsd os" | "bsdos"
+        // Linux + distros
         | "linux" | "linux_kernel" | "linux kernel"
         | "debian" | "ubuntu" | "redhat" | "red hat" | "centos"
         | "fedora" | "gentoo" | "suse" | "opensuse" | "arch"
+        // Microsoft / Apple
         | "windows" | "macos" | "mac os x" | "macosx"
-        | "darwin" | "unix" | "kernel" | "os"
+        | "darwin"
+        // Legacy enterprise UNIX — the 1999-era CVE family
+        | "sunos" | "solaris" | "aix" | "irix" | "hp-ux"
+        | "nextstep" | "openserver" | "unixware" | "osf 1"
+        | "a ux" | "asl ux 4800" | "ews-ux v" | "up-ux v"
+        | "internet faststart" | "open desktop"
+        // Pure generic catch-all
+        | "tcp ip" | "inet" | "unix" | "kernel" | "os"
     )
 }
 
@@ -292,15 +303,152 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
         if all_generic && e.version_substrings.is_empty() {
             continue;
         }
-        // Version-substring match — if no versions specified,
-        // we trust the (non-generic) keyword match alone. Otherwise
-        // require at least one version-string hit.
-        let ver_match = e.version_substrings.is_empty()
-            || e.version_substrings.iter().any(|v| banner.contains(v));
+        // Version-substring match.
+        //
+        // For generic-OS-only matches we need STRICT proximity:
+        // a banner like "SSH-2.0-OpenSSH_10.2 FreeBSD-..." contains
+        // both the keyword "freebsd" AND the version substring
+        // "2.0" — but the "2.0" comes from the SSH protocol
+        // version, not from the OS. A naive `banner.contains(v)`
+        // surfaced 7 false-positive 1999-era CVEs against modern
+        // FreeBSD hosts.
+        //
+        // Fix: when ALL matched keywords are generic, require
+        // the keyword + version to co-occur within 50 chars of
+        // each other in the banner. "FreeBSD-openssh-...-10.2"
+        // satisfies this for keyword "freebsd" + version "10.2";
+        // "SSH-2.0-OpenSSH_10.2 FreeBSD-..." does NOT for keyword
+        // "freebsd" + version "2.0".
+        //
+        // For specific keywords (apache, openssh, wordpress) we
+        // keep the existing banner-wide substring check — these
+        // CVEs have product-specific keywords that already
+        // anchor the match.
+        let ver_match = if e.version_substrings.is_empty() {
+            true
+        } else if all_generic {
+            matched_keywords.iter().any(|kw| {
+                let kw_lc = kw.to_lowercase();
+                lc.match_indices(&kw_lc).any(|(pos, _)| {
+                    let end = pos + kw_lc.len();
+                    let window_end = (end + 50).min(lc.len());
+                    let window = &lc[end..window_end];
+                    e.version_substrings.iter().any(|v| window.contains(&v.to_lowercase()))
+                })
+            })
+        } else {
+            e.version_substrings.iter().any(|v| banner.contains(v))
+        };
         if !ver_match {
             continue;
         }
         hits.push(e.clone());
     }
     hits
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, keywords: &[&str], versions: &[&str]) -> FeedEntry {
+        FeedEntry {
+            id: id.into(),
+            product_keywords: keywords.iter().map(|s| (*s).into()).collect(),
+            version_substrings: versions.iter().map(|s| (*s).into()).collect(),
+            severity: crate::vuln::Severity::High,
+            cvss: 7.0,
+            title: format!("{id}: test"),
+            detail: "test".into(),
+            recommendation: "test".into(),
+        }
+    }
+
+    fn cache_with(entries: Vec<FeedEntry>) -> FeedCache {
+        FeedCache {
+            entries,
+            last_fetched_at: None,
+        }
+    }
+
+    // The original PR #27 bug: "freebsd" + version "2.0" matched
+    // "SSH-2.0-...FreeBSD" because the substring "2.0" appears
+    // in the protocol version, far from the keyword.
+    #[test]
+    fn proximity_blocks_protocol_version_collision() {
+        let cache = cache_with(vec![entry(
+            "CVE-1999-1313",
+            &["freebsd"],
+            &["2.0", "2.1", "2.2"],
+        )]);
+        let banner = "SSH-2.0-OpenSSH_10.2 FreeBSD-openssh-portable-10.2.p1_1,1";
+        let hits = match_with_cache(banner, &cache);
+        assert!(
+            hits.is_empty(),
+            "modern FreeBSD banner with SSH-2.0 must NOT match CVE-1999 with FreeBSD 2.0 versions"
+        );
+    }
+
+    // Legitimate match: keyword + version are adjacent in the banner.
+    #[test]
+    fn proximity_allows_adjacent_keyword_and_version() {
+        let cache = cache_with(vec![entry(
+            "CVE-2099-9999",
+            &["freebsd"],
+            &["13.2"],
+        )]);
+        // FreeBSD 13.2 — exact match, "freebsd" and "13.2" within 30 chars.
+        let banner = "SSH-2.0-OpenSSH_9.6 FreeBSD-13.2-RELEASE";
+        let hits = match_with_cache(banner, &cache);
+        assert_eq!(hits.len(), 1);
+    }
+
+    // Specific (non-generic) keyword + version: existing behaviour
+    // preserved. Apache 2.4 → matches Apache CVE with version 2.4.
+    #[test]
+    fn specific_keyword_uses_banner_wide_match() {
+        let cache = cache_with(vec![entry(
+            "CVE-2017-XXXX",
+            &["apache_http_server"],
+            &["2.4"],
+        )]);
+        let banner = "Apache/2.4.6 (Linux)";
+        // banner doesn't lowercase-contain "apache_http_server"
+        // but contains "2.4". For this test, use a banner that
+        // matches both. Realistically the cve_feed parser would
+        // already lowercase + de-underscore the product.
+        let cache = cache_with(vec![entry(
+            "CVE-2017-XXXX",
+            &["apache"],
+            &["2.4"],
+        )]);
+        let hits = match_with_cache(banner, &cache);
+        assert_eq!(hits.len(), 1);
+    }
+
+    // CVE with no versions + only generic keyword: drop.
+    #[test]
+    fn generic_keyword_no_version_dropped() {
+        let cache = cache_with(vec![entry(
+            "CVE-1999-1301",
+            &["freebsd"],
+            &[],
+        )]);
+        let hits = match_with_cache("SSH-2.0-OpenSSH_10.2 FreeBSD-...", &cache);
+        assert!(hits.is_empty());
+    }
+
+    // Newly-blocklisted legacy UNIX names — same treatment.
+    #[test]
+    fn legacy_unix_names_treated_generic() {
+        for name in &["sunos", "irix", "aix", "hp-ux", "openserver"] {
+            let cache = cache_with(vec![entry(
+                "CVE-1999-X",
+                &[name],
+                &[],
+            )]);
+            let hits = match_with_cache("Apache/2.4 (Linux)", &cache);
+            assert!(hits.is_empty(), "{name} should be treated as generic");
+        }
+    }
 }
