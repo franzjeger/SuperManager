@@ -28,6 +28,8 @@ struct DiscoveryPanel: View {
     @State private var credTestInFlight: Set<String> = []
     @State private var selectedFinding: PersistedFinding?
     @State private var showReport = false
+    @State private var showDnsAudit = false
+    @State private var showTrafficCapture = false
     /// Becomes true the first time the user interacts with a finding
     /// (taps a row, toggles a pin). Suppresses the auto-open of the
     /// most-severe finding after subsequent scans — once the user
@@ -104,6 +106,12 @@ struct DiscoveryPanel: View {
         }
         .sheet(isPresented: $showReport) {
             EngagementReportSheet(engagementId: engagement.id, title: engagement.title)
+        }
+        .sheet(isPresented: $showDnsAudit) {
+            DnsAuditSheet()
+        }
+        .sheet(isPresented: $showTrafficCapture) {
+            TrafficCaptureSheet(engagementId: engagement.id)
         }
     }
 
@@ -233,6 +241,17 @@ struct DiscoveryPanel: View {
                 } label: {
                     Label("Engagement report…", systemImage: "doc.text.fill")
                 }
+                Divider()
+                Button {
+                    showDnsAudit = true
+                } label: {
+                    Label("DNS zone-transfer audit…", systemImage: "network.badge.shield.half.filled")
+                }
+                Button {
+                    showTrafficCapture = true
+                } label: {
+                    Label("Capture insecure traffic…", systemImage: "waveform.path.ecg.rectangle")
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -240,7 +259,7 @@ struct DiscoveryPanel: View {
             .controlSize(.small)
             .fixedSize()
             .accessibilityLabel("More actions")
-            .help("Reports, exports, and other engagement tools.")
+            .help("Reports, recon, traffic capture, and other engagement tools.")
         }
     }
 

@@ -443,4 +443,116 @@ extension AppState {
             return nil
         }
     }
+
+    // MARK: - DNS AXFR (zone-transfer audit)
+
+    struct DnsAxfrResult: Codable {
+        let findings: [SecurityFinding]
+    }
+
+    /// Probe the given domain's authoritative nameservers for
+    /// anonymous AXFR. Returns one finding per leaking NS (or
+    /// empty when no NS allowed it).
+    ///
+    /// Backed by `discovery_dns_axfr` RPC. ~8 sec per NS, runs
+    /// nameservers sequentially — typical domain has 2-4 NSes so
+    /// expect 10-30 sec wall-clock total.
+    func runDnsAxfr(domain: String) async -> [SecurityFinding]? {
+        do {
+            let result: DnsAxfrResult = try await client.call(
+                "discovery_dns_axfr",
+                params: ["domain": domain]
+            )
+            return result.findings
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    // MARK: - Traffic sniffer (cleartext-credential capture)
+
+    struct TrafficAuditResult: Codable {
+        let findings: [SecurityFinding]
+        let evidenceFiles: [String]
+        let packetsInspected: Int
+        let eventsMatched: Int
+
+        enum CodingKeys: String, CodingKey {
+            case findings
+            case evidenceFiles = "evidence_files"
+            case packetsInspected = "packets_inspected"
+            case eventsMatched = "events_matched"
+        }
+    }
+
+    /// Analyse an existing pcap for cleartext-protocol exposure.
+    /// Used both for one-shot analysis and for live-streaming
+    /// polling: call this repeatedly while a capture is running
+    /// and the partial-pcap tolerance in the engine ensures each
+    /// call returns the cumulative findings so far.
+    func analyseTrafficPcap(
+        pcapPath: String,
+        engagementId: String?
+    ) async -> TrafficAuditResult? {
+        var params: [String: Any] = ["pcap_path": pcapPath]
+        if let e = engagementId {
+            params["engagement_id"] = e
+        }
+        do {
+            return try await client.call("discovery_analyse_pcap", params: params)
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    /// Helper-side: start a tcpdump capture. The helper validates
+    /// args + writes the pcap as root to a path under our data
+    /// dir, chmod'd 0644 so the engine analyser can read it.
+    /// Returns the pcap path + size on success.
+    struct CaptureReport: Codable {
+        let pcapPath: String
+        let sizeBytes: Int
+        let durationSecs: Int
+        let interface: String
+        let completedCleanly: Bool
+        let packetCountEstimate: Int
+
+        enum CodingKeys: String, CodingKey {
+            case pcapPath = "pcap_path"
+            case sizeBytes = "size_bytes"
+            case durationSecs = "duration_secs"
+            case interface
+            case completedCleanly = "completed_cleanly"
+            case packetCountEstimate = "packet_count_estimate"
+        }
+    }
+
+    func startTrafficCapture(
+        interface: String,
+        outputPath: String,
+        bpfFilter: String,
+        durationSecs: Int
+    ) async throws -> CaptureReport {
+        return try await HelperClient.shared.callRaw(
+            method: "traffic_capture",
+            params: [
+                "interface": interface,
+                "output_path": outputPath,
+                "bpf_filter": bpfFilter,
+                "duration_secs": durationSecs,
+            ]
+        )
+    }
+
+    /// Build a BPF filter that covers ALL the cleartext-protocol
+    /// detections in the engine: FTP, Telnet, HTTP-alt ports for
+    /// basic-auth + form-POST, POP3, IMAP, SMTP-AUTH, SNMP v1/v2c,
+    /// NTLM via SMB, MQTT.
+    static let cleartextProtocolBpf: String =
+        "tcp port 21 or tcp port 23 or tcp port 80 or tcp port 110 "
+        + "or tcp port 143 or tcp port 25 or tcp port 465 or tcp port 587 "
+        + "or tcp port 445 or tcp port 1883 or tcp port 8080 or tcp port 8000 "
+        + "or tcp port 8888 or udp port 161 or udp port 162"
 }

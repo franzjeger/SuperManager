@@ -172,6 +172,17 @@ final class HelperClient {
         }
     }
 
+    /// Generic typed-decoded helper RPC call. Wraps the private
+    /// `call(method:params:)` and decodes the response body into
+    /// the caller's `Decodable` type. New call sites should use
+    /// this in preference to dictionary-fishing through the raw
+    /// `[String: Any]` form.
+    func callRaw<T: Decodable>(method: String, params: [String: Any]) async throws -> T {
+        let raw = try await call(method, params: params)
+        let data = try JSONSerialization.data(withJSONObject: raw)
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
     /// Hand the deployed helper an absolute path to a *new* binary
     /// and have it copy itself, then exit so launchd respawns from
     /// the new code. Only works when the deployed helper was built
