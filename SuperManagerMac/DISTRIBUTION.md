@@ -148,6 +148,56 @@ gh release create v1.0.0 dist/SuperManager-1.0.0.zip dist/appcast.xml \
 Sparkle picks up the new appcast within `SUScheduledCheckInterval` (1 day)
 or immediately when the user clicks **SuperManager → Check for Updates…**.
 
+### CI-driven release (preferred, after one-time secret setup)
+
+`.github/workflows/release.yml` reproduces the entire local
+`release.sh` flow on a GitHub-hosted macOS runner. Trigger by
+pushing a `v*.*.*` tag — no local build needed. The workflow:
+
+1. Spins up a temporary signing keychain on the runner
+2. Imports the Developer ID cert + Sparkle private key from
+   repository secrets
+3. Stages the App Store Connect API key
+4. Runs `./scripts/release.sh "$TAG"` end-to-end
+5. Uploads `dist/SuperManager-<version>.zip` + `dist/appcast.xml`
+   to the GitHub Release that the tag triggered
+6. Tears down the keychain so no signing material lingers
+
+#### One-time secret setup
+
+Add these via **Settings → Secrets and variables → Actions →
+New repository secret**:
+
+| Secret | Value | How to produce |
+|---|---|---|
+| `MACOS_CERTIFICATE` | Base64 of `.p12` export | Keychain Access → My Certificates → right-click cert → Export → .p12 → `base64 -i cert.p12 -o cert.b64` then copy contents |
+| `MACOS_CERTIFICATE_PASSWORD` | Plain string | Password you chose during the .p12 export |
+| `MACOS_DEV_ID_APP` | `Developer ID Application: Frank Lia (LY6LJ395B8)` | From `security find-identity -p codesigning -v` |
+| `AC_API_KEY_BASE64` | Base64 of `AuthKey_XXXXXX.p8` | `base64 -i ~/.appstoreconnect/AuthKey_*.p8 -o ac.b64` |
+| `AC_API_KEY_ID` | 10-char key id | Already in `~/.zshenv` (`$AC_API_KEY_ID`) |
+| `AC_API_ISSUER_ID` | UUID | Already in `~/.zshenv` (`$AC_API_ISSUER_ID`) |
+| `SPARKLE_PRIVATE_KEY` | Base64 ed25519 seed | `security find-generic-password -a ed25519 -s 'https://sparkle-project.org' -w` |
+
+The `SPARKLE_PRIVATE_KEY` is the most sensitive secret — anyone
+with it can push malicious updates to all installed copies.
+Rotate via `./scripts/sparkle-keygen.sh --force` if it ever
+leaks; the matching public key in `project.yml` would then need
+to be updated, breaking existing installs' ability to auto-update
+(they'd need to manually download the next signed release).
+
+#### Cutting a release through CI
+
+```sh
+# After updating CHANGELOG, project.yml is bumped automatically by
+# release.sh INSIDE CI. So locally:
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+Watch progress at https://github.com/franzjeger/SuperManager/actions.
+Apple notarisation takes 5-30 min, so the full workflow typically
+runs 12-35 min.
+
 ### Auto-update internals
 
 The app reads `SUFeedURL` from Info.plist on launch. Sparkle polls that
