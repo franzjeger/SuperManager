@@ -78,6 +78,46 @@ impl EngineServer {
                 "no targets after expansion".to_owned(),
             );
         }
+
+        // Strict-scope enforcement. If the engagement has
+        // `strict_scope = true` AND `scope_cidrs` non-empty, every
+        // target must fall within some scope CIDR and none can fall
+        // inside an exclusion. Reject the WHOLE scan if any target
+        // violates — partial-execute would defeat the audit guarantee
+        // strict mode is there to provide.
+        if let Some(eid) = engagement_id.as_deref() {
+            if let Ok(engagement) = crate::engagement::load(eid) {
+                if engagement.strict_scope {
+                    let violations = crate::engagement::targets_outside_scope(
+                        &targets,
+                        &engagement.scope_cidrs,
+                        &engagement.exclusions,
+                    );
+                    if !violations.is_empty() {
+                        let sample = violations.iter()
+                            .take(5)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let extra = if violations.len() > 5 {
+                            format!(" (+ {} more)", violations.len() - 5)
+                        } else {
+                            String::new()
+                        };
+                        return Response::err_engine(
+                            id,
+                            &crate::error::EngineError::InvalidScope {
+                                reason: format!(
+                                    "Strict scope: {} target(s) outside engagement scope or inside exclusions: {sample}{extra}",
+                                    violations.len()
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         // Register the scan as a cancellable operation. The guard
         // unregisters on drop so we don't have to remember to
         // clean up on error paths.

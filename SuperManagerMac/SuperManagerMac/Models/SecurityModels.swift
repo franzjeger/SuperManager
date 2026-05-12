@@ -80,6 +80,11 @@ struct Engagement: Codable, Identifiable {
     var log: [EngagementEvent]
     var notes: String
     var schedule: EngagementSchedule?
+    /// When true, active scans started under this engagement reject
+    /// any target IP that doesn't fall within `scopeCidrs`. When
+    /// false (default), the GUI shows a soft warning for out-of-
+    /// scope targets but the scan proceeds.
+    var strictScope: Bool
     enum CodingKeys: String, CodingKey {
         case id, title, log, notes, schedule
         case customerSlug = "customer_slug"
@@ -91,6 +96,7 @@ struct Engagement: Codable, Identifiable {
         case expiresAt = "expires_at"
         case authorizedBy = "authorized_by"
         case authorizationDocPath = "authorization_doc_path"
+        case strictScope = "strict_scope"
     }
 
     var isActive: Bool { expiresAt > Date() }
@@ -114,6 +120,7 @@ struct Engagement: Codable, Identifiable {
         log = (try? c.decode([EngagementEvent].self, forKey: .log)) ?? []
         notes = (try? c.decode(String.self, forKey: .notes)) ?? ""
         schedule = try? c.decodeIfPresent(EngagementSchedule.self, forKey: .schedule)
+        strictScope = (try? c.decode(Bool.self, forKey: .strictScope)) ?? false
     }
 
     init(
@@ -130,7 +137,8 @@ struct Engagement: Codable, Identifiable {
         authorizationDocPath: String? = nil,
         log: [EngagementEvent] = [],
         notes: String = "",
-        schedule: EngagementSchedule? = nil
+        schedule: EngagementSchedule? = nil,
+        strictScope: Bool = false
     ) {
         self.id = id
         self.customerSlug = customerSlug
@@ -146,6 +154,7 @@ struct Engagement: Codable, Identifiable {
         self.log = log
         self.notes = notes
         self.schedule = schedule
+        self.strictScope = strictScope
     }
 }
 

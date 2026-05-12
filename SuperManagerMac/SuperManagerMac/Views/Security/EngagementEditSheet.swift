@@ -33,6 +33,7 @@ struct EngagementEditSheet: View {
         })
     @State private var scheduleEnabled = false
     @State private var scheduleCadence: ScheduleCadence = .weekly
+    @State private var strictScope = false
     @State private var saving = false
     @State private var error: String?
     @State private var showingNewCustomer = false
@@ -167,6 +168,7 @@ struct EngagementEditSheet: View {
         scopeHostsText = e.scopeHosts.joined(separator: "\n")
         exclusionsText = e.exclusions.joined(separator: "\n")
         allowedTechniques = Set(e.allowedTechniques)
+        strictScope = e.strictScope
         if let s = e.schedule {
             scheduleEnabled = true
             scheduleCadence = s.cadence
@@ -213,6 +215,32 @@ struct EngagementEditSheet: View {
                     Text("First scan fires ~60 s after save. Daemon must be running.")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                }
+            }
+            Section("Enforcement") {
+                // strict_scope: when ON, the daemon rejects active
+                // scans whose targets fall outside the scope CIDRs
+                // (or inside the exclusions). Mirrors a real
+                // legal/contractual guarantee — "the scan stayed
+                // within authorised scope" — and lets the audit
+                // log say that definitively.
+                Toggle("Strict scope enforcement", isOn: $strictScope)
+                    .disabled(scopeCidrsText.trimmingCharacters(in: .whitespaces).isEmpty)
+                if strictScope {
+                    Text("Active scans will REJECT any target outside the scope CIDRs above (or inside an exclusion). Use for engagements where the customer has signed a scope-limiting authorization document.")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if !scopeCidrsText.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Text("Out-of-scope targets currently produce a warning but run anyway. Enable strict mode to hard-block.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Add at least one scope CIDR (in the right pane) to enable.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Section("Notes") {
@@ -345,7 +373,8 @@ struct EngagementEditSheet: View {
             authorizedBy: authorizedBy,
             authorizationDocPath: engagement?.authorizationDocPath,
             log: engagement?.log ?? [],
-            notes: notes
+            notes: notes,
+            strictScope: strictScope
         )
         if let saved = await appState.saveEngagement(payload) {
             // Apply schedule via dedicated RPC. Cadence transitions:
