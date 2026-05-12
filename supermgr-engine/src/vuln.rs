@@ -287,30 +287,42 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
             cvss: Some(9.0),
         });
     } else if v.contains("tlsv1.0") || v.contains("tlsv1") && !v.contains("tlsv1.1") && !v.contains("tlsv1.2") && !v.contains("tlsv1.3") {
+        let (sev, cvss) = deprecated_tls_severity("TLSv1.0", host_ip);
+        let title = if cvss < 6.0 {
+            "Deprecated TLS 1.0 (internal host — compliance issue)"
+        } else {
+            "Deprecated TLS 1.0"
+        };
         out.push(Finding {
             id: "tls.tls10".into(),
             host_ip: host_ip.to_owned(),
             port: Some(port),
             service: Some("https".into()),
-            severity: Severity::High,
-            title: "Deprecated TLS 1.0".into(),
-            detail: "TLS 1.0 is deprecated by RFC 8996. Vulnerable to BEAST and weak cipher suites.".into(),
-            recommendation: "Disable TLS 1.0. Allow only TLS 1.2+.".into(),
+            severity: sev,
+            title: title.into(),
+            detail: "TLS 1.0 is deprecated by RFC 8996. Vulnerable to BEAST and weak cipher suites. On internal hosts the risk is bounded but PCI DSS / HIPAA / FedRAMP all require TLS 1.2+.".into(),
+            recommendation: "Disable TLS 1.0. Allow only TLS 1.2+. On Windows: Disable via SCHANNEL registry keys + IIS bindings. On nginx/Apache: `ssl_protocols TLSv1.2 TLSv1.3;` / `SSLProtocol -all +TLSv1.2 +TLSv1.3`.".into(),
             cve: None,
-            cvss: Some(6.5),
+            cvss: Some(cvss),
         });
     } else if v.contains("tlsv1.1") {
+        let (sev, cvss) = deprecated_tls_severity("TLSv1.1", host_ip);
+        let title = if cvss < 5.0 {
+            "Deprecated TLS 1.1 (internal host — compliance issue)"
+        } else {
+            "Deprecated TLS 1.1"
+        };
         out.push(Finding {
             id: "tls.tls11".into(),
             host_ip: host_ip.to_owned(),
             port: Some(port),
             service: Some("https".into()),
-            severity: Severity::High,
-            title: "Deprecated TLS 1.1".into(),
-            detail: "TLS 1.1 is deprecated by RFC 8996.".into(),
-            recommendation: "Disable TLS 1.1. Allow only TLS 1.2+.".into(),
+            severity: sev,
+            title: title.into(),
+            detail: "TLS 1.1 is deprecated by RFC 8996. Same compliance + cipher-suite story as TLS 1.0.".into(),
+            recommendation: "Disable TLS 1.1. Allow only TLS 1.2+. See TLS 1.0 recommendation for platform-specific config.".into(),
             cve: None,
-            cvss: Some(5.5),
+            cvss: Some(cvss),
         });
     }
 
@@ -440,19 +452,18 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
     }
 
     // Protocol matrix — flag any pre-TLS-1.2 versions the server
-    // is willing to speak.
+    // is willing to speak. Severity is attenuated for internal
+    // RFC1918 hosts: SSLv2/v3 stay Critical (POODLE works on
+    // LANs); TLS 1.0/1.1 drop to Medium where they're a compliance
+    // issue rather than an active threat.
     for proto in &tls.protocols_accepted {
-        let sev = match proto.as_str() {
-            "SSLv3"    => Severity::Critical,
-            "TLSv1.0"  => Severity::High,
-            "TLSv1.1"  => Severity::High,
-            _          => Severity::Medium,
-        };
-        let cvss = match proto.as_str() {
-            "SSLv3"   => 9.0,
-            "TLSv1.0" => 6.5,
-            "TLSv1.1" => 5.5,
-            _         => 4.0,
+        let (sev, cvss) = deprecated_tls_severity(proto, host_ip);
+        let zone = crate::asset_enrich::classify(host_ip);
+        let internal = !zone.is_routable_externally();
+        let context_suffix = if internal && proto.starts_with("TLSv1") {
+            " (internal host)"
+        } else {
+            ""
         };
         out.push(Finding {
             id: format!("tls.proto-{}", proto.to_lowercase().replace('.', "")),
@@ -460,7 +471,7 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
             port: Some(port),
             service: Some("https".into()),
             severity: sev,
-            title: format!("Server accepts {proto}"),
+            title: format!("Server accepts {proto}{context_suffix}"),
             detail: format!(
                 "Probed `openssl s_client {}` — handshake succeeded. RFC 8996 deprecates TLS <1.2; SSLv3 is broken (POODLE).",
                 proto.to_lowercase()
@@ -471,6 +482,25 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
             cve: None,
             cvss: Some(cvss),
         });
+    }
+}
+
+/// Severity + CVSS score for an accepted deprecated TLS version,
+/// attenuated by IP zone. SSLv2/SSLv3 stay Critical regardless
+/// (POODLE-class attacks work on a LAN). TLS 1.0/1.1 drop to
+/// Medium internally — they're a compliance issue (PCI DSS / HIPAA
+/// / FedRAMP all require TLS 1.2+) but the active-exploit risk
+/// against an internal host is much smaller than against a
+/// public-facing one.
+fn deprecated_tls_severity(proto: &str, host_ip: &str) -> (Severity, f32) {
+    let internal = !crate::asset_enrich::classify(host_ip).is_routable_externally();
+    match (proto, internal) {
+        ("SSLv2" | "SSLv3", _) => (Severity::Critical, 9.0),
+        ("TLSv1.0", false) => (Severity::High, 6.5),
+        ("TLSv1.0", true)  => (Severity::Medium, 4.5),
+        ("TLSv1.1", false) => (Severity::High, 5.5),
+        ("TLSv1.1", true)  => (Severity::Medium, 3.5),
+        _ => (Severity::Medium, 4.0),
     }
 }
 
@@ -1059,6 +1089,69 @@ mod tests {
                 "{service} should produce a *-exposed config finding"
             );
         }
+    }
+
+    #[test]
+    fn tls_proto_findings_public_stay_high() {
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "X".into(),
+            cert_subject: None,
+            cert_issuer: None,
+            cert_san: vec![],
+            cert_expires_iso: None,
+            self_signed: false,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec!["TLSv1.0".into(), "TLSv1.1".into()],
+        };
+        let mut out = vec![];
+        tls_findings("203.0.113.5", 443, &tls, &mut out);
+        for proto in ["tls.proto-tlsv10", "tls.proto-tlsv11"] {
+            let f = out.iter().find(|f| f.id == proto).expect("must fire");
+            assert_eq!(f.severity, Severity::High, "{proto} on public → high");
+            assert!(!f.title.contains("internal"), "public title got {}", f.title);
+        }
+    }
+
+    #[test]
+    fn tls_proto_findings_internal_drop_to_medium() {
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "X".into(),
+            cert_subject: None,
+            cert_issuer: None,
+            cert_san: vec![],
+            cert_expires_iso: None,
+            self_signed: false,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec!["TLSv1.0".into(), "TLSv1.1".into()],
+        };
+        let mut out = vec![];
+        tls_findings("10.1.0.5", 443, &tls, &mut out);
+        for proto in ["tls.proto-tlsv10", "tls.proto-tlsv11"] {
+            let f = out.iter().find(|f| f.id == proto).expect("must fire");
+            assert_eq!(f.severity, Severity::Medium, "{proto} on internal → medium");
+            assert!(f.title.contains("internal"), "internal title got {}", f.title);
+        }
+    }
+
+    #[test]
+    fn tls_proto_sslv3_stays_critical_internal() {
+        let tls = crate::probes::TlsInfo {
+            version: "TLSv1.3".into(),
+            cipher: "X".into(),
+            cert_subject: None,
+            cert_issuer: None,
+            cert_san: vec![],
+            cert_expires_iso: None,
+            self_signed: false,
+            weak_ciphers_accepted: vec![],
+            protocols_accepted: vec!["SSLv3".into()],
+        };
+        let mut out = vec![];
+        tls_findings("10.1.0.5", 443, &tls, &mut out);
+        let f = out.iter().find(|f| f.id == "tls.proto-sslv3").expect("must fire");
+        assert_eq!(f.severity, Severity::Critical, "SSLv3 stays Critical even on internal — POODLE works on LANs");
     }
 
     #[test]
