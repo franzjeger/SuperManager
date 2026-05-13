@@ -1092,6 +1092,11 @@ enum AppSection: String, CaseIterable, Identifiable {
     case compliance = "Compliance"
     case provisioning = "Provisioning"
     case security = "Security"
+    /// Recon / pentest tool launcher — surfaces every active-audit
+    /// capability as a clickable tile instead of burying them in
+    /// engagement-panel sub-menus. The toolkit's white/gray-hat
+    /// face: discovery, DNS audit, traffic capture, etc.
+    case recon = "Recon"
     // case console = "Console"          — re-enable once we ship the Claude integration
 
     var id: String { rawValue }
@@ -1105,6 +1110,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .compliance: return "checkmark.shield"
         case .provisioning: return "wand.and.stars"
         case .security: return "shield.lefthalf.filled.badge.checkmark"
+        case .recon: return "binoculars.fill"
         }
     }
 }

@@ -259,6 +259,10 @@ struct ContentView: View {
             ProvisioningListColumn()
         case .security:
             SecurityListColumn()
+        case .recon:
+            // Recon is a single full-width tool launcher — no list
+            // column, same shape as Fleet.
+            EmptyView()
         }
     }
 
@@ -356,6 +360,8 @@ struct ContentView: View {
             ProvisioningView()
         case .security:
             SecurityView()
+        case .recon:
+            ReconView()
         }
     }
 
