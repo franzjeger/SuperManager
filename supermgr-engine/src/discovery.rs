@@ -630,58 +630,313 @@ fn u32_to_ipv4(n: u32) -> String {
 // OUI lookup (MAC vendor database)
 // ---------------------------------------------------------------------------
 
-/// Bundled IEEE OUI prefix → vendor table. We include a small
-/// curated set covering the most common gear an MSP encounters;
-/// production builds would ship the full IEEE registry.
+/// Bundled IEEE OUI prefix → vendor table. The curated list
+/// below covers every Ubiquiti / Fortinet / Cisco / MikroTik
+/// / Aruba / HPE / Meraki / TP-Link / Netgear prefix the
+/// author has personally seen in MSP fleets, plus the major
+/// consumer-PC + virtualisation vendors so misc IPs get a
+/// useful label too. The list is intentionally fat for the
+/// network-gear side because those are the rows the operator
+/// most needs to act on.
+///
+/// If `oui_database_load_external()` finds a Wireshark `manuf`
+/// file at one of the well-known paths, its 35k+ entries are
+/// layered on top of the curated set — so a missing prefix
+/// here doesn't doom the device to "no vendor" on systems
+/// where the operator has Wireshark installed.
 fn oui_database() -> HashMap<String, String> {
     let mut m = HashMap::new();
-    let curated = [
-        ("00:11:32", "Apple, Inc."),
-        ("00:1c:42", "Parallels"),
-        ("00:0c:29", "VMware, Inc."),
-        ("00:50:56", "VMware, Inc."),
-        ("00:25:90", "Super Micro Computer"),
-        ("00:e0:4c", "Realtek Semiconductor"),
-        ("00:1d:d8", "Microsoft Corporation"),
-        ("d8:c4:97", "Apple, Inc."),
-        ("dc:a6:32", "Raspberry Pi Foundation"),
-        ("b8:27:eb", "Raspberry Pi Foundation"),
-        ("e4:5f:01", "Raspberry Pi Foundation"),
-        ("18:e8:29", "Ubiquiti Networks Inc."),
-        ("24:5a:4c", "Ubiquiti Networks Inc."),
-        ("44:d9:e7", "Ubiquiti Networks Inc."),
-        ("78:8a:20", "Ubiquiti Networks Inc."),
-        ("80:2a:a8", "Ubiquiti Networks Inc."),
-        ("dc:9f:db", "Ubiquiti Networks Inc."),
-        ("e0:63:da", "Ubiquiti Networks Inc."),
-        ("f0:9f:c2", "Ubiquiti Networks Inc."),
-        ("00:09:0f", "Fortinet, Inc."),
-        ("90:6c:ac", "Fortinet, Inc."),
-        ("70:4c:a5", "Fortinet, Inc."),
-        ("00:1b:21", "Intel Corporate"),
-        ("00:e0:b8", "Foxconn"),
-        ("3c:8c:f8", "Xiaomi Communications"),
-        ("ac:bc:32", "Apple, Inc."),
-        ("60:f8:1d", "Apple, Inc."),
-        ("a4:5e:60", "Apple, Inc."),
-        ("00:11:43", "Dell Inc."),
-        ("d4:81:d7", "Dell Inc."),
-        ("0c:c4:7a", "Super Micro Computer"),
-        ("00:14:bf", "Cisco-Linksys"),
-        ("00:21:d8", "Cisco Systems"),
-        ("00:1b:8b", "Cisco Systems"),
-        ("00:80:77", "HP, Inc."),
-        ("3c:d9:2b", "HP, Inc."),
-        ("a4:5d:36", "HP, Inc."),
-        ("00:14:c2", "HP, Inc."),
-        ("28:cd:c1", "Synology"),
-        ("00:11:32", "Synology"),
-        ("ac:de:48", "Private (locally administered)"),
+    // ---- Ubiquiti — comprehensive list of registered OUIs
+    //     (UniFi APs / switches / routers / Cloud Keys). The
+    //     user's U7-Pro is on 8c:ed:e1; missing this entry was
+    //     the entire reason adopted UniFi gear rendered as
+    //     "generic Linux" in scan results.
+    let ubiquiti: &[&str] = &[
+        "00:15:6d", "00:27:22", "04:18:d6", "18:e8:29", "24:5a:4c",
+        "24:a4:3c", "28:70:4e", "44:d9:e7", "60:22:32", "68:72:51",
+        "68:d7:9a", "70:a7:41", "74:83:c2", "74:ac:b9", "78:45:58",
+        "78:8a:20", "80:2a:a8", "80:2d:7a", "8c:ed:e1", "94:2a:6f",
+        "a0:36:bc", "ac:8b:a9", "b4:fb:e4", "d0:21:f9", "d2:21:f9",
+        "dc:9f:db", "e0:63:da", "e4:38:83", "e4:6f:13", "f0:9f:c2",
+        "f4:e2:c6", "f8:1b:73", "f8:8e:38", "fc:ec:da",
     ];
-    for (prefix, vendor) in curated.iter() {
-        m.insert((*prefix).to_owned(), (*vendor).to_owned());
+    for p in ubiquiti { m.insert((*p).to_owned(), "Ubiquiti Networks Inc.".to_owned()); }
+
+    // ---- Fortinet (FortiGate / FortiSwitch / FortiAP)
+    let fortinet: &[&str] = &[
+        "00:09:0f", "00:13:5f", "04:d5:90", "08:5b:0e", "08:5b:0f",
+        "08:62:66", "0c:74:c2", "10:0a:f8", "1c:a4:dc", "70:4c:a5",
+        "78:f0:9c", "90:6c:ac", "b4:cb:57", "e8:1c:ba", "f0:b2:b9",
+    ];
+    for p in fortinet { m.insert((*p).to_owned(), "Fortinet, Inc.".to_owned()); }
+
+    // ---- MikroTik (RouterBOARD / CCR / CRS / hAP)
+    let mikrotik: &[&str] = &[
+        "00:0c:42", "08:55:31", "18:fd:74", "2c:c8:1b", "48:8f:5a",
+        "4c:5e:0c", "64:d1:54", "6c:3b:6b", "74:4d:28", "78:9a:18",
+        "b8:69:f4", "c4:ad:34", "cc:2d:e0", "d4:ca:6d", "dc:2c:6e",
+        "e4:8d:8c",
+    ];
+    for p in mikrotik { m.insert((*p).to_owned(), "MikroTik".to_owned()); }
+
+    // ---- Cisco (incl. Linksys legacy + Meraki) — small subset
+    let cisco: &[&str] = &[
+        "00:0a:b8", "00:0b:46", "00:0d:bd", "00:0e:08", "00:0e:39",
+        "00:14:bf", "00:14:f1", "00:16:9c", "00:18:73", "00:1b:53",
+        "00:1b:8b", "00:1d:7e", "00:21:d8", "00:21:d7", "00:23:33",
+        "00:25:84", "00:26:0b", "00:2a:10", "00:30:96", "08:96:ad",
+        "0c:33:5e", "10:f3:11", "18:8b:9d", "1c:6a:7a", "2c:36:f8",
+        "44:e4:d9", "5c:50:15", "70:cd:60", "8c:60:4f", "a0:f8:49",
+        "c8:9c:1d", "cc:48:3a", "f8:7b:20",
+    ];
+    for p in cisco { m.insert((*p).to_owned(), "Cisco Systems".to_owned()); }
+
+    // ---- Meraki (Cisco's small-business / MSP line) —
+    //     separated so the operator gets a clearer signal.
+    for p in ["00:18:0a", "88:15:44", "ac:17:c8", "e0:55:3d", "e0:cb:bc"] {
+        m.insert(p.to_owned(), "Cisco Meraki".to_owned());
     }
+
+    // ---- HPE / Aruba / ProCurve
+    let hpe: &[&str] = &[
+        "00:01:e7", "00:0b:cd", "00:11:0a", "00:14:c2", "00:1f:fe",
+        "00:23:7d", "00:25:b3", "00:80:77", "18:64:72", "3c:d9:2b",
+        "94:18:82", "a4:5d:36", "b0:e9:7e", "d0:7e:35", "f0:7f:06",
+        "00:24:6c", "20:4c:03", "70:3a:0e", "94:b4:0f", "ac:a3:1e",
+    ];
+    for p in hpe { m.insert((*p).to_owned(), "HPE / Aruba Networks".to_owned()); }
+
+    // ---- TP-Link / Netgear / D-Link — common consumer/SMB gear
+    let tplink: &[&str] = &[
+        "00:14:78", "00:23:cd", "00:27:19", "14:cc:20", "30:b5:c2",
+        "44:23:7c", "50:c7:bf", "54:e6:fc", "64:6e:97", "70:4f:57",
+        "84:16:f9", "98:da:c4", "a0:f3:c1", "c0:25:e9", "f4:f2:6d",
+    ];
+    for p in tplink { m.insert((*p).to_owned(), "TP-Link Technologies".to_owned()); }
+    let netgear: &[&str] = &[
+        "00:09:5b", "00:0f:b5", "00:14:6c", "00:18:4d", "00:1b:2f",
+        "00:1f:33", "10:0d:7f", "20:0c:c8", "30:46:9a", "44:94:fc",
+        "9c:3d:cf", "a0:21:b7", "a4:2b:8c", "c0:3f:0e", "e0:46:9a",
+    ];
+    for p in netgear { m.insert((*p).to_owned(), "Netgear".to_owned()); }
+    let dlink: &[&str] = &[
+        "00:05:5d", "00:0d:88", "00:0f:3d", "00:11:95", "00:13:46",
+        "00:15:e9", "00:17:9a", "00:1c:f0", "00:1e:58", "00:21:91",
+        "00:24:01", "1c:7e:e5", "78:54:2e", "84:c9:b2", "c4:e9:0a",
+    ];
+    for p in dlink { m.insert((*p).to_owned(), "D-Link".to_owned()); }
+
+    // ---- pfSense / Netgate appliances + generic FreeBSD
+    for p in ["00:08:a2", "ac:1f:6b"] {
+        m.insert(p.to_owned(), "Netgate / pfSense".to_owned());
+    }
+
+    // ---- Apple — big mix because most operator workstations
+    //     are Macs and personal devices show up in scans.
+    let apple: &[&str] = &[
+        "00:03:93", "00:05:02", "00:0a:27", "00:0a:95", "00:0d:93",
+        "00:10:fa", "00:11:24", "00:14:51", "00:16:cb", "00:17:f2",
+        "00:19:e3", "00:1b:63", "00:1c:b3", "00:1e:c2", "00:1f:5b",
+        "00:1f:f3", "00:21:e9", "00:22:41", "00:23:12", "00:23:32",
+        "00:24:36", "00:25:00", "00:25:4b", "00:25:bc", "00:26:08",
+        "00:26:4a", "00:26:b0", "00:26:bb", "00:30:65", "00:50:e4",
+        "00:88:65", "00:a0:40", "00:c6:10", "04:0c:ce", "04:15:52",
+        "04:1e:64", "04:48:9a", "04:54:53", "04:69:f8", "04:db:56",
+        "04:e5:36", "04:f1:3e", "08:00:07", "08:74:02", "08:e6:89",
+        "0c:30:21", "0c:74:c2", "10:1c:0c", "10:9a:dd", "14:10:9f",
+        "18:81:0e", "18:af:61", "18:e7:f4", "1c:91:48", "1c:ab:a7",
+        "28:5a:eb", "28:cf:da", "28:e0:2c", "2c:f0:a2", "30:90:ab",
+        "34:36:3b", "34:c0:59", "3c:07:54", "3c:15:c2", "3c:ab:8e",
+        "40:30:04", "40:6c:8f", "40:a6:d9", "44:00:10", "44:2a:60",
+        "44:fb:42", "48:60:bc", "48:74:6e", "4c:74:bf", "4c:7c:5f",
+        "4c:8d:79", "4c:b1:99", "50:7a:55", "50:ea:d6", "54:26:96",
+        "54:72:4f", "54:e4:3a", "58:1f:aa", "58:55:ca", "58:b0:35",
+        "5c:8d:4e", "5c:95:ae", "5c:96:9d", "5c:97:f3", "60:03:08",
+        "60:33:4b", "60:69:44", "60:c5:47", "60:f8:1d", "60:fa:cd",
+        "60:fb:42", "64:9a:be", "64:a3:cb", "64:a5:c3", "64:b9:e8",
+        "68:09:27", "68:5b:35", "68:96:7b", "68:9c:70", "68:a8:6d",
+        "68:ab:1e", "68:db:ca", "6c:40:08", "6c:70:9f", "6c:72:e7",
+        "6c:94:f8", "6c:96:cf", "6c:ab:31", "70:11:24", "70:48:0f",
+        "70:73:cb", "70:cd:60", "70:de:e2", "74:e1:b6", "74:e2:f5",
+        "78:31:c1", "78:6c:1c", "78:7e:61", "78:88:6d", "78:a3:e4",
+        "78:ca:39", "78:fd:94", "7c:11:be", "7c:6d:62", "7c:6d:f8",
+        "7c:c3:a1", "7c:c5:37", "7c:d1:c3", "80:49:71", "80:92:9f",
+        "80:be:05", "80:ea:96", "84:38:35", "84:78:8b", "84:85:06",
+        "84:fc:fe", "88:1f:a1", "88:53:95", "88:c6:63", "88:e9:fe",
+        "8c:00:6d", "8c:29:37", "8c:2d:aa", "8c:7b:9d", "8c:85:90",
+        "8c:fa:ba", "90:27:e4", "90:72:40", "90:84:0d", "90:b0:ed",
+        "90:b2:1f", "90:b9:31", "90:fd:61", "94:94:26", "98:01:a7",
+        "98:03:d8", "98:b8:e3", "98:d6:bb", "98:e0:d9", "98:f0:ab",
+        "9c:04:eb", "9c:35:eb", "9c:84:bf", "9c:e6:5e", "9c:f3:87",
+        "9c:f4:8e", "a0:99:9b", "a4:5e:60", "a4:67:06", "a4:b1:97",
+        "a4:b8:05", "a4:c3:61", "a4:d1:8c", "a4:d1:d2", "a4:f1:e8",
+        "a4:fc:14", "a8:20:66", "a8:51:ab", "a8:5c:2c", "a8:60:b6",
+        "a8:8e:24", "a8:96:8a", "a8:bb:cf", "a8:fa:d8", "ac:1f:74",
+        "ac:29:3a", "ac:3c:0b", "ac:61:ea", "ac:7f:3e", "ac:87:a3",
+        "ac:bc:32", "ac:cf:5c", "ac:fd:ec", "b0:34:95", "b0:48:1a",
+        "b0:65:bd", "b4:18:d1", "b4:f0:ab", "b8:09:8a", "b8:17:c2",
+        "b8:44:d9", "b8:53:ac", "b8:78:2e", "b8:8d:12", "b8:c7:5d",
+        "b8:e8:56", "b8:f6:b1", "bc:3b:af", "bc:52:b7", "bc:67:1c",
+        "bc:92:6b", "bc:a9:20", "bc:b8:63", "c0:63:94", "c0:84:7a",
+        "c0:b6:58", "c0:cc:f8", "c0:e8:62", "c0:f2:fb", "c4:2c:03",
+        "c4:84:66", "c4:b3:01", "c8:1e:e7", "c8:2a:14", "c8:33:4b",
+        "c8:69:cd", "c8:6f:1d", "c8:85:50", "c8:bc:c8", "c8:d0:83",
+        "c8:e0:eb", "c8:f6:50", "cc:08:e0", "cc:25:ef", "cc:29:f5",
+        "cc:78:5f", "cc:c7:60", "d0:23:db", "d0:25:98", "d0:33:11",
+        "d0:81:7a", "d4:61:9d", "d4:f4:6f", "d4:f4:65", "d8:a2:5e",
+        "d8:cf:9c", "d8:d1:cb", "dc:0c:5c", "dc:2b:2a", "dc:2b:61",
+        "dc:9b:9c", "dc:a4:ca", "dc:a9:04", "dc:e2:ac", "e0:5f:45",
+        "e0:b9:ba", "e0:c9:7a", "e0:f5:c6", "e0:f8:47", "e4:25:e7",
+        "e4:8b:7f", "e4:9a:dc", "e4:c6:3d", "e8:80:2e", "e8:8d:28",
+        "e8:b2:ac", "ec:35:86", "ec:85:2f", "ec:ad:b8", "f0:18:98",
+        "f0:24:75", "f0:99:bf", "f0:b4:79", "f0:b0:e7", "f0:c1:f1",
+        "f0:cb:a1", "f0:d1:a9", "f0:db:e2", "f0:db:f8", "f0:dc:e2",
+        "f0:f6:1c", "f4:0f:24", "f4:31:c3", "f4:5c:89", "f4:f1:5a",
+        "f8:1e:df", "f8:27:93", "f8:4e:73", "fc:25:3f", "fc:b6:d8",
+        "fc:e9:98", "fc:fc:48",
+    ];
+    for p in apple { m.insert((*p).to_owned(), "Apple, Inc.".to_owned()); }
+
+    // ---- Microsoft (incl. Surface devices) + virtualization
+    for p in ["00:03:ff", "00:0d:3a", "00:15:5d", "00:17:fa", "00:1d:d8",
+              "00:50:f2", "28:18:78", "30:59:b7", "60:45:bd", "7c:1e:52",
+              "98:5f:d3", "a0:8c:fd", "b0:7d:64", "e4:e7:49"]
+    {
+        m.insert(p.to_owned(), "Microsoft Corporation".to_owned());
+    }
+    for p in ["00:0c:29", "00:1c:14", "00:50:56", "00:05:69"] {
+        m.insert(p.to_owned(), "VMware, Inc.".to_owned());
+    }
+    for p in ["00:1c:42"] {
+        m.insert(p.to_owned(), "Parallels".to_owned());
+    }
+    for p in ["52:54:00"] {
+        m.insert(p.to_owned(), "QEMU / KVM (libvirt)".to_owned());
+    }
+    for p in ["02:42:ac"] {
+        m.insert(p.to_owned(), "Docker container".to_owned());
+    }
+
+    // ---- Raspberry Pi (B+/Zero/3/4/5)
+    for p in ["b8:27:eb", "dc:a6:32", "e4:5f:01", "2c:cf:67", "d8:3a:dd"] {
+        m.insert(p.to_owned(), "Raspberry Pi Foundation".to_owned());
+    }
+
+    // ---- Intel / Dell / HP / Lenovo / Samsung / Xiaomi / etc.
+    for p in ["00:1b:21", "8c:16:45", "a4:34:d9", "f8:34:41", "fc:f8:ae"] {
+        m.insert(p.to_owned(), "Intel Corporate".to_owned());
+    }
+    for p in ["00:11:43", "00:23:ae", "00:26:b9", "18:03:73", "d4:81:d7",
+              "d4:ae:52", "f0:1f:af"]
+    {
+        m.insert(p.to_owned(), "Dell Inc.".to_owned());
+    }
+    for p in ["00:21:cc", "00:24:7e", "08:b2:58", "20:1a:06", "94:18:82"] {
+        m.insert(p.to_owned(), "Lenovo".to_owned());
+    }
+    for p in ["00:23:99", "08:08:c2", "20:64:32", "28:ba:b5", "70:14:a6",
+              "ac:5f:3e", "c0:bd:d1"]
+    {
+        m.insert(p.to_owned(), "Samsung Electronics".to_owned());
+    }
+    for p in ["28:6c:07", "3c:8c:f8", "ac:f7:f3", "f0:b4:29", "f4:8c:50"] {
+        m.insert(p.to_owned(), "Xiaomi Communications".to_owned());
+    }
+
+    // ---- NAS / printer / IoT staples
+    for p in ["00:11:32", "28:cd:c1"] {
+        m.insert(p.to_owned(), "Synology".to_owned());
+    }
+    for p in ["00:08:9b", "00:24:0b"] {
+        m.insert(p.to_owned(), "QNAP Systems".to_owned());
+    }
+    for p in ["00:25:90", "0c:c4:7a", "30:5a:3a"] {
+        m.insert(p.to_owned(), "Super Micro Computer".to_owned());
+    }
+    for p in ["00:e0:b8"] {
+        m.insert(p.to_owned(), "Foxconn".to_owned());
+    }
+    for p in ["00:e0:4c"] {
+        m.insert(p.to_owned(), "Realtek Semiconductor".to_owned());
+    }
+    for p in ["ac:de:48"] {
+        m.insert(p.to_owned(), "Private (locally administered)".to_owned());
+    }
+
+    // Apply an external Wireshark manuf overlay if present —
+    // that file has ~35k entries and covers everything the
+    // curated list misses (assuming the operator has
+    // Wireshark installed, which most network engineers do).
+    apply_wireshark_manuf_overlay(&mut m);
+
     m
+}
+
+/// Layer the Wireshark `manuf` database on top of the curated
+/// set if any of the well-known install paths exist. macOS
+/// users typically have one of these via:
+///   - Homebrew Wireshark (Intel):  /usr/local/etc/wireshark/manuf
+///   - Homebrew Wireshark (Silicon): /opt/homebrew/etc/wireshark/manuf
+///   - System Wireshark.app: bundled inside the .app
+///
+/// File format is one line per OUI:
+///     08:00:20	Sun	Oracle Corporation
+///     8C:ED:E1	UbiquitiI	Ubiquiti Inc
+/// We just take the first two whitespace-separated fields per
+/// line, lowercase the prefix, and overwrite our curated entry
+/// only when the curated table has no entry (so a curated
+/// "Ubiquiti Networks Inc." beats Wireshark's "UbiquitiI"
+/// truncated alias).
+fn apply_wireshark_manuf_overlay(out: &mut HashMap<String, String>) {
+    let candidates = [
+        "/opt/homebrew/etc/wireshark/manuf",
+        "/usr/local/etc/wireshark/manuf",
+        "/Applications/Wireshark.app/Contents/Resources/share/wireshark/manuf",
+        "/usr/share/wireshark/manuf",
+    ];
+    for path in candidates {
+        let Ok(text) = std::fs::read_to_string(path) else { continue };
+        let mut added = 0usize;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('#') || trimmed.is_empty() { continue }
+            // Three-octet OUI lines look like
+            //   "8C:ED:E1\tUbiquiti\tUbiquiti Networks Inc"
+            // Lines with /36 (28-bit MA-M) or /28 (24+4 bit
+            // MA-S) prefixes look like "8C:1F:64:1A:0/28 ..."
+            // — skip those, our key is a /24 (first 3 octets).
+            let mut parts = trimmed.splitn(3, |c: char| c == '\t' || c == ' ');
+            let raw_prefix = parts.next().unwrap_or("");
+            if raw_prefix.contains('/') { continue }
+            let prefix_clean: String = raw_prefix
+                .chars()
+                .filter(|c| c.is_ascii_hexdigit() || *c == ':')
+                .collect();
+            // Want exactly 8 chars: "XX:XX:XX". Two hex digits
+            // per octet, two colons.
+            if prefix_clean.len() != 8 { continue }
+            let prefix = prefix_clean.to_ascii_lowercase();
+            // Prefer the curated entry. Use Wireshark's "long"
+            // (third column) name when present, else the short
+            // alias (second column).
+            let short = parts.next().unwrap_or("").trim();
+            let long = parts.next().unwrap_or("").trim();
+            let vendor = if !long.is_empty() {
+                long.to_owned()
+            } else if !short.is_empty() {
+                short.to_owned()
+            } else {
+                continue
+            };
+            out.entry(prefix).or_insert(vendor);
+            added += 1;
+        }
+        tracing::debug!(
+            "OUI overlay: loaded {} entries from {}",
+            added, path
+        );
+        return; // first one that exists wins
+    }
 }
 
 fn lookup_oui(db: &HashMap<String, String>, mac: &str) -> Option<String> {

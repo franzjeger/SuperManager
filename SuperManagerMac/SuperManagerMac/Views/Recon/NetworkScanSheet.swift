@@ -375,12 +375,21 @@ struct NetworkScanSheet: View {
         )
     }
 
-    /// Sniff a vendor for a scanned host. The engine's OUI
-    /// lookup writes `host.vendor` (e.g. "Ubiquiti Networks"),
-    /// and per-port banners often disclose model names. We
-    /// check both.
+    /// Sniff a vendor for a scanned host. Reads:
+    ///   - `host.vendor`  (OUI lookup string from the engine —
+    ///                     e.g. "Ubiquiti Networks Inc.")
+    ///   - `host.mac`     (raw — so curated-list OUI prefixes
+    ///                     win even if the vendor string
+    ///                     never made it through)
+    ///   - each probe's banner / title / server / x-powered-by
+    ///
+    /// MAC-prefix shortcuts cover the case where the engine
+    /// found the MAC (via ARP) but our OUI database missed the
+    /// prefix, AND the device exposes nothing over TCP we can
+    /// fingerprint from (typical for an adopted UniFi AP).
     static func deviceType(for host: ActiveHost) -> DeviceType {
         let vendor = (host.vendor ?? "").lowercased()
+        let mac = (host.mac ?? "").lowercased()
         let banners = host.probes
             .compactMap { p -> String? in
                 let parts = [p.banner, p.title, p.serverHeader, p.poweredBy]
@@ -389,12 +398,19 @@ struct NetworkScanSheet: View {
             }
             .joined(separator: " ")
             .lowercased()
-        let blob = vendor + " " + banners
+        let fingerprintBlob = host.probes
+            .flatMap { $0.fingerprints }
+            .joined(separator: " ")
+            .lowercased()
+        let blob = vendor + " " + banners + " " + fingerprintBlob
+
+        // 1. Vendor / banner string contains a known token.
         if blob.contains("fortinet") || blob.contains("fortigate") {
             return .fortigate
         }
-        if blob.contains("ubiquiti") || blob.contains("unifi")
-            || blob.contains("ubnt")
+        if blob.contains("ubiquiti") || blob.contains("ubnt")
+            || blob.contains("unifi") || blob.contains("airmax")
+            || blob.contains("edgemax") || blob.contains("amplifi")
         {
             return .unifi
         }
@@ -407,8 +423,45 @@ struct NetworkScanSheet: View {
         if blob.contains("windows") || blob.contains("microsoft-iis") {
             return .windows
         }
+
+        // 2. MAC-prefix fallback. The same Ubiquiti / Fortinet
+        //    prefix list the engine ships, but used here so a
+        //    GUI rebuild that ran before the engine's curated
+        //    list updated still labels correctly.
+        let prefix = mac.split(separator: ":").prefix(3)
+            .joined(separator: ":")
+        if Self.ubiquitiOuiPrefixes.contains(prefix) {
+            return .unifi
+        }
+        if Self.fortinetOuiPrefixes.contains(prefix) {
+            return .fortigate
+        }
+        if Self.mikrotikOuiPrefixes.contains(prefix) {
+            return .openWrt  // closest match in our enum
+        }
         return .linux
     }
+
+    private static let ubiquitiOuiPrefixes: Set<String> = [
+        "00:15:6d", "00:27:22", "04:18:d6", "18:e8:29", "24:5a:4c",
+        "24:a4:3c", "28:70:4e", "44:d9:e7", "60:22:32", "68:72:51",
+        "68:d7:9a", "70:a7:41", "74:83:c2", "74:ac:b9", "78:45:58",
+        "78:8a:20", "80:2a:a8", "80:2d:7a", "8c:ed:e1", "94:2a:6f",
+        "a0:36:bc", "ac:8b:a9", "b4:fb:e4", "d0:21:f9", "d2:21:f9",
+        "dc:9f:db", "e0:63:da", "e4:38:83", "e4:6f:13", "f0:9f:c2",
+        "f4:e2:c6", "f8:1b:73", "f8:8e:38", "fc:ec:da",
+    ]
+    private static let fortinetOuiPrefixes: Set<String> = [
+        "00:09:0f", "00:13:5f", "04:d5:90", "08:5b:0e", "08:5b:0f",
+        "08:62:66", "0c:74:c2", "10:0a:f8", "1c:a4:dc", "70:4c:a5",
+        "78:f0:9c", "90:6c:ac", "b4:cb:57", "e8:1c:ba", "f0:b2:b9",
+    ]
+    private static let mikrotikOuiPrefixes: Set<String> = [
+        "00:0c:42", "08:55:31", "18:fd:74", "2c:c8:1b", "48:8f:5a",
+        "4c:5e:0c", "64:d1:54", "6c:3b:6b", "74:4d:28", "78:9a:18",
+        "b8:69:f4", "c4:ad:34", "cc:2d:e0", "d4:ca:6d", "dc:2c:6e",
+        "e4:8d:8c",
+    ]
 
     private func defaultUsername(for type: DeviceType) -> String {
         switch type {
