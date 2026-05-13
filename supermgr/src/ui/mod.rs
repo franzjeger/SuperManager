@@ -3822,7 +3822,7 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
         .website("https://github.com/franzjeger/SuperManager")
         .issue_url("https://github.com/franzjeger/SuperManager/issues")
         .license_type(gtk4::License::Gpl30)
-        .developers(vec!["Frank-Andreas Lia"])
+        .developers(vec!["SuperManager Maintainers"])
         .comments("Unified SSH, VPN, and network device management with AI assistant")
         .build();
     dialog.present(Some(window));

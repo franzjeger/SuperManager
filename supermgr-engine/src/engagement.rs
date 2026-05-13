@@ -67,7 +67,7 @@ pub struct Engagement {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 
     /// Free-form: who authorized this on the customer side.
-    /// "Frank Liaaen, Aarsleff CTO". Surfaced on every report
+    /// "Your Name, Acme CTO". Surfaced on every report
     /// generated under this engagement.
     #[serde(default)]
     pub authorized_by: String,
@@ -438,7 +438,7 @@ mod tests {
     fn fixture_engagement(suffix: &str) -> Engagement {
         Engagement {
             id: format!("test-engagement-{}-{suffix}", uuid::Uuid::new_v4().simple()),
-            customer_slug: "aarsleff-norge".into(),
+            customer_slug: "acme-corp".into(),
             title: "Q1 audit".into(),
             scope_cidrs: vec!["10.0.0.0/16".into()],
             scope_hosts: vec![],

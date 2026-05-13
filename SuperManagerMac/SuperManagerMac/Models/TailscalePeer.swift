@@ -15,7 +15,7 @@ struct TailscalePeer: Identifiable, Hashable, Decodable {
     let id: String
 
     /// Short name as shown in the Tailscale admin console, e.g.
-    /// `docker` or `franks-mac-mini`. May contain spaces (Apple
+    /// `docker` or `dev-laptop`. May contain spaces (Apple
     /// devices often use the human-readable computer name).
     let hostName: String
 
@@ -146,7 +146,7 @@ struct TailscaleStatus: Decodable {
     let tailscaleIPs: [String]
     let magicDNSSuffix: String?
     /// Human-readable tailnet name from the coordinator, e.g.
-    /// `franks-personal.ts.net` or `someone@gmail.com`. Surfaced in
+    /// `example.ts.net` or `someone@example.com`. Surfaced in
     /// the header so the user can confirm which account this Mac is
     /// joined to without leaving the app.
     let currentTailnetName: String?

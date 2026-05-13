@@ -84,9 +84,9 @@ struct GlobalCustomerPicker: View {
         .padding()
 }
 
-#Preview("Aarsleff selected") {
+#Preview("Acme selected") {
     let s = AppState.previewSeeded
-    s.globalCustomerSlug = "aarsleff-norge"
+    s.globalCustomerSlug = "acme-corp"
     return GlobalCustomerPicker()
         .environment(s)
         .padding()

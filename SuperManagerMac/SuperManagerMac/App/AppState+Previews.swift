@@ -4,13 +4,18 @@ import SwiftUI
 /// Preview / test fixtures for AppState. Lives in `#if DEBUG` so
 /// the production binary doesn't ship the seed data.
 ///
+/// All IPs use the RFC 5737 documentation ranges (`192.0.2.0/24`,
+/// `198.51.100.0/24`, `203.0.113.0/24`) so previews never collide
+/// with real network addressing. Customer / contact names are
+/// generic placeholders.
+///
 /// Usage in a `#Preview`:
 ///
 /// ```swift
 /// #Preview("Finding detail") {
 ///     FindingDetailSheet(
 ///         finding: .previewExampleSshOpen,
-///         scope: "aarsleff-norge",
+///         scope: "acme-corp",
 ///         engagementId: "demo",
 ///         onSaved: { _ in }
 ///     )
@@ -26,7 +31,7 @@ extension AppState {
     @MainActor
     static var previewSeeded: AppState {
         let s = AppState()
-        s.customers = [.previewAarsleff, .previewLab, .previewNetcraft]
+        s.customers = [.previewAcme, .previewLab, .previewNetcraft]
         s.engagements = [.previewActive, .previewExpired]
         s.sshHosts = [
             .previewFortigate,
@@ -48,23 +53,23 @@ extension AppState {
 }
 
 extension Customer {
-    static let previewAarsleff = Customer(
-        slug: "aarsleff-norge",
-        displayName: "Aarsleff Norge",
-        contactName: "Frank Liaaen",
-        contactEmail: "frank@aarsleff.no",
-        notes: "Construction-MSP customer. ~12 sites, FortiGate-100F at HQ.",
+    static let previewAcme = Customer(
+        slug: "acme-corp",
+        displayName: "Acme Corp",
+        contactName: "Alex Doe",
+        contactEmail: "alex@example.com",
+        notes: "Generic MSP customer. ~12 sites, FortiGate-100F at HQ.",
         defaultTemplate: "fortigate_branch_office",
-        mgmtAllowlistDomains: ["*.unifi.aarsleff.no", "*.ubnt.com"],
-        primaryDomain: "aarsleff.no",
+        mgmtAllowlistDomains: ["*.unifi.example.com", "*.ubnt.com"],
+        primaryDomain: "example.com",
         sites: [
             .init(
-                id: "hq-oslo",
-                displayName: "HQ Oslo",
-                address: "Strandveien 50, 1366 Lysaker",
+                id: "hq",
+                displayName: "HQ",
+                address: "Main Street 1, 0123 City",
                 hostIds: [],
                 wanType: "static",
-                wanStaticIp: "81.10.42.10/29",
+                wanStaticIp: "203.0.113.10/29",
                 lanBase: "10.0.0.0/16",
                 vlans: [
                     .init(id: 10, name: "MGMT", subnet: "10.0.10.0/24", purpose: "mgmt"),
@@ -78,12 +83,12 @@ extension Customer {
     static let previewLab = Customer(
         slug: "lab",
         displayName: "Lab / Internal",
-        contactName: "Me",
-        contactEmail: "support@sybr.no",
+        contactName: "—",
+        contactEmail: "admin@example.com",
         notes: "Internal test environment.",
         defaultTemplate: nil,
         mgmtAllowlistDomains: [],
-        primaryDomain: "sybr.no",
+        primaryDomain: "example.com",
         sites: []
     )
 
@@ -100,7 +105,7 @@ extension Customer {
             .init(
                 id: "main",
                 displayName: "Main",
-                address: "Industrigata 1, 0123 Oslo",
+                address: "Industrial Park 1, 0001 City",
                 hostIds: [],
                 wanType: "dhcp",
                 wanStaticIp: "",
@@ -114,8 +119,8 @@ extension Customer {
 extension Engagement {
     static let previewActive = Engagement(
         id: "preview-eng-1",
-        customerSlug: "aarsleff-norge",
-        title: "Aarsleff Q1 2026 audit",
+        customerSlug: "acme-corp",
+        title: "Acme Q1 audit",
         scopeCidrs: ["10.0.0.0/16"],
         scopeHosts: [],
         exclusions: [],
@@ -124,7 +129,7 @@ extension Engagement {
         },
         startedAt: Date().addingTimeInterval(-30 * 86400),
         expiresAt: Date().addingTimeInterval(60 * 86400),
-        authorizedBy: "Frank Liaaen, CTO",
+        authorizedBy: "Alex Doe, CTO",
         authorizationDocPath: nil,
         log: [],
         notes: "Quarterly authorised pen-test."
@@ -134,7 +139,7 @@ extension Engagement {
         id: "preview-eng-2",
         customerSlug: "lab",
         title: "Lab continuous",
-        scopeCidrs: ["192.168.200.0/24"],
+        scopeCidrs: ["192.0.2.0/24"],
         scopeHosts: [],
         exclusions: [],
         allowedTechniques: SecurityTechnique.allCases,
@@ -157,13 +162,13 @@ extension SshHostSummary {
         label: "FortiGate HQ",
         hostname: "10.0.10.1",
         username: "admin",
-        group: "aarsleff-norge",
+        group: "acme-corp",
         deviceType: .fortigate
     )
     static let previewSynology = SshHostSummary.previewFixture(
         id: "host-syn-1",
         label: "Synology NAS",
-        hostname: "192.168.200.111",
+        hostname: "192.0.2.111",
         username: "admin",
         group: "lab",
         deviceType: .linux
@@ -171,7 +176,7 @@ extension SshHostSummary {
     static let previewLabUbuntu = SshHostSummary.previewFixture(
         id: "host-lab-1",
         label: "Lab Ubuntu",
-        hostname: "192.168.200.23",
+        hostname: "192.0.2.23",
         username: "ubuntu",
         group: "lab",
         deviceType: .linux
@@ -219,10 +224,10 @@ extension VpnProfileSummary {
         let json = """
         {
             "id": "vpn-1",
-            "name": "Aarsleff HQ",
+            "name": "Acme HQ",
             "backend": "forti_gate",
-            "host": "vpn.aarsleff.no",
-            "username": "frank",
+            "host": "vpn.example.com",
+            "username": "alex",
             "auto_connect": false,
             "full_tunnel": false,
             "split_routes": ["10.0.0.0/16"],
@@ -238,10 +243,10 @@ extension PersistedFinding {
     static let previewExampleSshOpen: PersistedFinding = {
         let json = """
         {
-            "key": "cve.cve-2023-38408|192.168.200.111|22|ssh",
+            "key": "cve.cve-2023-38408|192.0.2.111|22|ssh",
             "finding": {
                 "id": "cve.cve-2023-38408",
-                "host_ip": "192.168.200.111",
+                "host_ip": "192.0.2.111",
                 "port": 22,
                 "service": "ssh",
                 "severity": "high",
@@ -268,10 +273,10 @@ extension PersistedFinding {
     static let previewAccepted: PersistedFinding = {
         let json = """
         {
-            "key": "config.smb-open|192.168.200.111|139|smb",
+            "key": "config.smb-open|192.0.2.111|139|smb",
             "finding": {
                 "id": "config.smb-open",
-                "host_ip": "192.168.200.111",
+                "host_ip": "192.0.2.111",
                 "port": 139,
                 "service": "smb",
                 "severity": "medium",

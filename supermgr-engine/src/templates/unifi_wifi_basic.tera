@@ -11,7 +11,7 @@
 {# the deploy step would POST to the corresponding endpoint.      #}
 {#                                                                #}
 {# Required `extras`:                                             #}
-{#   - wifi_ssid_prefix    Prefix for SSID names (e.g. "Aarsleff")#}
+{#   - wifi_ssid_prefix    Prefix for SSID names (e.g. "Acme")#}
 {#   - wifi_password       WPA3 password (min 8 chars)            #}
 {#   - controller_site     Controller site key (default: default) #}
 {# ============================================================ #}

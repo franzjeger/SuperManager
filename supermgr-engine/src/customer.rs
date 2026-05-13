@@ -566,7 +566,7 @@ mod slug_tests {
 
     #[test]
     fn accepts_normal_slugs() {
-        assert!(validate_slug("aarsleff-norge").is_ok());
+        assert!(validate_slug("acme-corp").is_ok());
         assert!(validate_slug("customer_a").is_ok());
         assert!(validate_slug("ABC123").is_ok());
         assert!(validate_slug("a").is_ok()); // single char OK

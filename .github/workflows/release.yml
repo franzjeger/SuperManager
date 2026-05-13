@@ -15,7 +15,7 @@ name: Release
 #                                `base64 -i cert.p12 -o cert.b64`)
 #   MACOS_CERTIFICATE_PASSWORD — Password you chose when exporting
 #   MACOS_DEV_ID_APP          — Common Name from `security find-identity`,
-#                                e.g. "Developer ID Application: Frank Lia (LY6LJ395B8)"
+#                                e.g. "Developer ID Application: Your Name (TEAM_ID)"
 #   AC_API_KEY_BASE64         — `base64 -i AuthKey_XXXXXX.p8 -o key.b64`
 #   AC_API_KEY_ID             — 10-char key id from App Store Connect
 #   AC_API_ISSUER_ID          — UUID from App Store Connect → Integrations

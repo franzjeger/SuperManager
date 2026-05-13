@@ -25,7 +25,7 @@
 #      (we don't auto-upload to avoid pushing half-baked builds).
 #
 # Required environment variables:
-#   DEVELOPER_ID_APP   — e.g. "Developer ID Application: Frank Liaaen (LY6LJ395B8)"
+#   DEVELOPER_ID_APP   — e.g. "Developer ID Application: Your Name (LY6LJ395B8)"
 #   AC_API_KEY_PATH    — path to AuthKey_XXXXXX.p8 from App Store Connect
 #   AC_API_KEY_ID      — the 10-char key ID
 #   AC_API_ISSUER_ID   — your Issuer ID (UUID)

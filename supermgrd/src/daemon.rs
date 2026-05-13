@@ -4761,7 +4761,7 @@ async fn current_system_dns_ips() -> Vec<String> {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let mut ips: Vec<String> = Vec::new();
     for line in stdout.lines() {
-        // Each line looks like: "Link 2 (enp14s0): 192.168.200.13"
+        // Each line looks like: "Link 2 (enp14s0): 192.0.2.13"
         // or "Global: 9.9.9.9"
         if let Some(colon_pos) = line.rfind(':') {
             for token in line[colon_pos + 1..].split_whitespace() {

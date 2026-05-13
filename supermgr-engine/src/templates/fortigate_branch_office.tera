@@ -446,7 +446,7 @@ end
 {# customer's site-wide bootstrap convention.                    #}
 {#                                                                #}
 {# Best-practice notes:                                           #}
-{#   - PSK ("sybr_admin") MUST be rotated periodically and        #}
+{#   - PSK ("admin") MUST be rotated periodically and        #}
 {#     replaced with a 32+ character random string for prod.      #}
 {#   - User passwords should ideally come from RADIUS (HQ uses    #}
 {#     FortiAuthenticator); local users here are fine for branch #}
@@ -504,7 +504,7 @@ config vpn ipsec phase1-interface
         set save-password enable
         set client-auto-negotiate enable
         set client-keep-alive enable
-        set psksecret "{{ extras.vpn_psk | default(value='sybr_admin') }}"
+        set psksecret "{{ extras.vpn_psk | default(value='admin') }}"
         set dpd on-idle
         set dpd-retrycount 3
         set dpd-retryinterval 30

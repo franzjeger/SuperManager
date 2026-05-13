@@ -229,7 +229,7 @@ mod tests {
             customer: customer.into(),
             config: ProfileConfig::FortiGate(FortiGateConfig {
                 host: "fw.example.com".into(),
-                username: "sybr_admin".into(),
+                username: "admin".into(),
                 password: SecretRef::new("p"),
                 psk: SecretRef::new("k"),
                 dns_servers: Vec::<IpAddr>::new(),

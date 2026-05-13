@@ -49,7 +49,7 @@ pub struct OperationInfo {
     /// `"compliance_run"`, `"smb_enum"`, …
     pub kind: String,
     /// Human-readable label for the status bar:
-    /// `"Active scan — 192.168.200.0/24 (124 hosts)"`.
+    /// `"Active scan — 192.0.2.0/24 (124 hosts)"`.
     pub label: String,
     pub started_at: DateTime<Utc>,
     /// True after `operation_cancel` has been called but before
