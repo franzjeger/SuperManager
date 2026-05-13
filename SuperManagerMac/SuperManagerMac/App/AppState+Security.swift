@@ -546,6 +546,52 @@ extension AppState {
         )
     }
 
+    // MARK: - DNS health audit (SPF / DKIM / DMARC / DNSSEC)
+
+    /// Run the SPF/DKIM/DMARC/DNSSEC audit for the given domain.
+    /// Returns the structured report; the GUI renders the per-
+    /// component states + emitted findings.
+    func runDnsHealthAudit(domain: String) async -> DnsHealthReport? {
+        do {
+            return try await client.call(
+                "dns_health_audit",
+                params: ["domain": domain]
+            )
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    // MARK: - Subdomain enumeration
+
+    struct SubdomainEnumResult: Codable {
+        let domain: String
+        let found: [String]
+        let certCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case domain
+            case found
+            case certCount = "cert_count"
+        }
+    }
+
+    /// Query crt.sh for `*.<domain>` and return discovered subdomains.
+    /// Useful for engagement-scope sanity checks ("what hostnames
+    /// does this customer have that I might not know about?").
+    func runSubdomainEnum(domain: String) async -> SubdomainEnumResult? {
+        do {
+            return try await client.call(
+                "subdomain_enum",
+                params: ["domain": domain]
+            )
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
     /// Build a BPF filter that covers ALL the cleartext-protocol
     /// detections in the engine: FTP, Telnet, HTTP-alt ports for
     /// basic-auth + form-POST, POP3, IMAP, SMTP-AUTH, SNMP v1/v2c,

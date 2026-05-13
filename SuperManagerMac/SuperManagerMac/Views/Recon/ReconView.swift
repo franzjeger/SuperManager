@@ -1,18 +1,14 @@
 import SwiftUI
 
 /// First-class launcher for the toolkit's white/gray-hat
-/// capabilities. Built so a fresh user can land here and see
-/// every tool without hunting through menus or sub-panels.
+/// capabilities. Every tile here opens a sheet that runs the
+/// tool directly from this section — no bounce-back to other
+/// parts of the app.
 ///
-/// Each capability is a tile with:
-///   - Icon + name + one-line "what it does"
-///   - Currently-relevant context (selected engagement, last run)
-///   - A single button that opens the tool's sheet or runs it inline
-///
-/// Tools that require an engagement (active scan, traffic capture)
-/// gate on an engagement picker at the top. Tools that don't (DNS
-/// audit) run regardless. Status text under each tile tells the
-/// operator what's missing if they click into a gated tile.
+/// Active scan + Passive scan are deliberately NOT in the grid:
+/// they live in the Security engagement panel where they're
+/// tightly coupled to the host inventory display. A small
+/// footer points the user there so the absence isn't confusing.
 struct ReconView: View {
     @Environment(AppState.self) private var appState
 
@@ -27,6 +23,8 @@ struct ReconView: View {
                 Divider()
                 toolsGrid
                 tipsCard
+                Divider()
+                whereIsActiveScanCard
             }
             .padding(24)
             .frame(maxWidth: 1100)
@@ -53,7 +51,7 @@ struct ReconView: View {
                     .foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Recon & Pentest Toolkit").font(.largeTitle.bold())
-                    Text("White/gray-hat audit capabilities — host discovery, DNS leaks, cleartext-protocol detection, evidence-grade packet capture.")
+                    Text("White/gray-hat audit capabilities — every tile runs the tool directly from here. Findings flow into the Security tab under the selected engagement.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -74,7 +72,7 @@ struct ReconView: View {
                 Label("Engagement", systemImage: "doc.text.fill")
                     .font(.headline)
                 Spacer()
-                Text("Scopes findings + evidence storage")
+                Text("Scopes findings + evidence storage for tools that need it")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -105,12 +103,12 @@ struct ReconView: View {
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 4) {
                 Text("No active engagement").font(.subheadline.weight(.medium))
-                Text("Create one in the Security section first — every tool here runs under an authorised engagement so the audit trail attributes its findings properly.")
+                Text("Some tools (traffic capture) save evidence under an engagement directory and need one selected. DNS-based tools work without an engagement.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Go to Security") {
+            Button("Create in Security") {
                 appState.selectedSection = .security
             }
             .controlSize(.small)
@@ -143,9 +141,9 @@ struct ReconView: View {
             ],
             spacing: 16
         ) {
-            tile(.activeScan)
-            tile(.passiveScan)
             tile(.dnsAudit)
+            tile(.dnsHealth)
+            tile(.subdomainEnum)
             tile(.trafficCapture)
         }
     }
@@ -171,10 +169,10 @@ struct ReconView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .lineLimit(3, reservesSpace: true)
+                .lineLimit(4, reservesSpace: true)
             HStack {
                 if gated {
-                    Text("Pick an engagement above to enable")
+                    Text("Pick an engagement above")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -204,10 +202,9 @@ struct ReconView: View {
             Label("Notes", systemImage: "lightbulb.fill")
                 .font(.subheadline.weight(.semibold))
             VStack(alignment: .leading, spacing: 6) {
-                Text("• Findings flow into the **Security** tab under the engagement — open it after a tool runs.")
+                Text("• Findings emitted by these tools flow into the **Security** tab under the selected engagement.")
                 Text("• Traffic captures save the full .pcap into `<engagement>/captures/` for Wireshark review. Per-finding redacted excerpts (passwords SHA-256 hashed) get written alongside.")
-                Text("• DNS audit runs ~5–8 sec per nameserver. Domains with 2–4 NSes finish in well under a minute.")
-                Text("• Active scans of /24 networks take a few minutes — the scope shown in the engagement picker is the target.")
+                Text("• DNS-based tools (zone transfer, health, subdomain enum) don't need an engagement — they only require a domain name.")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -219,20 +216,40 @@ struct ReconView: View {
         )
     }
 
+    /// Tells the user where Active + Passive scan live, because
+    /// they're conspicuously absent from the grid. Without this
+    /// they'd hunt and assume something's missing.
+    private var whereIsActiveScanCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+            Text("Active scan + passive discovery live on the engagement page (Security → pick engagement → \"Active scan\"). They're not duplicated here because they're tightly coupled to the engagement's host-inventory display.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+            Button("Open Security") {
+                appState.selectedSection = .security
+            }
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(.background.tertiary)
+        )
+    }
+
     // MARK: - Sheet routing
 
     @ViewBuilder
     private func sheetFor(tool: ReconTool) -> some View {
         switch tool {
-        case .activeScan, .passiveScan:
-            // These tools live inside the engagement panel today.
-            // Bounce the user there with the engagement pre-selected.
-            ActiveScanLaunchSheet(
-                engagementId: selectedEngagement?.id,
-                passive: tool == .passiveScan
-            )
         case .dnsAudit:
             DnsAuditSheet()
+        case .dnsHealth:
+            DnsHealthSheet()
+        case .subdomainEnum:
+            SubdomainEnumSheet()
         case .trafficCapture:
             if let eid = selectedEngagement?.id {
                 TrafficCaptureSheet(engagementId: eid)
@@ -244,113 +261,76 @@ struct ReconView: View {
 // MARK: - Tool catalogue
 
 enum ReconTool: String, Identifiable, CaseIterable {
-    case passiveScan
-    case activeScan
     case dnsAudit
+    case dnsHealth
+    case subdomainEnum
     case trafficCapture
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .passiveScan: return "Passive discovery"
-        case .activeScan: return "Active scan"
         case .dnsAudit: return "DNS zone-transfer audit"
+        case .dnsHealth: return "Email + DNS health audit"
+        case .subdomainEnum: return "Subdomain enumeration"
         case .trafficCapture: return "Capture insecure traffic"
         }
     }
 
     var tagline: String {
         switch self {
-        case .passiveScan: return "ARP + mDNS — no packets sent"
-        case .activeScan: return "TCP sweep + banner + CVE matching"
         case .dnsAudit: return "Probes for AXFR leakage"
+        case .dnsHealth: return "SPF / DKIM / DMARC / DNSSEC posture"
+        case .subdomainEnum: return "Certificate-Transparency log search"
         case .trafficCapture: return "Cleartext-credential PoC evidence"
         }
     }
 
     var detail: String {
         switch self {
-        case .passiveScan:
-            return "Reads the system ARP cache + mDNS announcements to enumerate hosts on the local segment without sending traffic. Useful for low-impact inventory."
-        case .activeScan:
-            return "TCP-connect sweep across the top-100 service ports for every host in scope. Banner-grabs services, probes TLS, matches CVE database, runs SMB/LDAP/SNMP enumeration where applicable."
         case .dnsAudit:
-            return "Queries every authoritative nameserver of the target domain for an AXFR transfer. A successful transfer leaks the entire zone — internal hostnames, mail routing, infra layout."
+            return "Queries every authoritative nameserver of the target domain for an AXFR transfer. A successful transfer leaks the entire zone — internal hostnames, mail routing, infra layout. Most NSes refuse this; the ones that don't are immediate findings."
+        case .dnsHealth:
+            return "Checks SPF, DKIM (common selectors), DMARC, MTA-STS, and DNSSEC for the target domain. Surfaces softfail/permissive/missing posture as findings — the email-deliverability + spoofing-resistance baseline every customer cares about."
+        case .subdomainEnum:
+            return "Queries crt.sh's Certificate Transparency database for every cert ever issued for *.<domain>. Returns the unique hostnames discovered. Passive recon — no traffic to the target. Useful for catching infra the customer didn't tell you about."
         case .trafficCapture:
-            return "Helper runs tcpdump as root for a bounded duration. Engine analyses the .pcap for FTP/Telnet/HTTP-basic/HTTP-POST/POP3/IMAP/SMTP/SNMP/NTLM/MQTT cleartext + TLS 1.0/1.1 downgrade-attempting clients. Live findings stream every 5 sec."
+            return "Helper runs tcpdump as root for a bounded duration. Engine analyses the .pcap for cleartext credentials (FTP/Telnet/HTTP-basic/HTTP-POST/POP3/IMAP/SMTP/SNMP/NTLM/MQTT) + TLS 1.0/1.1 downgrade-attempting clients. Live counter streams every 5 sec."
         }
     }
 
     var icon: String {
         switch self {
-        case .passiveScan: return "antenna.radiowaves.left.and.right"
-        case .activeScan: return "scope"
         case .dnsAudit: return "network.badge.shield.half.filled"
+        case .dnsHealth: return "envelope.badge.shield.half.filled"
+        case .subdomainEnum: return "magnifyingglass.circle.fill"
         case .trafficCapture: return "waveform.path.ecg.rectangle"
         }
     }
 
     var tint: Color {
         switch self {
-        case .passiveScan: return .gray
-        case .activeScan: return .orange
         case .dnsAudit: return .blue
+        case .dnsHealth: return .teal
+        case .subdomainEnum: return .indigo
         case .trafficCapture: return .purple
         }
     }
 
     var requiresEngagement: Bool {
         switch self {
-        case .passiveScan, .activeScan, .trafficCapture: return true
-        case .dnsAudit: return false
+        case .trafficCapture: return true
+        case .dnsAudit, .dnsHealth, .subdomainEnum: return false
         }
     }
 
     var actionLabel: String {
         switch self {
-        case .passiveScan, .activeScan: return "Open in Security…"
-        case .dnsAudit: return "Run DNS audit…"
+        case .dnsAudit: return "Run AXFR audit…"
+        case .dnsHealth: return "Run health audit…"
+        case .subdomainEnum: return "Enumerate…"
         case .trafficCapture: return "Start capture…"
         }
-    }
-}
-
-/// Hand-off sheet for tools that still live inside the engagement
-/// panel (passive + active scan). Tells the user where to find
-/// them and provides a one-click jump.
-private struct ActiveScanLaunchSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @Environment(AppState.self) private var appState
-
-    let engagementId: String?
-    let passive: Bool
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: passive ? "antenna.radiowaves.left.and.right" : "scope")
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
-            Text("Open the engagement to run \(passive ? "Passive" : "Active") scan")
-                .font(.headline)
-            Text("Discovery and scan controls live on the engagement page so the scan log + result snapshots stay paired with the engagement they ran under.")
-                .font(.callout)
-                .multilineTextAlignment(.center)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
-            HStack {
-                Button("Close") { dismiss() }
-                Button("Go to Security") {
-                    appState.selectedSection = .security
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return)
-            }
-            .padding(.top, 4)
-        }
-        .padding(28)
-        .frame(width: 460)
     }
 }
 
