@@ -27,6 +27,10 @@ struct NetworkScanSheet: View {
     /// triggered from a row's "..." menu. Each case carries the
     /// host so the sheet can pre-fill against it without lookup.
     @State private var pendingHostAction: HostAction?
+    /// Set of IPs whose row is currently expanded to show the
+    /// full Advanced-IP-Scanner-style detail panel (MAC,
+    /// vendor, per-port banners, SMB/SNMP detail, etc.).
+    @State private var expandedIps: Set<String> = []
 
     /// One-click follow-up actions exposed inline in the scan
     /// results. Each scan row gets a menu populated with these,
@@ -111,6 +115,14 @@ struct NetworkScanSheet: View {
                             ForEach(r.hosts) { host in
                                 HostRow(
                                     host: host,
+                                    isExpanded: expandedIps.contains(host.ip),
+                                    onToggleExpand: {
+                                        if expandedIps.contains(host.ip) {
+                                            expandedIps.remove(host.ip)
+                                        } else {
+                                            expandedIps.insert(host.ip)
+                                        }
+                                    },
                                     onAction: { action in
                                         pendingHostAction = action
                                     },
@@ -128,12 +140,27 @@ struct NetworkScanSheet: View {
                                 )
                             }
                         } header: {
-                            Text("Hosts (\(r.hosts.count))")
+                            HStack {
+                                Text("Hosts (\(r.hosts.count))")
+                                Spacer()
+                                if !expandedIps.isEmpty {
+                                    Button("Collapse all") {
+                                        expandedIps.removeAll()
+                                    }
+                                    .controlSize(.small)
+                                } else if r.hosts.count <= 32 {
+                                    Button("Expand all") {
+                                        expandedIps = Set(r.hosts.map(\.ip))
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
                         } footer: {
                             Text(
-                                "Click the **\"…\"** button on any row to add it as "
-                                + "an SSH host, adopt to a UniFi controller, jump to "
-                                + "provisioning, copy the IP, or open its web UI."
+                                "Click a row to expand for full device detail — "
+                                + "MAC, vendor, OS guess, banners, TLS cert, SMB "
+                                + "shares, SNMP info. Click **\"…\"** for actions: "
+                                + "Add SSH host, UniFi adopt, provision, open web UI."
                             )
                             .font(.caption)
                         }
@@ -415,19 +442,17 @@ struct NetworkScanSheet: View {
 
 // MARK: - Sub-rows
 
-/// One row per scanned host. Each row is interactive: the
-/// trailing "…" menu lets the operator add the host as an SSH
-/// device, adopt to a UniFi controller, jump to provisioning,
-/// open the web UI, or copy the IP — *without* having to navigate
-/// out of the scan results sheet. Vendor-specific entries (e.g.
-/// "Adopt to UniFi controller") only render when the host's
-/// detected device type matches.
+/// Rich per-host row. Compact view shows IP + vendor pill +
+/// device type + identity strings + port summary + action menu
+/// + expand chevron. Tapping the chevron unrolls a detail panel
+/// modeled after Advanced IP Scanner: MAC, vendor, OS guess,
+/// per-port banners (server/title/x-powered-by), TLS cert info,
+/// SMB shares, SNMP detail, and findings tied to this host.
 private struct HostRow: View {
     let host: ActiveHost
-    /// Callback for actions that need a sheet (Add SSH, Adopt).
+    let isExpanded: Bool
+    let onToggleExpand: () -> Void
     let onAction: (NetworkScanSheet.HostAction) -> Void
-    /// Callback for the "Provision config" action — navigates
-    /// out of this sheet so left to the parent to coordinate.
     let onProvision: (ActiveHost) -> Void
     let onOpenInBrowser: (ActiveHost) -> Void
     let onCopyIp: (ActiveHost) -> Void
@@ -444,49 +469,355 @@ private struct HostRow: View {
         })
     }
 
+    /// Best one-line identity. Order of preference:
+    ///   1. Reverse-DNS hostname
+    ///   2. NetBIOS computer name (SMB)
+    ///   3. SNMP sysName
+    ///   4. HTTP page title (often vendor model: "USW-Pro-24")
+    private var bestIdentity: String? {
+        if let h = host.hostname, !h.isEmpty { return h }
+        if let nb = host.probes.compactMap({ $0.smb?.netbiosName }).first {
+            return nb
+        }
+        if let sn = host.probes.compactMap({ $0.snmp?.sysName }).first,
+           !sn.isEmpty
+        {
+            return sn
+        }
+        if let title = host.probes.compactMap({ $0.title }).first,
+           !title.isEmpty
+        {
+            return title
+        }
+        return nil
+    }
+
+    /// Cheap OS guess from probe data. The engine doesn't run a
+    /// nmap-style OS fingerprint scan; this is purely banner-
+    /// derived but covers the common cases.
+    private var osGuess: String? {
+        let blob = host.probes
+            .flatMap { p -> [String] in
+                [p.banner, p.title, p.serverHeader, p.poweredBy]
+                    .compactMap { $0 }
+            }
+            .joined(separator: " ")
+            .lowercased()
+        let role = host.probes.compactMap { $0.smb?.serverRole }.first?
+            .lowercased() ?? ""
+        if blob.contains("microsoft-iis") || role.contains("primary domain")
+            || role.contains("nt server")
+        {
+            return "Windows"
+        }
+        if blob.contains("fortios") { return "FortiOS" }
+        if blob.contains("unifi os") || blob.contains("ubnt") { return "UniFi OS (Linux)" }
+        if blob.contains("openwrt") { return "OpenWrt" }
+        if blob.contains("pfsense") { return "FreeBSD (pfSense)" }
+        if blob.contains("openssh") && blob.contains("ubuntu") { return "Linux (Ubuntu)" }
+        if blob.contains("openssh") && blob.contains("debian") { return "Linux (Debian)" }
+        if blob.contains("openssh") { return "Linux / *nix" }
+        if blob.contains("samba") { return "Linux (Samba)" }
+        if blob.contains("nginx") || blob.contains("apache") { return "Linux (likely)" }
+        return nil
+    }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            // Vendor pill — gives instant signal that "this is
-            // a UniFi" so the operator knows what action to use.
+        VStack(alignment: .leading, spacing: 6) {
+            primaryLine
+            secondaryLine
+            tertiaryLine
+            if isExpanded { expandedDetail }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture { onToggleExpand() }
+    }
+
+    private var primaryLine: some View {
+        HStack(alignment: .center, spacing: 10) {
             vendorIcon
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 8) {
                     Text(host.ip)
                         .font(.body.monospaced().weight(.medium))
-                    Text("·")
-                        .foregroundStyle(.tertiary)
+                    Text("·").foregroundStyle(.tertiary)
                     Text(deviceType.displayName)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
-                    if let name = host.hostname, !name.isEmpty {
-                        Text(name)
+                    if let identity = bestIdentity {
+                        Text("·").foregroundStyle(.tertiary)
+                        Text(identity)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                     Spacer()
-                    if host.findingCount > 0 {
-                        Label(
-                            "\(host.findingCount)",
-                            systemImage: "exclamationmark.triangle.fill"
-                        )
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                    }
-                    Text("\(host.probes.count) ports")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                if !host.probes.isEmpty {
-                    Text(portsSummary(host))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
                 }
             }
-            actionMenu
+            badgesAndActions
         }
-        .padding(.vertical, 4)
+    }
+
+    private var secondaryLine: some View {
+        HStack(spacing: 8) {
+            // Skip the row when there's no identifying detail
+            // — keeps the visual rhythm tight for hosts that
+            // only revealed a single open port.
+            if let mac = host.mac, !mac.isEmpty {
+                Label(mac, systemImage: "barcode")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+            }
+            if let vendor = host.vendor, !vendor.isEmpty {
+                Text(vendor)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            if let os = osGuess {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                    Text(os)
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var tertiaryLine: some View {
+        if !host.probes.isEmpty {
+            Text(portsSummary(host))
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    private var badgesAndActions: some View {
+        HStack(spacing: 6) {
+            if host.findingCount > 0 {
+                Label("\(host.findingCount)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+            Text("\(host.probes.count) ports")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            actionMenu
+            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    // MARK: - Expanded detail
+
+    private var expandedDetail: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider().padding(.vertical, 2)
+
+            // Identity card
+            VStack(alignment: .leading, spacing: 3) {
+                identityRow("IP", host.ip, monospaced: true)
+                if let mac = host.mac, !mac.isEmpty {
+                    identityRow("MAC", mac, monospaced: true)
+                }
+                if let v = host.vendor, !v.isEmpty {
+                    identityRow("Vendor (OUI)", v)
+                }
+                if let h = host.hostname, !h.isEmpty {
+                    identityRow("Hostname (rDNS)", h)
+                }
+                if let nb = host.probes.compactMap({ $0.smb?.netbiosName }).first {
+                    identityRow("NetBIOS name", nb)
+                }
+                if let wg = host.probes.compactMap({ $0.smb?.workgroup }).first {
+                    identityRow("Workgroup", wg)
+                }
+                if let sn = host.probes.compactMap({ $0.snmp?.sysName }).first,
+                   !sn.isEmpty
+                {
+                    identityRow("SNMP sysName", sn)
+                }
+                if let sd = host.probes.compactMap({ $0.snmp?.sysDescr }).first,
+                   !sd.isEmpty
+                {
+                    identityRow("SNMP sysDescr", sd)
+                }
+                if let loc = host.probes.compactMap({ $0.snmp?.sysLocation }).first,
+                   !loc.isEmpty
+                {
+                    identityRow("SNMP sysLocation", loc)
+                }
+                if let os = osGuess {
+                    identityRow("OS guess", os)
+                }
+                if let zone = host.zone {
+                    identityRow("Zone", zone)
+                }
+            }
+
+            // Per-port detail
+            if !host.probes.isEmpty {
+                detailHeader("Ports & services")
+                ForEach(host.probes.sorted(by: { $0.port < $1.port })) { probe in
+                    probeRow(probe)
+                }
+            }
+
+            // SMB shares — collapsed by default unless something
+            // jumps out as worrying (null session, SYSVOL exposed).
+            if let smb = host.probes.compactMap({ $0.smb }).first,
+               !smb.shares.isEmpty || smb.nullSession
+            {
+                detailHeader("SMB / file sharing")
+                VStack(alignment: .leading, spacing: 2) {
+                    if smb.nullSession {
+                        Label(
+                            "Null session accepted (unauthenticated browse possible)",
+                            systemImage: "exclamationmark.octagon.fill"
+                        )
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.red)
+                    }
+                    ForEach(smb.shares) { share in
+                        HStack(spacing: 6) {
+                            Image(systemName: "folder.fill").foregroundStyle(.tint)
+                            Text(share.name).font(.caption.monospaced())
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(share.kind)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            if !share.comment.isEmpty {
+                                Text("— \(share.comment)")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // SNMP interfaces — only worth showing for switches
+            // / routers, which is where the SNMP probe finds
+            // populated `interfaces`.
+            if let snmp = host.probes.compactMap({ $0.snmp }).first,
+               !snmp.interfaces.isEmpty
+            {
+                detailHeader("SNMP interfaces (\(snmp.interfaces.count))")
+                Text(snmp.interfaces.prefix(8).joined(separator: ", "))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                if snmp.interfaces.count > 8 {
+                    Text("… and \(snmp.interfaces.count - 8) more")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(.leading, 36)
+    }
+
+    private func identityRow(_ label: String, _ value: String, monospaced: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .frame(width: 110, alignment: .trailing)
+            Text(value)
+                .font(monospaced ? .caption.monospaced() : .caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            Spacer()
+        }
+    }
+
+    private func detailHeader(_ text: String) -> some View {
+        Text(text.uppercased())
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.top, 6)
+    }
+
+    private func probeRow(_ probe: PortProbe) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text("\(probe.port)/\(probe.service)")
+                    .font(.caption.monospaced().weight(.medium))
+                    .foregroundStyle(.primary)
+                if let title = probe.title, !title.isEmpty {
+                    Text("·").foregroundStyle(.tertiary)
+                    Text("\"\(title)\"")
+                        .font(.caption.italic())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if !probe.fingerprints.isEmpty {
+                    Text(probe.fingerprints.prefix(3).joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+            }
+            // Server banner / x-powered-by / generic banner
+            if let s = probe.serverHeader, !s.isEmpty {
+                Text("server: \(s)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            if let pb = probe.poweredBy, !pb.isEmpty {
+                Text("x-powered-by: \(pb)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            if let b = probe.banner, !b.isEmpty,
+               probe.serverHeader == nil
+            {
+                // Show generic banner only when there's no HTTP
+                // server header (otherwise the two overlap and
+                // the server line is the more useful one).
+                Text(b.prefix(120))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            if let tls = probe.tls {
+                tlsLine(tls)
+            }
+        }
+        .padding(.vertical, 1)
+    }
+
+    private func tlsLine(_ tls: TlsInfo) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: tls.selfSigned ? "lock.trianglebadge.exclamationmark" : "lock")
+                .foregroundStyle(tls.selfSigned ? .orange : .green)
+            Text(tls.version)
+                .font(.caption.monospaced().weight(.medium))
+                .foregroundStyle(.secondary)
+            if let s = tls.certSubject, !s.isEmpty {
+                Text("· \(s)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            if let exp = tls.certExpiresIso, !exp.isEmpty {
+                Text("· expires \(exp.prefix(10))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
     }
 
     private var vendorIcon: some View {
