@@ -43,7 +43,7 @@ wireguard-control = { workspace = true }
 nix             = { version = "0.29", features = ["user", "net", "signal", "fs"] }
 
 # Netlink for address assignment, interface deletion, and route management
-rtnetlink              = "0.14"
+rtnetlink              = "0.21"
 netlink-packet-route   = "0.19"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
