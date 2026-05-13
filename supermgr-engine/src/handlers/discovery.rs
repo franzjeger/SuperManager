@@ -128,19 +128,58 @@ impl EngineServer {
         );
         let guard = self.operations.start("active_scan", label);
         let cancel = Some(guard.cancel_flag());
-        match crate::discovery::active_scan(
+        let scan_result = crate::discovery::active_scan(
             &targets,
             &ports,
             customer_slug.as_deref(),
             engagement_id.as_deref(),
             cancel,
         )
-        .await
-        {
-            Ok(result) => match serde_json::to_value(&result) {
-                Ok(v) => Response::ok(id, v),
-                Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
-            },
+        .await;
+
+        match scan_result {
+            Ok(mut result) => {
+                // Controller-first annotation. Cross-reference
+                // every scanned host's MAC against the union of
+                // all configured UniFi controllers' device
+                // inventories. Matches get `controller_state`
+                // populated so the GUI can swap SSH-based
+                // actions for controller-API ones. Failures
+                // (unreachable controller, login refused, etc.)
+                // log + continue — the underlying scan result
+                // is still valid and useful even when no
+                // controller responded.
+                let controllers: Vec<crate::unifi_controllers::UnifiController> = {
+                    let st = self.state.lock().await;
+                    st.unifi_controllers.values().cloned().collect()
+                };
+                if !controllers.is_empty() {
+                    let macs: Vec<String> = result
+                        .hosts
+                        .iter()
+                        .filter_map(|h| h.mac.clone())
+                        .collect();
+                    if !macs.is_empty() {
+                        let by_mac = crate::unifi_controllers::cross_reference(
+                            &self.secrets,
+                            &controllers,
+                            &macs,
+                        )
+                        .await;
+                        for host in result.hosts.iter_mut() {
+                            if let Some(ref mac) = host.mac {
+                                if let Some(state) = by_mac.get(&mac.to_ascii_lowercase()) {
+                                    host.controller_state = Some(state.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                match serde_json::to_value(&result) {
+                    Ok(v) => Response::ok(id, v),
+                    Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+                }
+            }
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }

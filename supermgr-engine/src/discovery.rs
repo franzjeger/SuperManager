@@ -1021,6 +1021,15 @@ pub struct ActiveHost {
     pub vendor: Option<String>,
     pub probes: Vec<crate::probes::PortProbe>,
     pub finding_count: u32,
+    /// Controller cross-reference. Populated post-scan by
+    /// matching `mac` against every configured UniFi
+    /// controller's device inventory. Non-None means a
+    /// controller-API path is available for this host;
+    /// the GUI uses it to replace SSH-based actions with
+    /// controller-driven ones (locate / restart / forget /
+    /// re-adopt) and to render the controller-state badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_state: Option<crate::unifi_controllers::ControllerStateRef>,
     /// RFC zone classification — drives the exposure pill in the
     /// UI ("internal" vs. "public"). Computed pure-compute from
     /// the IP at scan time, no I/O.
@@ -1171,6 +1180,7 @@ pub async fn active_scan(
                     probes: Vec::new(),
                     finding_count: 0,
                     zone: Some(crate::asset_enrich::classify(ip).label().to_owned()),
+                    controller_state: None,
                 });
             }
         }
@@ -1388,6 +1398,7 @@ async fn scan_host_active(
         probes,
         finding_count: 0,
         zone,
+        controller_state: None,
     })
 }
 

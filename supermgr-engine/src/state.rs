@@ -43,6 +43,13 @@ pub struct DaemonState {
     /// Directory where SSH host TOML files are stored.
     pub ssh_host_dir: PathBuf,
 
+    /// First-class UniFi controller registry. Keyed by UUID
+    /// and persisted as TOML in `unifi_controller_dir`. NOT
+    /// tied to an SSH host — see `unifi_controllers.rs` for
+    /// the architectural reasoning.
+    pub unifi_controllers: HashMap<Uuid, crate::unifi_controllers::UnifiController>,
+    pub unifi_controller_dir: PathBuf,
+
     /// Webhook URL for outgoing notifications.
     pub webhook_url: String,
     /// Fire a webhook when an SSH host goes down.
@@ -92,6 +99,8 @@ impl DaemonState {
             host_health: HashMap::new(),
             ssh_key_dir: data_dir.join("ssh/keys"),
             ssh_host_dir: data_dir.join("ssh/hosts"),
+            unifi_controllers: HashMap::new(),
+            unifi_controller_dir: data_dir.join("unifi/controllers"),
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
@@ -184,6 +193,35 @@ impl DaemonState {
     /// Delete an SSH host's on-disk file.
     pub fn delete_ssh_host_file(&self, id: Uuid) -> anyhow::Result<()> {
         delete_toml(&self.ssh_host_dir, &id.to_string())
+    }
+
+    // -----------------------------------------------------------------------
+    // UniFi controller registry (separate from SSH hosts)
+    // -----------------------------------------------------------------------
+
+    pub fn load_unifi_controllers(&mut self) -> anyhow::Result<()> {
+        load_toml_dir(&self.unifi_controller_dir, |text, path| {
+            match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
+                Ok(ctrl) => {
+                    info!("loaded UniFi controller '{}' from {:?}", ctrl.label, path);
+                    self.unifi_controllers.insert(ctrl.id, ctrl);
+                }
+                Err(e) => {
+                    warn!("skipping malformed UniFi controller {:?}: {}", path, e);
+                }
+            }
+        })
+    }
+
+    pub fn save_unifi_controller(
+        &self,
+        ctrl: &crate::unifi_controllers::UnifiController,
+    ) -> anyhow::Result<()> {
+        save_toml(&self.unifi_controller_dir, &ctrl.id.to_string(), ctrl)
+    }
+
+    pub fn delete_unifi_controller_file(&self, id: Uuid) -> anyhow::Result<()> {
+        delete_toml(&self.unifi_controller_dir, &id.to_string())
     }
 }
 

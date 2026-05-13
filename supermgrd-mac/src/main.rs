@@ -40,12 +40,14 @@ async fn main() -> anyhow::Result<()> {
     state.load_profiles()?;
     state.load_ssh_keys()?;
     state.load_ssh_hosts()?;
+    state.load_unifi_controllers()?;
 
     info!(
-        "loaded {} profiles, {} SSH keys, {} SSH hosts",
+        "loaded {} profiles, {} SSH keys, {} SSH hosts, {} UniFi controllers",
         state.profiles.len(),
         state.ssh_keys.len(),
         state.ssh_hosts.len(),
+        state.unifi_controllers.len(),
     );
 
     // Set up secrets store.

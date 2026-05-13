@@ -134,4 +134,281 @@ impl EngineServer {
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Standalone controller registry handlers
+    // -----------------------------------------------------------------------
+
+    pub(crate) async fn handle_unifi_controller_list(&self, id: u64) -> Response {
+        let st = self.state.lock().await;
+        let list: Vec<crate::unifi_controllers::UnifiController> =
+            st.unifi_controllers.values().cloned().collect();
+        match serde_json::to_value(&list) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Upsert a controller. On a fresh save the password param
+    /// is required and stored in the keychain; on an update of
+    /// an existing record, omitting the password leaves the
+    /// existing keychain entry intact (so the operator can
+    /// rename or re-scope without re-entering the password).
+    pub(crate) async fn handle_unifi_controller_save(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        use crate::unifi_controllers::UnifiController;
+        use supermgr_core::vpn::profile::SecretRef;
+
+        let label = match params.get("label").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing label".to_owned()),
+        };
+        let url = match params.get("url").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.trim_end_matches('/').to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing url".to_owned()),
+        };
+        let username = match params.get("username").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing username".to_owned(),
+                )
+            }
+        };
+        let site_id = params
+            .get("site_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default")
+            .to_owned();
+        let customer_slug = params
+            .get("customer_slug")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let supplied_id = params
+            .get("id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let password = params.get("password").and_then(|v| v.as_str());
+
+        // Distinguish "fresh save" from "update existing".
+        let now = chrono::Utc::now();
+        let (controller_id, created_at, existing_label) = {
+            let st = self.state.lock().await;
+            if let Some(id) = supplied_id {
+                if let Some(existing) = st.unifi_controllers.get(&id) {
+                    (existing.id, existing.created_at, existing.creds_ref.0.clone())
+                } else {
+                    (id, now, format!("unifi/controller/{}", id.simple()))
+                }
+            } else {
+                let new_id = uuid::Uuid::new_v4();
+                (new_id, now, format!("unifi/controller/{}", new_id.simple()))
+            }
+        };
+
+        // Store/refresh password in keychain if supplied.
+        if let Some(pw) = password {
+            if let Err(e) = self.secrets.store(&existing_label, pw.as_bytes()).await {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("store password: {e:#}"),
+                );
+            }
+        } else if supplied_id.is_none() {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "password is required on first save".to_owned(),
+            );
+        }
+
+        let controller = UnifiController {
+            id: controller_id,
+            label,
+            url,
+            site_id,
+            username,
+            creds_ref: SecretRef::new(existing_label),
+            customer_slug,
+            verified_at: None,
+            created_at,
+            updated_at: now,
+        };
+
+        // Verify credentials before persisting — fail-fast on
+        // bad URL / wrong creds so we don't accumulate broken
+        // entries in the registry.
+        match crate::unifi_controllers::test_connection(&self.secrets, &controller).await {
+            Ok(sysinfo) => {
+                let mut final_controller = controller.clone();
+                final_controller.verified_at = Some(chrono::Utc::now());
+                {
+                    let mut st = self.state.lock().await;
+                    st.unifi_controllers
+                        .insert(final_controller.id, final_controller.clone());
+                    if let Err(e) = st.save_unifi_controller(&final_controller) {
+                        return Response::err(
+                            id,
+                            protocol::INTERNAL_ERROR,
+                            format!("persist: {e:#}"),
+                        );
+                    }
+                }
+                Response::ok(
+                    id,
+                    serde_json::json!({
+                        "controller": final_controller,
+                        "sysinfo": sysinfo,
+                    }),
+                )
+            }
+            Err(e) => Response::err(
+                id,
+                protocol::INTERNAL_ERROR,
+                format!("controller test failed: {e:#}"),
+            ),
+        }
+    }
+
+    pub(crate) async fn handle_unifi_controller_delete(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let cid = match get_uuid_param(&params, "id") {
+            Ok(id) => id,
+            Err(r) => return r,
+        };
+        let creds_label = {
+            let st = self.state.lock().await;
+            st.unifi_controllers.get(&cid).map(|c| c.creds_ref.0.clone())
+        };
+        if let Some(label) = creds_label {
+            let _ = self.secrets.delete(&label).await;
+        }
+        let mut st = self.state.lock().await;
+        st.unifi_controllers.remove(&cid);
+        if let Err(e) = st.delete_unifi_controller_file(cid) {
+            return Response::err(
+                id,
+                protocol::INTERNAL_ERROR,
+                format!("delete file: {e:#}"),
+            );
+        }
+        Response::ok(id, serde_json::json!({ "deleted": true }))
+    }
+
+    pub(crate) async fn handle_unifi_controller_test(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let cid = match get_uuid_param(&params, "id") {
+            Ok(id) => id,
+            Err(r) => return r,
+        };
+        let controller = {
+            let st = self.state.lock().await;
+            match st.unifi_controllers.get(&cid).cloned() {
+                Some(c) => c,
+                None => return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "controller not found".to_owned(),
+                ),
+            }
+        };
+        match crate::unifi_controllers::test_connection(&self.secrets, &controller).await {
+            Ok(sysinfo) => {
+                // Bump verified_at on success.
+                let mut st = self.state.lock().await;
+                if let Some(c) = st.unifi_controllers.get_mut(&cid) {
+                    c.verified_at = Some(chrono::Utc::now());
+                    let snapshot = c.clone();
+                    let _ = st.save_unifi_controller(&snapshot);
+                }
+                Response::ok(id, serde_json::json!({ "ok": true, "sysinfo": sysinfo }))
+            }
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
+    pub(crate) async fn handle_unifi_controller_devices(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let cid = match get_uuid_param(&params, "id") {
+            Ok(id) => id,
+            Err(r) => return r,
+        };
+        let controller = {
+            let st = self.state.lock().await;
+            match st.unifi_controllers.get(&cid).cloned() {
+                Some(c) => c,
+                None => return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "controller not found".to_owned(),
+                ),
+            }
+        };
+        match crate::unifi_controllers::list_devices(&self.secrets, &controller).await {
+            Ok(devices) => match serde_json::to_value(&devices) {
+                Ok(v) => Response::ok(id, v),
+                Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+            },
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
+    pub(crate) async fn handle_unifi_controller_devmgr(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let cid = match get_uuid_param(&params, "id") {
+            Ok(id) => id,
+            Err(r) => return r,
+        };
+        let cmd = match params.get("cmd").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing cmd".to_owned()),
+        };
+        let mac = match params.get("mac").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing mac".to_owned()),
+        };
+        let extra = params.get("extra").cloned().unwrap_or(serde_json::json!({}));
+        let controller = {
+            let st = self.state.lock().await;
+            match st.unifi_controllers.get(&cid).cloned() {
+                Some(c) => c,
+                None => return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "controller not found".to_owned(),
+                ),
+            }
+        };
+        match crate::unifi_controllers::devmgr_command(
+            &self.secrets,
+            &controller,
+            &cmd,
+            &mac,
+            extra,
+        )
+        .await
+        {
+            Ok(body) => Response::ok(id, body),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
 }

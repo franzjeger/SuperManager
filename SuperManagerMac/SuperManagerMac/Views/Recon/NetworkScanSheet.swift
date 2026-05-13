@@ -38,10 +38,18 @@ struct NetworkScanSheet: View {
     enum HostAction: Identifiable {
         case addSsh(ActiveHost)
         case adoptUnifi(ActiveHost)
+        /// Controller-API command on a host. `cmd` is one of:
+        /// `locate`, `unset-locate`, `restart`, `forget`,
+        /// `adopt`. Resolved via the controller stored in
+        /// `host.controllerState`.
+        case controllerCommand(ActiveHost, String)
+
         var id: String {
             switch self {
             case .addSsh(let h): return "ssh-\(h.ip)"
             case .adoptUnifi(let h): return "unifi-\(h.ip)"
+            case .controllerCommand(let h, let cmd):
+                return "ctrl-\(cmd)-\(h.ip)"
             }
         }
     }
@@ -220,6 +228,9 @@ struct NetworkScanSheet: View {
                     .environment(appState)
             case .adoptUnifi(let host):
                 UnifiAdoptInlineSheet(host: host)
+                    .environment(appState)
+            case .controllerCommand(let host, let cmd):
+                ControllerCommandSheet(host: host, command: cmd)
                     .environment(appState)
             }
         }
@@ -637,8 +648,35 @@ private struct HostRow: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.tertiary)
             }
+            if let cs = host.controllerState {
+                managedByBadge(cs)
+            }
             Spacer()
         }
+    }
+
+    private func managedByBadge(_ cs: ControllerStateRef) -> some View {
+        let (sym, tint): (String, Color) = {
+            switch cs.state {
+            case "connected" where cs.adopted: return ("checkmark.seal.fill", .green)
+            case "pending-adoption": return ("clock.badge.exclamationmark", .orange)
+            case "disconnected": return ("xmark.seal", .red)
+            case "managed-by-other": return ("exclamationmark.octagon", .yellow)
+            case "isolated": return ("network.slash", .red)
+            default: return ("antenna.radiowaves.left.and.right", .blue)
+            }
+        }()
+        return Label(
+            "via \(cs.controllerLabel) (\(cs.state))",
+            systemImage: sym
+        )
+        .font(.caption.weight(.medium))
+        .foregroundStyle(tint)
+        .help(
+            "This MAC is known to UniFi controller "
+            + "'\(cs.controllerLabel)'. State: \(cs.state). "
+            + "Use the `…` menu for controller-API actions."
+        )
     }
 
     @ViewBuilder
@@ -908,17 +946,62 @@ private struct HostRow: View {
 
     private var actionMenu: some View {
         Menu {
+            // CONTROLLER-FIRST actions appear at the top when a
+            // configured UniFi controller knows this MAC. The
+            // operator should reach for these before any SSH
+            // path — the controller can talk to the device
+            // even when SSH is locked down (which it usually
+            // is on adopted UniFi gear).
+            if let cs = host.controllerState, host.mac != nil {
+                Section {
+                    Button {
+                        onAction(.controllerCommand(host, "locate"))
+                    } label: {
+                        Label("Locate (blink LED)", systemImage: "light.beacon.max.fill")
+                    }
+                    Button {
+                        onAction(.controllerCommand(host, "unset-locate"))
+                    } label: {
+                        Label("Stop locate", systemImage: "light.beacon.max")
+                    }
+                    Button {
+                        onAction(.controllerCommand(host, "restart"))
+                    } label: {
+                        Label("Restart device", systemImage: "arrow.clockwise")
+                    }
+                    if cs.adopted {
+                        Button(role: .destructive) {
+                            onAction(.controllerCommand(host, "forget"))
+                        } label: {
+                            Label("Forget from controller", systemImage: "trash")
+                        }
+                    } else if cs.state == "pending-adoption" {
+                        Button {
+                            onAction(.controllerCommand(host, "adopt"))
+                        } label: {
+                            Label("Adopt via controller", systemImage: "checkmark.seal.fill")
+                        }
+                    }
+                } header: {
+                    Text("Controller: \(cs.controllerLabel)")
+                }
+                Divider()
+            }
             Button {
                 onAction(.addSsh(host))
             } label: {
                 Label("Add as SSH host…", systemImage: "terminal")
             }
-            if deviceType == .unifi {
+            // Direct-SSH adoption stays available as a last-
+            // resort path: factory-reset device, no controller
+            // configured, or operator explicitly wants to
+            // re-aim at a different controller.
+            if deviceType == .unifi && host.controllerState == nil {
                 Button {
                     onAction(.adoptUnifi(host))
                 } label: {
                     Label(
-                        "Adopt to UniFi controller…",
+                        "Adopt via SSH (factory defaults)…",
                         systemImage: "antenna.radiowaves.left.and.right.circle.fill"
                     )
                 }
@@ -1273,6 +1356,138 @@ private struct FindingRow: View {
             Spacer()
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Per-host controller-API command sheet. Shown when the
+/// operator picks Locate / Restart / Forget / Adopt from a
+/// row whose `controllerState` is populated. Confirms the
+/// action, runs it via `runUnifiDevmgrCommand`, and shows
+/// the controller's response inline so the operator sees
+/// success / error without leaving the scan view.
+private struct ControllerCommandSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+
+    let host: ActiveHost
+    let command: String
+
+    @State private var running = false
+    @State private var output: String?
+    @State private var errorMessage: String?
+
+    private var commandLabel: String {
+        switch command {
+        case "locate": return "Locate (blink LED)"
+        case "unset-locate": return "Stop locate"
+        case "restart": return "Restart device"
+        case "forget": return "Forget from controller"
+        case "adopt": return "Adopt via controller"
+        default: return command
+        }
+    }
+
+    private var dangerous: Bool {
+        command == "forget" || command == "restart"
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: dangerous ? "exclamationmark.triangle.fill" : "wand.and.stars")
+                    .foregroundStyle(dangerous ? Color.orange : Color.accentColor)
+                    .imageScale(.large)
+                VStack(alignment: .leading) {
+                    Text(commandLabel).font(.headline)
+                    if let cs = host.controllerState {
+                        Text("via \(cs.controllerLabel)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(.background.secondary)
+
+            Form {
+                Section("Target") {
+                    LabeledContent("IP", value: host.ip)
+                    if let mac = host.mac {
+                        LabeledContent("MAC", value: mac)
+                    }
+                    if let model = host.controllerState?.model {
+                        LabeledContent("Model", value: model)
+                    }
+                    if let name = host.controllerState?.name {
+                        LabeledContent("Name", value: name)
+                    }
+                }
+                if dangerous {
+                    Section {
+                        Label(
+                            command == "forget"
+                                ? "This un-adopts the device from the controller. It will need to be re-adopted (factory reset + new set-inform) to come back online."
+                                : "Device will reboot — typically 60-90 s of downtime.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if let out = output {
+                    Section("Controller response") {
+                        Text(out)
+                            .font(.caption.monospaced())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                if let err = errorMessage {
+                    Section { Text(err).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button(running ? "Running…" : commandLabel) {
+                    Task { await run() }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(dangerous ? Color.orange : Color.accentColor)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(running || host.controllerState == nil || host.mac == nil)
+            }
+            .padding(12)
+        }
+        .frame(minWidth: 480, minHeight: 360)
+    }
+
+    private func run() async {
+        guard let cs = host.controllerState, let mac = host.mac else {
+            errorMessage = "Missing controller reference or MAC."
+            return
+        }
+        running = true
+        defer { running = false }
+        errorMessage = nil
+        output = nil
+        let result = await appState.runUnifiDevmgrCommand(
+            controllerId: cs.controllerId,
+            cmd: command,
+            mac: mac
+        )
+        switch result {
+        case .success(let body):
+            output = body
+        case .failure(let msg):
+            errorMessage = msg.message
+        }
     }
 }
 

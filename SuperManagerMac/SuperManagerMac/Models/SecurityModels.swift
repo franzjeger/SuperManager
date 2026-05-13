@@ -318,10 +318,16 @@ struct ActiveHost: Codable, Identifiable {
     let probes: [PortProbe]
     let findingCount: UInt32
     let zone: String?
+    /// Engine post-scan annotation: which configured UniFi
+    /// controller (if any) claims this MAC. Drives the
+    /// "managed by" badge + the controller-API-driven action
+    /// menu in the scan-result row.
+    let controllerState: ControllerStateRef?
     var id: String { ip }
     enum CodingKeys: String, CodingKey {
         case ip, mac, hostname, vendor, probes, zone
         case findingCount = "finding_count"
+        case controllerState = "controller_state"
     }
 
     init(from decoder: Decoder) throws {
@@ -333,6 +339,26 @@ struct ActiveHost: Codable, Identifiable {
         probes = (try? c.decode([PortProbe].self, forKey: .probes)) ?? []
         findingCount = (try? c.decode(UInt32.self, forKey: .findingCount)) ?? 0
         zone = try c.decodeIfPresent(String.self, forKey: .zone)
+        controllerState = try? c.decodeIfPresent(ControllerStateRef.self, forKey: .controllerState)
+    }
+}
+
+/// Cross-reference annotation from the engine — a UniFi
+/// controller's view of this scanned host. Codable to/from the
+/// engine's `ControllerStateRef` JSON shape.
+struct ControllerStateRef: Codable, Hashable {
+    let controllerId: String
+    let controllerLabel: String
+    /// Engine-side human label: "connected", "pending-adoption",
+    /// "managed-by-other", "isolated", "adopting", etc.
+    let state: String
+    let adopted: Bool
+    let model: String?
+    let name: String?
+    enum CodingKeys: String, CodingKey {
+        case state, adopted, model, name
+        case controllerId = "controller_id"
+        case controllerLabel = "controller_label"
     }
 }
 

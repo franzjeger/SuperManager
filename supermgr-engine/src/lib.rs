@@ -44,6 +44,7 @@ pub mod ssh;
 pub mod ssh_compliance;
 pub mod state;
 pub mod unifi;
+pub mod unifi_controllers;
 pub mod vuln;
 pub mod waf_detect;
 pub mod web_paths;

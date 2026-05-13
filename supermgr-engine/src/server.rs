@@ -257,6 +257,24 @@ impl EngineServer {
             "unifi_test" => self.handle_unifi_test(id, req.params).await,
             "unifi_api" => self.handle_unifi_api(id, req.params).await,
 
+            // -- Standalone UniFi controller registry --
+            "unifi_controller_list" => self.handle_unifi_controller_list(id).await,
+            "unifi_controller_save" => {
+                self.handle_unifi_controller_save(id, req.params).await
+            }
+            "unifi_controller_delete" => {
+                self.handle_unifi_controller_delete(id, req.params).await
+            }
+            "unifi_controller_test" => {
+                self.handle_unifi_controller_test(id, req.params).await
+            }
+            "unifi_controller_devices" => {
+                self.handle_unifi_controller_devices(id, req.params).await
+            }
+            "unifi_controller_devmgr" => {
+                self.handle_unifi_controller_devmgr(id, req.params).await
+            }
+
             // -- Engagement / Security methods --
             "engagement_list" => self.handle_engagement_list(id).await,
             "engagement_save" => self.handle_engagement_save(id, req.params).await,

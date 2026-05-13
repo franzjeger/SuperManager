@@ -50,6 +50,14 @@ class AppState {
     /// browser flow or the daemon-side timeout expires).
     var pendingTailscaleAuthURL: URL?
 
+    /// All configured UniFi controllers (standalone — not
+    /// tied to SSH hosts). Refreshed on app launch via
+    /// `refreshUnifiControllers()` and after any save/delete.
+    /// Drives the controller-list settings page + the scan-row
+    /// "managed by" badge + the per-host controller-API
+    /// action menu.
+    var unifiControllers: [UnifiController] = []
+
     /// Pending "Capture from web" payload. Set by the
     /// `supermgr://` URL-scheme handler in SuperManagerApp or by
     /// the Help → Capture from Web… menu item. ContentView
@@ -433,6 +441,7 @@ class AppState {
         await refreshAutoReconnect()
         await refreshCustomers()
         await refreshEngagements()
+        await refreshUnifiControllers()
     }
 
     /// True while `refreshAll` is in flight. Drives the toolbar
