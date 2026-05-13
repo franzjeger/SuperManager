@@ -5,10 +5,14 @@ import SwiftUI
 /// tool directly from this section — no bounce-back to other
 /// parts of the app.
 ///
-/// Active scan + Passive scan are deliberately NOT in the grid:
-/// they live in the Security engagement panel where they're
-/// tightly coupled to the host inventory display. A small
-/// footer points the user there so the absence isn't confusing.
+/// Active scan + Passive scan are accessible in two places:
+///   1. Here, via the "Network scan" tile (general LAN sweep,
+///      engagement-optional).
+///   2. The Security engagement panel ("Active scan" button)
+///      which is tightly coupled to the host inventory display.
+/// Both call the same engine RPC; pick whichever ergonomics
+/// fits the workflow. The footer card at the bottom of this
+/// view points to the engagement-panel variant.
 struct ReconView: View {
     @Environment(AppState.self) private var appState
 
@@ -141,6 +145,7 @@ struct ReconView: View {
             ],
             spacing: 16
         ) {
+            tile(.networkScan)
             tile(.dnsAudit)
             tile(.dnsHealth)
             tile(.subdomainEnum)
@@ -216,14 +221,17 @@ struct ReconView: View {
         )
     }
 
-    /// Tells the user where Active + Passive scan live, because
-    /// they're conspicuously absent from the grid. Without this
-    /// they'd hunt and assume something's missing.
+    /// Cross-link to the engagement-panel variant of the active
+    /// scan. Recon's "Network scan" tile and Security's "Active
+    /// scan" button both call the same engine RPC — the Security
+    /// version just lives next to the per-engagement host
+    /// inventory, so it's more ergonomic if you're already
+    /// triaging that engagement's hosts.
     private var whereIsActiveScanCard: some View {
         HStack(spacing: 10) {
             Image(systemName: "info.circle")
                 .foregroundStyle(.secondary)
-            Text("Active scan + passive discovery live on the engagement page (Security → pick engagement → \"Active scan\"). They're not duplicated here because they're tightly coupled to the engagement's host-inventory display.")
+            Text("The \"Network scan\" tile above and the \"Active scan\" button on the Security engagement panel both call the same engine — same hosts, same findings. Use whichever fits the workflow: this view for ad-hoc scans, Security if you're already triaging an engagement's host list.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -244,6 +252,11 @@ struct ReconView: View {
     @ViewBuilder
     private func sheetFor(tool: ReconTool) -> some View {
         switch tool {
+        case .networkScan:
+            NetworkScanSheet(
+                engagementId: selectedEngagement?.id,
+                initialTargets: selectedEngagement?.scopeCidrs.joined(separator: ", ") ?? ""
+            )
         case .dnsAudit:
             DnsAuditSheet()
         case .dnsHealth:
@@ -261,6 +274,7 @@ struct ReconView: View {
 // MARK: - Tool catalogue
 
 enum ReconTool: String, Identifiable, CaseIterable {
+    case networkScan
     case dnsAudit
     case dnsHealth
     case subdomainEnum
@@ -270,6 +284,7 @@ enum ReconTool: String, Identifiable, CaseIterable {
 
     var title: String {
         switch self {
+        case .networkScan: return "Network scan (hosts + ports)"
         case .dnsAudit: return "DNS zone-transfer audit"
         case .dnsHealth: return "Email + DNS health audit"
         case .subdomainEnum: return "Subdomain enumeration"
@@ -279,6 +294,7 @@ enum ReconTool: String, Identifiable, CaseIterable {
 
     var tagline: String {
         switch self {
+        case .networkScan: return "Host discovery + port sweep + CVE match"
         case .dnsAudit: return "Probes for AXFR leakage"
         case .dnsHealth: return "SPF / DKIM / DMARC / DNSSEC posture"
         case .subdomainEnum: return "Certificate-Transparency log search"
@@ -288,6 +304,8 @@ enum ReconTool: String, Identifiable, CaseIterable {
 
     var detail: String {
         switch self {
+        case .networkScan:
+            return "Sweeps a CIDR range (or list of CIDRs/IPs) for live hosts, then port-scans + service-fingerprints each one. Banner-grabs HTTP/HTTPS/SMB/SNMP/etc., runs TLS audits, and matches discovered service versions against the CVE feed. Capped at 256 hosts per run. Findings flow into the selected engagement if one is picked."
         case .dnsAudit:
             return "Queries every authoritative nameserver of the target domain for an AXFR transfer. A successful transfer leaks the entire zone — internal hostnames, mail routing, infra layout. Most NSes refuse this; the ones that don't are immediate findings."
         case .dnsHealth:
@@ -301,6 +319,7 @@ enum ReconTool: String, Identifiable, CaseIterable {
 
     var icon: String {
         switch self {
+        case .networkScan: return "network"
         case .dnsAudit: return "network.badge.shield.half.filled"
         case .dnsHealth: return "envelope.badge.shield.half.filled"
         case .subdomainEnum: return "magnifyingglass.circle.fill"
@@ -310,6 +329,7 @@ enum ReconTool: String, Identifiable, CaseIterable {
 
     var tint: Color {
         switch self {
+        case .networkScan: return .orange
         case .dnsAudit: return .blue
         case .dnsHealth: return .teal
         case .subdomainEnum: return .indigo
@@ -320,12 +340,13 @@ enum ReconTool: String, Identifiable, CaseIterable {
     var requiresEngagement: Bool {
         switch self {
         case .trafficCapture: return true
-        case .dnsAudit, .dnsHealth, .subdomainEnum: return false
+        case .networkScan, .dnsAudit, .dnsHealth, .subdomainEnum: return false
         }
     }
 
     var actionLabel: String {
         switch self {
+        case .networkScan: return "Start scan…"
         case .dnsAudit: return "Run AXFR audit…"
         case .dnsHealth: return "Run health audit…"
         case .subdomainEnum: return "Enumerate…"
