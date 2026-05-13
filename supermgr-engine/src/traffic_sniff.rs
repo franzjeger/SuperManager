@@ -239,6 +239,20 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
         });
     }
 
+    // Binary pcap pass for TLS ClientHello downgrade detection.
+    // The text-based scan above can't see TLS handshake bytes
+    // (they're binary), so this runs a separate parse over the
+    // same .pcap looking for clients proposing SSLv3 / TLS 1.0 /
+    // TLS 1.1. Failure here is non-fatal — the text findings are
+    // still useful, we just lose the TLS-client coverage.
+    match crate::pcap_binary::detect_tls_downgrade_clients(pcap_path).await {
+        Ok(extra) => findings.extend(extra),
+        Err(e) => tracing::warn!(
+            "TLS downgrade scan failed on {}: {e}",
+            pcap_path.display()
+        ),
+    }
+
     Ok(TrafficAuditResult {
         findings,
         evidence_files,
