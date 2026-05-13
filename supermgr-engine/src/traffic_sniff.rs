@@ -304,6 +304,28 @@ const PROTO_HTTP_FORM_POST: ProtocolDef = ProtocolDef {
         and ensure login forms POST to https:// URLs (not http://). Check the form's HTML \
         for absolute http:// action URLs — those bypass any redirect.",
 };
+const PROTO_NTLM_HANDSHAKE: ProtocolDef = ProtocolDef {
+    id: "ntlm-handshake",
+    name: "NTLM authentication handshake",
+    severity: Severity::High,
+    cvss: 7.5,
+    recommendation: "Disable NTLM where possible (Kerberos-only Group Policy on AD-joined hosts). \
+        Where NTLM must remain: enforce NTLMv2 only — `LmCompatibilityLevel = 5` in HKLM\\SYSTEM\\\
+        CurrentControlSet\\Control\\Lsa. Crucially: enable SMB SIGNING + SEALING and EPA (Extended \
+        Protection for Authentication) so captured NTLM exchanges can't be relayed. NTLMv1 \
+        challenges captured here are OFFLINE-CRACKABLE — treat as if the affected account's \
+        password is already leaked and rotate it.",
+};
+const PROTO_MQTT_CLEARTEXT: ProtocolDef = ProtocolDef {
+    id: "mqtt-cleartext",
+    name: "MQTT cleartext (port 1883)",
+    severity: Severity::High,
+    cvss: 7.0,
+    recommendation: "Migrate MQTT clients + broker to port 8883 (MQTT-over-TLS). Most IoT brokers \
+        (Mosquitto, EMQX, HiveMQ) support TLS via simple config; clients usually need a CA-cert \
+        bundle pushed via firmware. If the cleartext-using device is fixed-firmware and can't be \
+        upgraded, segment it onto a dedicated VLAN with no L3 path to other workloads.",
+};
 
 /// Header line emitted by `tcpdump -A -tttt`: starts with an ISO-like
 /// timestamp.
@@ -598,6 +620,79 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
                 dst_port: header.dst_port,
                 protocol: PROTO_HTTP_FORM_POST,
                 redacted_excerpt: form,
+            });
+        }
+    }
+
+    // NTLM authentication handshake detection. Looks for the
+    // NTLMSSP signature anywhere in the payload — appears in:
+    //
+    //   - SMB messages (port 445) — NTLM type-1/2/3 inside the
+    //     SMB Session Setup request/response.
+    //   - HTTP `Authorization: NTLM <base64>` / `WWW-Authenticate:
+    //     NTLM <base64>` headers (port 80 / 8080 / various).
+    //   - LDAP simple bind with NTLM SASL (port 389).
+    //
+    // The signature `NTLMSSP\0` is 8 printable-ish bytes —
+    // tcpdump's -A output renders it as `NTLMSSP.` (the trailing
+    // NUL prints as a dot). We grep for that.
+    //
+    // We don't try to parse the full NTLMSSP message structure
+    // (challenge bytes, target names, etc.) from text output —
+    // that needs proper binary parsing which is out of scope for
+    // this PR (deferred to the future binary-pcap-parser module).
+    // The flag of "NTLM exchange happened" is already a finding:
+    // the captured exchange is offline-crackable if it's NTLMv1
+    // and re-playable for relay attacks regardless.
+    if let Some(idx) = payload.find("NTLMSSP") {
+        // Extract a small surrounding-context excerpt — just
+        // enough that the operator can confirm it's NTLM and
+        // see the message type byte (1/2/3 = negotiate/challenge/
+        // authenticate). tcpdump -A renders the type byte as
+        // either a printable digit or a dot — fine for our purposes.
+        let snippet_end = (idx + 32).min(payload.len());
+        let snippet = &payload[idx..snippet_end];
+        let preview = snippet
+            .chars()
+            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '.' })
+            .collect::<String>();
+        out.push(Event {
+            timestamp: header.timestamp.clone(),
+            src_ip: header.src_ip.clone(),
+            src_port: header.src_port,
+            dst_ip: header.dst_ip.clone(),
+            dst_port: header.dst_port,
+            protocol: PROTO_NTLM_HANDSHAKE,
+            redacted_excerpt: format!("NTLMSSP signature found: {preview}"),
+        });
+    }
+
+    // MQTT cleartext detection on the canonical port. The MQTT
+    // 3.1.1 spec puts the protocol name string ("MQTT") into the
+    // CONNECT packet variable header — it's printable bytes
+    // immediately after a 0x00 0x04 length prefix. The MQTT 3.1
+    // spec uses "MQIsdp" as the protocol name (legacy).
+    //
+    // We grep for either literal in any payload to/from port
+    // 1883. Hit = CONNECT packet observed = client and broker
+    // are talking unencrypted MQTT. If a username flag is set
+    // in the CONNECT, the username string follows the client-ID
+    // — visible as ASCII bytes in -A output, but extracting
+    // it cleanly needs binary parsing. For now, surface "MQTT
+    // cleartext seen" as the finding; the operator can open the
+    // pcap in Wireshark for credential-level detail if needed.
+    if header.dst_port == 1883 || header.src_port == 1883 {
+        let has_mqtt = payload.contains("MQTT")
+            || payload.contains("MQIsdp");
+        if has_mqtt {
+            out.push(Event {
+                timestamp: header.timestamp.clone(),
+                src_ip: header.src_ip.clone(),
+                src_port: header.src_port,
+                dst_ip: header.dst_ip.clone(),
+                dst_port: header.dst_port,
+                protocol: PROTO_MQTT_CLEARTEXT,
+                redacted_excerpt: "MQTT CONNECT observed on cleartext port 1883".into(),
             });
         }
     }
@@ -1106,5 +1201,96 @@ username=admin&password=correcthorse
         assert!(!post[0].redacted_excerpt.contains("correcthorse"));
         assert!(post[0].redacted_excerpt.contains("/admin/login.php"));
         assert!(post[0].redacted_excerpt.contains("username=admin"));
+    }
+
+    // ─── NTLM handshake detection ──────────────────────────────────
+
+    #[test]
+    fn scan_events_extracts_ntlm_via_smb() {
+        // SMB session-setup carrying NTLMSSP type-1 (negotiate).
+        // The `NTLMSSP\0\x01\x00\x00\x00` byte sequence is what
+        // gets sent; under tcpdump -A the NUL bytes show as dots.
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > 192.0.2.100.445: tcp 200
+....NTLMSSP.....\u{0001}.....more bytes.....
+";
+        let events = scan_events(text);
+        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        assert_eq!(ntlm.len(), 1);
+        assert!(ntlm[0].redacted_excerpt.contains("NTLMSSP"));
+    }
+
+    #[test]
+    fn scan_events_extracts_ntlm_via_http() {
+        // HTTP Negotiate / NTLM auth in WWW-Authenticate header.
+        // The base64-decoded blob starts with `NTLMSSP` — we'd see
+        // it after `NTLM ` if the capture happens to land on the
+        // raw bytes (some SMB-over-HTTP proxies do).
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > 192.0.2.100.80: tcp 200
+HTTP/1.1 401 Unauthorized\r
+WWW-Authenticate: Negotiate\r
+WWW-Authenticate: NTLM\r
+\r
+NTLMSSP....type-1 negotiate message bytes
+";
+        let events = scan_events(text);
+        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        assert_eq!(ntlm.len(), 1);
+    }
+
+    #[test]
+    fn ntlm_not_emitted_on_unrelated_traffic() {
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > 192.0.2.100.443: tcp 200
+....regular https payload bytes that happen to mention NTL or LMS or even NT M but not the magic
+";
+        let events = scan_events(text);
+        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        assert!(ntlm.is_empty(), "no NTLMSSP magic = no event");
+    }
+
+    // ─── MQTT cleartext detection ──────────────────────────────────
+
+    #[test]
+    fn scan_events_extracts_mqtt_v311_connect() {
+        // MQTT 3.1.1 CONNECT — protocol name "MQTT" appears as
+        // printable ASCII after the byte-0x10 fixed header. tcpdump
+        // -A renders it verbatim.
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > broker.example.1883: tcp 80
+\u{0010}.\u{0004}MQTT.\u{0002}.<.client-id-here.
+";
+        let events = scan_events(text);
+        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        assert_eq!(mqtt.len(), 1);
+        assert!(mqtt[0].redacted_excerpt.contains("MQTT CONNECT"));
+    }
+
+    #[test]
+    fn scan_events_extracts_mqtt_v31_legacy_connect() {
+        // MQTT 3.1 legacy protocol name "MQIsdp".
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > broker.example.1883: tcp 80
+\u{0010}.\u{0006}MQIsdp.\u{0003}.<.client.
+";
+        let events = scan_events(text);
+        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        assert_eq!(mqtt.len(), 1);
+    }
+
+    #[test]
+    fn mqtt_not_emitted_on_port_8883() {
+        // MQTT-over-TLS on 8883 — even if "MQTT" string somehow
+        // appears in the payload (it shouldn't post-handshake;
+        // it's encrypted), we shouldn't flag it. Port 1883 is the
+        // cleartext-specific signal.
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > broker.example.8883: tcp 80
+....tls bytes... mqtt in some unrelated text ....
+";
+        let events = scan_events(text);
+        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        assert!(mqtt.is_empty(), "non-1883 ports don't flag");
     }
 }
