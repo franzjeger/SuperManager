@@ -1,0 +1,27 @@
+# Dependabot: watch for advisories and version bumps so we don't
+# rely on humans remembering to `cargo update`.
+#
+# - cargo: workspace Cargo.toml / Cargo.lock
+# - github-actions: the SHA-pinned workflows in .github/workflows/
+#
+# Updates open as PRs grouped to keep noise down. Review the diff
+# (especially for actions: confirm the new SHA points to the tag
+# you expect — `git ls-remote --tags <repo>` cross-check).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
