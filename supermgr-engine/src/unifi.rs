@@ -80,7 +80,27 @@ pub async fn set_inform(
     let _parsed: reqwest::Url = url.parse()
         .with_context(|| format!("invalid inform URL: {url:?}"))?;
     let (_host, session) = open_session(state, secrets, host_id).await?;
-    let cmd = format!("set-inform {url}");
+
+    // UniFi device shell is busybox `ash`. Bare `set-inform`
+    // is only available inside the `mca-cli` interactive shell
+    // and via login-shell PATH hacks — neither apply when we
+    // SSH-exec a single command. The portable invocation is
+    // `mca-cli-op set-inform <url>` (UniFi Network 5.x+); we
+    // fall back to bare `set-inform` for very old firmware
+    // that lacks mca-cli-op, and to /usr/bin/syswrapper.sh for
+    // legacy AC-series gear that has neither.
+    //
+    // Trying them all in sequence at the device side (using
+    // `||` short-circuit chain) means one SSH session does
+    // the whole probe — saves a round-trip per failed try and
+    // ensures the device's chosen variant runs in its own
+    // shell environment.
+    let cmd = format!(
+        "mca-cli-op set-inform {url} 2>/dev/null \
+            || /sbin/set-inform {url} 2>/dev/null \
+            || /usr/bin/syswrapper.sh set-inform {url} 2>/dev/null \
+            || set-inform {url}"
+    );
     info!("unifi set_inform: {cmd}");
     let (exit, stdout, stderr) = session
         .exec(&cmd)

@@ -1171,6 +1171,15 @@ private struct UnifiAdoptInlineSheet: View {
         if low.contains("invalid inform url") || low.contains("invalid url") {
             return "URL didn't parse — check the format. Raw: \(raw)"
         }
+        if low.contains("not found") && low.contains("set-inform") {
+            return
+                "Device's shell can't find a set-inform binary. "
+                + "Likely an obscure UniFi firmware variant — try "
+                + "factory-resetting the AP (hold reset 10 s with "
+                + "PoE applied) to get back to a stock firmware "
+                + "where `mca-cli-op set-inform` is present. "
+                + "Raw: \(raw)"
+        }
         if low.contains("set-inform returned exit") {
             return
                 "Device rejected the set-inform command — check the "
