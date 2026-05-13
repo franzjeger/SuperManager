@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [main]
 
+# Default to read-only. Individual jobs/steps can opt in to more.
+permissions:
+  contents: read
+
 jobs:
   # Linux build — exercises the `default-members` crates only
   # (supermgr-core, supermgrd, supermgr, supermgr-mcp). The Mac stack
@@ -14,8 +18,8 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -35,8 +39,8 @@ jobs:
   mac:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       # xcodegen turns `SuperManagerMac/project.yml` → `.xcodeproj`.
       # pandoc is the engagement-report renderer; install so report
       # tests (if/when added) don't get skipped.
