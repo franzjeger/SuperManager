@@ -595,6 +595,18 @@ private struct HostRow: View {
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+        } else {
+            // ARP-only host (no TCP port answered, but the
+            // device is on the LAN). Common for adopted UniFi
+            // gear / printers / IoT that locks down everything
+            // except the inform / discovery channel.
+            HStack(spacing: 6) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .foregroundStyle(.orange)
+                Text("No open TCP ports — discovered via ARP")
+                    .font(.caption.italic())
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 

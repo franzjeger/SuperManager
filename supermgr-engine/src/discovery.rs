@@ -24,7 +24,7 @@
 //!
 //! # Active scanning (Phase B+) lives in a future module.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -689,6 +689,18 @@ fn lookup_oui(db: &HashMap<String, String>, mac: &str) -> Option<String> {
     db.get(&prefix).cloned()
 }
 
+/// Sort key that gives sane numerical ordering for IPv4
+/// addresses (so `192.168.1.10` sorts after `192.168.1.9`, not
+/// after `192.168.1.1`). Non-parseable strings fall back to
+/// lexical order via the unused octets being all-zero.
+fn ip_sort_key(s: &str) -> (u32, String) {
+    if let Ok(addr) = s.parse::<std::net::Ipv4Addr>() {
+        (u32::from(addr), String::new())
+    } else {
+        (0, s.to_owned())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inventory persistence
 // ---------------------------------------------------------------------------
@@ -778,6 +790,29 @@ pub async fn active_scan(
     use std::sync::atomic::Ordering;
 
     let started_at = chrono::Utc::now();
+
+    // ARP lookup runs in parallel with the host fan-out so it
+    // doesn't add to wall-clock. ARP gives us MAC + OUI vendor
+    // for every host on the local L2 segment — without this
+    // pre-pass the active-scan results would be MAC-blank, and
+    // the GUI's vendor-pill / device-type sniffing would have
+    // nothing to work with for devices like UniFi APs that
+    // disclose nothing about themselves over an open port.
+    let arp_lookup = tokio::spawn(async {
+        let cache = scan_arp_cache().await.unwrap_or_default();
+        let vendors = oui_database();
+        let mut by_ip: HashMap<String, (Option<String>, Option<String>)> =
+            HashMap::new();
+        for h in cache {
+            let v = h
+                .mac
+                .as_deref()
+                .and_then(|m| lookup_oui(&vendors, m));
+            by_ip.insert(h.ip, (h.mac, v));
+        }
+        by_ip
+    });
+
     let host_sema = Arc::new(tokio::sync::Semaphore::new(32));
     let mut futs = Vec::new();
     for ip in targets {
@@ -838,6 +873,79 @@ pub async fn active_scan(
             hosts.len()
         );
     }
+
+    // Merge ARP data — every host we already collected via TCP
+    // probe gets its MAC + OUI vendor filled in. This is the
+    // single most important pass for the GUI: without it the
+    // "vendor pill" / "device-type" badges have nothing to
+    // chew on and every host renders as a grey Linux generic.
+    let arp_map: HashMap<String, (Option<String>, Option<String>)> = arp_lookup
+        .await
+        .unwrap_or_else(|e| {
+            warn!("arp lookup task failed: {e:#}");
+            HashMap::new()
+        });
+    let scanned_ips: HashSet<String> = hosts.iter().map(|h| h.ip.clone()).collect();
+    for h in hosts.iter_mut() {
+        if let Some((mac, vendor)) = arp_map.get(&h.ip) {
+            if h.mac.is_none() { h.mac = mac.clone(); }
+            if h.vendor.is_none() { h.vendor = vendor.clone(); }
+        }
+    }
+
+    // Include ARP-only hosts. UniFi APs that are already
+    // adopted to a controller lock down EVERY listener except
+    // the inform channel (often only outbound), so the active
+    // TCP sweep returns zero probes — but the device is still
+    // very much on the network. Dropping them silently meant
+    // operators couldn't find their own adopted gear. We add
+    // these hosts with an empty `probes` vec and a synthetic
+    // `arp-only` zone hint so the GUI knows to render them
+    // with the "no open ports — discovered via ARP" treatment.
+    for ip in targets {
+        if scanned_ips.contains(ip) {
+            continue;
+        }
+        if let Some((mac, vendor)) = arp_map.get(ip) {
+            if mac.is_some() {
+                hosts.push(ActiveHost {
+                    ip: ip.clone(),
+                    mac: mac.clone(),
+                    hostname: None,
+                    vendor: vendor.clone(),
+                    probes: Vec::new(),
+                    finding_count: 0,
+                    zone: Some(crate::asset_enrich::classify(ip).label().to_owned()),
+                });
+            }
+        }
+    }
+
+    // Reverse-DNS for every host that didn't already get a
+    // hostname from a probe. Same `enrich_many` the passive
+    // scan uses — bounded by internal concurrency + timeout
+    // so a slow resolver can't wedge results.
+    {
+        let ips: Vec<String> = hosts.iter().map(|h| h.ip.clone()).collect();
+        let enrichment = crate::asset_enrich::enrich_many(&ips).await;
+        let by_ip: HashMap<String, &crate::asset_enrich::AssetEnrichment> =
+            enrichment.iter().map(|e| (e.ip.clone(), e)).collect();
+        for h in hosts.iter_mut() {
+            if h.hostname.is_none() {
+                if let Some(en) = by_ip.get(&h.ip) {
+                    h.hostname = en.reverse_dns.clone();
+                }
+            }
+        }
+    }
+
+    // Sort by IP so the GUI's row order is stable across re-
+    // runs. Hosts with TCP probes are interleaved with ARP-only
+    // hosts in IP order — keeping the visual "this is what's
+    // on my network" view coherent.
+    hosts.sort_by(|a, b| {
+        ip_sort_key(&a.ip).cmp(&ip_sort_key(&b.ip))
+    });
     // Update finding-count on each host post-aggregation.
     let mut by_ip: HashMap<String, u32> = HashMap::new();
     for f in &findings {
@@ -1004,12 +1112,19 @@ async fn scan_host_active(
         }
     }
     if probes.is_empty() {
-        // Host-level reachability check: did anything respond?
-        // If literally no port responded, skip it from results
-        // entirely — most addresses in a /24 are unused.
+        // No open TCP port. Return None so this slot is filled
+        // — if at all — by the ARP-only pass in active_scan
+        // (which keeps the host visible when MAC was learned)
+        // and discarded otherwise. Most addresses in a /24 are
+        // unused so this keeps the response set tight.
         return None;
     }
     let zone = Some(crate::asset_enrich::classify(ip).label().to_owned());
+    // mac / hostname / vendor are left None here on purpose —
+    // active_scan's post-pass fills them from the parallel ARP
+    // lookup + reverse-DNS enrichment so every probe-found
+    // host gets full identity without doing two DNS lookups
+    // per host or refetching the ARP cache for every host.
     Some(ActiveHost {
         ip: ip.to_owned(),
         mac: None,
