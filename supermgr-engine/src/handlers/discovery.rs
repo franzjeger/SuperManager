@@ -194,6 +194,50 @@ impl EngineServer {
         }
     }
 
+    /// Analyse a packet capture for cleartext-protocol exposure.
+    /// Parses the .pcap, classifies events per (src_ip, protocol),
+    /// emits findings, and writes redacted evidence files to the
+    /// engagement's `captures/` directory. The full unredacted
+    /// .pcap stays on disk for the operator's Wireshark review.
+    pub(crate) async fn handle_discovery_analyse_pcap(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let pcap_path = match params.get("pcap_path").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing or empty `pcap_path`".to_owned(),
+                );
+            }
+        };
+        let engagement_id = params
+            .get("engagement_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+
+        let evidence_dir = match engagement_id.as_deref() {
+            Some(eid) => crate::traffic_sniff::engagement_evidence_dir(eid),
+            None => {
+                let mut p = crate::secrets::default_data_dir();
+                p.push("captures");
+                p
+            }
+        };
+
+        let pcap = std::path::Path::new(&pcap_path);
+        match crate::traffic_sniff::analyse_pcap(pcap, &evidence_dir).await {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(v) => Response::ok(id, v),
+                Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+            },
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
     pub(crate) async fn handle_discovery_inventory(
         &self,
         id: u64,
