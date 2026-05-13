@@ -106,11 +106,85 @@ struct ContentView: View {
                     GlobalCustomerPicker()
                 }
             }
+            // GLOBAL "Add device" menu — visible from every
+            // section, not just SSH. Discoverability fix: the
+            // old `+` only showed up on the SSH page, so a user
+            // looking at Recon / Compliance / etc. had no
+            // obvious way to add a device. This menu collects
+            // every device-add path the app supports.
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button {
+                        showingAddHost = true
+                    } label: {
+                        Label("Type details manually…", systemImage: "keyboard")
+                    }
+                    .help("Open the standard 'Add SSH Host' form.")
+
+                    Button {
+                        appState.pendingWebCapture = WebCapture(
+                            hostname: "",
+                            label: "",
+                            deviceType: .linux,
+                            username: "root"
+                        )
+                    } label: {
+                        Label(
+                            "Paste from web or clipboard…",
+                            systemImage: "globe.americas.fill"
+                        )
+                    }
+                    .help(
+                        "Opens the Web Capture sheet. Auto-pulls "
+                        + "from clipboard, parses IPs / URLs / banners, "
+                        + "and lets you add as SSH host, append to "
+                        + "engagement scope, or kick off a network scan."
+                    )
+
+                    Button {
+                        appState.selectedSection = .recon
+                    } label: {
+                        Label(
+                            "Scan network for devices…",
+                            systemImage: "network"
+                        )
+                    }
+                    .help(
+                        "Opens the Recon section. The Network Scan tile "
+                        + "discovers hosts + open ports in a CIDR range."
+                    )
+
+                    Divider()
+
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(
+                            SuperManagerApp.webCaptureBookmarklet,
+                            forType: .string
+                        )
+                    } label: {
+                        Label(
+                            "Copy browser bookmarklet",
+                            systemImage: "bookmark.fill"
+                        )
+                    }
+                    .help(
+                        "Copies a JavaScript bookmarklet to the clipboard. "
+                        + "Paste it as the URL of a new bookmark in your "
+                        + "browser; clicking that bookmark on any vendor "
+                        + "admin page captures the device in one click."
+                    )
+                } label: {
+                    Label("Add device", systemImage: "plus.circle.fill")
+                }
+                .menuStyle(.borderlessButton)
+                .help("Add a device — type manually, paste, or scan.")
+            }
             ToolbarItem(placement: .primaryAction) {
                 if appState.selectedSection == .ssh {
                     Button(action: {
-                        if sshTab == .hosts { showingAddHost = true }
-                        else { showingGenerateKey = true }
+                        if sshTab == .keys { showingGenerateKey = true }
+                        else { showingAddHost = true }
                     }) {
                         Image(systemName: "plus")
                     }
@@ -209,6 +283,13 @@ struct ContentView: View {
         // sheets from, so it owns the visibility state.
         .onReceive(NotificationCenter.default.publisher(for: .superManagerShowAbout)) { _ in
             showingAbout = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .superManagerOpenAddHost)) { _ in
+            // Recon's "Type details" quick-add button posts this
+            // after switching to the SSH section, so the form
+            // opens as a top-of-stack sheet ready for input.
+            sshTab = .hosts
+            showingAddHost = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .superManagerShowExplain)) { _ in
             explainPrefillText = ""

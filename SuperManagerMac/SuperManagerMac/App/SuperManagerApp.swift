@@ -11,6 +11,14 @@ extension Notification.Name {
 
     /// Fired by the Help → Explain Configuration… menu item.
     static let superManagerShowExplain = Notification.Name("com.sybr.supermanager.showExplain")
+
+    /// Cross-section trigger that asks ContentView (the SSH page
+    /// owns the AddHostSheet sheet binding) to present the
+    /// "Add SSH Host" form. Lets us put an "Add a device → Type
+    /// details" button on the Recon page that flips to SSH and
+    /// immediately opens the form, instead of asking the user
+    /// to navigate sections and then find a `+` button.
+    static let superManagerOpenAddHost = Notification.Name("com.sybr.supermanager.openAddHost")
 }
 
 @main

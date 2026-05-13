@@ -109,27 +109,85 @@ struct WebCaptureSheet: View {
     private var pasteSection: some View {
         if capture == nil {
             Section {
+                howToCard
                 TextField(
-                    "Paste an IP, URL, or banner string — or use the bookmarklet",
+                    "Paste an IP, URL, or banner string here",
                     text: $rawPaste,
                     axis: .vertical
                 )
                 .textFieldStyle(.roundedBorder)
                 .font(.body.monospaced())
-                .lineLimit(2...4)
-                Button("Parse") { parseAndApply() }
-                    .controlSize(.small)
-                    .disabled(rawPaste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .lineLimit(3...6)
+                HStack {
+                    Button("Parse what I pasted") { parseAndApply() }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.regular)
+                        .disabled(rawPaste.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Try clipboard again") { retryClipboard() }
+                        .controlSize(.regular)
+                }
             } header: {
-                Text("Source")
+                Text("1. Tell me what device")
             } footer: {
                 Text(
-                    "Examples: `https://10.0.0.1:8443/admin/`, "
-                    + "`fw1.example.com:22`, `192.0.2.5`, or paste a banner "
-                    + "string like `FortiGate-100F v7.4.1 192.0.2.5`."
+                    "Examples that all work: `192.0.2.5`, "
+                    + "`fw1.example.com:22`, `https://10.0.0.1:8443/admin/`, "
+                    + "or a copy-paste banner string like "
+                    + "`FortiGate-100F v7.4.1 192.0.2.5`."
                 )
                 .font(.caption)
             }
+        }
+    }
+
+    /// Quick-start card shown in the empty-paste state. The user
+    /// has multiple ways to land here so we tell them what
+    /// they're looking at + how the bookmarklet route works
+    /// (since that's the one that requires a one-time setup).
+    private var howToCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Three ways to populate this sheet:", systemImage: "lightbulb.fill")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.tint)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("**Paste** any IP, URL, or banner below — then click Parse.")
+                Text("**⌘⇧W** anywhere in the app — auto-grabs the clipboard.")
+                Text("**Bookmarklet** in your browser → click while on a vendor admin page.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        SuperManagerApp.webCaptureBookmarklet,
+                        forType: .string
+                    )
+                } label: {
+                    Label("Copy bookmarklet to clipboard", systemImage: "bookmark.fill")
+                }
+                .controlSize(.small)
+                Text("then paste it as the URL of a new browser bookmark.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8).fill(.tint.opacity(0.08))
+        )
+    }
+
+    private func retryClipboard() {
+        if let s = NSPasteboard.general.string(forType: .string),
+           let c = WebCapture.from(pastedText: s)
+        {
+            rawPaste = s
+            capture = c
+            applyCaptureToFields(c)
+            errorMessage = nil
+        } else {
+            errorMessage = "Clipboard doesn't contain anything host-shaped."
         }
     }
 
