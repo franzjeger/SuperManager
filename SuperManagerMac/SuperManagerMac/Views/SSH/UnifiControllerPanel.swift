@@ -341,9 +341,38 @@ struct UnifiSetInformSheet: View {
                     .textSelection(.enabled)
             }
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // When our daemon-side SSH fails (russh
+                    // transport quirk, cold ARP, route flake),
+                    // the operator's terminal almost always
+                    // works. Give them a one-click fallback
+                    // that opens Terminal.app with the exact
+                    // command pre-filled — they enter the
+                    // password in their own terminal, see the
+                    // output there.
+                    HStack(spacing: 8) {
+                        Button {
+                            openInTerminal()
+                        } label: {
+                            Label("Run via Terminal instead", systemImage: "terminal")
+                        }
+                        .controlSize(.small)
+                        Button {
+                            copyToClipboard()
+                        } label: {
+                            Label("Copy ssh command", systemImage: "doc.on.doc")
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.08))
+                )
             }
             HStack {
                 Spacer()
@@ -377,5 +406,47 @@ struct UnifiSetInformSheet: View {
                 ? "set-inform failed. Make sure the device is reachable over SSH and the credentials are correct."
                 : appState.errorMessage
         }
+    }
+
+    /// Build the SSH command that does the same thing the
+    /// daemon would do — chained `mca-cli-op` → fallbacks so it
+    /// works on every UniFi firmware generation.
+    private func terminalCommand() -> String {
+        let url = informUrl
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(
+                of: #"(?i)^set-inform\s+"#,
+                with: "",
+                options: .regularExpression
+            )
+        return "ssh \(host.username)@\(host.hostname) "
+            + "'mca-cli-op set-inform \(url) "
+            + "|| /sbin/set-inform \(url) "
+            + "|| /usr/bin/syswrapper.sh set-inform \(url) "
+            + "|| set-inform \(url)'"
+    }
+
+    /// Open Terminal.app and paste the prepared command —
+    /// the operator types their password in their own terminal,
+    /// no SSH library involved. Reuses the working SSH path
+    /// they've already proven works.
+    private func openInTerminal() {
+        let cmd = terminalCommand()
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Terminal"
+                activate
+                do script "\(cmd)"
+            end tell
+            """
+        if let appleScript = NSAppleScript(source: script) {
+            var err: NSDictionary?
+            _ = appleScript.executeAndReturnError(&err)
+        }
+    }
+
+    private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(terminalCommand(), forType: .string)
     }
 }

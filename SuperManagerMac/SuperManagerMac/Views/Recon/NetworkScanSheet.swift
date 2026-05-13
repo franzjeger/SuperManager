@@ -1044,7 +1044,29 @@ private struct UnifiAdoptInlineSheet: View {
                     }
                 }
                 if let err = errorMessage {
-                    Section { Text(err).foregroundStyle(.red) }
+                    Section {
+                        Text(err).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                        // Daemon-side SSH failing? The operator's
+                        // own terminal almost always works. One-
+                        // click fallback opens Terminal.app with
+                        // the prepared command — no russh stack,
+                        // no engine, just /usr/bin/ssh and the
+                        // user's password.
+                        HStack(spacing: 8) {
+                            Button {
+                                openInTerminal()
+                            } label: {
+                                Label("Run via Terminal instead", systemImage: "terminal")
+                            }
+                            .controlSize(.small)
+                            Button {
+                                copyTerminalCommand()
+                            } label: {
+                                Label("Copy ssh command", systemImage: "doc.on.doc")
+                            }
+                            .controlSize(.small)
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -1151,6 +1173,39 @@ private struct UnifiAdoptInlineSheet: View {
         }
     }
 
+    /// Same chained set-inform fallback the engine runs, but
+    /// shelled out via the operator's own `/usr/bin/ssh`. Used
+    /// when the daemon-side russh transport fails for some
+    /// reason but the operator's terminal SSH works fine.
+    private func terminalCommand() -> String {
+        let url = sanitisedUrl
+        return "ssh \(username)@\(host.ip) "
+            + "'mca-cli-op set-inform \(url) "
+            + "|| /sbin/set-inform \(url) "
+            + "|| /usr/bin/syswrapper.sh set-inform \(url) "
+            + "|| set-inform \(url)'"
+    }
+
+    private func openInTerminal() {
+        let cmd = terminalCommand()
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Terminal"
+                activate
+                do script "\(cmd)"
+            end tell
+            """
+        if let appleScript = NSAppleScript(source: script) {
+            var err: NSDictionary?
+            _ = appleScript.executeAndReturnError(&err)
+        }
+    }
+
+    private func copyTerminalCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(terminalCommand(), forType: .string)
+    }
+
     /// Map raw engine error strings into hints the operator
     /// can act on without grepping the daemon logs.
     private func humanise(_ raw: String) -> String {
@@ -1167,6 +1222,16 @@ private struct UnifiAdoptInlineSheet: View {
                 + "devices often disable SSH; factory-reset the device "
                 + "(hold reset for 10 s with PoE applied) to enable it "
                 + "and try again. Raw: \(raw)"
+        }
+        if low.contains("no route to host") || low.contains("network is unreachable")
+            || low.contains("tcp pre-flight")
+        {
+            return
+                "Daemon-side SSH couldn't route to \(host.ip). If "
+                + "your terminal works (`ssh \(username)@\(host.ip)`), "
+                + "click **Run via Terminal instead** below — that uses "
+                + "/usr/bin/ssh and your shell's network setup, skipping "
+                + "our SSH library entirely. Raw: \(raw)"
         }
         if low.contains("invalid inform url") || low.contains("invalid url") {
             return "URL didn't parse — check the format. Raw: \(raw)"

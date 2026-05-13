@@ -48,6 +48,36 @@ use crate::state::DaemonState;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cheap reachability check before we open a full SSH session.
+/// Tries to TCP-connect twice with a 300 ms gap on the first
+/// failure — covers the cold-ARP-cache case where the kernel
+/// returns EHOSTUNREACH on the first attempt because the ARP
+/// resolve hadn't completed yet, then succeeds on the second.
+/// Either probe succeeding short-circuits to Ok.
+async fn tcp_preflight(host: &str, port: u16) -> Result<()> {
+    let addr = format!("{host}:{port}");
+    let attempt = || async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+    };
+    match attempt().await {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(e1)) => {
+            tracing::debug!("TCP probe attempt 1 failed: {e1}, retrying in 300ms");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            match attempt().await {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(e2)) => Err(anyhow!("{e2}")),
+                Err(_) => Err(anyhow!("timed out after 3s")),
+            }
+        }
+        Err(_) => Err(anyhow!("timed out after 3s")),
+    }
+}
+
 /// Run `set-inform <inform_url>` on the device via SSH. Used
 /// for first-time adoption (factory defaults) or to repoint a
 /// device at a different controller.
@@ -79,6 +109,27 @@ pub async fn set_inform(
     // typos rather than getting an opaque shell exit.
     let _parsed: reqwest::Url = url.parse()
         .with_context(|| format!("invalid inform URL: {url:?}"))?;
+    // Pre-flight TCP probe with a single retry. EHOSTUNREACH
+    // from a daemon process is occasionally just a cold ARP
+    // cache — a second connect 300 ms later succeeds. Saves
+    // the operator from "open the russh stack and discover
+    // network is unreachable" 5 seconds in.
+    let (probe_host, probe_port) = {
+        let st = state.lock().await;
+        match st.ssh_hosts.get(&host_id) {
+            Some(h) => (h.hostname.clone(), h.port),
+            None => return Err(anyhow!("host not found: {host_id}")),
+        }
+    };
+    if let Err(e) = tcp_preflight(&probe_host, probe_port).await {
+        return Err(anyhow!(
+            "TCP pre-flight to {probe_host}:{probe_port} failed: {e}. \
+             The Mac running SuperManager can't reach the device. \
+             Try the 'Run via Terminal' fallback in the GUI, or \
+             check that you're on the same VLAN as {probe_host}."
+        ));
+    }
+
     let (_host, session) = open_session(state, secrets, host_id).await?;
 
     // UniFi device shell is busybox `ash`. Bare `set-inform`
