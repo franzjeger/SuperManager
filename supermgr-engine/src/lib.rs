@@ -25,6 +25,7 @@ pub mod ldap_enum;
 pub mod netdetect;
 pub mod notify;
 pub mod operations;
+pub mod pcap_binary;
 pub mod tools;
 pub mod probes;
 pub mod protocol;
