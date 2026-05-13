@@ -62,8 +62,25 @@ pub async fn set_inform(
     host_id: uuid::Uuid,
     inform_url: &str,
 ) -> Result<String> {
+    // Defensive sanitisation. The GUI sends whatever's in the
+    // text field. If the operator pasted "set-inform http://…"
+    // (e.g. copied the full command from a UniFi forum thread),
+    // the naive `format!("set-inform {}", …)` below would build
+    // `set-inform set-inform http://…` which the device parses
+    // as a syntax error. Strip a leading prefix once, here.
+    let url = inform_url
+        .trim()
+        .trim_start_matches("set-inform")
+        .trim_start();
+    if url.is_empty() {
+        return Err(anyhow!("inform URL is empty"));
+    }
+    // Sanity-check it parses as a URL so we fail fast on
+    // typos rather than getting an opaque shell exit.
+    let _parsed: reqwest::Url = url.parse()
+        .with_context(|| format!("invalid inform URL: {url:?}"))?;
     let (_host, session) = open_session(state, secrets, host_id).await?;
-    let cmd = format!("set-inform {inform_url}");
+    let cmd = format!("set-inform {url}");
     info!("unifi set_inform: {cmd}");
     let (exit, stdout, stderr) = session
         .exec(&cmd)

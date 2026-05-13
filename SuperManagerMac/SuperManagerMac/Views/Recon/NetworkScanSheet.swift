@@ -1071,11 +1071,29 @@ private struct UnifiAdoptInlineSheet: View {
         }
     }
 
+    /// Normalised inform URL — trims whitespace + strips any
+    /// stray `set-inform` prefix the user accidentally included
+    /// when pasting a full command. The engine does the same on
+    /// its side; doing it here too keeps the live "Running
+    /// `set-inform <url>`" preview accurate.
+    private var sanitisedUrl: String {
+        let trimmed = controllerUrl.trimmingCharacters(in: .whitespaces)
+        if let r = trimmed.range(
+            of: #"^set-inform\s+"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) {
+            return String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return trimmed
+    }
+
     private var canSubmit: Bool {
-        !label.isEmpty
+        let url = sanitisedUrl
+        return !label.isEmpty
             && !username.isEmpty
             && !password.isEmpty
-            && controllerUrl.contains("inform")
+            && (url.hasPrefix("http://") || url.hasPrefix("https://"))
+            && url.contains("inform")
     }
 
     private func runAdopt() async {
@@ -1083,6 +1101,7 @@ private struct UnifiAdoptInlineSheet: View {
         defer { running = false }
         errorMessage = nil
         output = nil
+        let url = sanitisedUrl
         step = "Adding SSH host…"
         await appState.addHost(
             label: label,
@@ -1105,21 +1124,60 @@ private struct UnifiAdoptInlineSheet: View {
                 + "set-inform from the host detail panel."
             return
         }
-        step = "Running `set-inform \(controllerUrl)`…"
-        if let out = await appState.unifiSetInform(
+        step = "Running `set-inform \(url)` over SSH…"
+        let result = await appState.unifiSetInformDetailed(
             hostId: newHost.id,
-            informUrl: controllerUrl
-        ) {
+            informUrl: url
+        )
+        switch result {
+        case .success(let out):
             output = out.isEmpty
                 ? "(no stdout — UniFi `set-inform` typically prints nothing on success)"
                 : out
             step = "Done. Device will appear in the controller within a few seconds."
-        } else {
-            errorMessage =
-                "set-inform failed. The host is in inventory, "
-                + "but the controller URL or creds may be wrong. "
-                + "Open the host's UniFi panel for diagnostics."
+        case .failure(let err):
+            // Surface the engine's real error string. Most
+            // common shapes:
+            //   - "set-inform returned exit 1: stdout=… stderr=Permission denied"
+            //     → device booted up locked, default creds reset
+            //   - "ssh exec: Authentication failed"
+            //     → wrong username/password
+            //   - "invalid inform URL: ..."
+            //     → URL didn't parse
+            //   - "open_session: Connection refused"
+            //     → SSH is disabled on the device (often the
+            //       case for already-adopted devices)
+            errorMessage = humanise(err)
         }
+    }
+
+    /// Map raw engine error strings into hints the operator
+    /// can act on without grepping the daemon logs.
+    private func humanise(_ raw: String) -> String {
+        let low = raw.lowercased()
+        if low.contains("authentication") || low.contains("permission denied") {
+            return
+                "SSH login refused. The device may not be on factory "
+                + "defaults — try the controller's adopted-device "
+                + "password instead of `ubnt`/`ubnt`. Raw: \(raw)"
+        }
+        if low.contains("connection refused") || low.contains("timed out") {
+            return
+                "Couldn't reach SSH on \(host.ip):22. Adopted UniFi "
+                + "devices often disable SSH; factory-reset the device "
+                + "(hold reset for 10 s with PoE applied) to enable it "
+                + "and try again. Raw: \(raw)"
+        }
+        if low.contains("invalid inform url") || low.contains("invalid url") {
+            return "URL didn't parse — check the format. Raw: \(raw)"
+        }
+        if low.contains("set-inform returned exit") {
+            return
+                "Device rejected the set-inform command — check the "
+                + "URL path includes `/inform` and the controller is "
+                + "reachable from the device's network. Raw: \(raw)"
+        }
+        return raw
     }
 }
 
