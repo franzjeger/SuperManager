@@ -442,12 +442,14 @@ struct UnifiControllerEditSheet: View {
     private var authMethodHint: some View {
         switch authMethod {
         case .apiKey:
-            Text(
-                "**Best path.** In your UniFi controller, sign in → Admins → "
-                + "API → Create API Key → copy the token → paste it below."
-            )
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("**Best path.** UniFi Network 8.x or later only — uses the Integration API at `/proxy/network/integration/v1/`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Mint a key in your controller: sign in → Admins → API → Create API Key → copy → paste below.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         case .password:
             Text(
                 "Works on every UniFi version including older ones. If your "

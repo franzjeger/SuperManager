@@ -614,11 +614,24 @@ pub async fn mfa_complete_login(
     ))
 }
 
-/// GET `/api/s/<site>/stat/device` and return every device the
-/// controller manages. Each row gets `controller_id` and
-/// `controller_label` annotated so callers can merge across
-/// many controllers without losing provenance.
+/// Return every device the controller manages. Dispatches
+/// based on auth method (classic API for password, Integration
+/// API for api-key) so we hit the endpoint the controller
+/// actually serves under that auth scheme. Each row is
+/// annotated with `controller_id` + `controller_label` so
+/// callers can merge across many controllers without losing
+/// provenance.
 pub async fn list_devices(
+    secrets: &Arc<dyn SecretStore>,
+    controller: &UnifiController,
+) -> Result<Vec<UnifiManagedDevice>> {
+    match controller.auth_method {
+        UnifiAuthMethod::ApiKey => list_devices_integration(secrets, controller).await,
+        UnifiAuthMethod::Password => list_devices_classic(secrets, controller).await,
+    }
+}
+
+async fn list_devices_classic(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,
 ) -> Result<Vec<UnifiManagedDevice>> {
@@ -637,22 +650,14 @@ pub async fn list_devices(
             text.chars().take(300).collect::<String>()
         ));
     }
-
-    // UniFi wraps every response in `{"meta": {...}, "data": [...]}`.
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .context("parse /stat/device JSON")?;
     let data = parsed
         .get("data")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("unexpected /stat/device shape — no `data` array"))?;
-
     let mut out = Vec::with_capacity(data.len());
     for row in data {
-        // Each row is a fat object with ~80 fields. We pluck the
-        // few we care about by string-name rather than via Serde
-        // because UniFi's JSON has wildly inconsistent naming
-        // and a flat struct deserialise was too brittle in
-        // practice.
         let mac = row
             .get("mac")
             .and_then(|v| v.as_str())
@@ -678,6 +683,202 @@ pub async fn list_devices(
         out.push(device);
     }
     Ok(out)
+}
+
+/// Walk `/proxy/network/integration/v1/sites/<site>/devices`.
+/// The Integration API uses different field names (`macAddress`
+/// vs `mac`, `ipAddress` vs `ip`, etc.) and a different
+/// pagination envelope (`{offset, limit, data, totalCount}`)
+/// so we normalise the rows on the way out to keep the rest of
+/// the GUI agnostic.
+///
+/// `site_id` semantics also differ: Integration API expects a
+/// UUID, but operators typically know their site by its
+/// classic "default" name. When the controller record has
+/// `site_id == "default"` (or empty), we first hit `/sites` to
+/// resolve to the right UUID. The result is cached for the
+/// lifetime of this call only — controllers can have sites
+/// added / renamed and we don't want stale data.
+async fn list_devices_integration(
+    secrets: &Arc<dyn SecretStore>,
+    controller: &UnifiController,
+) -> Result<Vec<UnifiManagedDevice>> {
+    let client = api_key_client(secrets, controller).await?;
+    let site_id = resolve_integration_site_id(&client, controller).await?;
+
+    let mut out: Vec<UnifiManagedDevice> = Vec::new();
+    let mut offset: usize = 0;
+    let page_size: usize = 200;
+    loop {
+        let url = format!(
+            "{}/proxy/network/integration/v1/sites/{}/devices?offset={}&limit={}",
+            controller.url.trim_end_matches('/'),
+            site_id,
+            offset,
+            page_size,
+        );
+        let resp = client.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        if status >= 400 {
+            return Err(anyhow!(
+                "Integration API /devices returned {status}: {}",
+                text.chars().take(300).collect::<String>()
+            ));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&text)
+            .context("parse integration /devices JSON")?;
+        let data = parsed
+            .get("data")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if data.is_empty() {
+            break;
+        }
+        for row in &data {
+            // Integration API uses camelCase + different
+            // field names. Map both to our normalised shape.
+            let mac = row
+                .get("macAddress")
+                .or_else(|| row.get("mac"))
+                .and_then(|v| v.as_str())
+                .map(str::to_ascii_lowercase);
+            let Some(mac) = mac else { continue };
+            let state_str = row
+                .get("state")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| "unknown".into());
+            let device = UnifiManagedDevice {
+                mac,
+                ip: row
+                    .get("ipAddress")
+                    .or_else(|| row.get("ip"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                model: row
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                name: row
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                state: normalise_integration_state(&state_str),
+                version: row
+                    .get("firmwareVersion")
+                    .or_else(|| row.get("version"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                adopted: row
+                    .get("adoptionStatus")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.eq_ignore_ascii_case("ADOPTED"))
+                    .or_else(|| row.get("adopted").and_then(|v| v.as_bool())),
+                inform_url: None, // not exposed via integration API
+                uptime: row.get("uptime").and_then(|v| v.as_u64()),
+                last_seen: None,
+                controller_id: Some(controller.id),
+                controller_label: Some(controller.label.clone()),
+            };
+            out.push(device);
+        }
+        let total = parsed
+            .get("totalCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(out.len() as u64) as usize;
+        offset += data.len();
+        if offset >= total {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a site_id usable on the Integration API. If the
+/// stored value already looks like a UUID we trust it. The
+/// literal "default" (or empty) gets resolved by hitting
+/// `/sites` and picking either an entry named "default" or
+/// the first site.
+async fn resolve_integration_site_id(
+    client: &reqwest::Client,
+    controller: &UnifiController,
+) -> Result<String> {
+    if controller.site_id != "default" && !controller.site_id.is_empty() {
+        // Check if it parses as a UUID — if so use it; if not
+        // treat it as a name to resolve.
+        if uuid::Uuid::parse_str(&controller.site_id).is_ok() {
+            return Ok(controller.site_id.clone());
+        }
+    }
+    let url = format!(
+        "{}/proxy/network/integration/v1/sites",
+        controller.url.trim_end_matches('/')
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status >= 400 {
+        return Err(anyhow!(
+            "Integration API /sites returned {status}: {}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .context("parse integration /sites JSON")?;
+    let sites = parsed
+        .get("data")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // Prefer a site whose internalReference == "default" or
+    // name == "default". Otherwise grab the first site.
+    let target = controller.site_id.is_empty() || controller.site_id == "default";
+    if let Some(s) = sites.iter().find(|s| {
+        if target {
+            let internal = s
+                .get("internalReference")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            internal == "default" || name == "default"
+        } else {
+            let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            name == controller.site_id
+        }
+    }) {
+        if let Some(id) = s.get("id").and_then(|v| v.as_str()) {
+            return Ok(id.to_owned());
+        }
+    }
+    if let Some(first) = sites.first().and_then(|s| s.get("id")).and_then(|v| v.as_str()) {
+        return Ok(first.to_owned());
+    }
+    Err(anyhow!("no sites returned from controller"))
+}
+
+/// Map Integration API state strings to the same labels the
+/// classic API path produces, so the GUI's badge logic doesn't
+/// have to know which path the data came from.
+fn normalise_integration_state(s: &str) -> String {
+    match s.to_ascii_uppercase().as_str() {
+        "ONLINE" | "CONNECTED" => "connected",
+        "OFFLINE" | "DISCONNECTED" => "disconnected",
+        "PENDING" | "PENDING_ADOPTION" => "pending-adoption",
+        "ADOPTING" => "adopting",
+        "PROVISIONING" => "provisioning",
+        "UPGRADING" => "upgrading",
+        "ISOLATED" => "isolated",
+        "MANAGED_BY_OTHER" => "managed-by-other",
+        other => return other.to_ascii_lowercase(),
+    }
+    .to_owned()
 }
 
 /// Map UniFi's numeric device state codes to human labels.
@@ -757,11 +958,28 @@ pub async fn devmgr_command(
     serde_json::from_str(&text).map_err(|e| anyhow!("parse devmgr response: {e}"))
 }
 
-/// Authenticate against the controller and return its sysinfo.
-/// Used by the "Test connection" button to give the operator
-/// immediate feedback that creds + URL work, plus the controller
-/// version + site count for sanity.
+/// Authenticate against the controller and return its
+/// sysinfo. Dispatches based on auth method:
+///
+///   - `ApiKey`  → Integration API at
+///                 `/proxy/network/integration/v1/info`. The
+///                 classic /api/.../stat/sysinfo path requires
+///                 a cookie session and 404s for API-key
+///                 callers, so we MUST take the Integration
+///                 API path here.
+///   - `Password`→ classic /api/s/<site>/stat/sysinfo via the
+///                 logged-in cookie session.
 pub async fn test_connection(
+    secrets: &Arc<dyn SecretStore>,
+    controller: &UnifiController,
+) -> Result<UnifiSysInfo> {
+    match controller.auth_method {
+        UnifiAuthMethod::ApiKey => test_via_integration_api(secrets, controller).await,
+        UnifiAuthMethod::Password => test_via_classic_api(secrets, controller).await,
+    }
+}
+
+async fn test_via_classic_api(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,
 ) -> Result<UnifiSysInfo> {
@@ -796,6 +1014,61 @@ pub async fn test_connection(
             .map(str::to_owned),
         name: data
             .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+    })
+}
+
+async fn test_via_integration_api(
+    secrets: &Arc<dyn SecretStore>,
+    controller: &UnifiController,
+) -> Result<UnifiSysInfo> {
+    let client = api_key_client(secrets, controller).await?;
+    let info_url = format!(
+        "{}/proxy/network/integration/v1/info",
+        controller.url.trim_end_matches('/')
+    );
+    let resp = client
+        .get(&info_url)
+        .send()
+        .await
+        .with_context(|| format!("GET {info_url}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if status == 401 || status == 403 {
+        return Err(anyhow!(
+            "API key rejected ({status}). Verify the key in your \
+             controller's UI: sign in → Admins → API → confirm the \
+             key is active and not revoked."
+        ));
+    }
+    if status == 404 {
+        return Err(anyhow!(
+            "Integration API not available at {info_url} (404). \
+             API-key auth needs UniFi Network 8.x or later. \
+             For older controllers, use Username + password instead."
+        ));
+    }
+    if status >= 400 {
+        return Err(anyhow!(
+            "Integration API /info returned {status}: {}",
+            text.chars().take(300).collect::<String>()
+        ));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .context("parse integration API /info JSON")?;
+    Ok(UnifiSysInfo {
+        version: parsed
+            .get("applicationVersion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_owned(),
+        hostname: parsed
+            .get("hostname")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        name: parsed
+            .get("applicationName")
             .and_then(|v| v.as_str())
             .map(str::to_owned),
     })
