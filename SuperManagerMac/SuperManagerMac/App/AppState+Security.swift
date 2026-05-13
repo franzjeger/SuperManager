@@ -28,6 +28,22 @@ extension AppState {
         }
     }
 
+    /// Replace an engagement's `scope_cidrs` and persist via
+    /// `engagement_save`. Used by the WebCapture "Add to scope"
+    /// flow so the operator can flip a freshly-discovered device
+    /// into the next scheduled scan without leaving the capture
+    /// sheet.
+    @discardableResult
+    func updateEngagementScope(
+        id: String,
+        scopeCidrs: [String]
+    ) async -> Bool {
+        guard var existing = engagements.first(where: { $0.id == id })
+        else { return false }
+        existing.scopeCidrs = scopeCidrs
+        return await saveEngagement(existing) != nil
+    }
+
     @discardableResult
     func deleteEngagement(id: String) async -> Bool {
         struct R: Codable { let deleted: Bool }

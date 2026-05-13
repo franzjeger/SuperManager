@@ -55,6 +55,27 @@ struct SuperManagerApp: App {
                     startAutoLockTimer()
                 }
             }
+            // Handle `supermgr://` URLs. The Info.plist
+            // CFBundleURLTypes entry routes any click on such a
+            // URL (typically a bookmarklet placed on a vendor
+            // admin page) to this handler. We parse it into a
+            // WebCapture and stash on AppState; ContentView's
+            // sheet binding handles the rest.
+            .onOpenURL { url in
+                if let cap = WebCapture.from(url: url) {
+                    appState.pendingWebCapture = cap
+                } else {
+                    // Unparseable URL — open an empty capture
+                    // sheet so the user can paste manually
+                    // rather than swallow the click silently.
+                    appState.pendingWebCapture = WebCapture(
+                        hostname: "",
+                        label: "",
+                        deviceType: .linux,
+                        username: "root"
+                    )
+                }
+            }
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 1100, height: 700)
@@ -81,6 +102,22 @@ struct SuperManagerApp: App {
                     .keyboardShortcut("5", modifiers: .command)
                 Button("Security") { appState.selectedSection = .security }
                     .keyboardShortcut("6", modifiers: .command)
+                Divider()
+                // Opens WebCaptureSheet with whatever's on the
+                // clipboard auto-parsed. Lets the operator
+                // capture a device without first having to
+                // install the bookmarklet — useful when working
+                // remotely and just copy/pasting an IP from a
+                // ticket.
+                Button("Capture from Web…") {
+                    appState.pendingWebCapture = WebCapture(
+                        hostname: "",
+                        label: "",
+                        deviceType: .linux,
+                        username: "root"
+                    )
+                }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
             }
             // Replace the default "About SuperManager" with one
             // that posts a notification ContentView listens for —
@@ -115,6 +152,21 @@ struct SuperManagerApp: App {
                         NSWorkspace.shared.open(url)
                     }
                 }
+                Divider()
+                Button("Copy Web Capture Bookmarklet") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        Self.webCaptureBookmarklet,
+                        forType: .string
+                    )
+                }
+                .help(
+                    "Copies a JavaScript bookmarklet to the clipboard. "
+                    + "Paste it into a new browser bookmark, then click "
+                    + "the bookmark while on any vendor admin page "
+                    + "(UniFi, FortiGate, pfSense, etc.) to add that "
+                    + "device to SuperManager in one click."
+                )
                 Divider()
                 Button("Tailscale Documentation") {
                     if let url = URL(string: "https://tailscale.com/kb/") {
@@ -330,6 +382,24 @@ struct SuperManagerApp: App {
         // for attention.
         return "shield"
     }
+
+    /// JavaScript snippet the user drags into their browser
+    /// bookmarks bar. On any page it builds a `supermgr://`
+    /// URL from the current `window.location` and passes the
+    /// page title for vendor sniffing. The OS routes the URL
+    /// to `.onOpenURL` above, which lands on WebCaptureSheet
+    /// with pre-filled fields.
+    ///
+    /// Kept as a single string with `void(...)` wrapping so it
+    /// works when pasted as the bookmark's URL field in
+    /// Safari / Chrome / Firefox without any modifications.
+    static let webCaptureBookmarklet: String =
+        "javascript:void("
+        + "window.location='supermgr://addhost?ip='"
+        + "+encodeURIComponent(location.hostname)"
+        + "+'&port='+encodeURIComponent(location.port||'')"
+        + "+'&title='+encodeURIComponent(document.title)"
+        + "+'&source='+encodeURIComponent(location.href))"
 
     /// Probe the daemon socket — `connect()` fails fast with ECONNREFUSED
     /// when the file exists but no daemon is listening.

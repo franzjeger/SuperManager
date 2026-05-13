@@ -185,6 +185,25 @@ struct ContentView: View {
         .sheet(isPresented: $showingExplain) {
             ExplainConfigSheet(initialConfig: explainPrefillText)
         }
+        // Web-capture sheet — driven by `pendingWebCapture` so
+        // both the `supermgr://` URL-scheme handler (in
+        // SuperManagerApp's `.onOpenURL`) and the Help → Capture
+        // from Web… menu item can trigger presentation. Sheet
+        // clears the binding on dismiss so the next URL/menu
+        // click presents a fresh sheet.
+        .sheet(
+            item: Binding(
+                get: { appState.pendingWebCapture },
+                set: { appState.pendingWebCapture = $0 }
+            )
+        ) { capture in
+            // Only forward a non-empty capture as the initial
+            // value — for the "menu-triggered, paste-mode" case
+            // the sheet attempts the clipboard on its own.
+            let prefill: WebCapture? = capture.hostname.isEmpty ? nil : capture
+            WebCaptureSheet(initialCapture: prefill)
+                .environment(appState)
+        }
         // The custom About menu item posts this notification —
         // ContentView is the canonical "first window" we present
         // sheets from, so it owns the visibility state.

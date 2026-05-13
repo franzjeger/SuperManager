@@ -49,6 +49,20 @@ class AppState {
     /// up` subprocess keeps running until the user finishes the
     /// browser flow or the daemon-side timeout expires).
     var pendingTailscaleAuthURL: URL?
+
+    /// Pending "Capture from web" payload. Set by the
+    /// `supermgr://` URL-scheme handler in SuperManagerApp or by
+    /// the Help → Capture from Web… menu item. ContentView
+    /// observes this and presents `WebCaptureSheet`. Reset to
+    /// nil when the sheet dismisses.
+    var pendingWebCapture: WebCapture?
+
+    /// Pre-seeded targets for the Recon → Network scan sheet.
+    /// The WebCapture sheet's "Run network scan now" action
+    /// sets this, then switches the section to `.recon`, so the
+    /// scan tile can open pre-populated without round-tripping
+    /// through another picker. ReconView clears it after use.
+    var pendingNetworkScanTargets: [String]?
     /// Last error from a Tailscale login/logout/up/down RPC.
     /// Surfaced inline in the header instead of a system alert —
     /// auth flows fail in mundane ways (network down, browser

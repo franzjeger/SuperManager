@@ -102,6 +102,20 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSSupportsAutomaticTermination: false
+
+        # `supermgr://` URL scheme. Browser bookmarklets on UniFi
+        # / FortiGate / pfSense admin pages build a URL of the
+        # form `supermgr://addhost?ip=…&port=…&vendor=…` and the
+        # OS routes it to SuperManager via `.onOpenURL`. The
+        # WebCaptureSheet then presents a confirmation flow so
+        # the operator can pick "Add as SSH host" / "Add to
+        # engagement scope" / "Run network scan now" without
+        # retyping the connection details.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.sybr.supermanager.urlscheme
+            CFBundleURLSchemes:
+              - supermgr
+            LSHandlerRank: Owner
         # No NSAppSandbox — the app spawns a privileged helper and
         # talks to a user-space daemon socket; sandboxing would block
         # both. We're not targeting the Mac App Store; outside-store

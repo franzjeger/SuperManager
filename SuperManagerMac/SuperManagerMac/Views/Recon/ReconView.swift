@@ -39,7 +39,21 @@ struct ReconView: View {
         .sheet(item: $presentedTool) { tool in
             sheetFor(tool: tool)
         }
-        .onAppear { syncEngagementSelection() }
+        .onAppear {
+            syncEngagementSelection()
+            // The WebCapture "Run network scan now" action sets
+            // `pendingNetworkScanTargets` and switches the
+            // section to .recon. Picking it up on appear hands
+            // off into the scan sheet with the discovered host
+            // pre-populated. The sheet itself clears the
+            // pending targets on appear so a re-open doesn't
+            // reuse them.
+            if let targets = appState.pendingNetworkScanTargets,
+               !targets.isEmpty
+            {
+                presentedTool = .networkScan
+            }
+        }
         .onChange(of: appState.engagements.map(\.id)) { _, _ in
             syncEngagementSelection()
         }
@@ -253,9 +267,17 @@ struct ReconView: View {
     private func sheetFor(tool: ReconTool) -> some View {
         switch tool {
         case .networkScan:
+            // If the WebCapture flow stashed targets, prefer
+            // those over the engagement's default scope so the
+            // operator's captured host is what gets scanned
+            // first.
+            let captureTargets = appState.pendingNetworkScanTargets ?? []
+            let defaultTargets = captureTargets.isEmpty
+                ? (selectedEngagement?.scopeCidrs.joined(separator: ", ") ?? "")
+                : captureTargets.joined(separator: ", ")
             NetworkScanSheet(
                 engagementId: selectedEngagement?.id,
-                initialTargets: selectedEngagement?.scopeCidrs.joined(separator: ", ") ?? ""
+                initialTargets: defaultTargets
             )
         case .dnsAudit:
             DnsAuditSheet()

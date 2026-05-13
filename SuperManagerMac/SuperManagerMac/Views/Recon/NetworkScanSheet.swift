@@ -143,6 +143,13 @@ struct NetworkScanSheet: View {
             .padding(12)
         }
         .frame(minWidth: 720, minHeight: 540)
+        .onAppear {
+            // If the WebCapture flow handed off a target via
+            // `pendingNetworkScanTargets`, clear it now so a
+            // subsequent re-open of this sheet doesn't reuse a
+            // stale capture target.
+            appState.pendingNetworkScanTargets = nil
+        }
         .onDisappear {
             // The user might close while scan is still going — keep
             // the daemon-side scan running so its results persist,
