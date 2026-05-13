@@ -35,6 +35,24 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SuperManager scans the local network for managed devices (UniFi APs, FortiGate firewalls, switches, servers) and connects to them over SSH / HTTPS for adoption, provisioning, and configuration audits.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_ssh._tcp</string>
+		<string>_http._tcp</string>
+		<string>_https._tcp</string>
+		<string>_smb._tcp</string>
+		<string>_afpovertcp._tcp</string>
+		<string>_airplay._tcp</string>
+		<string>_printer._tcp</string>
+		<string>_ipp._tcp</string>
+		<string>_ipps._tcp</string>
+		<string>_device-info._tcp</string>
+		<string>_unifi._tcp</string>
+		<string>_workstation._tcp</string>
+		<string>_services._dns-sd._udp</string>
+	</array>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>SUAutomaticallyUpdate</key>
