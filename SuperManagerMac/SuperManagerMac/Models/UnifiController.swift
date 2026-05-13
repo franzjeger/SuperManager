@@ -7,15 +7,24 @@ import Foundation
 ///
 /// Field order + naming mirrors the Rust `UnifiController` so
 /// the same JSON shape goes both ways through the engine RPC.
+/// Mirrors `engine::unifi_controllers::UnifiAuthMethod`. API
+/// key auth is the recommended path because it sidesteps MFA
+/// and the controller's session-cookie protocol entirely.
+enum UnifiAuthMethod: String, Codable, CaseIterable, Hashable {
+    case apiKey = "api_key"
+    case password
+}
+
 struct UnifiController: Codable, Identifiable, Hashable {
     let id: String   // UUID as string
     var label: String
     var url: String
     var siteId: String
+    var authMethod: UnifiAuthMethod
     var username: String
-    /// Reference into the keychain; the password itself never
-    /// appears in this struct. The engine resolves it during
-    /// every API call.
+    /// Reference into the keychain; the password / api key
+    /// itself never appears in this struct. The engine
+    /// resolves it during every API call.
     var credsRef: String
     /// Optional customer scoping for MSP setups.
     var customerSlug: String?
@@ -28,6 +37,7 @@ struct UnifiController: Codable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id, label, url, username
         case siteId = "site_id"
+        case authMethod = "auth_method"
         case credsRef = "creds_ref"
         case customerSlug = "customer_slug"
         case verifiedAt = "verified_at"
@@ -41,7 +51,10 @@ struct UnifiController: Codable, Identifiable, Hashable {
         label = try c.decode(String.self, forKey: .label)
         url = try c.decode(String.self, forKey: .url)
         siteId = (try? c.decode(String.self, forKey: .siteId)) ?? "default"
-        username = try c.decode(String.self, forKey: .username)
+        // Default to password for back-compat with controllers
+        // serialised before the auth_method field existed.
+        authMethod = (try? c.decode(UnifiAuthMethod.self, forKey: .authMethod)) ?? .password
+        username = (try? c.decode(String.self, forKey: .username)) ?? ""
 
         // SecretRef serialises as a single-string tuple struct
         // on the Rust side via serde's default representation —
@@ -95,4 +108,32 @@ struct UnifiSysInfo: Codable, Hashable {
     let version: String
     let hostname: String?
     let name: String?
+}
+
+/// One authenticator offered by the controller during an MFA
+/// challenge. The GUI lists these so the operator can pick
+/// "email" (we support) vs "webauthn" (we don't yet).
+struct MfaAuthenticator: Codable, Hashable, Identifiable {
+    let id: String
+    /// `email`, `webauthn`, `sms`, `push`, `totp`, etc.
+    let kind: String
+    let name: String
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case kind = "type"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        kind = (try? c.decode(String.self, forKey: .kind)) ?? ""
+        name = (try? c.decode(String.self, forKey: .name)) ?? ""
+    }
+
+    /// Whether the GUI can complete this authenticator path
+    /// without OS-level WebAuthn integration we don't yet have.
+    var isSupported: Bool {
+        kind.lowercased() == "email"
+    }
 }

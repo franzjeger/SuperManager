@@ -149,17 +149,27 @@ impl EngineServer {
         }
     }
 
-    /// Upsert a controller. On a fresh save the password param
-    /// is required and stored in the keychain; on an update of
-    /// an existing record, omitting the password leaves the
-    /// existing keychain entry intact (so the operator can
-    /// rename or re-scope without re-entering the password).
+    /// Upsert a controller. Behaviour:
+    ///   - `auth_method == "api_key"`: simple — store the
+    ///     token, verify via sysinfo, persist.
+    ///   - `auth_method == "password"` (default): attempt the
+    ///     login. If the controller demands MFA, park the
+    ///     in-flight session and return `{mfa_required: true,
+    ///     challenge_id, authenticators}` — the GUI then
+    ///     drives the operator through the email flow via
+    ///     `unifi_controller_mfa_send` + `unifi_controller_mfa_complete`.
+    ///
+    /// Credential is required on first save. On edit, omit it
+    /// to leave the existing keychain entry intact.
     pub(crate) async fn handle_unifi_controller_save(
         &self,
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        use crate::unifi_controllers::UnifiController;
+        use crate::unifi_controllers::{
+            password_login, test_connection, PasswordLoginOutcome, UnifiAuthMethod,
+            UnifiController,
+        };
         use supermgr_core::vpn::profile::SecretRef;
 
         let label = match params.get("label").and_then(|v| v.as_str()) {
@@ -170,16 +180,24 @@ impl EngineServer {
             Some(s) if !s.is_empty() => s.trim_end_matches('/').to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing url".to_owned()),
         };
-        let username = match params.get("username").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing username".to_owned(),
-                )
-            }
+        let auth_method = match params.get("auth_method").and_then(|v| v.as_str()) {
+            Some("api_key") => UnifiAuthMethod::ApiKey,
+            _ => UnifiAuthMethod::Password,
         };
+        // Username is required for password auth, optional for
+        // api-key (where the key itself identifies the caller).
+        let username = params
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if auth_method == UnifiAuthMethod::Password && username.is_empty() {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing username (required for password auth)".to_owned(),
+            );
+        }
         let site_id = params
             .get("site_id")
             .and_then(|v| v.as_str())
@@ -194,7 +212,13 @@ impl EngineServer {
             .get("id")
             .and_then(|v| v.as_str())
             .and_then(|s| uuid::Uuid::parse_str(s).ok());
-        let password = params.get("password").and_then(|v| v.as_str());
+        // The credential param is named after the auth method —
+        // `password` for password auth, `api_key` for api-key.
+        // We accept either name on either method for forgiveness.
+        let credential = params
+            .get("password")
+            .and_then(|v| v.as_str())
+            .or_else(|| params.get("api_key").and_then(|v| v.as_str()));
 
         // Distinguish "fresh save" from "update existing".
         let now = chrono::Utc::now();
@@ -212,20 +236,19 @@ impl EngineServer {
             }
         };
 
-        // Store/refresh password in keychain if supplied.
-        if let Some(pw) = password {
-            if let Err(e) = self.secrets.store(&existing_label, pw.as_bytes()).await {
+        if let Some(cred) = credential {
+            if let Err(e) = self.secrets.store(&existing_label, cred.as_bytes()).await {
                 return Response::err(
                     id,
                     protocol::INTERNAL_ERROR,
-                    format!("store password: {e:#}"),
+                    format!("store credential: {e:#}"),
                 );
             }
         } else if supplied_id.is_none() {
             return Response::err(
                 id,
                 protocol::INVALID_PARAMS,
-                "password is required on first save".to_owned(),
+                "credential is required on first save (`password` or `api_key`)".to_owned(),
             );
         }
 
@@ -234,6 +257,7 @@ impl EngineServer {
             label,
             url,
             site_id,
+            auth_method,
             username,
             creds_ref: SecretRef::new(existing_label),
             customer_slug,
@@ -242,39 +266,168 @@ impl EngineServer {
             updated_at: now,
         };
 
-        // Verify credentials before persisting — fail-fast on
-        // bad URL / wrong creds so we don't accumulate broken
-        // entries in the registry.
-        match crate::unifi_controllers::test_connection(&self.secrets, &controller).await {
-            Ok(sysinfo) => {
-                let mut final_controller = controller.clone();
-                final_controller.verified_at = Some(chrono::Utc::now());
-                {
-                    let mut st = self.state.lock().await;
-                    st.unifi_controllers
-                        .insert(final_controller.id, final_controller.clone());
-                    if let Err(e) = st.save_unifi_controller(&final_controller) {
-                        return Response::err(
-                            id,
-                            protocol::INTERNAL_ERROR,
-                            format!("persist: {e:#}"),
-                        );
-                    }
+        // Branch on auth method. API-key path is one round-trip
+        // (sysinfo); password path may need to detour through
+        // an MFA challenge that the GUI completes asynchronously.
+        match auth_method {
+            UnifiAuthMethod::ApiKey => {
+                match test_connection(&self.secrets, &controller).await {
+                    Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
+                    Err(e) => Response::err(
+                        id,
+                        protocol::INTERNAL_ERROR,
+                        format!("controller test failed: {e:#}"),
+                    ),
                 }
-                Response::ok(
+            }
+            UnifiAuthMethod::Password => {
+                match password_login(&self.secrets, &controller).await {
+                    Ok(PasswordLoginOutcome::Ok(_)) => {
+                        // Login worked without MFA — proceed
+                        // straight to sysinfo + persist.
+                        match test_connection(&self.secrets, &controller).await {
+                            Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
+                            Err(e) => Response::err(
+                                id,
+                                protocol::INTERNAL_ERROR,
+                                format!("sysinfo after login: {e:#}"),
+                            ),
+                        }
+                    }
+                    Ok(PasswordLoginOutcome::MfaRequired { client, authenticators }) => {
+                        // Park the in-flight challenge so the
+                        // GUI can complete it via send+complete.
+                        let challenge_id =
+                            crate::unifi_controllers::park_pending_save(
+                                controller,
+                                client,
+                                authenticators.clone(),
+                            )
+                            .await;
+                        Response::ok(
+                            id,
+                            serde_json::json!({
+                                "mfa_required": true,
+                                "challenge_id": challenge_id,
+                                "authenticators": authenticators,
+                            }),
+                        )
+                    }
+                    Err(e) => Response::err(
+                        id,
+                        protocol::INTERNAL_ERROR,
+                        format!("controller login failed: {e:#}"),
+                    ),
+                }
+            }
+        }
+    }
+
+    /// Trigger an email send for an in-flight MFA challenge.
+    /// Caller supplies the `challenge_id` returned by
+    /// `unifi_controller_save` + the `authenticator_id` of
+    /// whichever email authenticator the operator picked.
+    pub(crate) async fn handle_unifi_controller_mfa_send(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let challenge_id = match params.get("challenge_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
                     id,
-                    serde_json::json!({
-                        "controller": final_controller,
-                        "sysinfo": sysinfo,
-                    }),
+                    protocol::INVALID_PARAMS,
+                    "missing challenge_id".to_owned(),
                 )
             }
-            Err(e) => Response::err(
-                id,
-                protocol::INTERNAL_ERROR,
-                format!("controller test failed: {e:#}"),
-            ),
+        };
+        let auth_id = match params.get("authenticator_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing authenticator_id".to_owned(),
+                )
+            }
+        };
+        match crate::unifi_controllers::send_mfa_email_for_challenge(
+            &challenge_id,
+            &auth_id,
+        )
+        .await
+        {
+            Ok(()) => Response::ok(id, serde_json::json!({ "sent": true })),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
+    }
+
+    /// Submit the email-MFA code to complete a pending
+    /// controller registration. On success the controller is
+    /// persisted + verified.
+    pub(crate) async fn handle_unifi_controller_mfa_complete(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let challenge_id = match params.get("challenge_id").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing challenge_id".to_owned(),
+                )
+            }
+        };
+        let code = match params.get("code").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing code".to_owned())
+            }
+        };
+        match crate::unifi_controllers::complete_pending_save(
+            &self.secrets,
+            &challenge_id,
+            &code,
+        )
+        .await
+        {
+            Ok((controller, sysinfo)) => self.persist_verified(id, controller, sysinfo).await,
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
+    /// Persist a freshly-verified controller (regardless of
+    /// auth path) and return the standard success shape.
+    async fn persist_verified(
+        &self,
+        id: u64,
+        controller: crate::unifi_controllers::UnifiController,
+        sysinfo: crate::unifi_controllers::UnifiSysInfo,
+    ) -> Response {
+        let mut final_controller = controller;
+        final_controller.verified_at = Some(chrono::Utc::now());
+        {
+            let mut st = self.state.lock().await;
+            st.unifi_controllers
+                .insert(final_controller.id, final_controller.clone());
+            if let Err(e) = st.save_unifi_controller(&final_controller) {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("persist: {e:#}"),
+                );
+            }
+        }
+        Response::ok(
+            id,
+            serde_json::json!({
+                "controller": final_controller,
+                "sysinfo": sysinfo,
+            }),
+        )
     }
 
     pub(crate) async fn handle_unifi_controller_delete(

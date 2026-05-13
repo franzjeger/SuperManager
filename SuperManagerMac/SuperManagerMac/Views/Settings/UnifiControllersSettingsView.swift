@@ -272,7 +272,13 @@ struct UnifiControllersSettingsView: View {
     }
 }
 
-/// Add / edit sheet for a single controller.
+/// Add / edit sheet for a single controller. Two phases:
+///   1. **Form**  — operator fills auth method + credentials.
+///   2. **MFA**   — only reached if auth_method=password AND the
+///                  controller demands a second factor. The sheet
+///                  shows the authenticator list, lets the
+///                  operator pick one + receive the email code,
+///                  then completes the login.
 struct UnifiControllerEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppState.self) private var appState
@@ -282,60 +288,112 @@ struct UnifiControllerEditSheet: View {
     @State private var label: String
     @State private var url: String
     @State private var siteId: String
+    @State private var authMethod: UnifiAuthMethod
     @State private var username: String
-    @State private var password: String
+    @State private var credential: String   // password OR api key, depending on authMethod
     @State private var customerSlug: String
     @State private var saving = false
     @State private var errorMessage: String?
+
+    /// MFA challenge state, populated after a `.mfaRequired`
+    /// save outcome. While non-nil the sheet renders the MFA
+    /// sub-view instead of the form.
+    @State private var mfaChallenge: MfaChallengeState?
+
+    struct MfaChallengeState {
+        let challengeId: String
+        let authenticators: [MfaAuthenticator]
+        var selectedAuthId: String?
+        var emailSent: Bool = false
+        var code: String = ""
+    }
 
     init(controller: UnifiController?) {
         self.controller = controller
         _label = State(initialValue: controller?.label ?? "")
         _url = State(initialValue: controller?.url ?? "https://")
         _siteId = State(initialValue: controller?.siteId ?? "default")
+        _authMethod = State(initialValue: controller?.authMethod ?? .apiKey)
         _username = State(initialValue: controller?.username ?? "")
-        _password = State(initialValue: "")
+        _credential = State(initialValue: "")
         _customerSlug = State(initialValue: controller?.customerSlug ?? "")
     }
 
     private var isEdit: Bool { controller != nil }
 
     private var canSubmit: Bool {
-        !label.isEmpty
-            && !url.isEmpty
-            && !username.isEmpty
-            && (isEdit || !password.isEmpty)
+        guard !label.isEmpty, !url.isEmpty else { return false }
+        switch authMethod {
+        case .apiKey:
+            return isEdit || !credential.isEmpty
+        case .password:
+            return !username.isEmpty && (isEdit || !credential.isEmpty)
+        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Image(systemName: "wifi.router.fill")
-                    .foregroundStyle(.tint).imageScale(.large)
-                VStack(alignment: .leading) {
-                    Text(isEdit ? "Edit UniFi controller" : "Add UniFi controller")
-                        .font(.headline)
-                    Text(
-                        "URL of your UniFi Network Application + login. "
-                        + "Cred is verified on save; only stored on success."
-                    )
+            header
+            if let _ = mfaChallenge {
+                mfaPhaseForm
+            } else {
+                formPhase
+            }
+        }
+        .frame(minWidth: 560, minHeight: 520)
+    }
+
+    private var header: some View {
+        HStack {
+            Image(systemName: mfaChallenge == nil ? "wifi.router.fill" : "lock.shield.fill")
+                .foregroundStyle(.tint).imageScale(.large)
+            VStack(alignment: .leading) {
+                Text(mfaChallenge != nil
+                     ? "Second factor required"
+                     : (isEdit ? "Edit UniFi controller" : "Add UniFi controller"))
+                    .font(.headline)
+                Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                }
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(12)
-            .background(.background.secondary)
+            Spacer()
+        }
+        .padding(12)
+        .background(.background.secondary)
+    }
 
+    private var headerSubtitle: String {
+        if mfaChallenge != nil {
+            return "Your controller wants a second factor. Pick an email authenticator, request the code, paste it below."
+        }
+        return "URL of your UniFi Network Application + credentials. Cred is verified on save; only stored on success."
+    }
+
+    // ---------------------------------------------------------
+    // Phase 1: form
+    // ---------------------------------------------------------
+
+    private var formPhase: some View {
+        VStack(spacing: 0) {
             Form {
                 Section("Identity") {
                     TextField("Label", text: $label)
-                    if let slug = currentCustomerSlug() {
-                        Text("Scoped to current customer: \(slug)")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
                     TextField("Customer slug (optional)", text: $customerSlug)
                         .help("MSP scoping. Leave blank for global.")
+                }
+                Section("Authentication") {
+                    Picker("Method", selection: $authMethod) {
+                        Text("API key (recommended)").tag(UnifiAuthMethod.apiKey)
+                        Text("Username + password").tag(UnifiAuthMethod.password)
+                    }
+                    .pickerStyle(.segmented)
+                    .help(
+                        "API keys bypass MFA, can be revoked independently, "
+                        + "and don't expire when you rotate your password. "
+                        + "Mint one in the controller UI: Admins → API."
+                    )
+                    authMethodHint
                 }
                 Section("Connection") {
                     TextField("URL", text: $url)
@@ -344,11 +402,19 @@ struct UnifiControllerEditSheet: View {
                         .help("e.g. https://192.168.1.1:8443 or https://unifi.example.com")
                     TextField("Site ID", text: $siteId)
                         .help("Most installs use 'default'. Multi-site deploys have distinct IDs.")
-                    TextField("Username", text: $username)
-                    SecureField(
-                        isEdit ? "Password (leave blank to keep)" : "Password",
-                        text: $password
-                    )
+                    if authMethod == .password {
+                        TextField("Username", text: $username)
+                        SecureField(
+                            isEdit ? "Password (leave blank to keep)" : "Password",
+                            text: $credential
+                        )
+                    } else {
+                        SecureField(
+                            isEdit ? "API key (leave blank to keep)" : "API key",
+                            text: $credential
+                        )
+                        .help("Paste the X-API-KEY value minted in the controller UI.")
+                    }
                 }
                 if let err = errorMessage {
                     Section { Text(err).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
@@ -370,15 +436,117 @@ struct UnifiControllerEditSheet: View {
             }
             .padding(12)
         }
-        .frame(minWidth: 520, minHeight: 460)
     }
 
-    private func currentCustomerSlug() -> String? {
-        guard customerSlug.isEmpty,
-              let slug = appState.selectedCustomerSlug,
-              !slug.isEmpty else { return nil }
-        return slug
+    @ViewBuilder
+    private var authMethodHint: some View {
+        switch authMethod {
+        case .apiKey:
+            Text(
+                "**Best path.** In your UniFi controller, sign in → Admins → "
+                + "API → Create API Key → copy the token → paste it below."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .password:
+            Text(
+                "Works on every UniFi version including older ones. If your "
+                + "account has 2FA we'll walk through it on the next screen."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
     }
+
+    // ---------------------------------------------------------
+    // Phase 2: MFA challenge
+    // ---------------------------------------------------------
+
+    private var mfaPhaseForm: some View {
+        VStack(spacing: 0) {
+            Form {
+                if let challenge = mfaChallenge {
+                    Section("Pick an authenticator") {
+                        let emailAuths = challenge.authenticators.filter { $0.isSupported }
+                        let otherAuths = challenge.authenticators.filter { !$0.isSupported }
+                        if emailAuths.isEmpty {
+                            Label(
+                                "This account only has WebAuthn / passkey authenticators registered. SuperManager can't drive those yet — please add an Email authenticator in your Ubiquiti account, or use an API key.",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Picker("Email", selection: Binding(
+                                get: { mfaChallenge?.selectedAuthId ?? emailAuths.first?.id ?? "" },
+                                set: { mfaChallenge?.selectedAuthId = $0 }
+                            )) {
+                                ForEach(emailAuths) { a in
+                                    Text(a.name).tag(a.id)
+                                }
+                            }
+                            Button(challenge.emailSent ? "Re-send code" : "Send code to email") {
+                                Task { await sendEmail() }
+                            }
+                            .controlSize(.small)
+                            .disabled(emailAuths.isEmpty)
+                        }
+                        if !otherAuths.isEmpty {
+                            Text(
+                                "Other authenticators on the account "
+                                + "(unsupported by SuperManager): "
+                                + otherAuths.map { "\($0.name) [\($0.kind)]" }
+                                    .joined(separator: ", ")
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        }
+                    }
+                    if challenge.emailSent {
+                        Section("Code") {
+                            TextField("6-digit code from email", text: Binding(
+                                get: { mfaChallenge?.code ?? "" },
+                                set: { mfaChallenge?.code = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            Text("Code expires in 5 minutes.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                if let err = errorMessage {
+                    Section { Text(err).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Button("Back") {
+                    mfaChallenge = nil
+                    errorMessage = nil
+                }
+                .keyboardShortcut(.cancelAction)
+                Spacer()
+                if mfaChallenge?.emailSent == true {
+                    Button(saving ? "Verifying…" : "Verify code") {
+                        Task { await verifyCode() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.return, modifiers: .command)
+                    .disabled(saving || (mfaChallenge?.code.isEmpty ?? true))
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Actions
+    // ---------------------------------------------------------
 
     private func save() async {
         saving = true
@@ -389,16 +557,62 @@ struct UnifiControllerEditSheet: View {
             id: controller?.id,
             label: label,
             url: url.trimmingCharacters(in: .whitespaces),
-            username: username,
-            password: password.isEmpty ? nil : password,
+            authMethod: authMethod,
+            username: authMethod == .password ? username : "",
+            credential: credential.isEmpty ? nil : credential,
             siteId: siteId.isEmpty ? "default" : siteId,
             customerSlug: trimmedSlug.isEmpty ? nil : trimmedSlug
         )
         switch result {
+        case .success(.saved):
+            dismiss()
+        case .success(.mfaRequired(let cid, let auths)):
+            let emailAuth = auths.first(where: { $0.isSupported })
+            mfaChallenge = MfaChallengeState(
+                challengeId: cid,
+                authenticators: auths,
+                selectedAuthId: emailAuth?.id
+            )
+        case .failure(let err):
+            errorMessage = err.message
+        }
+    }
+
+    private func sendEmail() async {
+        guard let cid = mfaChallenge?.challengeId,
+              let aid = mfaChallenge?.selectedAuthId
+        else { return }
+        saving = true
+        defer { saving = false }
+        errorMessage = nil
+        let result = await appState.sendUnifiMfaEmail(
+            challengeId: cid,
+            authenticatorId: aid
+        )
+        switch result {
+        case .success:
+            mfaChallenge?.emailSent = true
+        case .failure(let err):
+            errorMessage = err.message
+        }
+    }
+
+    private func verifyCode() async {
+        guard let cid = mfaChallenge?.challengeId,
+              let code = mfaChallenge?.code
+        else { return }
+        saving = true
+        defer { saving = false }
+        errorMessage = nil
+        let result = await appState.completeUnifiMfa(
+            challengeId: cid,
+            code: code.trimmingCharacters(in: .whitespaces)
+        )
+        switch result {
         case .success:
             dismiss()
-        case .failure(let msg):
-            errorMessage = msg.message
+        case .failure(let err):
+            errorMessage = err.message
         }
     }
 }

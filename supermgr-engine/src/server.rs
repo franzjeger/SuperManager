@@ -274,6 +274,12 @@ impl EngineServer {
             "unifi_controller_devmgr" => {
                 self.handle_unifi_controller_devmgr(id, req.params).await
             }
+            "unifi_controller_mfa_send" => {
+                self.handle_unifi_controller_mfa_send(id, req.params).await
+            }
+            "unifi_controller_mfa_complete" => {
+                self.handle_unifi_controller_mfa_complete(id, req.params).await
+            }
 
             // -- Engagement / Security methods --
             "engagement_list" => self.handle_engagement_list(id).await,

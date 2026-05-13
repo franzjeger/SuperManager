@@ -33,39 +33,131 @@ extension AppState {
         }
     }
 
+    /// Outcome of an attempted controller registration.
+    enum SaveOutcome {
+        case saved(UnifiController)
+        /// Controller demanded a second factor. The GUI must
+        /// route the operator through email-MFA via
+        /// `sendUnifiMfaEmail` + `completeUnifiMfa` using the
+        /// returned `challengeId`.
+        case mfaRequired(challengeId: String, authenticators: [MfaAuthenticator])
+    }
+
     /// Upsert a controller. Pass `id: nil` for a fresh save.
-    /// `password` is required on first save; on update it can
-    /// be omitted to leave the existing keychain entry intact.
-    @discardableResult
+    /// `credential` (password OR API key, depending on
+    /// `authMethod`) is required on first save; on update it
+    /// can be omitted to leave the existing keychain entry
+    /// intact.
     func saveUnifiController(
         id: String?,
         label: String,
         url: String,
+        authMethod: UnifiAuthMethod,
         username: String,
-        password: String?,
+        credential: String?,
         siteId: String = "default",
         customerSlug: String? = nil
-    ) async -> Result<UnifiController, AppError> {
-        struct Resp: Codable {
-            let controller: UnifiController
-            let sysinfo: UnifiSysInfo
-        }
+    ) async -> Result<SaveOutcome, AppError> {
+        // Wire payload shape — server accepts the credential
+        // under either `password` or `api_key` so we use the
+        // semantically correct one.
         var params: [String: Any] = [
             "label": label,
             "url": url,
             "username": username,
             "site_id": siteId,
+            "auth_method": authMethod.rawValue,
         ]
         if let id { params["id"] = id }
-        if let password { params["password"] = password }
+        if let credential {
+            switch authMethod {
+            case .apiKey: params["api_key"] = credential
+            case .password: params["password"] = credential
+            }
+        }
         if let customerSlug { params["customer_slug"] = customerSlug }
+        // One Codable type with every field optional — the
+        // engine returns either the saved shape (controller +
+        // sysinfo) or the MFA-required shape (mfa_required +
+        // challenge_id + authenticators) from the same RPC.
+        // Branching on which fields decoded keeps this single
+        // RPC contract clean.
+        struct SaveResp: Codable {
+            let controller: UnifiController?
+            let sysinfo: UnifiSysInfo?
+            let mfaRequired: Bool?
+            let challengeId: String?
+            let authenticators: [MfaAuthenticator]?
+            enum CodingKeys: String, CodingKey {
+                case controller, sysinfo, authenticators
+                case mfaRequired = "mfa_required"
+                case challengeId = "challenge_id"
+            }
+        }
         do {
-            let resp: Resp = try await client.call(
+            let resp: SaveResp = try await client.call(
                 "unifi_controller_save",
                 params: params
             )
+            if resp.mfaRequired == true {
+                return .success(.mfaRequired(
+                    challengeId: resp.challengeId ?? "",
+                    authenticators: resp.authenticators ?? []
+                ))
+            }
+            guard let controller = resp.controller else {
+                return .failure(AppError("server returned no controller and no MFA challenge"))
+            }
             await refreshUnifiControllers()
-            return .success(resp.controller)
+            return .success(.saved(controller))
+        } catch {
+            return .failure(AppError(String(describing: error)))
+        }
+    }
+
+    /// Trigger the email leg of an in-flight MFA challenge.
+    /// `authenticatorId` is one of the IDs from the
+    /// `.mfaRequired` outcome's `authenticators` list.
+    func sendUnifiMfaEmail(
+        challengeId: String,
+        authenticatorId: String
+    ) async -> Result<Void, AppError> {
+        struct R: Codable { let sent: Bool }
+        do {
+            let _: R = try await client.call(
+                "unifi_controller_mfa_send",
+                params: [
+                    "challenge_id": challengeId,
+                    "authenticator_id": authenticatorId,
+                ]
+            )
+            return .success(())
+        } catch {
+            return .failure(AppError(String(describing: error)))
+        }
+    }
+
+    /// Submit the email-MFA code to complete a pending
+    /// controller registration. On success the controller is
+    /// persisted + verified.
+    func completeUnifiMfa(
+        challengeId: String,
+        code: String
+    ) async -> Result<UnifiController, AppError> {
+        struct R: Codable {
+            let controller: UnifiController
+            let sysinfo: UnifiSysInfo
+        }
+        do {
+            let r: R = try await client.call(
+                "unifi_controller_mfa_complete",
+                params: [
+                    "challenge_id": challengeId,
+                    "code": code,
+                ]
+            )
+            await refreshUnifiControllers()
+            return .success(r.controller)
         } catch {
             return .failure(AppError(String(describing: error)))
         }
