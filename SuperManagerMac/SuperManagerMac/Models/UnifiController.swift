@@ -103,6 +103,44 @@ struct UnifiManagedDevice: Codable, Identifiable, Hashable {
     }
 }
 
+extension UnifiController {
+    /// Derive the `inform` URL the controller listens on,
+    /// from its admin URL. Used by the adopt flow so the
+    /// operator just picks a controller from a Picker instead
+    /// of typing the URL by hand.
+    ///
+    /// Mapping (in priority order):
+    ///   - `https://host:8443`            → `http://host:8080/inform`
+    ///   - `https://host:443`             → `http://host:8080/inform`
+    ///   - `https://host` (no port)       → `http://host:8080/inform`
+    ///   - `https://host:8443/<path>`     → `http://host:8080/inform`
+    ///                                     (UniFi-OS path prefixes
+    ///                                      are ignored — inform
+    ///                                      always lives at root)
+    ///
+    /// The scheme intentionally drops to `http://` because the
+    /// inform service runs on port 8080 over plain HTTP on
+    /// every UniFi Network Application generation. Operators
+    /// who run the inform service over HTTPS on a non-default
+    /// port still get the right answer via the override
+    /// field in the GUI sheet.
+    var derivedInformUrl: String {
+        // Quick parse — URL keeps scheme + host even when port
+        // is non-default. We only care about the host.
+        if let parsed = URL(string: url), let host = parsed.host {
+            return "http://\(host):8080/inform"
+        }
+        // Fallback: strip whatever scheme is present and rebuild.
+        let stripped = url
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+            .split(separator: "/").first
+            .map(String.init) ?? url
+        let host = stripped.split(separator: ":").first.map(String.init) ?? stripped
+        return "http://\(host):8080/inform"
+    }
+}
+
 /// Controller sysinfo returned by `unifi_controller_test`.
 struct UnifiSysInfo: Codable, Hashable {
     let version: String

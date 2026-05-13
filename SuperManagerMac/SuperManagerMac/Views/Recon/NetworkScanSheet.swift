@@ -1058,8 +1058,13 @@ private struct UnifiAdoptInlineSheet: View {
     @State private var label: String = ""
     @State private var username: String = "ubnt"
     @State private var password: String = "ubnt"
-    @State private var controllerUrl: String =
-        "http://unifi.example.lan:8080/inform"
+    /// Selected target controller from the registry. When set,
+    /// `derivedInformUrl()` builds the actual inform URL; when
+    /// the operator flips on Override, they can hand-roll the
+    /// URL instead.
+    @State private var targetControllerId: String?
+    @State private var overrideInformUrl: Bool = false
+    @State private var customInformUrl: String = ""
     @State private var group: String = ""
     @State private var step: String = ""
     @State private var output: String?
@@ -1102,19 +1107,47 @@ private struct UnifiAdoptInlineSheet: View {
                     }
                 }
                 Section("Controller") {
-                    TextField(
-                        "http://controller.lan:8080/inform",
-                        text: $controllerUrl
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .font(.body.monospaced())
-                    Text(
-                        "Full URL including scheme + `/inform`. UniFi "
-                        + "controllers default to port 8080 for inform "
-                        + "traffic; the UI itself lives on 8443."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    if appState.unifiControllers.isEmpty {
+                        Label(
+                            "No UniFi controllers configured. Add one under Settings → UniFi first — the inform URL gets derived automatically from the controller's address.",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Picker("Target", selection: $targetControllerId) {
+                            Text("Pick a controller…").tag(Optional<String>.none)
+                            ForEach(appState.unifiControllers) { c in
+                                Text(c.label).tag(Optional(c.id))
+                            }
+                        }
+                        if let derived = derivedInformUrl() {
+                            LabeledContent("Inform URL") {
+                                Text(derived)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                            Text(
+                                "Auto-derived from the controller's address. "
+                                + "Inform runs on port 8080 over HTTP on every "
+                                + "UniFi Network Application generation."
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        }
+                        Toggle("Override (non-standard port / proxy)", isOn: $overrideInformUrl)
+                            .toggleStyle(.checkbox)
+                        if overrideInformUrl {
+                            TextField(
+                                "http://controller.lan:8080/inform",
+                                text: $customInformUrl
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                        }
+                    }
                 }
                 if !step.isEmpty {
                     Section { Text(step).font(.caption) }
@@ -1169,31 +1202,58 @@ private struct UnifiAdoptInlineSheet: View {
             .padding(12)
         }
         .frame(minWidth: 560, minHeight: 520)
+        .task { await appState.refreshUnifiControllers() }
         .onAppear {
             if label.isEmpty {
                 label = "UniFi @ \(host.ip)"
             }
+            // Default to the only configured controller. If
+            // there are several, force the operator to pick
+            // explicitly — silently aiming a UniFi device at
+            // the wrong controller is the kind of mistake we
+            // don't want to make automatic.
+            if targetControllerId == nil {
+                let scoped = appState.unifiControllers.filter { c in
+                    guard let selected = appState.selectedCustomerSlug,
+                          let cs = c.customerSlug,
+                          !selected.isEmpty
+                    else { return true }
+                    return cs == selected
+                }
+                if scoped.count == 1 {
+                    targetControllerId = scoped.first?.id
+                } else if appState.unifiControllers.count == 1 {
+                    targetControllerId = appState.unifiControllers.first?.id
+                }
+            }
         }
     }
 
-    /// Normalised inform URL — trims whitespace + strips any
-    /// stray `set-inform` prefix the user accidentally included
-    /// when pasting a full command. The engine does the same on
-    /// its side; doing it here too keeps the live "Running
-    /// `set-inform <url>`" preview accurate.
-    private var sanitisedUrl: String {
-        let trimmed = controllerUrl.trimmingCharacters(in: .whitespaces)
-        if let r = trimmed.range(
-            of: #"^set-inform\s+"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) {
-            return String(trimmed[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+    /// Resolve the inform URL to actually send to the device.
+    /// Override-mode wins; otherwise we derive it from whichever
+    /// controller the operator picked. Returns nil when neither
+    /// path can produce a usable URL — drives `canSubmit`.
+    private func derivedInformUrl() -> String? {
+        if overrideInformUrl {
+            let trimmed = customInformUrl.trimmingCharacters(in: .whitespaces)
+            // Strip stray "set-inform " prefix in case the user
+            // pasted a full command. Engine does this too;
+            // doing it here keeps the live preview honest.
+            let stripped = trimmed.replacingOccurrences(
+                of: #"^(?i)set-inform\s+"#,
+                with: "",
+                options: .regularExpression
+            )
+            return stripped.isEmpty ? nil : stripped
         }
-        return trimmed
+        guard let id = targetControllerId,
+              let ctrl = appState.unifiControllers.first(where: { $0.id == id })
+        else { return nil }
+        return ctrl.derivedInformUrl
     }
 
     private var canSubmit: Bool {
-        let url = sanitisedUrl
+        guard let url = derivedInformUrl() else { return false }
         return !label.isEmpty
             && !username.isEmpty
             && !password.isEmpty
@@ -1206,7 +1266,10 @@ private struct UnifiAdoptInlineSheet: View {
         defer { running = false }
         errorMessage = nil
         output = nil
-        let url = sanitisedUrl
+        guard let url = derivedInformUrl() else {
+            errorMessage = "Pick a controller (or enable Override and type the URL)."
+            return
+        }
         step = "Adding SSH host…"
         await appState.addHost(
             label: label,
@@ -1261,7 +1324,7 @@ private struct UnifiAdoptInlineSheet: View {
     /// when the daemon-side russh transport fails for some
     /// reason but the operator's terminal SSH works fine.
     private func terminalCommand() -> String {
-        let url = sanitisedUrl
+        let url = derivedInformUrl() ?? "http://controller.lan:8080/inform"
         return "ssh \(username)@\(host.ip) "
             + "'mca-cli-op set-inform \(url) "
             + "|| /sbin/set-inform \(url) "
