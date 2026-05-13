@@ -284,6 +284,26 @@ const PROTO_SMTP_AUTH: ProtocolDef = ProtocolDef {
         Disable plaintext AUTH on the MTA (Postfix: `smtpd_tls_auth_only = yes`; \
         Exchange: require TLS on receive connectors).",
 };
+const PROTO_SNMP_COMMUNITY: ProtocolDef = ProtocolDef {
+    id: "snmp-community",
+    name: "SNMP community string (cleartext)",
+    severity: Severity::High,
+    cvss: 7.5,
+    recommendation: "Migrate to SNMPv3 with authPriv (SHA + AES). \
+        On managed switches / firewalls / printers / UPS: set v3 user with \
+        authProtocol = SHA-256, privProtocol = AES-128 minimum, then disable v1/v2c. \
+        If v2c MUST stay (legacy device): rotate the community string to a 32-char random \
+        secret and ACL the SNMP listener to the management VLAN only.",
+};
+const PROTO_HTTP_FORM_POST: ProtocolDef = ProtocolDef {
+    id: "http-form-post",
+    name: "HTTP form-POST credentials (cleartext)",
+    severity: Severity::High,
+    cvss: 8.0,
+    recommendation: "Move the affected endpoint behind HTTPS only. Set HSTS, redirect HTTP→HTTPS, \
+        and ensure login forms POST to https:// URLs (not http://). Check the form's HTML \
+        for absolute http:// action URLs — those bypass any redirect.",
+};
 
 /// Header line emitted by `tcpdump -A -tttt`: starts with an ISO-like
 /// timestamp.
@@ -528,6 +548,60 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
         }
     }
 
+    // SNMP v1/v2c community-string exposure (UDP 161 / 162). When
+    // `tcpdump -v` decodes an SNMP packet it prints the community
+    // in the clear in several different forms depending on
+    // tcpdump version: `C="public"`, `community public`,
+    // `{ Community = "public" }`. Match any of them.
+    if header.dst_port == 161
+        || header.dst_port == 162
+        || header.src_port == 161
+        || header.src_port == 162
+    {
+        if let Some(community) = extract_snmp_community(payload) {
+            // Treat well-known "public" / "private" as separately-
+            // important — those are the canonical default-credential
+            // findings — but flag ANY cleartext community since v3
+            // is the only safe path. The redacted excerpt keeps the
+            // community name in the clear (the operator needs it to
+            // see WHICH legacy credential is exposed) — this isn't
+            // a "redact for safety" path, it's the actual finding.
+            out.push(Event {
+                timestamp: header.timestamp.clone(),
+                src_ip: header.src_ip.clone(),
+                src_port: header.src_port,
+                dst_ip: header.dst_ip.clone(),
+                dst_port: header.dst_port,
+                protocol: PROTO_SNMP_COMMUNITY,
+                redacted_excerpt: format!("SNMP community=\"{community}\""),
+            });
+        }
+    }
+
+    // HTTP form-POST password capture. Operates on requests to
+    // common HTTP ports — the body of a POST with
+    // `application/x-www-form-urlencoded` is plaintext key=value
+    // pairs (limited to the first TCP segment; multi-segment
+    // form bodies are out of scope for the text-parsing model
+    // and would need real TCP reassembly).
+    if header.dst_port == 80
+        || header.dst_port == 8080
+        || header.dst_port == 8000
+        || header.dst_port == 8888
+    {
+        if let Some(form) = extract_http_form_password(payload) {
+            out.push(Event {
+                timestamp: header.timestamp.clone(),
+                src_ip: header.src_ip.clone(),
+                src_port: header.src_port,
+                dst_ip: header.dst_ip.clone(),
+                dst_port: header.dst_port,
+                protocol: PROTO_HTTP_FORM_POST,
+                redacted_excerpt: form,
+            });
+        }
+    }
+
     out
 }
 
@@ -611,6 +685,124 @@ fn short_hash(s: &str) -> String {
     // creds without enabling cross-engagement correlation.
     let hex: String = bytes.iter().take(8).map(|b| format!("{b:02x}")).collect();
     hex
+}
+
+/// Extract an SNMP community string from a tcpdump-printed
+/// SNMP packet, if one is present. tcpdump's SNMP printer emits
+/// the community in a few different forms depending on version:
+///
+///   - `C="public"`
+///   - `{ Community = "public" }`
+///   - `community public`
+///   - `Community: "public"`
+///
+/// We try each in turn. Returns the community string itself
+/// (without surrounding quotes / whitespace). Returns `None` if
+/// the payload isn't an SNMP packet or tcpdump didn't decode it
+/// (which happens for SNMPv3 — those packets carry an encrypted
+/// PDU and don't have a cleartext community to print).
+fn extract_snmp_community(payload: &str) -> Option<String> {
+    // Pattern 1: `C="..."`
+    if let Some(idx) = payload.find("C=\"") {
+        let rest = &payload[idx + 3..];
+        if let Some(end) = rest.find('"') {
+            return Some(rest[..end].to_owned());
+        }
+    }
+    // Pattern 2: `Community = "..."` (with or without spaces around =)
+    let lc = payload.to_lowercase();
+    if let Some(idx) = lc.find("community") {
+        let rest = &payload[idx + "community".len()..];
+        let trimmed = rest.trim_start_matches([' ', '=', ':', '\t']);
+        // Quoted form
+        if let Some(stripped) = trimmed.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                return Some(stripped[..end].to_owned());
+            }
+        }
+        // Bareword form — take the first whitespace-delimited token.
+        if let Some(token) = trimmed.split_whitespace().next() {
+            // Sanity: rule out tokens that look like noise.
+            if token.len() <= 64
+                && token.chars().all(|c| c.is_ascii_graphic())
+                // Skip tcpdump's own punctuation/wrapper tokens.
+                && !token.starts_with('{')
+                && !token.starts_with('[')
+                && !token.starts_with('(')
+            {
+                let cleaned = token.trim_matches(|c: char| matches!(c, ',' | '}' | ']' | ')'));
+                if !cleaned.is_empty() {
+                    return Some(cleaned.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract a password-bearing field from an HTTP form-POST body
+/// in a tcpdump ASCII payload. Returns a redacted string like
+///   `POST /login.php  password=sha256:abcd1234…`
+/// keeping the path + non-credential fields useful for attribution
+/// while hashing the password itself.
+///
+/// Single-segment captures only: if the POST body spans multiple
+/// TCP segments, this misses it. Real TCP reassembly is out of
+/// scope for the text-parsing model. In practice ~95% of login
+/// POSTs fit in one segment because the typical form body is
+/// `username=…&password=…&csrf=…` — well under MTU.
+fn extract_http_form_password(payload: &str) -> Option<String> {
+    // Must be a POST request.
+    if !payload.starts_with("POST ") && !payload.contains("\nPOST ") {
+        return None;
+    }
+    // Must be form-urlencoded — JSON / multipart bodies aren't
+    // simple key=value pairs and need a different parse.
+    let lc = payload.to_lowercase();
+    if !lc.contains("application/x-www-form-urlencoded") {
+        return None;
+    }
+    // Find the body — separator is `\r\n\r\n` or `\n\n`.
+    let body_start = payload
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .or_else(|| payload.find("\n\n").map(|i| i + 2))?;
+    let body = &payload[body_start..];
+    // Look for password-bearing keys.
+    let body_lc = body.to_lowercase();
+    let key = ["password=", "passwd=", "pwd=", "pass="]
+        .iter()
+        .find(|k| body_lc.contains(*k))
+        .copied()?;
+    // Extract the request path from the POST line for context.
+    let request_line = payload.lines().find(|l| l.starts_with("POST "))?;
+    let path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .to_owned();
+    // Pull the password value, hash it, leave other fields alone.
+    let idx = body_lc.find(key)?;
+    let key_len = key.len();
+    let value_end = body[idx + key_len..]
+        .find('&')
+        .map(|i| idx + key_len + i)
+        .unwrap_or(body.len());
+    let password = &body[idx + key_len..value_end];
+    // Build a redacted version of the body that swaps the
+    // password value for its hash but keeps the other keys
+    // (`username`, `csrf_token`, etc.) intact for attribution.
+    let mut redacted = String::with_capacity(body.len());
+    redacted.push_str(&body[..idx + key_len]);
+    redacted.push_str(&format!("sha256:{}", short_hash(password)));
+    redacted.push_str(&body[value_end..]);
+    // Trim to first 200 chars so we don't paste huge form blobs
+    // into the finding detail.
+    if redacted.len() > 200 {
+        redacted.truncate(200);
+        redacted.push_str("…");
+    }
+    Some(format!("POST {path}  {redacted}"))
 }
 
 /// Helper to produce the engagement evidence directory path.
@@ -783,5 +975,136 @@ AUTH PLAIN dXNlcgB1c2VyAHBhc3M=
 ";
         let events = scan_events(text);
         assert!(events.is_empty(), "no cleartext = no events; got {events:?}");
+    }
+
+    // ─── SNMP community-string extraction ──────────────────────────
+
+    #[test]
+    fn extract_snmp_community_c_equals_form() {
+        // tcpdump's terse `C="public"` form.
+        let payload = "  SNMPv2c C=\"public\" GetRequest(28) R=12345\n";
+        assert_eq!(extract_snmp_community(payload).as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn extract_snmp_community_braced_form() {
+        // tcpdump's `{ Community = "private" }` form.
+        let payload = "  { SNMPv2c { Community = \"private\" } GetRequest }\n";
+        assert_eq!(extract_snmp_community(payload).as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn extract_snmp_community_bareword_form() {
+        // `community public` (no quotes).
+        let payload = "    community public  GetRequest(28) ...\n";
+        assert_eq!(extract_snmp_community(payload).as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn extract_snmp_community_custom_string() {
+        // A non-default community is still a finding (cleartext is
+        // cleartext); we want to surface the actual string so the
+        // operator knows what's leaked.
+        let payload = "C=\"super-secret-2024\" GetRequest";
+        assert_eq!(
+            extract_snmp_community(payload).as_deref(),
+            Some("super-secret-2024")
+        );
+    }
+
+    #[test]
+    fn extract_snmp_community_returns_none_when_absent() {
+        // SNMPv3 packets have no plaintext community.
+        let payload = "    SNMPv3 msgUserName=foo encryptedPDU(48)\n";
+        assert_eq!(extract_snmp_community(payload), None);
+    }
+
+    #[test]
+    fn scan_events_extracts_snmp_community() {
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.5.55555 > 192.0.2.10.161: udp 80
+  SNMPv2c C=\"public\" GetRequest(28) .1.3.6.1.2.1.1.5.0
+";
+        let events = scan_events(text);
+        let snmp: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "snmp-community").collect();
+        assert_eq!(snmp.len(), 1);
+        assert!(snmp[0].redacted_excerpt.contains("public"));
+        assert_eq!(snmp[0].src_ip, "192.0.2.5");
+        assert_eq!(snmp[0].dst_port, 161);
+    }
+
+    // ─── HTTP form-POST password extraction ────────────────────────
+
+    #[test]
+    fn extract_http_form_password_basic() {
+        let payload = "POST /login.php HTTP/1.1\r\n\
+                       Host: example.com\r\n\
+                       Content-Type: application/x-www-form-urlencoded\r\n\
+                       Content-Length: 42\r\n\
+                       \r\n\
+                       username=alex&password=hunter2&remember=1";
+        let result = extract_http_form_password(payload).expect("must extract");
+        assert!(result.contains("POST /login.php"));
+        assert!(result.contains("username=alex"));
+        assert!(result.contains("password=sha256:"));
+        assert!(!result.contains("hunter2"));
+        // Other form fields kept for attribution.
+        assert!(result.contains("remember=1"));
+    }
+
+    #[test]
+    fn extract_http_form_password_alternative_keys() {
+        for key in &["passwd", "pwd", "pass"] {
+            let payload = format!(
+                "POST /signin HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser=alex&{key}=hunter2",
+            );
+            let result = extract_http_form_password(&payload)
+                .unwrap_or_else(|| panic!("must extract for key {key}"));
+            assert!(result.contains(&format!("{key}=sha256:")), "got: {result}");
+            assert!(!result.contains("hunter2"));
+        }
+    }
+
+    #[test]
+    fn extract_http_form_password_returns_none_on_get() {
+        let payload = "GET /login HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(extract_http_form_password(payload), None);
+    }
+
+    #[test]
+    fn extract_http_form_password_returns_none_without_form_content_type() {
+        // JSON-bodied POST is out of scope for this detector.
+        let payload = "POST /api/login HTTP/1.1\r\n\
+                       Content-Type: application/json\r\n\r\n\
+                       {\"username\":\"alex\",\"password\":\"hunter2\"}";
+        assert_eq!(extract_http_form_password(payload), None);
+    }
+
+    #[test]
+    fn extract_http_form_password_returns_none_without_password_field() {
+        let payload = "POST /api/event HTTP/1.1\r\n\
+                       Content-Type: application/x-www-form-urlencoded\r\n\r\n\
+                       event_name=login&duration=42";
+        assert_eq!(extract_http_form_password(payload), None);
+    }
+
+    #[test]
+    fn scan_events_extracts_http_form_post() {
+        let text = "\
+2026-05-13 14:23:45.000000 IP 192.0.2.50.43021 > 192.0.2.100.80: tcp 220
+POST /admin/login.php HTTP/1.1\r
+Host: 192.0.2.100\r
+Content-Type: application/x-www-form-urlencoded\r
+Content-Length: 38\r
+\r
+username=admin&password=correcthorse
+";
+        let events = scan_events(text);
+        let post: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "http-form-post").collect();
+        assert_eq!(post.len(), 1, "should find one POST event");
+        assert!(post[0].redacted_excerpt.contains("password=sha256:"));
+        assert!(!post[0].redacted_excerpt.contains("correcthorse"));
+        assert!(post[0].redacted_excerpt.contains("/admin/login.php"));
+        assert!(post[0].redacted_excerpt.contains("username=admin"));
     }
 }
