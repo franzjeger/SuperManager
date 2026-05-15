@@ -217,18 +217,29 @@ impl EngineServer {
         }
     }
 
-    /// Set (or clear, when device_type is null/empty) a manual
-    /// device-type override for a MAC. The override sticks
-    /// across re-scans; the GUI uses it as authoritative over
-    /// our OUI / banner heuristics.
+    /// Set (or clear, when device_type is null/empty) a
+    /// manual device-type override. Params:
+    ///   - `mac` (or `key`) — the MAC the override applies to
+    ///   - `scope` — `"mac"` (default) for exact-MAC match,
+    ///     `"oui"` to apply to every device with the same
+    ///     three-octet OUI prefix
+    ///   - `device_type` — type string (or empty to clear)
     pub(crate) async fn handle_device_type_override_set(
         &self,
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let mac = match params.get("mac").and_then(|v| v.as_str()) {
+        let key = match params
+            .get("mac")
+            .or_else(|| params.get("key"))
+            .and_then(|v| v.as_str())
+        {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing mac".to_owned()),
+        };
+        let scope = match params.get("scope").and_then(|v| v.as_str()) {
+            Some("oui") => crate::device_type_overrides::OverrideScope::Oui,
+            _ => crate::device_type_overrides::OverrideScope::Mac,
         };
         let device_type = params.get("device_type").and_then(|v| v.as_str());
         let store = {
@@ -236,8 +247,11 @@ impl EngineServer {
             st.device_type_overrides.clone()
         };
         let dt = device_type.filter(|s| !s.is_empty());
-        match store.set(&mac, dt).await {
-            Ok(()) => Response::ok(id, serde_json::json!({ "ok": true })),
+        match store.set(&key, scope, dt).await {
+            Ok(()) => Response::ok(
+                id,
+                serde_json::json!({ "ok": true, "scope": scope.as_str() }),
+            ),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }

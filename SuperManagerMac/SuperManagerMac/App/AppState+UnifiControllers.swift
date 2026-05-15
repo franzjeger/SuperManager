@@ -261,16 +261,31 @@ extension AppState {
         }
     }
 
-    /// Set or clear a manual device-type override for a MAC.
+    /// Scope of a device-type override.
+    /// `mac` applies to the exact MAC only;
+    /// `oui` applies to every device sharing the first three
+    /// octets (e.g. all `58:d6:1f:*` devices) — useful when
+    /// the operator finds an unrecognised Ubiquiti / Fortinet
+    /// prefix and wants to classify the whole bunch at once.
+    enum DeviceTypeOverrideScope: String {
+        case mac
+        case oui
+    }
+
+    /// Set or clear a manual device-type override.
     /// Pass `deviceType: nil` to clear. The override persists
     /// across re-scans on the daemon side.
     @discardableResult
     func setDeviceTypeOverride(
         mac: String,
+        scope: DeviceTypeOverrideScope = .mac,
         deviceType: String?
     ) async -> Bool {
         struct R: Codable { let ok: Bool }
-        var params: [String: Any] = ["mac": mac]
+        var params: [String: Any] = [
+            "mac": mac,
+            "scope": scope.rawValue,
+        ]
         if let dt = deviceType, !dt.isEmpty {
             params["device_type"] = dt
         } else {

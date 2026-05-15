@@ -1610,6 +1610,7 @@ private struct SetDeviceTypeSheet: View {
     let host: ActiveHost
 
     @State private var selected: DeviceType
+    @State private var applyToWholeOui: Bool = false
     @State private var saving: Bool = false
     @State private var errorMessage: String?
 
@@ -1624,6 +1625,17 @@ private struct SetDeviceTypeSheet: View {
             starting = NetworkScanSheet.autoDetectDeviceType(for: host)
         }
         _selected = State(initialValue: starting)
+    }
+
+    /// First three octets of the host's MAC, lowercased and
+    /// colon-joined — the form the engine's `oui` scope
+    /// expects. Nil only when the host has no MAC, in which
+    /// case the OUI toggle isn't shown.
+    private var ouiPrefix: String? {
+        guard let mac = host.mac else { return nil }
+        let parts = mac.split(separator: ":").prefix(3)
+        guard parts.count == 3 else { return nil }
+        return parts.map { $0.lowercased() }.joined(separator: ":")
     }
 
     var body: some View {
@@ -1673,6 +1685,24 @@ private struct SetDeviceTypeSheet: View {
                     .pickerStyle(.inline)
                     .labelsHidden()
                 }
+                if let prefix = ouiPrefix {
+                    Section("Scope") {
+                        Toggle(isOn: $applyToWholeOui) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Apply to every MAC starting with \(prefix)")
+                                Text(
+                                    "Best when an entire vendor's OUI prefix "
+                                    + "is missing from our database. One rule "
+                                    + "classifies every present + future host "
+                                    + "with the same prefix."
+                                )
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
                 if let err = errorMessage {
                     Section {
                         Text(err)
@@ -1711,8 +1741,11 @@ private struct SetDeviceTypeSheet: View {
         saving = true
         defer { saving = false }
         errorMessage = nil
+        let scope: AppState.DeviceTypeOverrideScope =
+            applyToWholeOui ? .oui : .mac
         let ok = await appState.setDeviceTypeOverride(
             mac: mac,
+            scope: scope,
             deviceType: selected.rawValue
         )
         if ok {
@@ -1727,12 +1760,13 @@ private struct SetDeviceTypeSheet: View {
         saving = true
         defer { saving = false }
         errorMessage = nil
-        let ok = await appState.setDeviceTypeOverride(mac: mac, deviceType: nil)
-        if ok {
-            dismiss()
-        } else {
-            errorMessage = "Couldn't clear override — check daemon logs."
-        }
+        // Clear both scopes so a per-MAC clear from the GUI
+        // doesn't leave a still-active OUI rule shadowing it.
+        // No-op for scopes that don't exist — the engine just
+        // returns ok.
+        _ = await appState.setDeviceTypeOverride(mac: mac, scope: .mac, deviceType: nil)
+        _ = await appState.setDeviceTypeOverride(mac: mac, scope: .oui, deviceType: nil)
+        dismiss()
     }
 }
 
