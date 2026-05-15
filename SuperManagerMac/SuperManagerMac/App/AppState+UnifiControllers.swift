@@ -246,6 +246,49 @@ extension AppState {
     }
 }
 
+extension AppState {
+    /// Pull every persisted device-type override from the
+    /// daemon. The GUI uses these to populate per-host menu
+    /// pre-selection and to know when to render the "(manual)"
+    /// indicator across stale scan results that haven't been
+    /// re-run yet.
+    func loadDeviceTypeOverrides() async -> [String: String] {
+        do {
+            return try await client.call("device_type_overrides_list")
+        } catch {
+            handleError(error)
+            return [:]
+        }
+    }
+
+    /// Set or clear a manual device-type override for a MAC.
+    /// Pass `deviceType: nil` to clear. The override persists
+    /// across re-scans on the daemon side.
+    @discardableResult
+    func setDeviceTypeOverride(
+        mac: String,
+        deviceType: String?
+    ) async -> Bool {
+        struct R: Codable { let ok: Bool }
+        var params: [String: Any] = ["mac": mac]
+        if let dt = deviceType, !dt.isEmpty {
+            params["device_type"] = dt
+        } else {
+            params["device_type"] = ""
+        }
+        do {
+            let _: R = try await client.call(
+                "device_type_override_set",
+                params: params
+            )
+            return true
+        } catch {
+            handleError(error)
+            return false
+        }
+    }
+}
+
 /// Tiny `Any`-wrapper so we can decode JSON objects with
 /// unknown value types into a Swift dictionary without writing
 /// a full struct.

@@ -43,6 +43,10 @@ struct NetworkScanSheet: View {
         /// `adopt`. Resolved via the controller stored in
         /// `host.controllerState`.
         case controllerCommand(ActiveHost, String)
+        /// Operator wants to set / clear the device-type
+        /// override for this host's MAC. Used when the OUI
+        /// heuristics get it wrong.
+        case setDeviceType(ActiveHost)
 
         var id: String {
             switch self {
@@ -50,6 +54,7 @@ struct NetworkScanSheet: View {
             case .adoptUnifi(let h): return "unifi-\(h.ip)"
             case .controllerCommand(let h, let cmd):
                 return "ctrl-\(cmd)-\(h.ip)"
+            case .setDeviceType(let h): return "type-\(h.ip)"
             }
         }
     }
@@ -232,6 +237,9 @@ struct NetworkScanSheet: View {
             case .controllerCommand(let host, let cmd):
                 ControllerCommandSheet(host: host, command: cmd)
                     .environment(appState)
+            case .setDeviceType(let host):
+                SetDeviceTypeSheet(host: host)
+                    .environment(appState)
             }
         }
         .onAppear {
@@ -386,19 +394,32 @@ struct NetworkScanSheet: View {
         )
     }
 
-    /// Sniff a vendor for a scanned host. Reads:
-    ///   - `host.vendor`  (OUI lookup string from the engine —
-    ///                     e.g. "Ubiquiti Networks Inc.")
-    ///   - `host.mac`     (raw — so curated-list OUI prefixes
-    ///                     win even if the vendor string
-    ///                     never made it through)
-    ///   - each probe's banner / title / server / x-powered-by
+    /// Resolve the device type for a scanned host. Priority:
+    ///   1. Operator's manual override (authoritative)
+    ///   2. OUI / vendor string from the engine
+    ///   3. MAC-prefix curated lists
+    ///   4. Banner / title / fingerprints sniffing
+    ///   5. Fallback to `.linux`
     ///
-    /// MAC-prefix shortcuts cover the case where the engine
-    /// found the MAC (via ARP) but our OUI database missed the
-    /// prefix, AND the device exposes nothing over TCP we can
-    /// fingerprint from (typical for an adopted UniFi AP).
+    /// The override path lets the operator be authoritative
+    /// when our heuristics are wrong — common when the OUI
+    /// prefix isn't in our curated set or Wireshark's manuf
+    /// file (which is true for many recent Ubiquiti / Fortinet
+    /// registrations).
     static func deviceType(for host: ActiveHost) -> DeviceType {
+        if let ovr = host.deviceTypeOverride,
+           let dt = DeviceType(rawValue: ovr)
+        {
+            return dt
+        }
+        return autoDetectDeviceType(for: host)
+    }
+
+    /// Heuristic device-type detection — same logic as
+    /// `deviceType(for:)` but minus the operator-override step.
+    /// Useful when the GUI wants to show "we'd auto-detect X,
+    /// you've overridden to Y" affordances.
+    static func autoDetectDeviceType(for host: ActiveHost) -> DeviceType {
         let vendor = (host.vendor ?? "").lowercased()
         let mac = (host.mac ?? "").lowercased()
         let banners = host.probes
@@ -609,6 +630,15 @@ private struct HostRow: View {
                     Text(deviceType.displayName)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
+                    if host.deviceTypeOverride != nil {
+                        Text("manual")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.tint)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(.tint.opacity(0.12), in: Capsule())
+                            .help("Device type set manually by the operator. Click \"…\" → Change device type to clear.")
+                    }
                     if let identity = bestIdentity {
                         Text("·").foregroundStyle(.tertiary)
                         Text(identity)
@@ -1023,6 +1053,19 @@ private struct HostRow: View {
                 onCopyIp(host)
             } label: {
                 Label("Copy IP", systemImage: "doc.on.doc")
+            }
+            if host.mac != nil {
+                Divider()
+                Button {
+                    onAction(.setDeviceType(host))
+                } label: {
+                    Label(
+                        host.deviceTypeOverride == nil
+                            ? "Set device type…"
+                            : "Change device type (manual)…",
+                        systemImage: "pencil"
+                    )
+                }
             }
         } label: {
             Image(systemName: "ellipsis.circle.fill")
@@ -1550,6 +1593,145 @@ private struct ControllerCommandSheet: View {
             output = body
         case .failure(let msg):
             errorMessage = msg.message
+        }
+    }
+}
+
+/// Inline sheet for manually overriding a device's classified
+/// type. Used when the OUI heuristics get it wrong — common
+/// for Ubiquiti / Fortinet prefixes that aren't in the
+/// curated set or Wireshark's manuf. The override is stored
+/// per MAC in the daemon's `device_type_overrides.toml` and
+/// stays in effect across re-scans.
+private struct SetDeviceTypeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+
+    let host: ActiveHost
+
+    @State private var selected: DeviceType
+    @State private var saving: Bool = false
+    @State private var errorMessage: String?
+
+    init(host: ActiveHost) {
+        self.host = host
+        let starting: DeviceType
+        if let ovr = host.deviceTypeOverride,
+           let dt = DeviceType(rawValue: ovr)
+        {
+            starting = dt
+        } else {
+            starting = NetworkScanSheet.autoDetectDeviceType(for: host)
+        }
+        _selected = State(initialValue: starting)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "pencil.tip.crop.circle")
+                    .foregroundStyle(.tint)
+                    .imageScale(.large)
+                VStack(alignment: .leading) {
+                    Text("Set device type")
+                        .font(.headline)
+                    Text(
+                        "Override SuperManager's auto-detection for this MAC. "
+                        + "The override sticks across re-scans."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(.background.secondary)
+
+            Form {
+                Section("Target") {
+                    LabeledContent("IP", value: host.ip)
+                    if let mac = host.mac {
+                        LabeledContent("MAC") {
+                            Text(mac).font(.caption.monospaced())
+                        }
+                    }
+                    if let vendor = host.vendor {
+                        LabeledContent("Vendor (OUI)", value: vendor)
+                    }
+                    LabeledContent("Auto-detected") {
+                        Text(NetworkScanSheet.autoDetectDeviceType(for: host).displayName)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("Manual type") {
+                    Picker("Device type", selection: $selected) {
+                        ForEach(DeviceType.allCases, id: \.self) { t in
+                            Text(t.displayName).tag(t)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                }
+                if let err = errorMessage {
+                    Section {
+                        Text(err)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                if host.deviceTypeOverride != nil {
+                    Button("Clear override", role: .destructive) {
+                        Task { await clearOverride() }
+                    }
+                    .disabled(saving)
+                }
+                Spacer()
+                Button(saving ? "Saving…" : "Save") {
+                    Task { await saveOverride() }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(saving || host.mac == nil)
+            }
+            .padding(12)
+        }
+        .frame(minWidth: 480, minHeight: 480)
+    }
+
+    private func saveOverride() async {
+        guard let mac = host.mac else { return }
+        saving = true
+        defer { saving = false }
+        errorMessage = nil
+        let ok = await appState.setDeviceTypeOverride(
+            mac: mac,
+            deviceType: selected.rawValue
+        )
+        if ok {
+            dismiss()
+        } else {
+            errorMessage = "Couldn't save override — check daemon logs."
+        }
+    }
+
+    private func clearOverride() async {
+        guard let mac = host.mac else { return }
+        saving = true
+        defer { saving = false }
+        errorMessage = nil
+        let ok = await appState.setDeviceTypeOverride(mac: mac, deviceType: nil)
+        if ok {
+            dismiss()
+        } else {
+            errorMessage = "Couldn't clear override — check daemon logs."
         }
     }
 }

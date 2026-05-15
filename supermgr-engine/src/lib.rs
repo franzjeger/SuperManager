@@ -13,6 +13,7 @@ pub mod compliance;
 pub mod creds;
 pub mod customer;
 pub mod cve_feed;
+pub mod device_type_overrides;
 pub mod discovery;
 pub mod dns_axfr;
 pub mod dns_health;

@@ -281,6 +281,14 @@ impl EngineServer {
                 self.handle_unifi_controller_mfa_complete(id, req.params).await
             }
 
+            // -- Device-type override store --
+            "device_type_overrides_list" => {
+                self.handle_device_type_overrides_list(id).await
+            }
+            "device_type_override_set" => {
+                self.handle_device_type_override_set(id, req.params).await
+            }
+
             // -- Engagement / Security methods --
             "engagement_list" => self.handle_engagement_list(id).await,
             "engagement_save" => self.handle_engagement_save(id, req.params).await,

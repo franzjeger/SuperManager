@@ -323,11 +323,18 @@ struct ActiveHost: Codable, Identifiable {
     /// "managed by" badge + the controller-API-driven action
     /// menu in the scan-result row.
     let controllerState: ControllerStateRef?
+    /// Operator-set device-type override for this host's MAC.
+    /// Non-nil means the human explicitly classified this
+    /// device; the GUI treats it as authoritative over the
+    /// OUI / banner heuristics, and renders a "(manual)"
+    /// indicator next to the type label.
+    let deviceTypeOverride: String?
     var id: String { ip }
     enum CodingKeys: String, CodingKey {
         case ip, mac, hostname, vendor, probes, zone
         case findingCount = "finding_count"
         case controllerState = "controller_state"
+        case deviceTypeOverride = "device_type_override"
     }
 
     init(from decoder: Decoder) throws {
@@ -340,6 +347,7 @@ struct ActiveHost: Codable, Identifiable {
         findingCount = (try? c.decode(UInt32.self, forKey: .findingCount)) ?? 0
         zone = try c.decodeIfPresent(String.self, forKey: .zone)
         controllerState = try? c.decodeIfPresent(ControllerStateRef.self, forKey: .controllerState)
+        deviceTypeOverride = try? c.decodeIfPresent(String.self, forKey: .deviceTypeOverride)
     }
 }
 

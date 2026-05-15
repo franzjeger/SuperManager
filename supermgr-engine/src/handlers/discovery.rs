@@ -149,10 +149,29 @@ impl EngineServer {
                 // log + continue — the underlying scan result
                 // is still valid and useful even when no
                 // controller responded.
-                let controllers: Vec<crate::unifi_controllers::UnifiController> = {
+                // Snapshot the override store + controller
+                // list under a single lock acquisition so we
+                // don't hold the state lock during the
+                // network round-trips below.
+                let (controllers, override_store) = {
                     let st = self.state.lock().await;
-                    st.unifi_controllers.values().cloned().collect()
+                    (
+                        st.unifi_controllers.values().cloned().collect::<Vec<_>>(),
+                        st.device_type_overrides.clone(),
+                    )
                 };
+                // Apply manual device-type overrides FIRST so
+                // the controller cross-reference and the GUI
+                // both see the operator's chosen type. We just
+                // stash the override string on the host; the
+                // GUI's row renderer treats it as authoritative.
+                for host in result.hosts.iter_mut() {
+                    if let Some(ref mac) = host.mac {
+                        if let Some(t) = override_store.get(mac).await {
+                            host.device_type_override = Some(t);
+                        }
+                    }
+                }
                 if !controllers.is_empty() {
                     let macs: Vec<String> = result
                         .hosts
@@ -180,6 +199,45 @@ impl EngineServer {
                     Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
                 }
             }
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
+    /// List every device-type override the operator has set,
+    /// returned as a flat map MAC → device-type string.
+    pub(crate) async fn handle_device_type_overrides_list(&self, id: u64) -> Response {
+        let store = {
+            let st = self.state.lock().await;
+            st.device_type_overrides.clone()
+        };
+        let map = store.snapshot().await;
+        match serde_json::to_value(&map) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Set (or clear, when device_type is null/empty) a manual
+    /// device-type override for a MAC. The override sticks
+    /// across re-scans; the GUI uses it as authoritative over
+    /// our OUI / banner heuristics.
+    pub(crate) async fn handle_device_type_override_set(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let mac = match params.get("mac").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing mac".to_owned()),
+        };
+        let device_type = params.get("device_type").and_then(|v| v.as_str());
+        let store = {
+            let st = self.state.lock().await;
+            st.device_type_overrides.clone()
+        };
+        let dt = device_type.filter(|s| !s.is_empty());
+        match store.set(&mac, dt).await {
+            Ok(()) => Response::ok(id, serde_json::json!({ "ok": true })),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }

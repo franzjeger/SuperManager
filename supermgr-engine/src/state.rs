@@ -50,6 +50,11 @@ pub struct DaemonState {
     pub unifi_controllers: HashMap<Uuid, crate::unifi_controllers::UnifiController>,
     pub unifi_controller_dir: PathBuf,
 
+    /// Operator-set device-type overrides (per MAC). Used by
+    /// `active_scan` to override the OUI-based vendor sniffer
+    /// when the human knows better than our heuristics.
+    pub device_type_overrides: crate::device_type_overrides::DeviceTypeOverrides,
+
     /// Webhook URL for outgoing notifications.
     pub webhook_url: String,
     /// Fire a webhook when an SSH host goes down.
@@ -101,6 +106,9 @@ impl DaemonState {
             ssh_host_dir: data_dir.join("ssh/hosts"),
             unifi_controllers: HashMap::new(),
             unifi_controller_dir: data_dir.join("unifi/controllers"),
+            device_type_overrides: crate::device_type_overrides::DeviceTypeOverrides::open(
+                &data_dir,
+            ),
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,

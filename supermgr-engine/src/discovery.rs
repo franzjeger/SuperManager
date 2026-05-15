@@ -888,11 +888,17 @@ fn oui_database() -> HashMap<String, String> {
 /// "Ubiquiti Networks Inc." beats Wireshark's "UbiquitiI"
 /// truncated alias).
 fn apply_wireshark_manuf_overlay(out: &mut HashMap<String, String>) {
+    // Wireshark's manuf file installs under `share/wireshark/`
+    // on every platform — earlier versions of this list used
+    // `etc/wireshark/` which never exists. The .app-bundle
+    // path is checked last because it requires a full GUI
+    // install; brew-only installs are far more common.
     let candidates = [
-        "/opt/homebrew/etc/wireshark/manuf",
-        "/usr/local/etc/wireshark/manuf",
+        "/opt/homebrew/share/wireshark/manuf",   // brew, Apple Silicon
+        "/usr/local/share/wireshark/manuf",       // brew, Intel / macports
+        "/opt/local/share/wireshark/manuf",       // macports alt prefix
+        "/usr/share/wireshark/manuf",             // system / Linux fallback
         "/Applications/Wireshark.app/Contents/Resources/share/wireshark/manuf",
-        "/usr/share/wireshark/manuf",
     ];
     for path in candidates {
         let Ok(text) = std::fs::read_to_string(path) else { continue };
@@ -1030,6 +1036,15 @@ pub struct ActiveHost {
     /// re-adopt) and to render the controller-state badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_state: Option<crate::unifi_controllers::ControllerStateRef>,
+
+    /// Operator-set device-type override for this host's MAC,
+    /// if any. When non-None the GUI shows a manual-override
+    /// badge and treats this value as authoritative over its
+    /// own OUI/banner heuristics. Engine doesn't compute the
+    /// override; it just echoes whatever's in the store so
+    /// the GUI can render it consistently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type_override: Option<String>,
     /// RFC zone classification — drives the exposure pill in the
     /// UI ("internal" vs. "public"). Computed pure-compute from
     /// the IP at scan time, no I/O.
@@ -1181,6 +1196,7 @@ pub async fn active_scan(
                     finding_count: 0,
                     zone: Some(crate::asset_enrich::classify(ip).label().to_owned()),
                     controller_state: None,
+                    device_type_override: None,
                 });
             }
         }
@@ -1399,6 +1415,7 @@ async fn scan_host_active(
         finding_count: 0,
         zone,
         controller_state: None,
+        device_type_override: None,
     })
 }
 
