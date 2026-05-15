@@ -355,6 +355,34 @@ extension AppState {
         }
     }
 
+    /// Detailed outcome of a UniFi `set-inform` invocation —
+    /// success carries stdout; failure carries the raw engine
+    /// error string for direct surfacing in the UI.
+    enum UnifiSetInformOutcome {
+        case success(stdout: String)
+        case failure(message: String)
+    }
+
+    /// Detailed variant of `unifiSetInform`. Used by the
+    /// Network-scan → Adopt flow so it can surface the actual
+    /// SSH exit / stderr / "command not found" / etc. instead
+    /// of swallowing it into a generic "something went wrong".
+    func unifiSetInformDetailed(
+        hostId: String,
+        informUrl: String
+    ) async -> UnifiSetInformOutcome {
+        struct R: Codable { let stdout: String }
+        do {
+            let r: R = try await client.call(
+                "unifi_set_inform",
+                params: ["host_id": hostId, "inform_url": informUrl]
+            )
+            return .success(stdout: r.stdout)
+        } catch {
+            return .failure(message: String(describing: error))
+        }
+    }
+
     /// Generic UniFi REST proxy. Returns (status, body).
     func unifiApi(
         hostId: String,

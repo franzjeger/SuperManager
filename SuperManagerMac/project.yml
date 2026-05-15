@@ -102,6 +102,58 @@ targets:
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSSupportsAutomaticTermination: false
+
+        # Local Network privacy (macOS Sequoia/Tahoe).
+        # Without this string, the OS silently drops outbound
+        # TCP from the daemon to RFC1918 addresses and returns
+        # EHOSTUNREACH on connect() — exactly what manifested
+        # as "No route to host (os error 65)" when SSH'ing to
+        # 192.168.x.x devices, even though the operator's own
+        # terminal connects fine (Terminal.app has long held
+        # this permission). The string here is shown to the
+        # user the FIRST time the app touches a local IP;
+        # approving the prompt is a one-time action.
+        NSLocalNetworkUsageDescription: >-
+          SuperManager scans the local network for managed
+          devices (UniFi APs, FortiGate firewalls, switches,
+          servers) and connects to them over SSH / HTTPS for
+          adoption, provisioning, and configuration audits.
+        # Bonjour service types we might browse during passive
+        # discovery / network scan. Without this list, macOS
+        # also blocks mDNS / Bonjour browse — which means the
+        # passive-scan mDNS pass returns zero hosts even on a
+        # LAN full of UniFi and Apple gear that advertises
+        # themselves. Wildcard `*` is intentionally NOT used:
+        # Apple deprecated it in macOS 11+. List the specific
+        # service types we actually browse.
+        NSBonjourServices:
+          - _ssh._tcp
+          - _http._tcp
+          - _https._tcp
+          - _smb._tcp
+          - _afpovertcp._tcp
+          - _airplay._tcp
+          - _printer._tcp
+          - _ipp._tcp
+          - _ipps._tcp
+          - _device-info._tcp
+          - _unifi._tcp
+          - _workstation._tcp
+          - _services._dns-sd._udp
+
+        # `supermgr://` URL scheme. Browser bookmarklets on UniFi
+        # / FortiGate / pfSense admin pages build a URL of the
+        # form `supermgr://addhost?ip=…&port=…&vendor=…` and the
+        # OS routes it to SuperManager via `.onOpenURL`. The
+        # WebCaptureSheet then presents a confirmation flow so
+        # the operator can pick "Add as SSH host" / "Add to
+        # engagement scope" / "Run network scan now" without
+        # retyping the connection details.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.sybr.supermanager.urlscheme
+            CFBundleURLSchemes:
+              - supermgr
+            LSHandlerRank: Owner
         # No NSAppSandbox — the app spawns a privileged helper and
         # talks to a user-space daemon socket; sandboxing would block
         # both. We're not targeting the Mac App Store; outside-store

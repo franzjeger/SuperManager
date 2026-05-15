@@ -28,6 +28,22 @@ extension AppState {
         }
     }
 
+    /// Replace an engagement's `scope_cidrs` and persist via
+    /// `engagement_save`. Used by the WebCapture "Add to scope"
+    /// flow so the operator can flip a freshly-discovered device
+    /// into the next scheduled scan without leaving the capture
+    /// sheet.
+    @discardableResult
+    func updateEngagementScope(
+        id: String,
+        scopeCidrs: [String]
+    ) async -> Bool {
+        guard var existing = engagements.first(where: { $0.id == id })
+        else { return false }
+        existing.scopeCidrs = scopeCidrs
+        return await saveEngagement(existing) != nil
+    }
+
     @discardableResult
     func deleteEngagement(id: String) async -> Bool {
         struct R: Codable { let deleted: Bool }
@@ -544,6 +560,52 @@ extension AppState {
                 "duration_secs": durationSecs,
             ]
         )
+    }
+
+    // MARK: - DNS health audit (SPF / DKIM / DMARC / DNSSEC)
+
+    /// Run the SPF/DKIM/DMARC/DNSSEC audit for the given domain.
+    /// Returns the structured report; the GUI renders the per-
+    /// component states + emitted findings.
+    func runDnsHealthAudit(domain: String) async -> DnsHealthReport? {
+        do {
+            return try await client.call(
+                "dns_health_audit",
+                params: ["domain": domain]
+            )
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    // MARK: - Subdomain enumeration
+
+    struct SubdomainEnumResult: Codable {
+        let domain: String
+        let found: [String]
+        let certCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case domain
+            case found
+            case certCount = "cert_count"
+        }
+    }
+
+    /// Query crt.sh for `*.<domain>` and return discovered subdomains.
+    /// Useful for engagement-scope sanity checks ("what hostnames
+    /// does this customer have that I might not know about?").
+    func runSubdomainEnum(domain: String) async -> SubdomainEnumResult? {
+        do {
+            return try await client.call(
+                "subdomain_enum",
+                params: ["domain": domain]
+            )
+        } catch {
+            handleError(error)
+            return nil
+        }
     }
 
     /// Build a BPF filter that covers ALL the cleartext-protocol

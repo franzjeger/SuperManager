@@ -31,6 +31,11 @@ struct SettingsView: View {
 
             IntegrationsSettingsView()
                 .tabItem { Label("Integrations", systemImage: "puzzlepiece.extension") }
+
+            UnifiControllersSettingsView()
+                .tabItem {
+                    Label("UniFi", systemImage: "antenna.radiowaves.left.and.right")
+                }
         }
         // Slight padding so each pane isn't flush against the tab strip.
         .padding(20)

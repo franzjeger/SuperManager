@@ -315,22 +315,67 @@ struct UnifiSetInformSheet: View {
     let host: SshHostSummary
     let onResult: (Bool) -> Void
 
-    @State private var informUrl: String = "http://"
+    @State private var targetControllerId: String?
+    @State private var overrideUrl: Bool = false
+    @State private var customInformUrl: String = ""
     @State private var running = false
     @State private var output: String?
     @State private var error: String?
+
+    /// Resolved inform URL — either auto-derived from the
+    /// picked controller, or operator-overridden.
+    private var resolvedInformUrl: String? {
+        if overrideUrl {
+            let s = customInformUrl.trimmingCharacters(in: .whitespaces)
+            return s.isEmpty ? nil : s
+        }
+        guard let id = targetControllerId,
+              let c = appState.unifiControllers.first(where: { $0.id == id })
+        else { return nil }
+        return c.derivedInformUrl
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Set UniFi inform URL")
                 .font(.title3.weight(.semibold))
-            Text("Tells this device to register with the controller at the inform URL. Required for adoption flow when the device is on factory defaults. Default port for inform is 8080.")
+            Text("Tells this device to register with a controller at its inform URL. Pick a controller you've registered under Settings → UniFi — the URL is derived automatically.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            TextField("Inform URL", text: $informUrl)
+            if appState.unifiControllers.isEmpty {
+                Label(
+                    "No UniFi controllers configured. Add one under Settings → UniFi first.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Picker("Target controller", selection: $targetControllerId) {
+                    Text("Pick…").tag(Optional<String>.none)
+                    ForEach(appState.unifiControllers) { c in
+                        Text(c.label).tag(Optional(c.id))
+                    }
+                }
+                if let url = resolvedInformUrl, !overrideUrl {
+                    Text("Inform URL: \(url)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+            Toggle("Override (non-standard port / proxy)", isOn: $overrideUrl)
+                .toggleStyle(.checkbox)
+            if overrideUrl {
+                TextField(
+                    "http://controller.lan:8080/inform",
+                    text: $customInformUrl
+                )
                 .textFieldStyle(.roundedBorder)
+                .font(.body.monospaced())
                 .help("e.g. http://10.0.0.5:8080/inform")
+            }
             if let output {
                 Text(output)
                     .font(.system(.caption, design: .monospaced))
@@ -341,9 +386,38 @@ struct UnifiSetInformSheet: View {
                     .textSelection(.enabled)
             }
             if let error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                VStack(alignment: .leading, spacing: 8) {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // When our daemon-side SSH fails (russh
+                    // transport quirk, cold ARP, route flake),
+                    // the operator's terminal almost always
+                    // works. Give them a one-click fallback
+                    // that opens Terminal.app with the exact
+                    // command pre-filled — they enter the
+                    // password in their own terminal, see the
+                    // output there.
+                    HStack(spacing: 8) {
+                        Button {
+                            openInTerminal()
+                        } label: {
+                            Label("Run via Terminal instead", systemImage: "terminal")
+                        }
+                        .controlSize(.small)
+                        Button {
+                            copyToClipboard()
+                        } label: {
+                            Label("Copy ssh command", systemImage: "doc.on.doc")
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.08))
+                )
             }
             HStack {
                 Spacer()
@@ -354,14 +428,23 @@ struct UnifiSetInformSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(
-                    running
-                        || informUrl.trimmingCharacters(in: .whitespaces).isEmpty
-                )
+                .disabled(running || resolvedInformUrl == nil)
             }
         }
         .padding(24)
         .frame(width: 480)
+        .task { await appState.refreshUnifiControllers() }
+        .onAppear {
+            // Auto-pick the only controller if just one is
+            // configured. Multiple configured → force the
+            // operator to pick to avoid silently aiming a
+            // device at the wrong controller.
+            if targetControllerId == nil,
+               appState.unifiControllers.count == 1
+            {
+                targetControllerId = appState.unifiControllers.first?.id
+            }
+        }
     }
 
     private func run() async {
@@ -369,7 +452,10 @@ struct UnifiSetInformSheet: View {
         defer { running = false }
         error = nil
         output = nil
-        let url = informUrl.trimmingCharacters(in: .whitespaces)
+        guard let url = resolvedInformUrl else {
+            error = "Pick a controller (or enable Override and type a URL)."
+            return
+        }
         if let stdout = await appState.unifiSetInform(hostId: host.id, informUrl: url) {
             output = stdout.isEmpty ? "set-inform completed (no output)." : stdout
         } else {
@@ -377,5 +463,41 @@ struct UnifiSetInformSheet: View {
                 ? "set-inform failed. Make sure the device is reachable over SSH and the credentials are correct."
                 : appState.errorMessage
         }
+    }
+
+    /// Build the SSH command that does the same thing the
+    /// daemon would do — chained `mca-cli-op` → fallbacks so it
+    /// works on every UniFi firmware generation.
+    private func terminalCommand() -> String {
+        let url = resolvedInformUrl ?? "http://controller.lan:8080/inform"
+        return "ssh \(host.username)@\(host.hostname) "
+            + "'mca-cli-op set-inform \(url) "
+            + "|| /sbin/set-inform \(url) "
+            + "|| /usr/bin/syswrapper.sh set-inform \(url) "
+            + "|| set-inform \(url)'"
+    }
+
+    /// Open Terminal.app and paste the prepared command —
+    /// the operator types their password in their own terminal,
+    /// no SSH library involved. Reuses the working SSH path
+    /// they've already proven works.
+    private func openInTerminal() {
+        let cmd = terminalCommand()
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+            tell application "Terminal"
+                activate
+                do script "\(cmd)"
+            end tell
+            """
+        if let appleScript = NSAppleScript(source: script) {
+            var err: NSDictionary?
+            _ = appleScript.executeAndReturnError(&err)
+        }
+    }
+
+    private func copyToClipboard() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(terminalCommand(), forType: .string)
     }
 }

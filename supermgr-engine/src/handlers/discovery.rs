@@ -128,19 +128,130 @@ impl EngineServer {
         );
         let guard = self.operations.start("active_scan", label);
         let cancel = Some(guard.cancel_flag());
-        match crate::discovery::active_scan(
+        let scan_result = crate::discovery::active_scan(
             &targets,
             &ports,
             customer_slug.as_deref(),
             engagement_id.as_deref(),
             cancel,
         )
-        .await
+        .await;
+
+        match scan_result {
+            Ok(mut result) => {
+                // Controller-first annotation. Cross-reference
+                // every scanned host's MAC against the union of
+                // all configured UniFi controllers' device
+                // inventories. Matches get `controller_state`
+                // populated so the GUI can swap SSH-based
+                // actions for controller-API ones. Failures
+                // (unreachable controller, login refused, etc.)
+                // log + continue — the underlying scan result
+                // is still valid and useful even when no
+                // controller responded.
+                // Snapshot the override store + controller
+                // list under a single lock acquisition so we
+                // don't hold the state lock during the
+                // network round-trips below.
+                let (controllers, override_store) = {
+                    let st = self.state.lock().await;
+                    (
+                        st.unifi_controllers.values().cloned().collect::<Vec<_>>(),
+                        st.device_type_overrides.clone(),
+                    )
+                };
+                // Apply manual device-type overrides FIRST so
+                // the controller cross-reference and the GUI
+                // both see the operator's chosen type. We just
+                // stash the override string on the host; the
+                // GUI's row renderer treats it as authoritative.
+                for host in result.hosts.iter_mut() {
+                    if let Some(ref mac) = host.mac {
+                        if let Some(t) = override_store.get(mac).await {
+                            host.device_type_override = Some(t);
+                        }
+                    }
+                }
+                if !controllers.is_empty() {
+                    let macs: Vec<String> = result
+                        .hosts
+                        .iter()
+                        .filter_map(|h| h.mac.clone())
+                        .collect();
+                    if !macs.is_empty() {
+                        let by_mac = crate::unifi_controllers::cross_reference(
+                            &self.secrets,
+                            &controllers,
+                            &macs,
+                        )
+                        .await;
+                        for host in result.hosts.iter_mut() {
+                            if let Some(ref mac) = host.mac {
+                                if let Some(state) = by_mac.get(&mac.to_ascii_lowercase()) {
+                                    host.controller_state = Some(state.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                match serde_json::to_value(&result) {
+                    Ok(v) => Response::ok(id, v),
+                    Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+                }
+            }
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        }
+    }
+
+    /// List every device-type override the operator has set,
+    /// returned as a flat map MAC → device-type string.
+    pub(crate) async fn handle_device_type_overrides_list(&self, id: u64) -> Response {
+        let store = {
+            let st = self.state.lock().await;
+            st.device_type_overrides.clone()
+        };
+        let map = store.snapshot().await;
+        match serde_json::to_value(&map) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Set (or clear, when device_type is null/empty) a
+    /// manual device-type override. Params:
+    ///   - `mac` (or `key`) — the MAC the override applies to
+    ///   - `scope` — `"mac"` (default) for exact-MAC match,
+    ///     `"oui"` to apply to every device with the same
+    ///     three-octet OUI prefix
+    ///   - `device_type` — type string (or empty to clear)
+    pub(crate) async fn handle_device_type_override_set(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let key = match params
+            .get("mac")
+            .or_else(|| params.get("key"))
+            .and_then(|v| v.as_str())
         {
-            Ok(result) => match serde_json::to_value(&result) {
-                Ok(v) => Response::ok(id, v),
-                Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
-            },
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing mac".to_owned()),
+        };
+        let scope = match params.get("scope").and_then(|v| v.as_str()) {
+            Some("oui") => crate::device_type_overrides::OverrideScope::Oui,
+            _ => crate::device_type_overrides::OverrideScope::Mac,
+        };
+        let device_type = params.get("device_type").and_then(|v| v.as_str());
+        let store = {
+            let st = self.state.lock().await;
+            st.device_type_overrides.clone()
+        };
+        let dt = device_type.filter(|s| !s.is_empty());
+        match store.set(&key, scope, dt).await {
+            Ok(()) => Response::ok(
+                id,
+                serde_json::json!({ "ok": true, "scope": scope.as_str() }),
+            ),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }

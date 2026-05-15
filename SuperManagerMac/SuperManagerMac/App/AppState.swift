@@ -49,6 +49,28 @@ class AppState {
     /// up` subprocess keeps running until the user finishes the
     /// browser flow or the daemon-side timeout expires).
     var pendingTailscaleAuthURL: URL?
+
+    /// All configured UniFi controllers (standalone — not
+    /// tied to SSH hosts). Refreshed on app launch via
+    /// `refreshUnifiControllers()` and after any save/delete.
+    /// Drives the controller-list settings page + the scan-row
+    /// "managed by" badge + the per-host controller-API
+    /// action menu.
+    var unifiControllers: [UnifiController] = []
+
+    /// Pending "Capture from web" payload. Set by the
+    /// `supermgr://` URL-scheme handler in SuperManagerApp or by
+    /// the Help → Capture from Web… menu item. ContentView
+    /// observes this and presents `WebCaptureSheet`. Reset to
+    /// nil when the sheet dismisses.
+    var pendingWebCapture: WebCapture?
+
+    /// Pre-seeded targets for the Recon → Network scan sheet.
+    /// The WebCapture sheet's "Run network scan now" action
+    /// sets this, then switches the section to `.recon`, so the
+    /// scan tile can open pre-populated without round-tripping
+    /// through another picker. ReconView clears it after use.
+    var pendingNetworkScanTargets: [String]?
     /// Last error from a Tailscale login/logout/up/down RPC.
     /// Surfaced inline in the header instead of a system alert —
     /// auth flows fail in mundane ways (network down, browser
@@ -419,6 +441,7 @@ class AppState {
         await refreshAutoReconnect()
         await refreshCustomers()
         await refreshEngagements()
+        await refreshUnifiControllers()
     }
 
     /// True while `refreshAll` is in flight. Drives the toolbar
@@ -1092,6 +1115,11 @@ enum AppSection: String, CaseIterable, Identifiable {
     case compliance = "Compliance"
     case provisioning = "Provisioning"
     case security = "Security"
+    /// Recon / pentest tool launcher — surfaces every active-audit
+    /// capability as a clickable tile instead of burying them in
+    /// engagement-panel sub-menus. The toolkit's white/gray-hat
+    /// face: discovery, DNS audit, traffic capture, etc.
+    case recon = "Recon"
     // case console = "Console"          — re-enable once we ship the Claude integration
 
     var id: String { rawValue }
@@ -1105,6 +1133,7 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .compliance: return "checkmark.shield"
         case .provisioning: return "wand.and.stars"
         case .security: return "shield.lefthalf.filled.badge.checkmark"
+        case .recon: return "binoculars.fill"
         }
     }
 }

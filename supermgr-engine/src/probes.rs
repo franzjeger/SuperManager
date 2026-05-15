@@ -112,6 +112,9 @@ pub const COMMON_PORTS: &[u16] = &[
     5986,  // WinRM-ssl
     6379,  // Redis
     6443,  // Kubernetes API
+    6789,  // UniFi-discovery (TCP fallback) — keep in scan list
+           // so adopted UniFi devices that locked everything
+           // else down still surface on a sweep.
     7000,  // various
     7001,  // weblogic
     8000,  // Web-alt

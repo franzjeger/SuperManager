@@ -9,15 +9,43 @@ struct AddHostSheet: View {
     /// doesn't have to walk through the picker). Defaults to
     /// `.linux` to preserve the existing toolbar-`+` behaviour.
     let defaultDeviceType: DeviceType
-    init(defaultDeviceType: DeviceType = .linux) {
+    /// Optional pre-fill from a recently-discovered device
+    /// (network scan row, web-capture URL, etc.). When supplied
+    /// every field below is initialised from this capture so the
+    /// operator only has to click Add (or pick auth + group).
+    let prefill: WebCapture?
+
+    init(
+        defaultDeviceType: DeviceType = .linux,
+        prefill: WebCapture? = nil
+    ) {
         self.defaultDeviceType = defaultDeviceType
-        _deviceType = State(initialValue: defaultDeviceType)
+        self.prefill = prefill
+        let dt = prefill?.deviceType ?? defaultDeviceType
+        _deviceType = State(initialValue: dt)
+        _label = State(initialValue: prefill?.label ?? "")
+        _hostname = State(initialValue: prefill?.hostname ?? "")
+        _port = State(initialValue: prefill?.port ?? 22)
+        _username = State(initialValue: prefill?.username ?? Self.defaultUsername(for: dt))
     }
 
-    @State private var label = ""
-    @State private var hostname = ""
-    @State private var port: UInt16 = 22
-    @State private var username = "root"
+    /// Vendor-appropriate SSH username default. Mirrors
+    /// WebCapture's heuristic so a pre-fill from a scan and a
+    /// "blank" sheet for the same device type look identical.
+    private static func defaultUsername(for type: DeviceType) -> String {
+        switch type {
+        case .unifi: return "ubnt"
+        case .fortigate: return "admin"
+        case .pfSense, .openWrt: return "root"
+        case .windows: return "Administrator"
+        case .linux, .custom: return "root"
+        }
+    }
+
+    @State private var label: String
+    @State private var hostname: String
+    @State private var port: UInt16
+    @State private var username: String
     @State private var group = ""
     @State private var deviceType: DeviceType
     @State private var authMethod: AuthMethod = .key
