@@ -348,16 +348,171 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
+        let combined = format!("{stderr}{stdout}");
+        // Interpret common strongSwan failure patterns into a
+        // short human-actionable diagnosis. Falls back to the
+        // raw exit message when nothing matches so we never
+        // lose information.
+        let diagnosis = diagnose_strongswan_failure(&combined);
+        let header = match diagnosis {
+            Some(d) => format!("{} ({})", d, output.status),
+            None => format!(
+                "{} {:?} exited {}",
+                bin.display(),
+                args,
+                output.status,
+            ),
+        };
         return Err(anyhow!(
-            "{} {:?} exited {}: {}{}",
-            bin.display(),
-            args,
-            output.status,
-            stderr,
-            stdout
+            "{header}\n\n--- swanctl output ---\n{combined}"
         ));
     }
     Ok([stdout, stderr].concat())
+}
+
+/// Map strongSwan's verbose negotiation log onto a one-line
+/// human diagnosis. Returns `None` for novel failures so the
+/// caller falls back to the raw exit message — we never hide
+/// the original.
+///
+/// Patterns are matched in priority order: the first one that
+/// hits wins, so more specific patterns come first.
+pub(crate) fn diagnose_strongswan_failure(log: &str) -> Option<String> {
+    let l = log.to_ascii_lowercase();
+
+    // Authentication-side failures — most common operator
+    // confusion, deserves the clearest message.
+    if l.contains("eap-ms-chapv2 failed")
+        || l.contains("eap_mschapv2 method failed")
+    {
+        return Some(
+            "EAP-MSCHAPv2 authentication failed. Username or \
+             password rejected by the server. If your FortiGate / \
+             Windows RADIUS expects a domain prefix, try \
+             `DOMAIN\\user` or `user@realm` in the username field."
+                .to_owned(),
+        );
+    }
+    if l.contains("received authentication_failed notify") {
+        return Some(
+            "Server rejected our credentials (AUTHENTICATION_FAILED). \
+             Most often a wrong pre-shared key for IKEv2, or the \
+             user account is locked / disabled."
+                .to_owned(),
+        );
+    }
+    if l.contains("invalid_id_information") || l.contains("invalid_id") {
+        return Some(
+            "Server rejected our identity (INVALID_ID_INFORMATION). \
+             Check the `local_id` / `remote_id` in the profile."
+                .to_owned(),
+        );
+    }
+
+    // Crypto / proposal-mismatch failures.
+    if l.contains("no_proposal_chosen") || l.contains("no proposal chosen") {
+        return Some(
+            "No matching IKE/ESP proposal. The server didn't accept \
+             any cipher suite we offered. Pin a specific proposal in \
+             the profile (Advanced → IKE proposals)."
+                .to_owned(),
+        );
+    }
+    // ECP/MODP mismatch is recoverable — strongSwan retries
+    // with the requested group automatically. We only see this
+    // if the retry ALSO failed.
+    if l.contains("ts_unacceptable") {
+        return Some(
+            "Traffic-selector mismatch (TS_UNACCEPTABLE). The local \
+             or remote subnets in your profile don't match what the \
+             gateway is configured to allow."
+                .to_owned(),
+        );
+    }
+
+    // Network / reachability.
+    if l.contains("retransmit") && l.contains("giving up") {
+        return Some(
+            "Gateway unreachable — every retransmit timed out. \
+             Check the server address / port and that UDP 500 + \
+             4500 aren't blocked between you and the gateway."
+                .to_owned(),
+        );
+    }
+    if l.contains("no route to host") || l.contains("network is unreachable") {
+        return Some(
+            "Kernel returned 'no route to host' for the gateway. \
+             You may need to grant SuperManager the Local Network \
+             permission under System Settings → Privacy & Security."
+                .to_owned(),
+        );
+    }
+    if l.contains("connection refused") {
+        return Some(
+            "Gateway actively refused the connection (TCP). For an \
+             IKEv2 dial-up the gateway must listen on UDP 500/4500, \
+             not TCP — verify the address + port."
+                .to_owned(),
+        );
+    }
+
+    // Config / profile problems.
+    if l.contains("no matching peer config found") {
+        return Some(
+            "Server doesn't have a peer config that matches our \
+             identity / IP. The user account or group on the \
+             gateway may not exist, or the local_id is wrong."
+                .to_owned(),
+        );
+    }
+    if l.contains("unable to install policy")
+        || l.contains("kernel install")
+    {
+        return Some(
+            "Tunnel established but the kernel rejected the routing \
+             policy. Usually a conflict with an existing route to \
+             the same subnet — disconnect other VPNs and retry."
+                .to_owned(),
+        );
+    }
+
+    // Catch-all: connection attempt finished without a successful
+    // CHILD_SA. Common when the EAP phase was never reached.
+    if l.contains("establishing child_sa") && l.contains("failed") {
+        return Some(
+            "IKE_AUTH completed but CHILD_SA setup failed — usually \
+             a phase-2 proposal mismatch or traffic-selector issue."
+                .to_owned(),
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod diagnose_tests {
+    use super::diagnose_strongswan_failure;
+
+    #[test]
+    fn mschapv2_auth_failure() {
+        let log = "[IKE] EAP-MS-CHAPv2 failed with error \
+                   ERROR_AUTHENTICATION_FAILURE: 'FAILED'\n\
+                   [IKE] EAP_MSCHAPV2 method failed";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("EAP-MSCHAPv2 authentication failed"));
+        assert!(d.contains("DOMAIN"));
+    }
+
+    #[test]
+    fn proposal_mismatch() {
+        let log = "[IKE] received NO_PROPOSAL_CHOSEN notify error";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("No matching IKE/ESP proposal"));
+    }
+
+    #[test]
+    fn unknown_failure_returns_none() {
+        assert!(diagnose_strongswan_failure("something we've never seen before").is_none());
+    }
 }
 
 async fn run_with_timeout(

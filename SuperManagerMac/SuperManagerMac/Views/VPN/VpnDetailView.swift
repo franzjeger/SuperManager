@@ -552,11 +552,40 @@ struct VpnDetailView: View {
 
             if let actionError {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(actionError)
-                        .font(.caption)
+                    // The helper now formats errors as
+                    //   "{diagnosis}\n\n--- swanctl output ---\n{raw log}"
+                    // — split on that boundary so the operator
+                    // sees the clean diagnosis first and the
+                    // raw log only on demand. Lines that don't
+                    // contain the boundary fall back to
+                    // single-text rendering.
+                    let parts = ParsedActionError(raw: actionError)
+                    Text(parts.headline)
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if let detail = parts.detail {
+                        DisclosureGroup {
+                            ScrollView {
+                                Text(detail)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .frame(maxHeight: 240)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(.red.opacity(0.05))
+                            )
+                        } label: {
+                            Text("Show raw swanctl output")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     // The error text from swanctl is usually truncated and
                     // unhelpful; the actual diagnosis lives in the charon
                     // log lines a few KB above. Surface a one-click jump
@@ -1384,4 +1413,40 @@ struct VpnDetailView: View {
         }
     }
 
+}
+
+// MARK: - Action-error parser
+
+/// Split a connect-error string into a one-line diagnosis +
+/// optional raw log. The helper formats VPN failures as:
+///
+///     {diagnosis} ({exit status})
+///     \n\n--- swanctl output ---\n
+///     {raw log}
+///
+/// or, when the helper can't diagnose, falls back to:
+///
+///     {bin} {args} exited {status}
+///     \n\n--- swanctl output ---\n
+///     {raw log}
+///
+/// Either shape is split on the literal boundary. Strings
+/// that don't contain it fall through to single-line render.
+private struct ParsedActionError {
+    let headline: String
+    let detail: String?
+
+    init(raw: String) {
+        let marker = "\n\n--- swanctl output ---\n"
+        if let r = raw.range(of: marker) {
+            self.headline = String(raw[..<r.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = String(raw[r.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.detail = body.isEmpty ? nil : body
+        } else {
+            self.headline = raw
+            self.detail = nil
+        }
+    }
 }
