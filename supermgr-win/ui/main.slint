@@ -1,0 +1,240 @@
+// SuperManager Windows UI — Slint declarative definition.
+//
+// The Rust side instantiates `AppWindow`, populates its model properties
+// from RPC results, and listens to its callbacks. Keep the Slint surface
+// purely declarative: no business logic, no transport details, no error
+// formatting — Rust owns all of that.
+
+import { Button, LineEdit, ListView, StandardListView, TabWidget, ComboBox, VerticalBox, HorizontalBox, GroupBox } from "std-widgets.slint";
+
+// One row in the SSH-key list. Mirrors the JSON the daemon emits:
+//   { id, name, key_type, fingerprint, created_at }
+export struct KeyRow {
+    id: string,
+    name: string,
+    key_type: string,
+    fingerprint: string,
+    created_at: string,
+}
+
+// One row in the host list. Mirrors the daemon's host JSON.
+export struct HostRow {
+    id: string,
+    label: string,
+    hostname: string,
+    username: string,
+    device_type: string,
+    pinned: bool,
+}
+
+export component AppWindow inherits Window {
+    title: "SuperManager";
+    preferred-width: 960px;
+    preferred-height: 600px;
+
+    // ------------------------------------------------------------------
+    // State pushed in from Rust
+    // ------------------------------------------------------------------
+    in property <[KeyRow]> keys: [];
+    in property <[HostRow]> hosts: [];
+    in property <string> daemon-status: "Connecting…";
+    in property <string> last-error: "";
+
+    // Form bindings for the "Generate new key" panel.
+    in-out property <string> new-key-name: "";
+    in-out property <string> new-key-description: "";
+    in-out property <int> new-key-type-index: 0;     // 0 = ed25519, 1 = rsa4096, 2 = rsa2048
+
+    // ------------------------------------------------------------------
+    // Callbacks fired by user actions — Rust hooks these.
+    // ------------------------------------------------------------------
+    callback refresh();
+    callback generate-key(string /* name */, string /* description */, string /* key_type */);
+    callback delete-key(string /* key_id */);
+    callback export-key(string /* key_id */);
+    callback delete-host(string /* host_id */);
+
+    VerticalBox {
+        Rectangle {
+            background: #1d2733;
+            height: 48px;
+            HorizontalBox {
+                padding-left: 16px;
+                padding-right: 16px;
+                Text {
+                    text: "SuperManager";
+                    color: white;
+                    font-size: 18px;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: root.daemon-status;
+                    color: #aac4dc;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        if root.last-error != "": Rectangle {
+            background: #5c2326;
+            HorizontalBox {
+                padding: 8px;
+                Text {
+                    text: "⚠ " + root.last-error;
+                    color: #ffd0d0;
+                    horizontal-stretch: 1;
+                }
+            }
+        }
+
+        TabWidget {
+            Tab {
+                title: "SSH Keys";
+                VerticalBox {
+                    padding: 12px;
+                    GroupBox {
+                        title: "Generate new key";
+                        VerticalBox {
+                            HorizontalBox {
+                                Text { text: "Name"; vertical-alignment: center; min-width: 100px; }
+                                LineEdit {
+                                    placeholder-text: "frank@workstation";
+                                    text <=> root.new-key-name;
+                                }
+                            }
+                            HorizontalBox {
+                                Text { text: "Description"; vertical-alignment: center; min-width: 100px; }
+                                LineEdit {
+                                    placeholder-text: "primary workstation key";
+                                    text <=> root.new-key-description;
+                                }
+                            }
+                            HorizontalBox {
+                                Text { text: "Type"; vertical-alignment: center; min-width: 100px; }
+                                ComboBox {
+                                    model: ["ed25519", "rsa4096", "rsa2048"];
+                                    current-index <=> root.new-key-type-index;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                                Button {
+                                    text: "Generate";
+                                    primary: true;
+                                    clicked => {
+                                        root.generate-key(
+                                            root.new-key-name,
+                                            root.new-key-description,
+                                            root.new-key-type-index == 0 ? "ed25519"
+                                                : root.new-key-type-index == 1 ? "rsa4096"
+                                                : "rsa2048"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    GroupBox {
+                        title: "Managed keys";
+                        VerticalBox {
+                            HorizontalBox {
+                                Button { text: "Refresh"; clicked => { root.refresh(); } }
+                                Rectangle { horizontal-stretch: 1; }
+                                Text {
+                                    text: "Total: " + root.keys.length;
+                                    vertical-alignment: center;
+                                    color: #888;
+                                }
+                            }
+                            ListView {
+                                min-height: 240px;
+                                for key[i] in root.keys: Rectangle {
+                                    height: 56px;
+                                    background: mod(i, 2) == 0 ? #fafafa : #ffffff;
+                                    HorizontalBox {
+                                        padding-left: 12px;
+                                        padding-right: 12px;
+                                        VerticalBox {
+                                            horizontal-stretch: 1;
+                                            spacing: 2px;
+                                            Text { text: key.name; font-weight: 600; }
+                                            Text {
+                                                text: key.key_type + "  ·  " + key.fingerprint;
+                                                color: #555;
+                                                font-size: 12px;
+                                            }
+                                        }
+                                        Button {
+                                            text: "Export";
+                                            clicked => { root.export-key(key.id); }
+                                        }
+                                        Button {
+                                            text: "Delete";
+                                            clicked => { root.delete-key(key.id); }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: "Hosts";
+                VerticalBox {
+                    padding: 12px;
+                    HorizontalBox {
+                        Button { text: "Refresh"; clicked => { root.refresh(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: "Total: " + root.hosts.length;
+                            vertical-alignment: center;
+                            color: #888;
+                        }
+                    }
+                    ListView {
+                        min-height: 360px;
+                        for host[i] in root.hosts: Rectangle {
+                            height: 56px;
+                            background: mod(i, 2) == 0 ? #fafafa : #ffffff;
+                            HorizontalBox {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                VerticalBox {
+                                    horizontal-stretch: 1;
+                                    spacing: 2px;
+                                    Text {
+                                        text: (host.pinned ? "★ " : "") + host.label;
+                                        font-weight: 600;
+                                    }
+                                    Text {
+                                        text: host.username + "@" + host.hostname + "  ·  " + host.device_type;
+                                        color: #555;
+                                        font-size: 12px;
+                                    }
+                                }
+                                Button {
+                                    text: "Delete";
+                                    clicked => { root.delete-host(host.id); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Tab {
+                title: "VPN";
+                VerticalBox {
+                    padding: 24px;
+                    Text {
+                        text: "VPN profiles are not yet wired up on Windows.\n\nThe daemon has stubbed slots for WireGuard (WireGuardNT), OpenVPN (openvpn.exe subprocess), IKEv2 (Windows RAS via PowerShell), and FortiGate SSL VPN (openfortivpn subprocess). Each will land in a follow-up.";
+                        wrap: word-wrap;
+                        color: #555;
+                    }
+                }
+            }
+        }
+    }
+}
