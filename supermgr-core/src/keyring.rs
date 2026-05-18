@@ -28,6 +28,9 @@ use zeroize::Zeroize;
 
 use crate::error::SecretError;
 
+#[cfg(target_os = "windows")]
+use keyring::Entry as WinKeyringEntry;
+
 // ---------------------------------------------------------------------------
 // ZeroizingSecret
 // ---------------------------------------------------------------------------
@@ -323,5 +326,105 @@ impl SecretStore for KeychainStore {
             })?;
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows: CredentialManagerStore
+// ---------------------------------------------------------------------------
+
+/// Production [`SecretStore`] backed by Windows Credential Manager.
+///
+/// Uses the `keyring` crate's `windows-native` backend, which wraps
+/// `CredReadW` / `CredWriteW` / `CredDeleteW` from the Advapi32 Credential
+/// Management API. Items are stored under the target name
+/// `"com.sybr.supermanager:<label>"`, persisted at `LOCAL_MACHINE` scope so
+/// the daemon (running as `LocalSystem`) and the interactive-user GUI can
+/// both reach them. Persistence survives reboot but does not roam.
+#[cfg(target_os = "windows")]
+pub struct CredentialManagerStore;
+
+#[cfg(target_os = "windows")]
+const WIN_KEYRING_SERVICE: &str = "com.sybr.supermanager";
+
+#[cfg(target_os = "windows")]
+impl CredentialManagerStore {
+    /// Create a new `CredentialManagerStore`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Build a `keyring::Entry` for `label`. Credential Manager calls are
+    /// cheap and stateless, so we open a fresh entry per operation rather
+    /// than caching handles across awaits.
+    fn entry(label: &str) -> Result<WinKeyringEntry, SecretError> {
+        WinKeyringEntry::new(WIN_KEYRING_SERVICE, label).map_err(|e| {
+            SecretError::ServiceUnavailable(format!("keyring entry construct: {e}"))
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Default for CredentialManagerStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[async_trait]
+impl SecretStore for CredentialManagerStore {
+    async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
+        let label_owned = label.to_owned();
+        let secret_owned = secret.to_vec();
+        // Credential Manager APIs are synchronous syscalls; bounce them to
+        // a blocking thread so we don't stall the async runtime.
+        tokio::task::spawn_blocking(move || -> Result<(), SecretError> {
+            let entry = Self::entry(&label_owned)?;
+            entry
+                .set_secret(&secret_owned)
+                .map_err(|e| SecretError::StoreFailed {
+                    label: label_owned.clone(),
+                    reason: e.to_string(),
+                })
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
+        let label_owned = label.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<ZeroizingSecret, SecretError> {
+            let entry = Self::entry(&label_owned)?;
+            match entry.get_secret() {
+                Ok(bytes) => Ok(ZeroizingSecret::from_vec(bytes)),
+                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
+                    label: label_owned.clone(),
+                }),
+                Err(e) => Err(SecretError::ServiceUnavailable(e.to_string())),
+            }
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+    }
+
+    async fn delete(&self, label: &str) -> Result<(), SecretError> {
+        let label_owned = label.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<(), SecretError> {
+            let entry = Self::entry(&label_owned)?;
+            match entry.delete_credential() {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
+                    label: label_owned.clone(),
+                }),
+                Err(e) => Err(SecretError::StoreFailed {
+                    label: label_owned.clone(),
+                    reason: e.to_string(),
+                }),
+            }
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
     }
 }
