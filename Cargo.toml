@@ -74,7 +74,7 @@ russh       = "0.46"
 # SFTP over russh
 russh-sftp  = "2.0"
 # SSH key loading for russh authentication
-russh-keys  = "0.46"
+russh-keys  = "0.49"
 # Random number generation
 rand        = "0.8"
 # Template engine for FortiGate / UniFi configuration generation.
