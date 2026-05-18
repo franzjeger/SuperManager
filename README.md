@@ -1,10 +1,14 @@
 # SuperManager
 
-A unified SSH, VPN, and network device management application for **Linux** (GTK4) and **macOS** (SwiftUI), built with a shared Rust core.
+A unified SSH, VPN, and network device management application for **Linux** (GTK4), **macOS** (SwiftUI), and **Windows** (Slint), built with a shared Rust core.
 
-SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec, OpenVPN, Azure VPN), network device monitoring, and remote desktop into a single desktop application with an integrated AI assistant.
+SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec + SSL VPN, OpenVPN, Azure VPN, IKEv2), network device monitoring (FortiGate, UniFi, OPNsense, Sophos XG), and remote desktop into a single desktop application with an integrated AI assistant.
 
-The Linux client uses GTK4 + libadwaita and a `supermgrd` D-Bus system daemon. The macOS client is a native SwiftUI app talking to a privileged `supermanager-helper` LaunchDaemon over a Unix socket. Both share `supermgr-core` (types, traits, keychain abstraction) and `supermgr-engine` (renderers, scan logic, RPC handlers).
+- **Linux** — GTK4 + libadwaita GUI talking to a `supermgrd` D-Bus system daemon.
+- **macOS** — native SwiftUI app talking to a privileged `supermanager-helper` LaunchDaemon over a Unix socket.
+- **Windows** — Slint GUI talking to a `supermgrd-win` Windows Service over a named pipe. See [WINDOWS.md](WINDOWS.md) for install + build instructions.
+
+All three share `supermgr-core` (types, traits, secret-store abstraction, RPC protocol) and `supermgr-engine` (renderers, scan logic).
 
 ## Features
 
