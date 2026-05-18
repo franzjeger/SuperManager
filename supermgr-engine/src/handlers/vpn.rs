@@ -909,6 +909,9 @@ impl EngineServer {
             ProfileConfig::FortiGate(fg) => {
                 fg.routes = if full_tunnel { Vec::new() } else { routes };
             }
+            ProfileConfig::ForticlientSslvpn(fc) => {
+                fc.routes = if full_tunnel { Vec::new() } else { routes };
+            }
             ProfileConfig::OpenVpn(_)
             | ProfileConfig::AzureVpn(_)
             | ProfileConfig::Generic(_) => {
@@ -1091,6 +1094,13 @@ impl EngineServer {
                         Ok(r) => ov.password = Some(r),
                         Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e),
                     }
+                }
+            }
+            ProfileConfig::ForticlientSslvpn(fc) => {
+                let new_pw = format!("vpn/{new_id}/forticlient-password");
+                match copy_secret(&self.secrets, &fc.password, new_pw).await {
+                    Ok(r) => fc.password = r,
+                    Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e),
                 }
             }
             ProfileConfig::AzureVpn(_) | ProfileConfig::Generic(_) => {
