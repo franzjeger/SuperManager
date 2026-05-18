@@ -27,5 +27,14 @@ security-framework = "3.2"
 secret-service = { workspace = true }
 zbus           = { workspace = true }
 
+# Windows: Credential Manager (via the `keyring` crate's win-native
+# backend, which wraps `CredReadW` / `CredWriteW` / `CredDeleteW`).
+# We also need tokio's Windows-only named-pipe types for the daemon
+# IPC client — those live behind `tokio::net::windows::named_pipe`
+# which is gated on `cfg(windows)` in tokio itself, so no extra
+# feature flag is required here.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring        = { version = "3.6", default-features = false, features = ["windows-native"] }
+
 [lints]
 workspace = true

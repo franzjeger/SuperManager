@@ -1,0 +1,98 @@
+[package]
+name        = "supermgrd-win"
+version     = "1.0.0"
+edition     = "2021"
+description = "SuperManager privileged daemon for Windows — runs as a Service and exposes a named-pipe RPC interface"
+license     = "GPL-3.0-or-later"
+
+[[bin]]
+name = "supermgrd-win"
+path = "src/main.rs"
+
+# Windows version-info resource embedded by build.rs via the `winres` crate.
+# Produces a VS_FIXEDFILEINFO block in the .exe so File Explorer's
+# Properties dialog shows the right version + manufacturer, and the WiX
+# installer's `!(bind.FileVersion.supermgrd_win.exe)` placeholder resolves
+# to a non-empty value.
+[build-dependencies]
+winres = "0.1"
+
+[dependencies]
+supermgr-core   = { path = "../supermgr-core" }
+
+anyhow          = { workspace = true }
+async-trait     = { workspace = true }
+base64          = { workspace = true }
+chrono          = { workspace = true }
+ipnet           = { workspace = true }
+rand            = { workspace = true }
+reqwest         = { workspace = true }
+rsa             = { workspace = true }
+russh           = { workspace = true }
+russh-keys      = { workspace = true }
+russh-sftp      = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+sha2            = { workspace = true }
+ssh-key         = { workspace = true }
+thiserror       = { workspace = true }
+tokio           = { workspace = true }
+toml            = { workspace = true }
+tracing         = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid            = { workspace = true }
+zeroize         = { workspace = true }
+
+# Directory discovery (LocalAppData, ProgramData) without re-implementing
+# SHGetKnownFolderPath ourselves.
+directories = "5"
+
+# Locate openvpn.exe and other helpers on %PATH%. Cross-platform crate;
+# we don't gate it because using `which` in non-Windows builds is harmless
+# (the OpenVPN backend is Windows-gated at the module level anyway).
+which = "6"
+
+# Windows-only deps live behind a target gate so `cargo check`/`cargo metadata`
+# can resolve this crate on Linux/macOS without pulling Win32 crates that
+# would fail to compile off-Windows. The binary itself is also gated at
+# `main.rs` so a Linux build produces a stub `fn main()` that errors out.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
+eventlog = "0.3"
+log      = "0.4"
+# WireGuardNT Rust bindings. Dynamically loads `wireguard.dll` at runtime
+# via libloading, so this dep does not pull a build-time SDK requirement.
+# The DLL + WireGuardNT driver must be present on the user's system at
+# connect time; the MSI installer bundles both. We pin the patch version
+# we tested against to avoid surprise breakage from upstream API churn.
+wireguard-nt = "0.4"
+# wireguard-nt 0.4 declares a use of `winapi::shared::winerror` but does
+# not enable the `winerror` feature on its own winapi dep, so it fails to
+# compile unless some other crate in the dependency graph activates the
+# feature. We do that ourselves; this is purely a build-graph fix and our
+# code does not touch winapi directly.
+winapi = { version = "0.3", features = ["winerror", "winbase", "ntdef", "minwindef"] }
+
+# The workspace-wide `unsafe_code = "forbid"` lint is incompatible with
+# Win32 integration: `define_windows_service!` expands to an `extern "system"`
+# entry point that windows-service marks `unsafe`, and SDDL parsing for the
+# named-pipe ACL eventually needs raw FFI. We override the rust lint group
+# while keeping the clippy lints in sync with the rest of the workspace,
+# so style/correctness checks stay strict.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all       = { level = "warn", priority = -1 }
+pedantic  = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"

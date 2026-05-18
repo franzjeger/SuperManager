@@ -28,3 +28,15 @@ SuperManagerMac/**/xcuserdata/
 SuperManagerMac/**/*.xcuserstate
 .DS_Store
 dist/
+
+# Bundled third-party binaries dropped here by the installer build step.
+# See vendor/README.md for the expected filenames and where to download
+# them from. Tracked README is in git; nothing else here is.
+/vendor/*
+!/vendor/README.md
+
+# WiX build outputs
+/installer/wix/obj/
+/installer/wix/SuperManager.msi
+/installer/wix/SuperManager-Setup.exe
+/installer/wix/*.wixpdb

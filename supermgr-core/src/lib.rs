@@ -8,6 +8,9 @@
 //! | [`host`]     | Managed-device model (`Host`, `HostSummary`) — used for SSH boxes, firewalls, controllers, anything we manage |
 //! | [`ssh`]      | SSH-specific types: keys, audit log, authentication method |
 //! | [`dbus`]     | D-Bus interface constants, client proxy, error mapping (Linux only) |
+//! | [`pipe`]     | Windows named-pipe client (Windows only) |
+//! | [`protocol`] | Wire-format types shared by all transports |
+//! | [`client`]   | Platform-selected re-export of the daemon client type |
 //! | [`error`]    | Unified error hierarchy (VPN + SSH) |
 //! | [`keyring`]  | Secret store trait and platform implementations |
 
@@ -15,6 +18,11 @@
 
 #[cfg(target_os = "linux")]
 pub mod dbus;
+#[cfg(target_os = "windows")]
+pub mod pipe;
+pub mod protocol;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod client;
 pub mod error;
 pub mod host;
 pub mod keyring;

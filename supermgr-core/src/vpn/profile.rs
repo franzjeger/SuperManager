@@ -229,6 +229,60 @@ pub struct AzureVpnConfig {
 }
 
 // ---------------------------------------------------------------------------
+// FortiGate / FortiClient SSL VPN
+// ---------------------------------------------------------------------------
+
+/// Configuration for a FortiGate **SSL VPN** connection driven via the
+/// open-source `openfortivpn` client.
+///
+/// Distinct from [`FortiGateConfig`], which targets FortiGate's IKEv2 IPsec
+/// stack via strongSwan (Linux) / Windows RAS. SSL VPN deployments are far
+/// more common in the wild and use a completely different protocol — HTTPS
+/// on a configurable port, with optional client-certificate auth on top of
+/// username + password.
+///
+/// On disk this profile selects `openfortivpn` (Linux + Windows) and the
+/// backend layer handles the subprocess + management lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForticlientSslvpnConfig {
+    /// FortiGate appliance hostname or IP. Without a port, defaults to 443.
+    pub host: String,
+
+    /// SSL VPN portal port. FortiGate typically listens on 443 or 10443.
+    #[serde(default = "default_sslvpn_port")]
+    pub port: u16,
+
+    /// SSL VPN username (the same one the user types into the FortiClient).
+    pub username: String,
+
+    /// Keyring reference to the user's password.
+    pub password: SecretRef,
+
+    /// Optional trusted CA fingerprint (SHA-256 hex). When set,
+    /// `openfortivpn` only proceeds if the gateway's certificate chain
+    /// matches; when absent we ship `--trusted-cert <fingerprint>` on
+    /// every connect after the first, computed from the cert the gateway
+    /// presented (TOFU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_cert: Option<String>,
+
+    /// DNS servers to push when the tunnel comes up. Empty = whatever
+    /// the gateway pushes (or no override on Windows when the gateway
+    /// pushes nothing).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_servers: Vec<IpAddr>,
+
+    /// Split-tunnel routes. Empty = let `openfortivpn` install whatever
+    /// the gateway pushes (typically full-tunnel).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<IpNet>,
+}
+
+const fn default_sslvpn_port() -> u16 {
+    443
+}
+
+// ---------------------------------------------------------------------------
 // Generic backend placeholder
 // ---------------------------------------------------------------------------
 
@@ -255,6 +309,9 @@ pub enum ProfileConfig {
     WireGuard(WireGuardConfig),
     /// FortiGate IPsec / IKEv2 via strongSwan.
     FortiGate(FortiGateConfig),
+    /// FortiGate **SSL VPN** via `openfortivpn`.  Most common FortiGate
+    /// remote-access deployment today.
+    ForticlientSslvpn(ForticlientSslvpnConfig),
     /// OpenVPN session managed via the `openvpn` v2 CLI.
     OpenVpn(OpenVpnConfig),
     /// Azure Point-to-Site VPN with Entra ID (device-code) authentication.
@@ -270,6 +327,7 @@ impl ProfileConfig {
         match self {
             Self::WireGuard(_) => "WireGuard",
             Self::FortiGate(_) => "FortiGate (IPsec/IKEv2)",
+            Self::ForticlientSslvpn(_) => "FortiGate SSL VPN",
             Self::OpenVpn(_) => "OpenVPN3",
             Self::AzureVpn(_) => "Azure VPN (Entra ID)",
             Self::Generic(_) => "Generic",
@@ -415,6 +473,9 @@ impl From<&Profile> for ProfileSummary {
             ProfileConfig::FortiGate(fg) => {
                 fg.routes.iter().map(|r| r.to_string()).collect()
             }
+            ProfileConfig::ForticlientSslvpn(fc) => {
+                fc.routes.iter().map(|r| r.to_string()).collect()
+            }
             _ => Vec::new(),
         };
         Self {
@@ -428,15 +489,18 @@ impl From<&Profile> for ProfileSummary {
                 .map(|dt| dt.timestamp().max(0) as u64),
             host: match &p.config {
                 ProfileConfig::FortiGate(fg) => Some(fg.host.clone()),
+                ProfileConfig::ForticlientSslvpn(fc) => Some(fc.host.clone()),
                 _ => None,
             },
             username: match &p.config {
                 ProfileConfig::FortiGate(fg) => Some(fg.username.clone()),
+                ProfileConfig::ForticlientSslvpn(fc) => Some(fc.username.clone()),
                 ProfileConfig::OpenVpn(ov) => ov.username.clone(),
                 _ => None,
             },
             dns_servers: match &p.config {
                 ProfileConfig::FortiGate(fg) => fg.dns_servers.clone(),
+                ProfileConfig::ForticlientSslvpn(fc) => fc.dns_servers.clone(),
                 _ => Vec::new(),
             },
             kill_switch: p.kill_switch,

@@ -107,3 +107,47 @@ jobs:
                 echo "::endgroup::"
                 exit 1
             }
+
+  # Windows build — exercises the Windows-only crates (supermgrd-win,
+  # supermgr-win) plus the cross-platform supermgr-core / supermgr-mcp.
+  # The Linux daemon (supermgrd) and Mac stack are excluded because
+  # their D-Bus / strongSwan / launchd deps don't exist on Windows.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Build (Windows crates)
+        run: |
+          cargo build --release `
+            -p supermgr-core `
+            -p supermgr-mcp `
+            -p supermgrd-win `
+            -p supermgr-win
+
+      - name: Tests (cross-platform crates)
+        run: |
+          cargo test `
+            -p supermgr-core `
+            -p supermgr-mcp
+
+      # Build the MSI on every push to main + every PR — catches WiX
+      # schema mistakes before they hit a release tag. Cached
+      # extensions across runs would be nice but `wix extension add`
+      # is fast enough not to bother.
+      - name: Install WiX v5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.UI.wixext/5.0.2 --global
+          wix extension add WixToolset.Util.wixext/5.0.2 --global
+
+      - name: Build MSI
+        run: .\installer\wix\build-msi.ps1 -SkipBuild
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: SuperManager-msi-${{ github.sha }}
+          path: installer/wix/SuperManager.msi
+          retention-days: 14

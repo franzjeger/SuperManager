@@ -1,7 +1,10 @@
 //! `supermgr-mcp` — MCP (Model Context Protocol) server for SuperManager.
 //!
 //! Exposes SSH and VPN operations as tools that Claude Code can invoke.
-//! Communicates with the `supermgrd` daemon via D-Bus on the system bus.
+//! Communicates with the local daemon over the platform-appropriate
+//! transport: D-Bus on Linux (`supermgrd`), named pipes on Windows
+//! (`supermgrd-win`). Both transports are reached via the
+//! [`supermgr_core::client::DaemonClient`] alias.
 //!
 //! # Transport
 //!
@@ -9,12 +12,11 @@
 
 use std::io::{self, BufRead, Write as _};
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tracing::{debug, error, info};
 
-use supermgr_core::dbus::DaemonProxy;
+use supermgr_core::client::{self, DaemonClient};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -302,7 +304,7 @@ fn tool_definitions() -> Value {
 // Tool execution
 // ---------------------------------------------------------------------------
 
-async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Result<Value, String> {
+async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Result<Value, String> {
     match name {
         "list_hosts" => {
             let json_str = proxy.list_hosts().await.map_err(|e| e.to_string())?;
@@ -472,7 +474,7 @@ fn handle_tools_list(id: &Value) -> JsonRpcResponse {
 }
 
 async fn handle_tools_call(
-    proxy: &DaemonProxy<'_>,
+    proxy: &DaemonClient,
     id: &Value,
     params: &Value,
 ) -> JsonRpcResponse {
@@ -525,14 +527,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("supermgr-mcp starting");
 
-    let conn = zbus::Connection::system()
+    let proxy = client::connect()
         .await
-        .context("D-Bus system connection failed — is supermgrd running?")?;
-    let proxy = DaemonProxy::new(&conn)
-        .await
-        .context("failed to create DaemonProxy")?;
+        .map_err(anyhow::Error::msg)?;
 
-    info!("connected to supermgrd via D-Bus");
+    info!("connected to supermgrd");
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();

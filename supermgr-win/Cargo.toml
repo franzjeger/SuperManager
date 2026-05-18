@@ -1,0 +1,66 @@
+[package]
+name        = "supermgr-win"
+version     = "1.0.0"
+edition     = "2021"
+description = "SuperManager desktop GUI for Windows (Slint frontend)"
+license     = "GPL-3.0-or-later"
+
+[[bin]]
+name = "supermgr-win"
+path = "src/main.rs"
+
+[dependencies]
+supermgr-core = { path = "../supermgr-core" }
+
+anyhow             = { workspace = true }
+chrono             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { workspace = true }
+
+# Windows-only UI stack lives behind a target gate so off-Windows tooling
+# (rust-analyzer, `cargo check` on a Linux dev box) can still resolve the
+# crate without pulling Slint's native code or the tray-icon's Win32
+# dependencies. The actual binary refuses to start anywhere except Windows
+# (see `main.rs`).
+[target.'cfg(target_os = "windows")'.dependencies]
+# Slint 1.x — pure-Rust UI framework. We pin to the `winit` backend with the
+# `software` renderer disabled (GPU path is fine on Windows and faster) and
+# turn off live-reload so the release build doesn't include the file watcher.
+slint = { version = "1.8", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-skia"] }
+
+# Cross-platform tray-icon abstraction. Backed by Win32 NotifyIcon on Windows.
+tray-icon = "0.19"
+
+# winit event loop integration: tray-icon needs a winit event source for the
+# menu events. Slint's winit backend re-exports the version it pins, so we
+# match here.
+winit = "0.30"
+
+# Cross-platform clipboard. On Windows it wraps OpenClipboard /
+# SetClipboardData via the `clipboard-win` crate — no Win32 plumbing in
+# our own code.
+arboard = { version = "3.4", default-features = false }
+
+# Slint code generation runs in build.rs; the slint-build crate produces Rust
+# from the `.slint` UI files at compile time. `winres` embeds the
+# VS_FIXEDFILEINFO version resource for File Explorer Properties + the MSI.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+slint-build = "1.8"
+winres      = "0.1"
+
+[lints.rust]
+# Slint's generated code intentionally emits patterns clippy::pedantic
+# considers stylistic warts (single-letter idents, large enums). We mirror
+# the workspace clippy config but relax the rust-side `unsafe_code` because
+# slint-build emits `unsafe extern "C"` shims in its generated module.
+unsafe_code = "allow"
+
+[lints.clippy]
+all       = { level = "warn", priority = -1 }
+pedantic  = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"

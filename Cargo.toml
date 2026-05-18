@@ -5,20 +5,25 @@ members = [
     "supermgr-engine",
     "supermgrd",
     "supermgrd-mac",
+    "supermgrd-win",
     "supermgr",
+    "supermgr-win",
     "supermgr-mcp",
     "supermanager-helper",
 ]
 # `cargo build` / `cargo test` (no -p / --workspace) only touches
-# this list. The Mac-only crates (supermgr-engine, supermgrd-mac,
-# supermanager-helper) stay out so the Linux CI image — which has
-# no security-framework, no launchd, no Xcode — doesn't try to
-# compile them. Run `cargo build --workspace` explicitly on macOS
-# to build everything.
+# this list. Platform-specific daemons and GUIs (supermgrd, supermgrd-mac,
+# supermgrd-win, supermgr, supermgr-win, supermgrd-mac, supermanager-helper,
+# supermgr-engine) stay out so a Linux/Windows CI image — which has no
+# Apple SDKs, no launchd, no Xcode — doesn't try to compile macOS crates,
+# and a Mac/Linux image doesn't try to compile the Windows daemon/GUI.
+#
+# Per-host invocations:
+#   cargo build -p supermgrd -p supermgr                  # Linux
+#   cargo build --workspace                               # macOS only
+#   cargo build -p supermgrd-win -p supermgr-win          # Windows
 default-members = [
     "supermgr-core",
-    "supermgrd",
-    "supermgr",
     "supermgr-mcp",
 ]
 
