@@ -1,0 +1,102 @@
+name: Release (Windows MSI)
+# Triggered alongside `release.yml` when a `v*` tag is pushed. Builds
+# the Windows MSI and uploads it to the matching GitHub Release.
+#
+# # Code signing (no EV cert today)
+#
+# Windows SmartScreen flags unsigned MSIs with a "Windows protected your
+# PC" prompt that requires the user to click "More info" → "Run anyway".
+# An OV or EV code-signing certificate from DigiCert/Sectigo (~$200/year
+# OV, ~$300/year EV) removes the prompt — but the SuperManager release
+# pipeline doesn't assume one is available.
+#
+# To wire signing in once you have a cert:
+#
+#   1. Export the cert as a .pfx + password.
+#   2. Add two repo secrets: `WINDOWS_PFX_BASE64` and `WINDOWS_PFX_PASSWORD`.
+#   3. Uncomment the `Sign MSI` step below.
+#   4. The MSI will be signtool-signed with SHA-256 / RFC 3161 timestamp
+#      and SmartScreen reputation will accumulate after a few signed
+#      releases.
+#
+# Until then the unsigned MSI ships with a `RELEASE_NOTES_WINDOWS.md`
+# blurb explaining the SmartScreen prompt so users aren't surprised.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msi:
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Cargo build (release)
+        run: |
+          cargo build --release `
+            -p supermgrd-win `
+            -p supermgr-win `
+            -p supermgr-mcp
+
+      - name: Install WiX v5
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.UI.wixext/5.0.2 --global
+          wix extension add WixToolset.Util.wixext/5.0.2 --global
+
+      - name: Build MSI
+        run: .\installer\wix\build-msi.ps1 -SkipBuild
+
+      # ----- Optional signing block (commented out until a cert exists) ----
+      # - name: Sign MSI
+      #   if: env.WINDOWS_PFX_BASE64 != ''
+      #   env:
+      #     WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+      #     WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+      #   run: |
+      #     $pfxPath = "$env:RUNNER_TEMP\codesign.pfx"
+      #     [System.IO.File]::WriteAllBytes(
+      #       $pfxPath,
+      #       [Convert]::FromBase64String($env:WINDOWS_PFX_BASE64)
+      #     )
+      #     & "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" `
+      #       sign /fd SHA256 `
+      #            /tr http://timestamp.digicert.com /td SHA256 `
+      #            /f $pfxPath /p $env:WINDOWS_PFX_PASSWORD `
+      #            installer\wix\SuperManager.msi
+      #     Remove-Item $pfxPath
+
+      - name: Rename MSI with version tag
+        shell: pwsh
+        run: |
+          $version = "$env:GITHUB_REF_NAME".TrimStart('v')
+          $dest = "installer\wix\SuperManager-$version.msi"
+          Move-Item "installer\wix\SuperManager.msi" $dest
+          "MSI_PATH=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Compute SHA-256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash $env:MSI_PATH -Algorithm SHA256).Hash
+          $hashFile = "$env:MSI_PATH.sha256"
+          "$hash  $(Split-Path -Leaf $env:MSI_PATH)" | Out-File -FilePath $hashFile -Encoding ascii
+          "MSI_SHA256_PATH=$hashFile" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "SHA-256: $hash"
+
+      - name: Attach MSI to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: |
+            ${{ env.MSI_PATH }}
+            ${{ env.MSI_SHA256_PATH }}
+          generate_release_notes: false
+          fail_on_unmatched_files: true
