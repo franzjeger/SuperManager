@@ -71,6 +71,12 @@ pub fn backend_for_profile(
             });
             Ok(Arc::new(azure::AzureBackend::new(tx)) as Arc<dyn VpnBackend>)
         }
+        ProfileConfig::ForticlientSslvpn(_) => Err(CoreError::internal(
+            "FortiClient SSL VPN backend is implemented on Windows only. \
+             Use the FortiGate (IPsec/IKEv2) backend on Linux, or invoke \
+             openfortivpn directly until a Linux backend lands."
+                .to_owned(),
+        )),
         ProfileConfig::Generic(g) => Err(CoreError::internal(format!(
             "no backend registered for generic plugin '{}'",
             g.backend_id
