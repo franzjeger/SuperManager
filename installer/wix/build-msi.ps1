@@ -6,7 +6,7 @@
 #        dotnet tool install --global wix --version 5.0.2
 #        wix extension add WixToolset.UI.wixext/5.0.2 --global
 #        wix extension add WixToolset.Util.wixext/5.0.2 --global
-#        wix extension add WixToolset.Bal.wixext/5.0.2 --global   # -Bundle only
+#        wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global   # -Bundle only
 #   3. Release builds of supermgrd-win.exe, supermgr-win.exe,
 #      supermgr-mcp.exe. The script invokes `cargo build --release` for
 #      you unless you pass `-SkipBuild`.
@@ -110,9 +110,12 @@ try {
 
         Write-Host "Compiling SuperManager-Setup.exe (Burn bundle)..."
         Remove-Item $outputExe -ErrorAction SilentlyContinue
+        # The bal extension was renamed in WiX v5 — the package
+        # `WixToolset.BootstrapperApplications.wixext` is the same
+        # thing the v4 docs still refer to as "bal".
         & $wix build `
             -arch x64 `
-            -ext WixToolset.Bal.wixext `
+            -ext WixToolset.BootstrapperApplications.wixext `
             -out $outputExe `
             $wxsBundle
         if ($LASTEXITCODE -ne 0) { throw "wix build (bundle) failed" }

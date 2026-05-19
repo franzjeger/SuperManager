@@ -141,13 +141,22 @@ jobs:
           dotnet tool install --global wix --version 5.0.2
           wix extension add WixToolset.UI.wixext/5.0.2 --global
           wix extension add WixToolset.Util.wixext/5.0.2 --global
+          wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
 
-      - name: Build MSI
-        run: .\installer\wix\build-msi.ps1 -SkipBuild
+      # Stage WireGuard + OpenVPN upstream MSIs so the Burn bundle
+      # build below works on every push - catches schema regressions
+      # in bundle.wxs before a release tag.
+      - name: Stage vendor binaries
+        run: .\scripts\windows\Get-VendorFiles.ps1
 
-      - name: Upload MSI artifact
+      - name: Build MSI + Burn bundle
+        run: .\installer\wix\build-msi.ps1 -SkipBuild -Bundle
+
+      - name: Upload installer artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: SuperManager-msi-${{ github.sha }}
-          path: installer/wix/SuperManager.msi
+          name: SuperManager-installer-${{ github.sha }}
+          path: |
+            installer/wix/SuperManager.msi
+            installer/wix/SuperManager-Setup.exe
           retention-days: 14

@@ -31,9 +31,12 @@ dist/
 
 # Bundled third-party binaries dropped here by the installer build step.
 # See vendor/README.md for the expected filenames and where to download
-# them from. Tracked README is in git; nothing else here is.
+# them from. Tracked README + manifest.toml (the version + hash pin
+# for the upstream installers) are in git; the binaries themselves are
+# fetched fresh on every build by scripts/windows/Get-VendorFiles.ps1.
 /vendor/*
 !/vendor/README.md
+!/vendor/manifest.toml
 
 # WiX build outputs
 /installer/wix/obj/

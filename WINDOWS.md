@@ -42,9 +42,27 @@ and other Linux-only crates. The workspace `default-members` list is set to
 just `supermgr-core` and `supermgr-mcp` so plain `cargo build` Just Works on
 any host.
 
-## Installing the service
+## Installing
 
-From an elevated PowerShell prompt:
+The recommended install is the **`SuperManager-Setup-<version>.exe`**
+Burn bootstrapper from the latest GitHub Release. It is a single
+executable that chain-installs everything SuperManager needs:
+
+1. WireGuard for Windows (driver + DLL)
+2. OpenVPN Community Edition (openvpn.exe + TAP-Windows6 driver)
+3. SuperManager itself (daemon + GUI + MCP server + Windows Service registration)
+
+You get one UAC prompt, one progress UI, no separate installs.
+
+If you already manage WireGuard and OpenVPN out-of-band (e.g. via
+Group Policy / Intune), grab the bare **`SuperManager-<version>.msi`**
+instead — same payload as the bundle minus the chained installers.
+
+### Manual service registration (developer flow)
+
+For local builds without an MSI, the same registration steps live in
+PowerShell so a `cargo run -p supermgrd-win -- --console` cycle can
+graduate to a service install once you're happy with the build:
 
 ```powershell
 .\scripts\windows\install-service.ps1
@@ -87,19 +105,32 @@ To remove:
 .\scripts\windows\uninstall-service.ps1
 ```
 
-## Packaging an MSI
+## Packaging the installer
 
 For end-user distribution, [`installer/wix/`](installer/wix/) contains a
-WiX-based MSI specification plus a Burn bootstrapper that optionally
-chains the WireGuardNT and OpenVPN Community installers as prerequisites.
+WiX v5 MSI specification plus a Burn bootstrapper that chains the
+WireGuardNT and OpenVPN Community installers as prerequisites.
 
 ```powershell
-# Prerequisite: WiX Toolset. Either:
-#   WiX v4: dotnet tool install --global wix
-#   WiX v3: download from https://wixtoolset.org/
-.\installer\wix\build-msi.ps1               # bare MSI
-.\installer\wix\build-msi.ps1 -Bundle       # bare MSI + chained-install .exe
+# Prerequisite: .NET SDK 8+ and WiX Toolset v5.
+#   dotnet tool install --global wix --version 5.0.2
+#   wix extension add WixToolset.UI.wixext/5.0.2 --global
+#   wix extension add WixToolset.Util.wixext/5.0.2 --global
+#   wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
+
+# Bare MSI (just SuperManager, assumes drivers already installed):
+.\installer\wix\build-msi.ps1
+
+# Burn bundle (auto-installs WireGuard + OpenVPN alongside SuperManager):
+.\scripts\windows\Get-VendorFiles.ps1
+.\installer\wix\build-msi.ps1 -Bundle
 ```
+
+`Get-VendorFiles.ps1` downloads + hash-verifies the upstream MSIs
+listed in [`vendor/manifest.toml`](vendor/manifest.toml). The pinned
+hashes are the only thing the build trusts; a tampered CDN won't
+get past the manifest check. Re-pin the manifest when you bump
+either upstream installer.
 
 The script runs `cargo build --release` (skip with `-SkipBuild`), then
 compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
@@ -116,20 +147,18 @@ compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
 
 ### Bundling third-party binaries (vendor/)
 
-Drop the following files into [`vendor/`](vendor/) before building to
-get a fully bundled installer. The directory is `.gitignore`d on purpose
-(license separation + version drift) — see [vendor/README.md](vendor/README.md)
-for download URLs.
+`vendor/` is `.gitignore`d on purpose (license separation + version
+drift). The only thing committed there is
+[`vendor/manifest.toml`](vendor/manifest.toml), which pins the upstream
+URLs + SHA-256 hashes of the WireGuard and OpenVPN installers chained
+by the Burn bundle. `Get-VendorFiles.ps1` populates the directory on
+every CI run + lets you populate it locally before a release build.
 
-| File                            | Effect when present |
-|---------------------------------|--------------------|
-| `vendor/openfortivpn.exe`       | Embedded directly into `SuperManager.msi` under `%ProgramFiles%\SuperManager\bin\`. The FortiClient SSL VPN backend picks it up automatically. |
-| `vendor/wireguard-installer.msi` | Chained into `SuperManager-Setup.exe` (Burn bootstrapper) by `-Bundle`. Installs the WireGuardNT driver + `wireguard.dll`. |
-| `vendor/openvpn-installer.msi`   | Chained into `SuperManager-Setup.exe` by `-Bundle`. Installs `openvpn.exe` + TAP-Windows6 driver. |
-
-When `vendor/openfortivpn.exe` is absent the bare MSI still builds — the
-FortiClient backend surfaces a typed `MissingDependency` error at connect
-time so the user knows what to install.
+| File                            | Source             | Effect when present |
+|---------------------------------|--------------------|--------------------|
+| `vendor/wireguard-installer.msi` | Pinned in `manifest.toml`, fetched by `Get-VendorFiles.ps1` | Chained into `SuperManager-Setup.exe` by `-Bundle`. Installs WireGuardNT driver + `wireguard.dll`. |
+| `vendor/openvpn-installer.msi`   | Pinned in `manifest.toml`, fetched by `Get-VendorFiles.ps1` | Chained into `SuperManager-Setup.exe` by `-Bundle`. Installs `openvpn.exe` + TAP-Windows6 driver. |
+| `vendor/openfortivpn.exe`        | User-supplied (no upstream Windows release exists) | Embedded directly into `SuperManager.msi`. Absent → FortiClient SSL VPN backend surfaces a typed `MissingDependency` error at connect time. |
 
 `-Bundle` additionally requires `installer/wix/license.rtf` (the
 bootstrapper's RTF license file shown on the welcome page).
@@ -205,14 +234,18 @@ polishing and code-signing for distribution — see the roadmap below.
 9. ✅ ~~Sophos XG XML Configuration API (`sophos_xml_api`).~~
 10. ✅ ~~WiX MSI installer specification + `build-msi.ps1` build script.~~
 11. ✅ ~~FortiGate SSL VPN via `openfortivpn` (new `ForticlientSslvpn` profile type + `import_forticlient_sslvpn` RPC).~~
-12. ✅ ~~Bundle prerequisites: openfortivpn embedded in the MSI, WireGuardNT + OpenVPN MSIs chained via the Burn bootstrapper.~~
+12. ✅ ~~Burn bootstrapper that chain-installs the WireGuard for Windows + OpenVPN Community MSIs alongside `SuperManager.msi`. End users run one `SuperManager-Setup-<version>.exe` and get every dependency installed.~~
 13. Code-signing (`signtool sign /fd SHA256` on the MSI + EXEs) is
     optional. The release workflow at `.github/workflows/release-windows.yml`
     has a commented-out signing block ready: drop a PFX cert into the
     `WINDOWS_PFX_BASE64` repo secret + uncomment the step. Until that
     lands, users see a SmartScreen prompt → "Run anyway" once per
     install (documented in the SmartScreen section above; SHA-256 of
-    each release MSI is published as `.sha256` for hash verification).
+    each release artifact is published as `.sha256` for hash verification).
+14. Build openfortivpn from source in CI (MSYS2 or Cygwin toolchain)
+    so FortiGate **SSL VPN** profiles also work out-of-the-box. The
+    other four VPN backends (WireGuard, OpenVPN, Azure P2S, FortiGate
+    IKEv2) all install bundled today.
 
 Each item is independent; see the `TODO` comments in the corresponding
 module for the precise next step.
