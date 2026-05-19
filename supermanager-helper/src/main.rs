@@ -51,6 +51,7 @@ use tracing::{debug, error, info, warn};
 mod auto_reconnect;
 mod connectivity_watchdog;
 mod dns_health_watchdog;
+mod fortivpn;
 mod kill_switch;
 mod openvpn;
 mod route_guardian;
@@ -68,6 +69,7 @@ struct Controllers {
     strongswan: Arc<Mutex<strongswan::Strongswan>>,
     wireguard: Arc<Mutex<wireguard::WireGuard>>,
     openvpn: Arc<Mutex<openvpn::OpenVpn>>,
+    fortivpn: Arc<Mutex<fortivpn::FortiVpn>>,
 }
 
 /// Path of the Unix socket we listen on.
@@ -183,6 +185,7 @@ async fn main() -> anyhow::Result<()> {
         strongswan: Arc::new(Mutex::new(strongswan::Strongswan::new())),
         wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new())),
         openvpn: Arc::new(Mutex::new(openvpn::OpenVpn::new())),
+        fortivpn: Arc::new(Mutex::new(fortivpn::FortiVpn::new())),
     };
 
     // Always-on auto-reconnect watchdog. Reads its persisted
@@ -299,6 +302,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
     let strongswan = &controllers.strongswan;
     let wireguard = &controllers.wireguard;
     let openvpn = &controllers.openvpn;
+    let fortivpn = &controllers.fortivpn;
     let id = req.id;
     if req.jsonrpc != "2.0" {
         return Response::err(id, -32600, "expected jsonrpc=2.0");
@@ -338,6 +342,9 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 "ovpn_connect",
                 "ovpn_disconnect",
                 "ovpn_status",
+                "forti_connect",
+                "forti_disconnect",
+                "forti_status",
                 "tailscaled_install",
                 "tailscaled_uninstall",
                 "tailscaled_status",
@@ -613,6 +620,49 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 match ov.status(&args).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("ovpn_status failed: {e:#}")),
+                }
+            }
+            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+        },
+
+        // -- FortiGate SSL-VPN (openfortivpn) --
+
+        "forti_connect" => {
+            let raw_args = req.params.clone();
+            match serde_json::from_value::<fortivpn::FortiConnectArgs>(req.params) {
+                Ok(args) => {
+                    let pid = args.profile_id.clone();
+                    let mut fv = fortivpn.lock().await;
+                    match fv.connect(args).await {
+                        Ok(r) => {
+                            let _ = auto_reconnect::refresh_args(
+                                &pid, "fortivpn".to_string(), raw_args).await;
+                            Response::ok(id, serde_json::to_value(r).unwrap_or_default())
+                        }
+                        Err(e) => Response::err(id, -32000, format!("forti_connect failed: {e:#}")),
+                    }
+                }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
+
+        "forti_disconnect" => match serde_json::from_value::<fortivpn::FortiDisconnectArgs>(req.params) {
+            Ok(args) => {
+                let mut fv = fortivpn.lock().await;
+                match fv.disconnect(args).await {
+                    Ok(()) => Response::ok(id, serde_json::json!({"ok": true})),
+                    Err(e) => Response::err(id, -32000, format!("forti_disconnect failed: {e:#}")),
+                }
+            }
+            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+        },
+
+        "forti_status" => match serde_json::from_value::<fortivpn::FortiStatusArgs>(req.params) {
+            Ok(args) => {
+                let fv = fortivpn.lock().await;
+                match fv.status(args).await {
+                    Ok(r) => Response::ok(id, serde_json::to_value(r).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("forti_status failed: {e:#}")),
                 }
             }
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
