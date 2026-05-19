@@ -1,0 +1,45 @@
+# Pinned upstream downloads consumed by `scripts/windows/Get-VendorFiles.ps1`
+# and chained into the SuperManager Burn bundle.
+#
+# Each entry pins the upstream URL + the SHA-256 hash the download must
+# match before being staged into `vendor/`. The hash is the only thing
+# the build trusts; a tampered CDN can't substitute a different file
+# without breaking the verification step.
+#
+# Updating an entry:
+#   1. Download the new MSI manually
+#   2. `Get-FileHash <file> -Algorithm SHA256`
+#   3. Replace the URL + sha256 here in a single commit so the diff
+#      shows both. Sign the commit if you have the GPG key wired up.
+#
+# Output filename (`output`) is what the WiX bundle.wxs references via
+# `SourceFile="vendor\<output>"`. Renaming an entry's output requires
+# also bumping bundle.wxs.
+
+[wireguard]
+# WireGuard for Windows — official upstream installer. Bundles the
+# WireGuardNT driver, wireguard.dll, and the WireGuard GUI app.
+# Re-pin when WireGuard ships a new amd64 build.
+version = "1.1"
+url = "https://download.wireguard.com/windows-client/wireguard-amd64-1.1.msi"
+sha256 = "6DAA5D37A9E2950DFB8C48B95AB8E562CB2BAD1C785D020F38F97BEA4C6A5566"
+output = "wireguard-installer.msi"
+
+[openvpn]
+# OpenVPN Community Edition — official upstream "latest stable" amd64
+# build. The `latest-stable` symlink rotates, so re-pin whenever you
+# refresh the bundle against a new release; the hash here is whatever
+# `openvpn-latest-stable-amd64.msi` was when this manifest was
+# committed.
+version = "latest-stable"
+url = "https://build.openvpn.net/downloads/releases/latest/openvpn-latest-stable-amd64.msi"
+sha256 = "7B70D592B421C20744D704D66A9C7B0C0FFF6B23C76A90F6AB52D9D2CECFAF25"
+output = "openvpn-installer.msi"
+
+# openfortivpn (FortiGate SSL VPN client) has no maintained Windows
+# upstream binary. The FortiClient backend on Windows surfaces a
+# typed `MissingDependency` error at connect time pointing the user
+# at `OPENFORTIVPN_EXE` until the user provides a build themselves
+# (or the SuperManager project ships one built in CI in a later
+# release). The other four VPN backends (WireGuard, OpenVPN, Azure,
+# FortiGate IKEv2) all install bundled and work out of the box.

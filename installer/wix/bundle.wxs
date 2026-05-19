@@ -42,15 +42,13 @@
       <MsiPackage Id="WireGuardForWindows"
                   SourceFile="vendor\wireguard-installer.msi"
                   Visible="yes"
-                  Permanent="yes"
-                  DisplayInternalUI="no" />
+                  Permanent="yes" />
 
       <!-- OpenVPN Community Edition: embedded and pinned the same way. -->
       <MsiPackage Id="OpenVpnCommunity"
                   SourceFile="vendor\openvpn-installer.msi"
                   Visible="yes"
-                  Permanent="yes"
-                  DisplayInternalUI="no" />
+                  Permanent="yes" />
 
       <!-- SuperManager itself, built by cargo release + wix.
            UpgradeCode-matched to the bare MSI so a subsequent bare-MSI
