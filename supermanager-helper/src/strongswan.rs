@@ -276,6 +276,16 @@ impl Strongswan {
         tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await.ok();
         tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await.ok();
 
+        // Drop the updown script in place so swanctl's
+        // per-child `updown = …` directive has a target to
+        // invoke on connect / disconnect. The script handles
+        // the routing + DNS adjustments macOS strongSwan
+        // doesn't do automatically — without it, full-tunnel
+        // mode brings the SA up but leaves the operator
+        // unable to resolve names or reach the public
+        // internet through the tunnel.
+        write_updown_script().await?;
+
         let conf_path = swanctl_dir.join(format!("conf.d/supermanager-{}.conf", args.profile_id));
         let secrets_path = swanctl_dir.join(format!("conf.d/supermanager-{}-secrets.conf", args.profile_id));
 
@@ -837,6 +847,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
                 remote_ts = {remote_ts}
                 start_action = none
                 close_action = none
+                updown = {updown_script}
             }}
         }}
     }}
@@ -847,7 +858,136 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         username = args.username,
         local_ts = local_ts,
         remote_ts = remote_ts,
+        updown_script = UPDOWN_SCRIPT_PATH,
     )
+}
+
+/// Stable on-disk location for the updown script. Same path
+/// regardless of brew prefix because charon invokes it via
+/// absolute path from the swanctl `updown = …` directive.
+const UPDOWN_SCRIPT_PATH: &str = "/etc/strongswan-updown.sh";
+
+/// macOS-specific updown script. charon invokes this on every
+/// CHILD_SA up/down event with `PLUTO_VERB`, `PLUTO_PEER`,
+/// `PLUTO_MY_SOURCEIP`, and `PLUTO_PEER_DNS_INFO` (space-
+/// separated DNS servers from CFG_REPLY) in the environment.
+///
+/// What this handles that strongSwan doesn't do automatically
+/// on macOS:
+///
+///   1. **Host route to the gateway** via the original default
+///      gateway. Without this, the moment we install
+///      split-default routes (next step) ESP packets bound for
+///      the VPN server itself try to route through the tunnel
+///      and the SA collapses on itself.
+///   2. **Split-default routes** (`0.0.0.0/1` + `128.0.0.0/1`
+///      via the IPsec interface). Apple's networking stack
+///      doesn't have Linux's xfrm policies; for a full tunnel
+///      we need explicit kernel routes that win over the
+///      original `default` because their prefix is longer.
+///   3. **DNS push via scutil**. We register a State key under
+///      `com.sybr.supermanager.vpn/DNS` so the resolver picks
+///      up the gateway-pushed DNS servers (and a catch-all
+///      SupplementalMatchDomain so they apply to every query
+///      while the tunnel is up).
+///   4. **Symmetric teardown** on down-client so the operator's
+///      original routing + DNS state is restored even if
+///      strongSwan crashes.
+///
+/// Logs to /tmp/supermgr-strongswan-updown.log world-readable
+/// so the GUI can tail it for diagnostics.
+const UPDOWN_SCRIPT: &str = r##"#!/bin/bash
+# SuperManager strongSwan updown script — macOS specifics for
+# full-tunnel IKEv2. See strongswan.rs::UPDOWN_SCRIPT for the
+# canonical commentary.
+
+LOG=/tmp/supermgr-strongswan-updown.log
+exec >>"$LOG" 2>&1
+echo "[$(date +%H:%M:%S)] verb=$PLUTO_VERB peer=$PLUTO_PEER vip=$PLUTO_MY_SOURCEIP dns='$PLUTO_PEER_DNS_INFO' my_clnt=$PLUTO_MY_CLIENT peer_clnt=$PLUTO_PEER_CLIENT"
+
+GATEWAY_FILE=/var/run/supermgr-strongswan-orig-gateway
+DNS_STATE_KEY="State:/Network/Service/com.sybr.supermanager.vpn/DNS"
+
+ensure_host_route_to_peer() {
+    # Pin the VPN server's IP to the original default gateway
+    # so subsequent IKE/ESP packets keep flowing once we
+    # install split-default routes that would otherwise pull
+    # them into the tunnel.
+    local peer="$1"
+    local orig_gw
+    orig_gw=$(/sbin/route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+    if [ -n "$orig_gw" ] && [ -n "$peer" ]; then
+        echo "$orig_gw" > "$GATEWAY_FILE"
+        /sbin/route -q add -host "$peer" -gateway "$orig_gw" 2>&1 || true
+        echo "  pinned $peer -> $orig_gw"
+    fi
+}
+
+restore_peer_route() {
+    local peer="$1"
+    /sbin/route -q delete -host "$peer" 2>&1 || true
+    rm -f "$GATEWAY_FILE"
+}
+
+push_dns() {
+    # PLUTO_PEER_DNS_INFO is a whitespace-separated list of DNS
+    # IPs from the gateway's CFG_REPLY. If empty, fall back to
+    # Cloudflare + Google so the operator's tunnel isn't
+    # useless for name resolution.
+    local servers="$PLUTO_PEER_DNS_INFO"
+    if [ -z "$servers" ]; then
+        servers="1.1.1.1 8.8.8.8"
+        echo "  no DNS from peer — falling back to public resolvers"
+    fi
+    local server_xml=""
+    for s in $servers; do
+        server_xml="${server_xml}\nd.add ServerAddresses * $s"
+    done
+    /usr/sbin/scutil <<EOF >/dev/null
+d.init
+$(for s in $servers; do echo "d.add ServerAddresses * $s"; done | sed 's/^/    /' | sed -e 's/^    //')
+d.add SupplementalMatchDomains * ""
+d.add SupplementalMatchDomainsNoSearch # 0
+set $DNS_STATE_KEY
+quit
+EOF
+    echo "  pushed DNS: $servers"
+}
+
+remove_dns() {
+    /usr/sbin/scutil <<EOF >/dev/null
+remove $DNS_STATE_KEY
+quit
+EOF
+    echo "  removed DNS state"
+}
+
+case "$PLUTO_VERB" in
+    up-client|up-host)
+        ensure_host_route_to_peer "$PLUTO_PEER"
+        push_dns
+        ;;
+    down-client|down-host)
+        remove_dns
+        restore_peer_route "$PLUTO_PEER"
+        ;;
+esac
+
+exit 0
+"##;
+
+/// Drop the updown script at the canonical path with 0755.
+/// Idempotent: we re-write it on every connect so a stale
+/// helper version's script can't linger.
+async fn write_updown_script() -> anyhow::Result<()> {
+    let path = std::path::Path::new(UPDOWN_SCRIPT_PATH);
+    tokio::fs::write(path, UPDOWN_SCRIPT)
+        .await
+        .with_context(|| format!("write updown script {UPDOWN_SCRIPT_PATH}"))?;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
 }
 
 /// `connections.<name>` keys must be ident-like. We only accept hex digits,
