@@ -27,6 +27,17 @@ struct VpnDetailView: View {
     @State private var helperReachable: Bool = false
     @State private var pollTask: Task<Void, Never>?
 
+    /// IKEv2 / strongSwan live metrics, populated by
+    /// `vpnStatus` each poll. All zero/empty when not
+    /// connected. Drives the FortiClient-style status card.
+    @State private var ikeServerAddr: String = ""
+    @State private var ikeCipherSuite: String = ""
+    @State private var ikeUptimeSeconds: UInt64 = 0
+    @State private var ikeBytesIn: UInt64 = 0
+    @State private var ikeBytesOut: UInt64 = 0
+    @State private var ikePacketsIn: UInt64 = 0
+    @State private var ikePacketsOut: UInt64 = 0
+
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
     @State private var showingLog = false
@@ -606,14 +617,135 @@ struct VpnDetailView: View {
                 .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
 
+            // FortiClient-style connected-tunnel status card.
+            // Only renders for IKEv2 profiles in connected state
+            // where the helper handed us a parsed assigned IP.
+            // For WireGuard/OpenVPN the existing `stateDetail`
+            // line above already shows what they expose.
+            if vpnState == "connected" && !liveVirtualIp.isEmpty {
+                ikeStatusCard(profile)
+            }
+
             if !stateDetail.isEmpty {
-                Text(stateDetail)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
+                DisclosureGroup("Raw swanctl block") {
+                    Text(stateDetail)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 4)
             }
         }
+    }
+
+    /// Connected-state status card for IKEv2/IPsec tunnels —
+    /// mirrors what FortiClient shows after a successful
+    /// connect: VPN name, gateway, virtual IP, username,
+    /// duration, bytes in / out, plus the cipher suite for
+    /// admins who care.
+    private func ikeStatusCard(_ profile: VpnProfile) -> some View {
+        let username: String = {
+            if case .ikev2(let cfg) = profile.config { return cfg.username }
+            return ""
+        }()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(.green)
+                Text("Tunnel established")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.green)
+                Spacer()
+                Text(formatDuration(ikeUptimeSeconds))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            statusRow("Profile", profile.name)
+            if !ikeServerAddr.isEmpty {
+                statusRow("Gateway", ikeServerAddr, mono: true)
+            }
+            statusRow("Assigned IP", liveVirtualIp, mono: true)
+            if !username.isEmpty {
+                statusRow("Username", username, mono: true)
+            }
+            HStack(spacing: 16) {
+                metricCol(
+                    label: "Received",
+                    value: formatBytes(ikeBytesIn),
+                    sub: "\(ikePacketsIn) packets"
+                )
+                metricCol(
+                    label: "Sent",
+                    value: formatBytes(ikeBytesOut),
+                    sub: "\(ikePacketsOut) packets"
+                )
+            }
+            .padding(.top, 4)
+            if !ikeCipherSuite.isEmpty {
+                Text(ikeCipherSuite)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(10)
+        .background(.green.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.green.opacity(0.25), lineWidth: 0.5)
+        )
+    }
+
+    private func statusRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .trailing)
+            Text(value)
+                .font(mono ? .caption.monospaced() : .caption)
+                .textSelection(.enabled)
+            Spacer()
+        }
+    }
+
+    private func metricCol(label: String, value: String, sub: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.body.monospaced().weight(.semibold))
+            Text(sub)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func formatBytes(_ n: UInt64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(n)
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        return unit == 0
+            ? "\(n) B"
+            : String(format: "%.2f %@", value, units[unit] as CVarArg)
+    }
+
+    private func formatDuration(_ seconds: UInt64) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
     /// Mirror of the daemon's match-arms in `handle_vpn_set_routing`.
@@ -1123,10 +1255,21 @@ struct VpnDetailView: View {
                 stateDetail = result["detail"] as? String ?? ""
                 // The helper reports "strongSwan not installed" via
                 // the status detail when its binary probe fails.
-                // Surfacing that in `actionError` would drown the
-                // user in noise; flip the dedicated flag and the
-                // detail view renders a setup banner instead.
                 strongswanMissing = stateDetail.contains("strongSwan not installed")
+                // Pull the structured fields the helper now
+                // parses out of `swanctl --list-sas`. Each
+                // is optional — fall back to zero/empty when
+                // not connected. UInt64 round-trip via Double
+                // because JSON numbers decode as Double in
+                // [String: Any].
+                liveVirtualIp = result["assigned_ip"] as? String ?? ""
+                ikeServerAddr = result["server_addr"] as? String ?? ""
+                ikeCipherSuite = result["cipher_suite"] as? String ?? ""
+                ikeUptimeSeconds = UInt64(result["uptime_seconds"] as? Double ?? 0)
+                ikeBytesIn = UInt64(result["bytes_in"] as? Double ?? 0)
+                ikeBytesOut = UInt64(result["bytes_out"] as? Double ?? 0)
+                ikePacketsIn = UInt64(result["packets_in"] as? Double ?? 0)
+                ikePacketsOut = UInt64(result["packets_out"] as? Double ?? 0)
             case .wireguard:
                 let result = try await HelperClient.shared.wgStatus(profileId: profileId)
                 vpnState = result["state"] as? String ?? "disconnected"

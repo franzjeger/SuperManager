@@ -116,8 +116,36 @@ pub struct DisconnectResult {
 pub struct StatusResult {
     /// "connected", "connecting", or "disconnected".
     pub state: String,
-    /// Optional human-readable detail (e.g. ESP rekey time).
+    /// Raw swanctl block kept for the "Show raw output" disclosure.
     pub detail: String,
+    /// Virtual IP the gateway assigned us inside the tunnel
+    /// (e.g. `10.0.60.100`). Empty when not yet established.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assigned_ip: String,
+    /// Server-side public IP we tunnel through.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_addr: String,
+    /// Negotiated IKE cipher suite, e.g.
+    /// `AES_CBC-256/HMAC_SHA2_256_128/MODP_2048`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cipher_suite: String,
+    /// Seconds the SA has been established. 0 when not connected.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub uptime_seconds: u64,
+    /// Bytes counters from kernel SAD. Sampled at every poll
+    /// tick so the GUI can render a live rate.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bytes_in: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bytes_out: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub packets_in: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub packets_out: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -319,25 +347,248 @@ impl Strongswan {
             return Ok(StatusResult {
                 state: "disconnected".to_owned(),
                 detail: "strongSwan not installed".to_owned(),
+                ..Default::default()
             });
         }
         let swanctl = self.swanctl.as_ref().expect("just resolved");
         let out = run(swanctl, &["--list-sas"]).await.unwrap_or_default();
-        let block_marker = format!("{}: ", args.profile_id);
-        let block = out
-            .lines()
-            .skip_while(|l| !l.starts_with(&block_marker))
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let state = if block.is_empty() {
-            "disconnected"
-        } else if block.contains("ESTABLISHED") {
-            "connected"
-        } else {
-            "connecting"
+        Ok(parse_swanctl_list_sas(&out, &args.profile_id))
+    }
+}
+
+impl Default for StatusResult {
+    fn default() -> Self {
+        Self {
+            state: "disconnected".to_owned(),
+            detail: String::new(),
+            assigned_ip: String::new(),
+            server_addr: String::new(),
+            cipher_suite: String::new(),
+            uptime_seconds: 0,
+            bytes_in: 0,
+            bytes_out: 0,
+            packets_in: 0,
+            packets_out: 0,
+        }
+    }
+}
+
+/// Parse `swanctl --list-sas` for a specific profile block.
+///
+/// Output shape we work with (one block per IKE SA):
+///
+/// ```text
+/// <profile>: #1, ESTABLISHED, IKEv2, <spi-i>:<spi-r>
+///   local  '<id>' @ <our-ip>[<port>]
+///   remote '<id>' @ <gateway-ip>[<port>] [<assigned-vip>]
+///   AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
+///   established 42s ago, rekeying in 1h 12m
+///   <profile>: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_CBC-256/HMAC_SHA2_256_128
+///     installed 42s ago, rekeying in 50m, expires in 1h
+///     in  c0ffee01,   2048 bytes,    12 packets,     1s ago
+///     out deadbeef,   1789 bytes,    11 packets,     1s ago
+///     local  0.0.0.0/0
+///     remote 10.0.60.0/24
+/// ```
+///
+/// The assigned tunnel IP appears in one of two places:
+///   1. Inside square brackets on the `remote '...' @ ...` line
+///      when the gateway sends CFG_REPLY with INTERNAL_IP4_ADDRESS.
+///   2. In a `local <vip>/<prefix>` line under the CHILD_SA.
+/// We try both.
+pub(crate) fn parse_swanctl_list_sas(raw: &str, profile_id: &str) -> StatusResult {
+    let marker = format!("{profile_id}: ");
+    // Pull the contiguous run of lines starting at the profile
+    // header up to the next non-indented section.
+    let mut block: Vec<&str> = Vec::new();
+    let mut in_block = false;
+    for line in raw.lines() {
+        if line.starts_with(&marker) {
+            in_block = true;
+        } else if in_block && !line.starts_with(' ') && !line.is_empty() {
+            // Next top-level entry — different SA, stop.
+            break;
+        }
+        if in_block {
+            block.push(line);
+        }
+    }
+    let detail = block.join("\n");
+    if detail.is_empty() {
+        return StatusResult::default();
+    }
+
+    let state = if detail.contains("ESTABLISHED") {
+        "connected"
+    } else {
+        "connecting"
+    };
+
+    let mut r = StatusResult {
+        state: state.to_owned(),
+        detail: detail.clone(),
+        ..Default::default()
+    };
+
+    for raw_line in detail.lines() {
+        let line = raw_line.trim();
+
+        // remote 'identity' @ a.b.c.d[port] [virtual-ip]
+        if let Some(rest) = line.strip_prefix("remote ") {
+            // Server address: the first `a.b.c.d[port]` token.
+            if let Some(at_idx) = rest.find(" @ ") {
+                let after_at = &rest[at_idx + 3..];
+                if let Some(bracket) = after_at.find('[') {
+                    r.server_addr = after_at[..bracket].to_owned();
+                }
+                // Virtual IP — last bracketed token on this line.
+                if let Some(open) = after_at.rfind('[') {
+                    if let Some(close) = after_at.rfind(']') {
+                        if close > open {
+                            let inner = &after_at[open + 1..close];
+                            // Skip the port — virtual IPs look
+                            // like `10.0.60.100`, ports are bare
+                            // 4-5 digit numbers.
+                            if inner.contains('.') {
+                                r.assigned_ip = inner.to_owned();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cipher suite line: `AES_CBC-256/HMAC_SHA2_256_128/...`
+        if line.starts_with("AES_") || line.starts_with("CHACHA")
+            || line.starts_with("3DES_")
+        {
+            if r.cipher_suite.is_empty() {
+                r.cipher_suite = line.to_owned();
+            }
+        }
+
+        // `established 42s ago, rekeying in ...`
+        if line.starts_with("established ") {
+            if let Some(rest) = line.strip_prefix("established ") {
+                if let Some(ago_idx) = rest.find(" ago") {
+                    let dur_str = &rest[..ago_idx];
+                    r.uptime_seconds = parse_duration_to_seconds(dur_str);
+                }
+            }
+        }
+
+        // `in  c0ffee01,   2048 bytes,    12 packets,     1s ago`
+        if let Some(rest) = line.strip_prefix("in ") {
+            let (bytes, packets) = parse_bytes_packets(rest);
+            r.bytes_in = bytes;
+            r.packets_in = packets;
+        }
+        if let Some(rest) = line.strip_prefix("out ") {
+            let (bytes, packets) = parse_bytes_packets(rest);
+            r.bytes_out = bytes;
+            r.packets_out = packets;
+        }
+        // `local 10.0.60.100/32` under the CHILD_SA — fallback
+        // virtual IP source for when the remote line didn't have
+        // it (some FortiGate firmwares).
+        if r.assigned_ip.is_empty() {
+            if let Some(rest) = line.strip_prefix("local ") {
+                if let Some(slash) = rest.find('/') {
+                    let candidate = &rest[..slash];
+                    if candidate.split('.').count() == 4
+                        && candidate != "0.0.0.0"
+                    {
+                        r.assigned_ip = candidate.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    r
+}
+
+/// Parse strongSwan's compact human duration: `42s`, `5m 12s`,
+/// `1h 30m`, `2d 4h`. Returns total seconds.
+fn parse_duration_to_seconds(s: &str) -> u64 {
+    let mut total: u64 = 0;
+    for tok in s.split_whitespace() {
+        let (digits, unit) = tok.split_at(tok.find(|c: char| !c.is_ascii_digit()).unwrap_or(tok.len()));
+        let n: u64 = digits.parse().unwrap_or(0);
+        total += match unit {
+            "s" => n,
+            "m" => n * 60,
+            "h" => n * 3600,
+            "d" => n * 86_400,
+            _ => 0,
         };
-        Ok(StatusResult { state: state.to_owned(), detail: block })
+    }
+    total
+}
+
+/// Pull `<bytes>` and `<packets>` out of a line like
+/// `c0ffee01,   2048 bytes,    12 packets,     1s ago`.
+fn parse_bytes_packets(s: &str) -> (u64, u64) {
+    let mut bytes = 0u64;
+    let mut packets = 0u64;
+    // Split on commas to isolate "<n> bytes" and "<n> packets".
+    for chunk in s.split(',') {
+        let trimmed = chunk.trim();
+        if let Some(rest) = trimmed.strip_suffix(" bytes") {
+            bytes = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = trimmed.strip_suffix(" packets") {
+            packets = rest.trim().parse().unwrap_or(0);
+        }
+    }
+    (bytes, packets)
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    // Use a raw string so leading whitespace on each line is
+    // preserved — swanctl indents continuation lines, and our
+    // block-collection logic depends on that indentation.
+    const SAMPLE: &str = r"motavo: #1, ESTABLISHED, IKEv2, c0ffee:f00d
+  local  '192.168.200.132' @ 192.168.200.132[4500]
+  remote '213.52.37.87' @ 213.52.37.87[4500] [10.0.60.100]
+  AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
+  established 142s ago, rekeying in 1h 12m
+  motavo: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_CBC-256/HMAC_SHA2_256_128
+    installed 142s ago, rekeying in 50m, expires in 1h
+    in  c0ffee01, 80264 bytes, 612 packets, 1s ago
+    out deadbeef, 72360 bytes, 511 packets, 1s ago
+    local  0.0.0.0/0
+    remote 10.0.60.0/24
+";
+
+    #[test]
+    fn parses_full_block() {
+        let r = parse_swanctl_list_sas(SAMPLE, "motavo");
+        assert_eq!(r.state, "connected");
+        assert_eq!(r.server_addr, "213.52.37.87");
+        assert_eq!(r.assigned_ip, "10.0.60.100");
+        assert!(r.cipher_suite.starts_with("AES_CBC-256/"));
+        assert_eq!(r.uptime_seconds, 142);
+        assert_eq!(r.bytes_in, 80264);
+        assert_eq!(r.bytes_out, 72360);
+        assert_eq!(r.packets_in, 612);
+        assert_eq!(r.packets_out, 511);
+    }
+
+    #[test]
+    fn unknown_profile_returns_disconnected() {
+        let r = parse_swanctl_list_sas(SAMPLE, "other");
+        assert_eq!(r.state, "disconnected");
+        assert_eq!(r.uptime_seconds, 0);
+    }
+
+    #[test]
+    fn parses_duration_strings() {
+        assert_eq!(parse_duration_to_seconds("42s"), 42);
+        assert_eq!(parse_duration_to_seconds("5m 12s"), 312);
+        assert_eq!(parse_duration_to_seconds("1h 30m"), 5400);
+        assert_eq!(parse_duration_to_seconds("2d 4h"), 187200);
     }
 }
 
