@@ -388,41 +388,44 @@ fn bind_callbacks(
         let conn = conn.clone();
         let rt = rt.clone();
         let host_cache = host_cache.clone();
-        window.on_add_host(move |label, hostname, port, username, group, device_type| {
-            let weak = weak.clone();
-            let conn = conn.clone();
-            let host_cache = host_cache.clone();
-            let label = label.to_string();
-            let hostname = hostname.to_string();
-            let username = username.to_string();
-            let group = group.to_string();
-            let device_type = device_type.to_string();
-            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 22 };
-            rt.spawn(async move {
-                if hostname.is_empty() || label.is_empty() {
-                    push_error(&weak, "Label and hostname are required.".into());
-                    return;
-                }
-                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
-                    let host_json = serde_json::json!({
-                        "label": label,
-                        "hostname": hostname,
-                        "port": port_u16,
-                        "username": username,
-                        "group": group,
-                        "device_type": device_type,
-                        "auth_method": "password",
-                    });
-                    match c.add_host(&host_json.to_string()).await {
-                        Ok(_) => {
-                            push_status(&weak, "Host added.");
-                            refresh_all(&conn, &host_cache, weak.clone()).await;
-                        }
-                        Err(e) => push_error(&weak, format!("Add host failed: {e}")),
+        window.on_add_host(
+            move |label, hostname, port, username, group, device_type, auth_method| {
+                let weak = weak.clone();
+                let conn = conn.clone();
+                let host_cache = host_cache.clone();
+                let label = label.to_string();
+                let hostname = hostname.to_string();
+                let username = username.to_string();
+                let group = group.to_string();
+                let device_type = device_type.to_string();
+                let auth_method = auth_method.to_string();
+                let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 22 };
+                rt.spawn(async move {
+                    if hostname.is_empty() || label.is_empty() {
+                        push_error(&weak, "Label and hostname are required.".into());
+                        return;
                     }
+                    with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                        let host_json = serde_json::json!({
+                            "label": label,
+                            "hostname": hostname,
+                            "port": port_u16,
+                            "username": username,
+                            "group": group,
+                            "device_type": device_type,
+                            "auth_method": auth_method,
+                        });
+                        match c.add_host(&host_json.to_string()).await {
+                            Ok(_) => {
+                                push_status(&weak, "Host added.");
+                                refresh_all(&conn, &host_cache, weak.clone()).await;
+                            }
+                            Err(e) => push_error(&weak, format!("Add host failed: {e}")),
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
     }
 
     // Delete host
@@ -613,6 +616,166 @@ fn bind_callbacks(
         });
     }
 
+    // Open host - fetches detail via get_host, populates selected-host,
+    // switches to the detail view.
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_open_host(move |host_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_id = host_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.get_host(&host_id).await {
+                        Ok(json) => {
+                            let detail = parse_host_detail(&json);
+                            let _ = weak.upgrade_in_event_loop(move |w| {
+                                w.set_selected_host(detail);
+                                w.set_host_cmd("".into());
+                                w.set_host_cmd_stdout("".into());
+                                w.set_host_cmd_stderr("".into());
+                                w.set_host_cmd_exit_code(0);
+                                w.set_host_test_result("".into());
+                                w.set_current_view(5);
+                            });
+                        }
+                        Err(e) => push_error(&weak, format!("Open host failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Close host detail - go back to the Hosts list.
+    {
+        let weak = window.as_weak();
+        window.on_close_host_detail(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_current_view(2);
+            }
+        });
+    }
+
+    // Test host connection
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_test_host_connection(move |host_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_id = host_id.to_string();
+            let weak_pending = weak.clone();
+            let _ = weak_pending.upgrade_in_event_loop(|w| {
+                w.set_host_test_result("Probing…".into());
+            });
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.test_host_connection(&host_id).await {
+                        Ok(json) => {
+                            let label = summarise_test_result(&json);
+                            let _ = weak.upgrade_in_event_loop(move |w| {
+                                w.set_host_test_result(SharedString::from(label));
+                            });
+                        }
+                        Err(e) => {
+                            let msg = format!("Probe failed: {e}");
+                            let _ = weak.upgrade_in_event_loop(move |w| {
+                                w.set_host_test_result(SharedString::from(msg));
+                            });
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // SSH execute command
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_ssh_execute(move |host_id, command| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_id = host_id.to_string();
+            let command = command.to_string();
+            if command.is_empty() {
+                return;
+            }
+            // Flip the running flag + clear previous output before kicking off.
+            let weak_pending = weak.clone();
+            let _ = weak_pending.upgrade_in_event_loop(|w| {
+                w.set_host_cmd_running(true);
+                w.set_host_cmd_stdout("".into());
+                w.set_host_cmd_stderr("".into());
+                w.set_host_cmd_exit_code(0);
+            });
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    let result = c.ssh_execute_command(&host_id, &command).await;
+                    let _ = weak.upgrade_in_event_loop(|w| { w.set_host_cmd_running(false); });
+                    match result {
+                        Ok(json) => {
+                            let (stdout, stderr, exit) = parse_exec_result(&json);
+                            let _ = weak.upgrade_in_event_loop(move |w| {
+                                w.set_host_cmd_stdout(SharedString::from(stdout));
+                                w.set_host_cmd_stderr(SharedString::from(stderr));
+                                w.set_host_cmd_exit_code(exit);
+                            });
+                        }
+                        Err(e) => push_error(&weak, format!("SSH execute failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Set host password
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_set_host_password(move |host_id, password| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_id = host_id.to_string();
+            let password = password.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.ssh_set_password(&host_id, &password).await {
+                        Ok(()) => push_status(&weak, "Password saved to Credential Manager."),
+                        Err(e) => push_error(&weak, format!("Set password failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Set host API token
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_set_host_api_token(move |host_id, token, port| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_id = host_id.to_string();
+            let token = token.to_string();
+            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 443 };
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.ssh_set_api_token(&host_id, &token, port_u16).await {
+                        Ok(()) => push_status(&weak, "API token saved to Credential Manager."),
+                        Err(e) => push_error(&weak, format!("Set API token failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
     // Host search - filters the cached host list client-side.
     {
         let weak = window.as_weak();
@@ -722,11 +885,94 @@ fn parse_hosts(j: &str) -> Vec<HostRow> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .into(),
+                    customer: item
+                        .get("customer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     pinned: item.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_host_detail(j: &str) -> HostDetail {
+    let v: serde_json::Value = serde_json::from_str(j).unwrap_or(serde_json::Value::Null);
+    HostDetail {
+        id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").into(),
+        label: v.get("label").and_then(|x| x.as_str()).unwrap_or("").into(),
+        hostname: v.get("hostname").and_then(|x| x.as_str()).unwrap_or("").into(),
+        port: v.get("port").and_then(|x| x.as_i64()).unwrap_or(22) as i32,
+        username: v.get("username").and_then(|x| x.as_str()).unwrap_or("").into(),
+        group: v.get("group").and_then(|x| x.as_str()).unwrap_or("").into(),
+        customer: v.get("customer").and_then(|x| x.as_str()).unwrap_or("").into(),
+        device_type: v
+            .get("device_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
+        auth_method: v
+            .get("auth_method")
+            .and_then(|x| x.as_str())
+            .unwrap_or("password")
+            .into(),
+        pinned: v.get("pinned").and_then(|x| x.as_bool()).unwrap_or(false),
+        created_at: v
+            .get("created_at")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
+    }
+}
+
+/// Parse the `ssh_execute_command` RPC result into (stdout, stderr,
+/// exit_code). The daemon wraps the JSON one extra level deep when it
+/// returns from `Value::String` so we unwrap that here.
+fn parse_exec_result(raw: &str) -> (String, String, i32) {
+    // The dispatcher returns the JSON-as-string; unwrap one level.
+    let inner: serde_json::Value = serde_json::from_str(raw).unwrap_or(serde_json::Value::Null);
+    let parsed = if let Some(s) = inner.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).unwrap_or(inner.clone())
+    } else {
+        inner
+    };
+    let stdout = parsed
+        .get("stdout")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let stderr = parsed
+        .get("stderr")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let exit = parsed
+        .get("exit_code")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(-1) as i32;
+    (stdout, stderr, exit)
+}
+
+/// Render the `test_host_connection` JSON ({ssh: "...", api: "..."})
+/// as one human-readable summary line for the detail view.
+fn summarise_test_result(j: &str) -> String {
+    let inner: serde_json::Value = serde_json::from_str(j).unwrap_or(serde_json::Value::Null);
+    // The daemon wraps in a string for D-Bus parity; unwrap if needed.
+    let parsed = if let Some(s) = inner.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).unwrap_or(inner.clone())
+    } else {
+        inner
+    };
+    let ssh = parsed
+        .get("ssh")
+        .and_then(|x| x.as_str())
+        .unwrap_or("unknown");
+    let api = parsed.get("api").and_then(|x| x.as_str());
+    match api {
+        Some(api) => format!("SSH: {ssh}  ·  API: {api}"),
+        None => format!("SSH: {ssh}"),
+    }
 }
 
 fn parse_profiles(j: &str) -> Vec<ProfileRow> {
