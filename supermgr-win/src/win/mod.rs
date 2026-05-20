@@ -3,20 +3,32 @@
 
 mod tray;
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context as _;
-use slint::{ComponentHandle as _, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 use supermgr_core::client;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-// Slint generates `AppWindow`, `KeyRow`, and `HostRow` from `ui/main.slint`.
 slint::include_modules!();
 
-/// Entry point for the GUI. Owns the Slint event loop and the Tokio
-/// runtime that drives daemon RPC; the two are bridged by `slint::spawn_local`
-/// for UI-thread callbacks and `slint::Weak::upgrade_in_event_loop` for
-/// pushing async results back to the UI from arbitrary tasks.
+/// How often the status poller wakes up.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often we re-pull the full key/host/profile lists.
+const LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Shared connection handle. Wrapped in a `Mutex<Option<...>>` so the
+/// poller can swap in a fresh handle if the daemon restarts mid-session
+/// without forcing the user to relaunch the GUI.
+type ConnectionSlot = Arc<Mutex<Option<Arc<client::DaemonClient>>>>;
+
+/// Cached unfiltered host list. The Hosts tab renders `set_hosts(...)`
+/// which is the *filtered* view; keeping the full list separately
+/// lets the host-search callback rebuild the filtered view client-side
+/// without round-tripping the daemon.
+type HostCache = Arc<Mutex<Vec<HostRow>>>;
+
 pub fn run() -> anyhow::Result<()> {
     init_tracing();
     info!("supermgr-win starting");
@@ -29,37 +41,59 @@ pub fn run() -> anyhow::Result<()> {
 
     let window = AppWindow::new().context("create main window")?;
 
-    // Connect to the daemon eagerly. If the connection fails the GUI still
-    // opens with an error banner — the user can install the service and
-    // hit Refresh without restarting the app.
-    let client = match rt_handle.block_on(client::connect()) {
-        Ok(c) => {
-            window.set_daemon_status("Connected".into());
-            Some(Arc::new(c))
-        }
-        Err(e) => {
-            warn!("daemon connect failed at startup: {e}");
-            window.set_daemon_status("Disconnected".into());
-            window.set_last_error(SharedString::from(format!(
-                "Could not reach supermgrd: {e}. Start the service from services.msc, then click Refresh."
-            )));
-            None
-        }
-    };
+    let connection: ConnectionSlot = Arc::new(Mutex::new(None));
+    let host_cache: HostCache = Arc::new(Mutex::new(Vec::new()));
 
-    // Tray icon. Holds a Weak to the window so the "Show" menu item can
-    // bring the GUI back from a minimised state.
-    let _tray = tray::spawn(window.as_weak());
+    // Eager first connect. If it fails we surface the error in the
+    // sidebar banner but still bring the window up — the poller will
+    // retry every POLL_INTERVAL.
+    {
+        let conn = connection.clone();
+        rt_handle.block_on(async move {
+            match client::connect().await {
+                Ok(c) => {
+                    *conn.lock().await = Some(Arc::new(c));
+                }
+                Err(e) => {
+                    warn!("initial daemon connect failed: {e}");
+                }
+            }
+        });
+    }
 
-    bind_callbacks(&window, client.clone(), rt_handle.clone());
+    // Hand the connection slot to the tray so it can disconnect on
+    // the "Quick disconnect" menu item.
+    let _tray = tray::spawn(window.as_weak(), connection.clone(), rt_handle.clone());
 
-    // Initial data load, fire-and-forget. The async closure pushes results
-    // back via `upgrade_in_event_loop` so we don't touch Slint state from
-    // a Tokio worker thread.
-    if let Some(c) = client.clone() {
+    bind_callbacks(&window, connection.clone(), host_cache.clone(), rt_handle.clone());
+
+    // Initial full refresh fire-and-forget.
+    {
+        let conn = connection.clone();
+        let host_cache = host_cache.clone();
+        let weak = window.as_weak();
+        rt_handle.spawn(async move { refresh_all(&conn, &host_cache, weak).await });
+    }
+
+    // Periodic status poller (every POLL_INTERVAL) + full list
+    // refresh on a longer cadence. One task drives both so we don't
+    // race two polls into the daemon at once.
+    {
+        let conn = connection.clone();
+        let host_cache = host_cache.clone();
         let weak = window.as_weak();
         rt_handle.spawn(async move {
-            refresh_all(&c, weak).await;
+            let mut ticks: u32 = 0;
+            loop {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                ticks = ticks.wrapping_add(1);
+                ensure_connection(&conn).await;
+                poll_status(&conn, weak.clone()).await;
+                // Pull the heavy lists every 6 ticks = 30 s.
+                if ticks % (LIST_REFRESH_INTERVAL.as_secs() / POLL_INTERVAL.as_secs()) as u32 == 0 {
+                    refresh_all(&conn, &host_cache, weak.clone()).await;
+                }
+            }
         });
     }
 
@@ -77,152 +111,546 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Wire all UI callbacks to async daemon calls.
-fn bind_callbacks(
-    window: &AppWindow,
-    client: Option<Arc<client::DaemonClient>>,
-    rt: tokio::runtime::Handle,
-) {
-    // ----- Refresh -----
-    {
-        let weak = window.as_weak();
-        let client = client.clone();
-        let rt = rt.clone();
-        window.on_refresh(move || {
-            let Some(c) = client.clone() else {
-                set_error(&weak, "Not connected to daemon.");
-                return;
-            };
-            let weak = weak.clone();
-            rt.spawn(async move { refresh_all(&c, weak).await });
-        });
+/// If the connection slot is empty, try to fill it. Best-effort: a
+/// failure here just leaves the slot empty for the next tick.
+async fn ensure_connection(conn: &ConnectionSlot) {
+    let guard = conn.lock().await;
+    if guard.is_some() {
+        return;
     }
-
-    // ----- Generate key -----
-    {
-        let weak = window.as_weak();
-        let client = client.clone();
-        let rt = rt.clone();
-        window.on_generate_key(move |name, description, key_type| {
-            let Some(c) = client.clone() else {
-                set_error(&weak, "Not connected to daemon.");
-                return;
-            };
-            let name = name.to_string();
-            let description = description.to_string();
-            let key_type = key_type.to_string();
-            let weak = weak.clone();
-            rt.spawn(async move {
-                if let Err(e) = c
-                    .ssh_generate_key(&key_type, &name, &description, "[]")
-                    .await
-                {
-                    push_error(&weak, format!("Generate key failed: {e}"));
-                    return;
-                }
-                refresh_all(&c, weak).await;
-            });
-        });
-    }
-
-    // ----- Delete key -----
-    {
-        let weak = window.as_weak();
-        let client = client.clone();
-        let rt = rt.clone();
-        window.on_delete_key(move |key_id| {
-            let Some(c) = client.clone() else {
-                set_error(&weak, "Not connected to daemon.");
-                return;
-            };
-            let key_id = key_id.to_string();
-            let weak = weak.clone();
-            rt.spawn(async move {
-                if let Err(e) = c.ssh_delete_key(&key_id).await {
-                    push_error(&weak, format!("Delete key failed: {e}"));
-                    return;
-                }
-                refresh_all(&c, weak).await;
-            });
-        });
-    }
-
-    // ----- Export key (copies the public OpenSSH line to the clipboard) -----
-    {
-        let weak = window.as_weak();
-        let client = client.clone();
-        let rt = rt.clone();
-        window.on_export_key(move |key_id| {
-            let Some(c) = client.clone() else {
-                set_error(&weak, "Not connected to daemon.");
-                return;
-            };
-            let key_id = key_id.to_string();
-            let weak = weak.clone();
-            rt.spawn(async move {
-                match c.ssh_export_public_key(&key_id).await {
-                    Ok(pubkey) => {
-                        if let Err(e) = copy_to_clipboard(&pubkey) {
-                            push_error(&weak, format!("Clipboard copy failed: {e}"));
-                        } else {
-                            push_status(&weak, "Public key copied to clipboard");
-                        }
-                    }
-                    Err(e) => push_error(&weak, format!("Export failed: {e}")),
-                }
-            });
-        });
-    }
-
-    // ----- Delete host -----
-    {
-        let weak = window.as_weak();
-        let client = client.clone();
-        let rt = rt.clone();
-        window.on_delete_host(move |host_id| {
-            let Some(c) = client.clone() else {
-                set_error(&weak, "Not connected to daemon.");
-                return;
-            };
-            let host_id = host_id.to_string();
-            let weak = weak.clone();
-            rt.spawn(async move {
-                if let Err(e) = c.delete_host(&host_id).await {
-                    push_error(&weak, format!("Delete host failed: {e}"));
-                    return;
-                }
-                refresh_all(&c, weak).await;
-            });
-        });
+    drop(guard);
+    if let Ok(c) = client::connect().await {
+        *conn.lock().await = Some(Arc::new(c));
+        info!("daemon connection (re)established");
     }
 }
 
-/// Pull keys + hosts from the daemon and push them into the UI model.
-async fn refresh_all(client: &client::DaemonClient, weak: slint::Weak<AppWindow>) {
-    let keys_result = client.ssh_list_keys().await;
-    let hosts_result = client.list_hosts().await;
+/// Pull `get_status` and push the result into the UI's status fields.
+async fn poll_status(conn: &ConnectionSlot, weak: slint::Weak<AppWindow>) {
+    let client = {
+        let guard = conn.lock().await;
+        guard.clone()
+    };
 
-    let keys = match keys_result {
+    let (connected, vpn_state, vpn_profile, vpn_backend) = match &client {
+        Some(c) => match c.get_status().await {
+            Ok(json) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+                let state = v
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Disconnected")
+                    .to_owned();
+                let backend = v
+                    .get("backend")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                // The backend doesn't echo the profile *name*, just the
+                // id. We resolve the name from the cached profile list
+                // on the UI thread.
+                let profile_id = v
+                    .get("profile_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                (true, state, profile_id, backend)
+            }
+            Err(e) => {
+                warn!("get_status RPC failed: {e}");
+                // Drop the connection so ensure_connection retries.
+                *conn.lock().await = None;
+                (false, "Disconnected".into(), String::new(), String::new())
+            }
+        },
+        None => (false, "Disconnected".into(), String::new(), String::new()),
+    };
+
+    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+    let _ = weak.upgrade_in_event_loop(move |w| {
+        w.set_daemon_connected(connected);
+        w.set_daemon_status(SharedString::from(if connected {
+            "Connected"
+        } else {
+            "Daemon offline (retrying…)"
+        }));
+        w.set_vpn_state(SharedString::from(vpn_state.clone()));
+        w.set_vpn_backend(SharedString::from(vpn_backend));
+        // Resolve profile-id to name from the cached list.
+        let profile_name = if vpn_profile.is_empty() {
+            String::new()
+        } else {
+            let profiles = w.get_profiles();
+            let mut found = String::new();
+            for i in 0..profiles.row_count() {
+                if let Some(p) = profiles.row_data(i) {
+                    if p.id.as_str() == vpn_profile {
+                        found = p.name.to_string();
+                        break;
+                    }
+                }
+            }
+            found
+        };
+        w.set_vpn_profile_name(SharedString::from(profile_name));
+        w.set_last_refresh(SharedString::from(ts));
+    });
+}
+
+/// Pull keys + hosts + profiles from the daemon and push them into the UI.
+/// Caches the full host list so the search callback can filter without
+/// hitting the daemon again.
+async fn refresh_all(
+    conn: &ConnectionSlot,
+    host_cache: &HostCache,
+    weak: slint::Weak<AppWindow>,
+) {
+    let client = {
+        let guard = conn.lock().await;
+        guard.clone()
+    };
+    let Some(client) = client else {
+        return;
+    };
+
+    let keys = match client.ssh_list_keys().await {
         Ok(j) => parse_keys(&j),
         Err(e) => {
             push_error(&weak, format!("List keys failed: {e}"));
             Vec::new()
         }
     };
-    let hosts = match hosts_result {
+    let hosts = match client.list_hosts().await {
         Ok(j) => parse_hosts(&j),
         Err(e) => {
             push_error(&weak, format!("List hosts failed: {e}"));
             Vec::new()
         }
     };
+    let profiles = match client.list_profiles().await {
+        Ok(j) => parse_profiles(&j),
+        Err(e) => {
+            push_error(&weak, format!("List profiles failed: {e}"));
+            Vec::new()
+        }
+    };
 
+    *host_cache.lock().await = hosts.clone();
+
+    let ts = chrono::Local::now().format("%H:%M:%S").to_string();
     let _ = weak.upgrade_in_event_loop(move |w| {
+        let query = w.get_host_search().to_string();
+        let filtered = if query.is_empty() {
+            hosts.clone()
+        } else {
+            filter_hosts(&hosts, &query)
+        };
         w.set_keys(ModelRc::new(VecModel::from(keys)));
-        w.set_hosts(ModelRc::new(VecModel::from(hosts)));
-        w.set_last_error("".into());
+        w.set_hosts(ModelRc::new(VecModel::from(filtered)));
+        w.set_profiles(ModelRc::new(VecModel::from(profiles)));
+        w.set_last_refresh(SharedString::from(ts));
     });
 }
+
+/// Case-insensitive substring match on label + hostname.
+fn filter_hosts(hosts: &[HostRow], query: &str) -> Vec<HostRow> {
+    let needle = query.to_ascii_lowercase();
+    hosts
+        .iter()
+        .filter(|h| {
+            h.label.to_ascii_lowercase().contains(&needle)
+                || h.hostname.to_ascii_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Callback wiring
+// ---------------------------------------------------------------------------
+
+fn bind_callbacks(
+    window: &AppWindow,
+    conn: ConnectionSlot,
+    host_cache: HostCache,
+    rt: tokio::runtime::Handle,
+) {
+    macro_rules! with_client {
+        ($conn:expr, $weak:expr, $body:expr) => {{
+            let client = {
+                let guard = $conn.lock().await;
+                guard.clone()
+            };
+            match client {
+                Some(c) => $body(c).await,
+                None => push_error(&$weak, "Not connected to daemon.".into()),
+            }
+        }};
+    }
+
+    // Refresh
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_refresh(move || {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            rt.spawn(async move {
+                ensure_connection(&conn).await;
+                refresh_all(&conn, &host_cache, weak.clone()).await;
+                poll_status(&conn, weak).await;
+            });
+        });
+    }
+
+    // Generate key
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_generate_key(move |name, description, key_type| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let name = name.to_string();
+            let description = description.to_string();
+            let key_type = key_type.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.ssh_generate_key(&key_type, &name, &description, "[]").await {
+                        Ok(_) => {
+                            push_status(&weak, "SSH key generated.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Generate key failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Delete key
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_delete_key(move |key_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let key_id = key_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.ssh_delete_key(&key_id).await {
+                        Ok(()) => {
+                            push_status(&weak, "Key deleted.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Delete key failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Export key — copies the OpenSSH public line to the clipboard.
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_export_key(move |key_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let key_id = key_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.ssh_export_public_key(&key_id).await {
+                        Ok(pubkey) => match copy_to_clipboard(&pubkey) {
+                            Ok(()) => push_status(&weak, "Public key copied to clipboard."),
+                            Err(e) => push_error(&weak, format!("Clipboard copy failed: {e}")),
+                        },
+                        Err(e) => push_error(&weak, format!("Export failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Add host
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_add_host(move |label, hostname, port, username, group, device_type| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let label = label.to_string();
+            let hostname = hostname.to_string();
+            let username = username.to_string();
+            let group = group.to_string();
+            let device_type = device_type.to_string();
+            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 22 };
+            rt.spawn(async move {
+                if hostname.is_empty() || label.is_empty() {
+                    push_error(&weak, "Label and hostname are required.".into());
+                    return;
+                }
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    let host_json = serde_json::json!({
+                        "label": label,
+                        "hostname": hostname,
+                        "port": port_u16,
+                        "username": username,
+                        "group": group,
+                        "device_type": device_type,
+                        "auth_method": "password",
+                    });
+                    match c.add_host(&host_json.to_string()).await {
+                        Ok(_) => {
+                            push_status(&weak, "Host added.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Add host failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Delete host
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_delete_host(move |host_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let host_id = host_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.delete_host(&host_id).await {
+                        Ok(()) => {
+                            push_status(&weak, "Host deleted.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Delete host failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Toggle host pin
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_toggle_host_pin(move |host_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let host_id = host_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.toggle_host_pin(&host_id).await {
+                        Ok(_) => refresh_all(&conn, &host_cache, weak).await,
+                        Err(e) => push_error(&weak, format!("Toggle pin failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Import WireGuard
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_import_wireguard(move |name, conf_text| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let name = name.to_string();
+            let conf_text = conf_text.to_string();
+            rt.spawn(async move {
+                if name.is_empty() || conf_text.is_empty() {
+                    push_error(&weak, "Name and .conf body are required.".into());
+                    return;
+                }
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.import_wireguard(&conf_text, &name).await {
+                        Ok(_) => {
+                            push_status(&weak, "WireGuard profile imported.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Import WireGuard failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Import FortiClient SSL VPN
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_import_forticlient(move |name, host, port, username, password| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let name = name.to_string();
+            let host = host.to_string();
+            let username = username.to_string();
+            let password = password.to_string();
+            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 443 };
+            rt.spawn(async move {
+                if name.is_empty() || host.is_empty() || username.is_empty() || password.is_empty() {
+                    push_error(
+                        &weak,
+                        "Name, host, username, and password are required.".into(),
+                    );
+                    return;
+                }
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c
+                        .import_forticlient_sslvpn(
+                            &name, &host, port_u16, &username, &password, None, "[]", "[]",
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            push_status(&weak, "FortiClient SSL VPN profile imported.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Import FortiClient failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Connect profile
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_connect_profile(move |profile_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let profile_id = profile_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.connect(&profile_id).await {
+                        Ok(()) => {
+                            push_status(&weak, "Connect requested.");
+                            poll_status(&conn, weak).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Connect failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Disconnect VPN
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        window.on_disconnect_vpn(move || {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.disconnect().await {
+                        Ok(()) => {
+                            push_status(&weak, "Disconnected.");
+                            poll_status(&conn, weak).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Disconnect failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Delete profile
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_delete_profile(move |profile_id| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let profile_id = profile_id.to_string();
+            rt.spawn(async move {
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.delete_profile(&profile_id).await {
+                        Ok(()) => {
+                            push_status(&weak, "Profile deleted.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Delete profile failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
+    // Host search - filters the cached host list client-side.
+    {
+        let weak = window.as_weak();
+        let host_cache = host_cache.clone();
+        let rt = rt.clone();
+        window.on_host_search_changed(move |query| {
+            let weak = weak.clone();
+            let host_cache = host_cache.clone();
+            let query = query.to_string();
+            rt.spawn(async move {
+                let hosts = host_cache.lock().await.clone();
+                let filtered = if query.is_empty() {
+                    hosts
+                } else {
+                    filter_hosts(&hosts, &query)
+                };
+                let _ = weak.upgrade_in_event_loop(move |w| {
+                    w.set_hosts(ModelRc::new(VecModel::from(filtered)));
+                });
+            });
+        });
+    }
+
+    // Dismiss banners
+    {
+        let weak = window.as_weak();
+        window.on_dismiss_error(move || {
+            if let Some(w) = weak.upgrade() {
+                w.set_last_error("".into());
+                w.set_last_status_message("".into());
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON → Slint-model helpers
+// ---------------------------------------------------------------------------
 
 fn parse_keys(j: &str) -> Vec<KeyRow> {
     let arr: serde_json::Value = match serde_json::from_str(j) {
@@ -301,34 +729,68 @@ fn parse_hosts(j: &str) -> Vec<HostRow> {
         .unwrap_or_default()
 }
 
+fn parse_profiles(j: &str) -> Vec<ProfileRow> {
+    let arr: serde_json::Value = match serde_json::from_str(j) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("parse profiles json: {e}");
+            return Vec::new();
+        }
+    };
+    arr.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| ProfileRow {
+                    id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    name: item.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    backend: item
+                        .get("backend")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
+                    host: item.get("host").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    username: item
+                        .get("username")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
+                    full_tunnel: item
+                        .get("full_tunnel")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true),
+                    auto_connect: item
+                        .get("auto_connect")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// UI thread helpers
+// ---------------------------------------------------------------------------
+
 fn push_error(weak: &slint::Weak<AppWindow>, msg: String) {
     error!("{msg}");
     let _ = weak.upgrade_in_event_loop(move |w| {
         w.set_last_error(SharedString::from(msg));
+        w.set_last_status_message("".into());
     });
 }
 
 fn push_status(weak: &slint::Weak<AppWindow>, msg: &'static str) {
     let _ = weak.upgrade_in_event_loop(move |w| {
-        w.set_daemon_status(SharedString::from(msg));
+        w.set_last_status_message(SharedString::from(msg));
+        w.set_last_error("".into());
     });
 }
 
-fn set_error(weak: &slint::Weak<AppWindow>, msg: &'static str) {
-    let _ = weak.upgrade_in_event_loop(move |w| {
-        w.set_last_error(SharedString::from(msg));
-    });
-}
-
-/// Copy a string to the Windows clipboard via `arboard`, which on Windows
-/// wraps `OpenClipboard` / `SetClipboardData` via the `clipboard-win` crate.
-/// A fresh [`arboard::Clipboard`] per call is cheap and side-steps the
-/// "clipboard handle must live on the UI thread" subtlety — we're already
-/// on the Tokio worker that handled the export RPC.
+/// Copy a string to the Windows clipboard via `arboard`.
 fn copy_to_clipboard(text: &str) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new()
-        .map_err(|e| format!("clipboard init: {e}"))?;
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {e}"))?;
     cb.set_text(text.to_owned())
         .map_err(|e| format!("clipboard set: {e}"))
 }
-
