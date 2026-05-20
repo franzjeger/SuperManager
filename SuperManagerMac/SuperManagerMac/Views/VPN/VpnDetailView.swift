@@ -27,6 +27,12 @@ struct VpnDetailView: View {
     @State private var helperReachable: Bool = false
     @State private var pollTask: Task<Void, Never>?
 
+    /// "Edit credentials" sheet — triggered from the
+    /// auth-failure inline button. Focused on just the
+    /// username + password (vs the full profile edit sheet)
+    /// so the operator can fix a typo'd case in two clicks.
+    @State private var showEditCredentialsSheet = false
+
     /// IKEv2 / strongSwan live metrics, populated by
     /// `vpnStatus` each poll. All zero/empty when not
     /// connected. Drives the FortiClient-style status card.
@@ -104,6 +110,28 @@ struct VpnDetailView: View {
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
         .sheet(isPresented: $showingLog) { logSheet }
+        .sheet(isPresented: $showEditCredentialsSheet) {
+            if let profile, case .ikev2(let cfg) = profile.config {
+                IkeCredentialsEditSheet(
+                    profileId: profile.id,
+                    profileName: profile.name,
+                    currentUsername: cfg.username,
+                    onSaved: {
+                        // Re-load the profile so the displayed
+                        // username updates, then auto-retry the
+                        // connect. The whole point of this
+                        // sheet is "fix and try again."
+                        Task {
+                            await load()
+                            if let p = self.profile {
+                                await connect(p)
+                            }
+                        }
+                    }
+                )
+                .environment(appState)
+            }
+        }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
                 // Reading the stored username inline in `details(_:)`
@@ -602,8 +630,42 @@ struct VpnDetailView: View {
                     // log lines a few KB above. Surface a one-click jump
                     // into them so users don't have to open Console.app
                     // and chase root permission.
+                    // Auth-failure shortcut: when the error is
+                    // about credentials, surface the username
+                    // we're actually sending + an inline "Edit
+                    // credentials" button. Case-sensitive
+                    // backends (FortiGate against a local DB,
+                    // Windows RADIUS, LDAP) reject `sybr_admin`
+                    // vs `Sybr_admin` silently; making the
+                    // value visible catches that in one glance.
+                    if isAuthFailure(actionError), case .ikev2(let cfg) = profile.config {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 4) {
+                                Text("Sending username:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("'\(cfg.username)'")
+                                    .font(.caption.monospaced().weight(.medium))
+                                    .textSelection(.enabled)
+                            }
+                            Text("If FortiClient succeeds with a different case (e.g. `Sybr_admin`), fix it below.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.top, 4)
+                    }
                     if helperReachable {
                         HStack(spacing: 8) {
+                            if isAuthFailure(actionError) {
+                                Button {
+                                    isRenaming = false
+                                    showEditCredentialsSheet = true
+                                } label: {
+                                    Label("Edit credentials…", systemImage: "person.crop.circle.badge.exclamationmark")
+                                }
+                                .controlSize(.small)
+                                .buttonStyle(.borderedProminent)
+                            }
                             Button("View Helper Log…") {
                                 Task { await loadLog() }
                             }
@@ -1592,4 +1654,21 @@ private struct ParsedActionError {
             self.detail = nil
         }
     }
+}
+
+/// Classify a connect-error message as "auth-side" so the
+/// VPN-detail toast knows to surface the inline
+/// "Edit credentials" shortcut. Matches both the helper's
+/// canonical diagnoser output (PR #74's
+/// `diagnose_strongswan_failure`) and lower-level lines from
+/// the raw swanctl log in case the diagnoser missed them.
+fileprivate func isAuthFailure(_ message: String) -> Bool {
+    let lower = message.lowercased()
+    return lower.contains("eap-mschapv2")
+        || lower.contains("eap_mschapv2")
+        || lower.contains("authentication_failed")
+        || lower.contains("authentication failed")
+        || lower.contains("username or password rejected")
+        || lower.contains("credentials may be wrong")
+        || lower.contains("login failed")
 }
