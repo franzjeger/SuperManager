@@ -49,10 +49,6 @@ use super::{VpnBackend, VpnError};
 /// second for healthy gateways and trip TLS retries past 30 s.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Default install location of the OpenVPN Community binary. Probed
-/// when `openvpn.exe` isn't on `%PATH%`.
-const DEFAULT_INSTALL_PATH: &str = r"C:\Program Files\OpenVPN\bin\openvpn.exe";
-
 /// Active OpenVPN tunnel state. Holds onto the child process and the
 /// management-socket reader so disconnect can issue a graceful SIGTERM
 /// over the management protocol before killing the process.
@@ -100,27 +96,48 @@ impl Default for OpenVpnBackend {
     }
 }
 
-/// Locate the openvpn.exe binary. Search order:
-/// 1. `OPENVPN_EXE` env var (lets users point at a portable install).
-/// 2. `%PATH%` lookup (the installer adds the bin dir).
-/// 3. Hardcoded `C:\Program Files\OpenVPN\bin\openvpn.exe`.
+/// Locate the `openvpn.exe` binary. Search order:
+/// 1. SuperManager's own `bin\openvpn.exe` — bundled by the MSI alongside
+///    the daemon. This is the expected location for normal installations.
+/// 2. `OPENVPN_EXE` env var — lets advanced users override with a specific
+///    binary (portable install, staging build, etc.).
+/// 3. `%PATH%` lookup.
+/// 4. Legacy `C:\Program Files\OpenVPN\bin\openvpn.exe` — fallback for
+///    machines that happen to have a full OpenVPN Community install.
 fn locate_openvpn() -> Result<PathBuf, VpnError> {
-    if let Some(p) = std::env::var_os("OPENVPN_EXE") {
-        let path = PathBuf::from(p);
+    // 1. Bundled in the same bin\ directory as the SuperManager daemon.
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("openvpn.exe")));
+    if let Some(ref p) = bundled {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+    }
+
+    // 2. Env var override.
+    if let Some(v) = std::env::var_os("OPENVPN_EXE") {
+        let path = PathBuf::from(v);
         if path.exists() {
             return Ok(path);
         }
     }
+
+    // 3. PATH.
     if let Ok(p) = which::which("openvpn.exe") {
         return Ok(p);
     }
-    let fallback = PathBuf::from(DEFAULT_INSTALL_PATH);
-    if fallback.exists() {
-        return Ok(fallback);
+
+    // 4. Legacy full-application install location.
+    let legacy = PathBuf::from(r"C:\Program Files\OpenVPN\bin\openvpn.exe");
+    if legacy.exists() {
+        return Ok(legacy);
     }
+
     Err(VpnError::MissingDependency(
-        "openvpn.exe not found. Install OpenVPN Community Edition from \
-         https://openvpn.net/community-downloads/ or set OPENVPN_EXE to its absolute path."
+        "openvpn.exe not found. It should be bundled at \
+         %ProgramFiles%\\SuperManager\\bin\\openvpn.exe. \
+         Re-run the SuperManager installer to restore it."
             .into(),
     ))
 }
@@ -192,6 +209,12 @@ impl OpenVpnBackend {
         };
 
         let mut command = Command::new(&openvpn_exe);
+        // Set the working directory to the directory containing openvpn.exe.
+        // OpenVPN 2.6+ probes its CWD for wintun.dll, so this lets it pick
+        // up the bundled wintun.dll without needing a separate --wintun flag.
+        if let Some(bin_dir) = openvpn_exe.parent() {
+            command.current_dir(bin_dir);
+        }
         command
             .arg("--config")
             .arg(&cfg.config_file)

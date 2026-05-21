@@ -94,6 +94,34 @@
                   KeyPath="yes" />
           </Component>
 
+          <!-- WireGuardNT DLL — self-installs the WireGuardNT kernel driver
+               on first adapter creation. No full WireGuard-for-Windows app
+               needed; this DLL is the ONLY dependency of the WireGuard backend.
+               Sourced from wireguard-nt releases via Get-VendorFiles.ps1. -->
+          <Component Id="WireGuardDll" Bitness="always64">
+            <File Id="wireguard.dll"
+                  Source="vendor\wireguard.dll"
+                  KeyPath="yes" />
+          </Component>
+
+          <!-- Wintun TUN driver DLL — self-installs wintun.sys on first use.
+               Picked up by openvpn.exe from the same directory. No TAP-Windows6
+               driver or OpenVPN GUI needed. -->
+          <Component Id="WintunDll" Bitness="always64">
+            <File Id="wintun.dll"
+                  Source="vendor\wintun.dll"
+                  KeyPath="yes" />
+          </Component>
+
+          <!-- OpenVPN CLI binary — extracted from the upstream OpenVPN MSI by
+               Get-VendorFiles.ps1, NOT installed system-wide. SuperManager
+               spawns this directly; no OpenVPN GUI, no system tray, no service. -->
+          <Component Id="OpenVpnExe" Bitness="always64">
+            <File Id="openvpn.exe"
+                  Source="vendor\openvpn.exe"
+                  KeyPath="yes" />
+          </Component>
+
           <!-- openfortivpn.exe is embedded only when vendor/openfortivpn.exe
                is present at build time. The build script sets the
                preprocessor variable based on file existence. -->
@@ -165,6 +193,9 @@
       <ComponentRef Id="DaemonExe" />
       <ComponentRef Id="GuiExe" />
       <ComponentRef Id="McpExe" />
+      <ComponentRef Id="WireGuardDll" />
+      <ComponentRef Id="WintunDll" />
+      <ComponentRef Id="OpenVpnExe" />
       <?if $(var.IncludeOpenfortivpn) = "yes" ?>
       <ComponentRef Id="OpenfortivpnExe" />
       <?endif?>

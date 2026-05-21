@@ -100,13 +100,44 @@ impl WireGuardBackend {
         if let Some(lib) = WG_LIB.get() {
             return Ok(lib.clone());
         }
+        // Probe the DLL in order of preference:
+        //  1. Same directory as the daemon binary (MSI install: bin\wireguard.dll)
+        //  2. WIREGUARD_DLL env var override (developer/testing)
+        //  3. System PATH (legacy: full WireGuard-for-Windows install)
+        //
         // `unsafe` is unavoidable: dynamic library loading can never be
-        // safe in the Rust sense. The MSI installer mitigates the risk
-        // by dropping the DLL into a system-protected directory.
-        let loaded: Arc<wireguard_nt::dll> = unsafe { wireguard_nt::load() }
-            .map_err(|e| VpnError::MissingDependency(format!(
-                "wireguard.dll not found ({e}); install WireGuard for Windows from https://www.wireguard.com/install/"
-            )))?;
+        // safe in the Rust sense. The MSI places the DLL inside a
+        // system-protected directory (%ProgramFiles%\SuperManager\bin\).
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+        let loaded: Arc<wireguard_nt::dll> = (|| {
+            // 1. Bundled in the SuperManager bin\ directory.
+            if let Some(ref dir) = exe_dir {
+                let bundled = dir.join("wireguard.dll");
+                if bundled.exists() {
+                    // SAFETY: path points to our own install directory.
+                    if let Ok(lib) = unsafe { wireguard_nt::load_from_path(&bundled) } {
+                        return Ok(lib);
+                    }
+                }
+            }
+            // 2. Env var override.
+            if let Ok(path) = std::env::var("WIREGUARD_DLL") {
+                if let Ok(lib) = unsafe { wireguard_nt::load_from_path(path.as_str()) } {
+                    return Ok(lib);
+                }
+            }
+            // 3. Fallback to PATH / default search.
+            unsafe { wireguard_nt::load() }
+        })()
+        .map_err(|e| VpnError::MissingDependency(format!(
+            "wireguard.dll not found ({e}). \
+             It should be bundled at %ProgramFiles%\\SuperManager\\bin\\wireguard.dll. \
+             Re-run the SuperManager installer to restore it."
+        )))?;
+
         match WG_LIB.set(loaded.clone()) {
             Ok(()) => Ok(loaded),
             Err(_) => Ok(WG_LIB.get().expect("OnceLock set then get").clone()),

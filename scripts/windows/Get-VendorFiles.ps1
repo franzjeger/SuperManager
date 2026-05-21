@@ -1,19 +1,24 @@
-# Download + hash-verify the upstream installers listed in
-# `vendor/manifest.toml`, staging them under `vendor/` for the Burn
-# bundle build.
+# Download + hash-verify the upstream files listed in vendor/manifest.toml,
+# then extract individual DLLs / EXEs into vendor/ for the MSI build.
 #
-# Idempotent: a file already present with the right hash is left
-# alone; a file whose hash drifted is re-downloaded. CI calls this
-# before `build-msi.ps1 -Bundle`.
+# SuperManager bundles only the MINIMAL files each VPN backend needs:
+#   wireguard.dll  — from wireguard-nt zip (no WireGuard GUI installed)
+#   wintun.dll     — from Wintun zip (no separate driver installer)
+#   openvpn.exe    — extracted from OpenVPN MSI via msiexec /a (no OpenVPN
+#                    GUI installed; just the CLI binary)
+#
+# Idempotent: files already present with the right hash are left alone.
+# CI calls this before build-msi.ps1.
 #
 # Exit codes:
-#   0  - everything pinned matches; vendor/ is populated
-#   1  - manifest parse / network / hash-mismatch failure
+#   0  - all vendor files present and verified
+#   1  - download, hash, or extraction failure
 
 [CmdletBinding()]
 param(
     [string]$ManifestPath = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor/manifest.toml'),
-    [string]$VendorDir    = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor')
+    [string]$VendorDir    = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'vendor'),
+    [switch]$Force        # Re-download even if hash matches
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,9 +28,7 @@ if (-not (Test-Path $ManifestPath)) {
     throw "manifest not found at $ManifestPath"
 }
 
-# Minimal TOML parser - we only need [section] headers + key="value"
-# lines. PowerShell's built-in ConvertFrom-Toml didn't ship until 7.4
-# so doing it by hand keeps the script runnable on the older runners.
+# Minimal TOML parser — handles [section] + key = "value" lines.
 function ConvertFrom-SimpleToml {
     param([string]$Text)
     $result = @{}
@@ -45,59 +48,112 @@ function ConvertFrom-SimpleToml {
     return $result
 }
 
-$manifest = ConvertFrom-SimpleToml -Text (Get-Content $ManifestPath -Raw)
+# Download a URL to a temp file, verify SHA-256, return temp path.
+function Get-Verified {
+    param([string]$Name, [string]$Url, [string]$ExpectedHash)
+    $tmp = [System.IO.Path]::GetTempFileName()
+    Write-Host ("  ← {0}" -f $Url)
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
+    } catch {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        throw "[$Name] download failed: $($_.Exception.Message)"
+    }
+    $actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToUpperInvariant()
+    $expected = $ExpectedHash.ToUpperInvariant()
+    if ($actual -ne $expected) {
+        Remove-Item $tmp -Force
+        throw "[$Name] HASH MISMATCH`n  expected: $expected`n  actual:   $actual`n  Re-pin vendor/manifest.toml."
+    }
+    Write-Host ("  ✓ SHA-256 verified ({0} bytes)" -f (Get-Item $tmp).Length)
+    return $tmp
+}
+
+# Extract a single file from a zip archive to a destination path.
+function Expand-ZipEntry {
+    param([string]$ZipPath, [string]$EntryPath, [string]$Dest)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        $entry = $zip.Entries | Where-Object { $_.FullName -eq $EntryPath }
+        if (-not $entry) {
+            throw "Entry '$EntryPath' not found in zip"
+        }
+        $stream = $entry.Open()
+        $out    = [System.IO.File]::Create($Dest)
+        try { $stream.CopyTo($out) } finally { $out.Close(); $stream.Close() }
+    } finally { $zip.Dispose() }
+}
+
 if (-not (Test-Path $VendorDir)) {
     New-Item -ItemType Directory -Path $VendorDir | Out-Null
 }
 
-$failed = $false
+$manifest = ConvertFrom-SimpleToml -Text (Get-Content $ManifestPath -Raw)
+$failed   = $false
+
 foreach ($name in $manifest.Keys | Sort-Object) {
     $entry = $manifest[$name]
-    $required = @('url', 'sha256', 'output')
-    $missing = $required | Where-Object { -not $entry.ContainsKey($_) }
-    if ($missing) {
-        Write-Warning "[$name] missing keys: $($missing -join ', ') - skipping"
-        continue
-    }
-    $expectedHash = $entry['sha256'].ToUpperInvariant()
+    if (-not $entry.ContainsKey('output')) { continue }  # skip comment-only sections
     $dest = Join-Path $VendorDir $entry['output']
 
-    if (Test-Path $dest) {
-        $actual = (Get-FileHash $dest -Algorithm SHA256).Hash
-        if ($actual -eq $expectedHash) {
-            Write-Host ("[{0}] cached at {1} (hash matches)" -f $name, $entry['output'])
+    # Check if already present and correct.
+    if (-not $Force -and (Test-Path $dest)) {
+        if ($entry.ContainsKey('sha256')) {
+            $actual   = (Get-FileHash $dest -Algorithm SHA256).Hash.ToUpperInvariant()
+            $expected = $entry['sha256'].ToUpperInvariant()
+            if ($actual -eq $expected) {
+                Write-Host ("[{0}] {1} — cached, hash OK" -f $name, $entry['output'])
+                continue
+            }
+            Write-Host ("[{0}] hash drifted, re-fetching" -f $name)
+        } else {
+            Write-Host ("[{0}] {1} — cached" -f $name, $entry['output'])
             continue
         }
-        Write-Host ("[{0}] cached file hash drifted; re-downloading" -f $name)
-        Remove-Item $dest -Force
     }
 
-    Write-Host ("[{0}] downloading {1}" -f $name, $entry['url'])
+    Write-Host ("[{0}] fetching {1}..." -f $name, $entry['output'])
     try {
-        Invoke-WebRequest -Uri $entry['url'] -OutFile $dest -UseBasicParsing
+        # --- ZIP source: download zip, extract single entry ---
+        if ($entry.ContainsKey('zip_path')) {
+            $tmp = Get-Verified -Name $name -Url $entry['url'] -ExpectedHash $entry['sha256']
+            Expand-ZipEntry -ZipPath $tmp -EntryPath $entry['zip_path'] -Dest $dest
+            Remove-Item $tmp -Force
+            Write-Host ("  → extracted {0}" -f $dest)
+        }
+        # --- MSI source: download MSI, admin-install to temp, copy exe ---
+        elseif ($entry.ContainsKey('msi_extract_path')) {
+            $msiTmp  = Get-Verified -Name $name -Url $entry['url'] -ExpectedHash $entry['sha256']
+            $exDir   = Join-Path $env:TEMP "supermgr-vendor-$name"
+            New-Item -ItemType Directory -Path $exDir -Force | Out-Null
+            Write-Host "  → extracting MSI (msiexec /a)…"
+            $proc = Start-Process msiexec.exe -ArgumentList "/a `"$msiTmp`" /qn TARGETDIR=`"$exDir`"" -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { throw "msiexec failed (exit $($proc.ExitCode))" }
+            $src = Join-Path $exDir $entry['msi_extract_path']
+            if (-not (Test-Path $src)) { throw "msiexec ran but '$src' not found in extracted tree" }
+            Copy-Item $src $dest -Force
+            Remove-Item $exDir -Recurse -Force
+            Remove-Item $msiTmp -Force
+            Write-Host ("  → extracted {0}" -f $dest)
+        }
+        # --- Direct download (no extraction) ---
+        else {
+            $tmp = Get-Verified -Name $name -Url $entry['url'] -ExpectedHash $entry['sha256']
+            Move-Item $tmp $dest -Force
+        }
     } catch {
-        Write-Warning ("[{0}] download failed: {1}" -f $name, $_.Exception.Message)
+        Write-Warning $_.Exception.Message
         $failed = $true
         continue
     }
-
-    $actual = (Get-FileHash $dest -Algorithm SHA256).Hash
-    if ($actual -ne $expectedHash) {
-        Write-Warning ("[{0}] HASH MISMATCH at {1}" -f $name, $dest)
-        Write-Warning ("       expected: {0}" -f $expectedHash)
-        Write-Warning ("       actual:   {0}" -f $actual)
-        Remove-Item $dest -Force
-        $failed = $true
-        continue
-    }
-    Write-Host ("[{0}] verified - {1} bytes" -f $name, (Get-Item $dest).Length)
+    Write-Host ("[{0}] done → {1}" -f $name, (Get-Item $dest).Length) -ForegroundColor Green
 }
 
 if ($failed) {
     Write-Host ""
-    Write-Host "One or more vendor files failed verification. Re-pin the manifest with the actual upstream hash if the upstream legitimately changed." -ForegroundColor Red
+    Write-Host "One or more vendor files failed. Update vendor/manifest.toml if upstream legitimately changed." -ForegroundColor Red
     exit 1
 }
-
 Write-Host ""
-Write-Host "All vendor files verified." -ForegroundColor Green
+Write-Host "All vendor files ready." -ForegroundColor Green

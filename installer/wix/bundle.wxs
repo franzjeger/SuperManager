@@ -2,24 +2,20 @@
 <!--
   SuperManager-Setup.exe (WiX v4/v5 Burn bootstrapper).
 
-  Chains three MSIs in order:
-    1. WireGuard for Windows (driver + DLL + GUI; SuperManager only needs
-       the driver and DLL, but the official MSI installs all of it)
-    2. OpenVPN Community Edition (openvpn.exe + TAP-Windows6 driver)
-    3. SuperManager.msi (our own MSI, built first by build-msi.ps1)
+  Unlike previous versions this bundle chains ONLY the SuperManager MSI.
+  WireGuard and OpenVPN are no longer installed as separate applications —
+  SuperManager.msi bundles only the minimal files each backend needs:
+    bin\wireguard.dll    WireGuardNT (self-installs kernel driver on first use)
+    bin\wintun.dll       Wintun (self-installs kernel driver on first use)
+    bin\openvpn.exe      OpenVPN CLI only (no GUI, not installed system-wide)
 
-  Each prerequisite is wrapped in MsiPackage with Permanent="yes" so
-  Burn does NOT uninstall it when SuperManager is later removed: the
-  user may have installed those for other reasons (the WireGuard MSI is
-  needed by the official WireGuard GUI; OpenVPN Community is widely used
-  standalone). SuperManager itself uninstalls cleanly.
+  This means the end user gets ONE UAC prompt and NO extra applications
+  appear in Add/Remove Programs.
 
   Build:
-    wix build -arch x64 -ext WixToolset.Bal.wixext -out SuperManager-Setup.exe bundle.wxs
-
-  build-msi.ps1 -Bundle does this automatically once the vendor files
-  are present (vendor\wireguard-installer.msi, vendor\openvpn-installer.msi)
-  and installer\wix\license.rtf exists.
+    .\installer\wix\build-msi.ps1 -Bundle
+  (Ensure vendor\wireguard.dll, vendor\wintun.dll, vendor\openvpn.exe are
+  present first — run scripts\windows\Get-VendorFiles.ps1.)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
@@ -36,23 +32,7 @@
     </BootstrapperApplication>
 
     <Chain>
-      <!-- WireGuard for Windows. Downloaded by the build script to
-           vendor/wireguard-installer.msi; we reference the relative
-           path so the embedded MSI is part of the EXE's payload. -->
-      <MsiPackage Id="WireGuardForWindows"
-                  SourceFile="vendor\wireguard-installer.msi"
-                  Visible="yes"
-                  Permanent="yes" />
-
-      <!-- OpenVPN Community Edition: embedded and pinned the same way. -->
-      <MsiPackage Id="OpenVpnCommunity"
-                  SourceFile="vendor\openvpn-installer.msi"
-                  Visible="yes"
-                  Permanent="yes" />
-
-      <!-- SuperManager itself, built by cargo release + wix.
-           UpgradeCode-matched to the bare MSI so a subsequent bare-MSI
-           install upgrades cleanly. -->
+      <!-- SuperManager MSI — everything needed is bundled inside it. -->
       <MsiPackage Id="SuperManagerMsi"
                   SourceFile="installer\wix\SuperManager.msi"
                   Visible="yes" />
