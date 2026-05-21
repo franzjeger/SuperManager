@@ -45,6 +45,11 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Permissions", systemImage: "lock.shield")
                 }
+
+            NetworkSettingsView()
+                .tabItem {
+                    Label("Network", systemImage: "network")
+                }
         }
         // Slight padding so each pane isn't flush against the tab strip.
         .padding(20)

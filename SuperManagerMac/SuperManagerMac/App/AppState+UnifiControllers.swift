@@ -246,18 +246,48 @@ extension AppState {
     }
 }
 
+/// Mirrors `engine::device_type_overrides::SnapshotView`: two
+/// scoped dictionaries of operator-set overrides. `byMac`
+/// applies to one specific MAC; `byOui` applies to every MAC
+/// with that three-octet prefix. Lookup priority on the engine
+/// side is exact-MAC first, then OUI prefix.
+struct DeviceTypeOverrides: Codable, Equatable {
+    var byMac: [String: String]
+    var byOui: [String: String]
+
+    static let empty = DeviceTypeOverrides(byMac: [:], byOui: [:])
+
+    enum CodingKeys: String, CodingKey {
+        case byMac = "by_mac"
+        case byOui = "by_oui"
+    }
+
+    init(byMac: [String: String], byOui: [String: String]) {
+        self.byMac = byMac
+        self.byOui = byOui
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        byMac = (try? c.decode([String: String].self, forKey: .byMac)) ?? [:]
+        byOui = (try? c.decode([String: String].self, forKey: .byOui)) ?? [:]
+    }
+
+    var isEmpty: Bool { byMac.isEmpty && byOui.isEmpty }
+    var totalCount: Int { byMac.count + byOui.count }
+}
+
 extension AppState {
     /// Pull every persisted device-type override from the
-    /// daemon. The GUI uses these to populate per-host menu
-    /// pre-selection and to know when to render the "(manual)"
-    /// indicator across stale scan results that haven't been
-    /// re-run yet.
-    func loadDeviceTypeOverrides() async -> [String: String] {
+    /// daemon, returned as a typed `DeviceTypeOverrides`
+    /// (two scoped dictionaries). Used by the Settings →
+    /// Network tab + by per-host scan-row rendering.
+    func loadDeviceTypeOverrides() async -> DeviceTypeOverrides {
         do {
             return try await client.call("device_type_overrides_list")
         } catch {
             handleError(error)
-            return [:]
+            return .empty
         }
     }
 
