@@ -28,9 +28,9 @@ struct DiscoveryPanel: View {
     @State private var credTestInFlight: Set<String> = []
     @State private var selectedFinding: PersistedFinding?
     @State private var showReport = false
-    // Traffic-capture still has a local sheet trigger; DNS audit's
-    // canonical home is Recon now (Tranche 1, 1.8).
-    @State private var showTrafficCapture = false
+    // Both DNS audit and traffic capture are canonically homed
+    // in Recon now (Tranche 1, 1.8 + 1.9). DiscoveryPanel
+    // surfaces them only as cross-section "open in Recon" links.
     /// Becomes true the first time the user interacts with a finding
     /// (taps a row, toggles a pin). Suppresses the auto-open of the
     /// most-severe finding after subsequent scans — once the user
@@ -107,9 +107,6 @@ struct DiscoveryPanel: View {
         }
         .sheet(isPresented: $showReport) {
             EngagementReportSheet(engagementId: engagement.id, title: engagement.title)
-        }
-        .sheet(isPresented: $showTrafficCapture) {
-            TrafficCaptureSheet(engagementId: engagement.id)
         }
     }
 
@@ -251,9 +248,14 @@ struct DiscoveryPanel: View {
                     Label("Open DNS audit in Recon…", systemImage: "arrow.up.forward.app")
                 }
                 Button {
-                    showTrafficCapture = true
+                    // Canonical home of traffic capture is the
+                    // Recon section. Cross-section hand-off via
+                    // AppState.pendingReconTool — Recon's
+                    // onAppear opens the right tile.
+                    appState.pendingReconTool = ReconTool.trafficCapture.rawValue
+                    appState.selectedSection = .recon
                 } label: {
-                    Label("Capture insecure traffic…", systemImage: "waveform.path.ecg.rectangle")
+                    Label("Open traffic capture in Recon…", systemImage: "arrow.up.forward.app")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
