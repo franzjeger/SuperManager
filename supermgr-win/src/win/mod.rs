@@ -505,6 +505,44 @@ fn bind_callbacks(
         });
     }
 
+    // Import FortiGate IKEv2 (Windows RAS)
+    {
+        let weak = window.as_weak();
+        let conn = conn.clone();
+        let rt = rt.clone();
+        let host_cache = host_cache.clone();
+        window.on_import_fortigate(move |name, host, username, password, psk| {
+            let weak = weak.clone();
+            let conn = conn.clone();
+            let host_cache = host_cache.clone();
+            let name = name.to_string();
+            let host = host.to_string();
+            let username = username.to_string();
+            let password = password.to_string();
+            let psk = psk.to_string();
+            rt.spawn(async move {
+                if name.is_empty() || host.is_empty() || username.is_empty()
+                    || password.is_empty() || psk.is_empty()
+                {
+                    push_error(
+                        &weak,
+                        "Name, host, username, password, and PSK are all required.".into(),
+                    );
+                    return;
+                }
+                with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
+                    match c.import_fortigate(&name, &host, &username, &password, &psk).await {
+                        Ok(_) => {
+                            push_status(&weak, "FortiGate IKEv2 profile imported.");
+                            refresh_all(&conn, &host_cache, weak.clone()).await;
+                        }
+                        Err(e) => push_error(&weak, format!("Import FortiGate failed: {e}")),
+                    }
+                });
+            });
+        });
+    }
+
     // Import FortiClient SSL VPN
     {
         let weak = window.as_weak();

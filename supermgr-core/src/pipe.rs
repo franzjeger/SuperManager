@@ -261,6 +261,31 @@ impl PipeClient {
         .await
     }
 
+    /// Import a FortiGate IKEv2 IPsec profile (Windows RAS / strongSwan).
+    /// Returns the new profile id. Password + PSK are sent in cleartext
+    /// over the local pipe; the daemon stores them in the platform
+    /// secret store before responding.
+    pub async fn import_fortigate(
+        &self,
+        name: &str,
+        host: &str,
+        username: &str,
+        password: &str,
+        psk: &str,
+    ) -> Result<String, PipeError> {
+        self.invoke_json_string(
+            "import_fortigate",
+            serde_json::json!({
+                "name": name,
+                "host": host,
+                "username": username,
+                "password": password,
+                "psk": psk,
+            }),
+        )
+        .await
+    }
+
     /// Import a FortiGate SSL VPN profile. Returns the new profile id.
     ///
     /// `dns_servers_json` and `routes_json` are JSON-encoded arrays
