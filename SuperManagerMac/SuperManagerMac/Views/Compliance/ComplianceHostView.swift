@@ -60,6 +60,8 @@ struct ComplianceHostView: View {
                             if let drift = appState.complianceDrift[hostId],
                                drift.previousRunId != nil {
                                 driftSection(drift: drift)
+                            } else if history.count == 1 {
+                                baselineEstablishedCard
                             }
                             breakdownSection(for: run)
                         } else {
@@ -396,6 +398,38 @@ struct ComplianceHostView: View {
     }
 
     // MARK: - Drift section
+
+    /// First-run state: a single run has been recorded so there's
+    /// no previous run to diff against. Explicit copy so the
+    /// operator doesn't read "no drift section" as "no problem"
+    /// — drift detection literally hasn't run yet because it
+    /// requires two runs to compare. Replaced by `driftSection`
+    /// on the second scan onward.
+    private var baselineEstablishedCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "flag.checkered.circle.fill")
+                .foregroundStyle(.tint)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Baseline established")
+                    .font(.subheadline.weight(.semibold))
+                Text("This is the first compliance run for this host. Drift detection compares future runs against this one — re-scan to see what changes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.tint.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.tint.opacity(0.25), lineWidth: 0.5)
+        )
+    }
 
     /// "Since last scan" panel. Surfaces what changed: newly
     /// failing checks (top priority), newly passing (good news),
