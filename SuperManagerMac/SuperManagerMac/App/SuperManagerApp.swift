@@ -110,6 +110,8 @@ struct SuperManagerApp: App {
                     .keyboardShortcut("5", modifiers: .command)
                 Button("Security") { appState.selectedSection = .security }
                     .keyboardShortcut("6", modifiers: .command)
+                Button("Recon") { appState.selectedSection = .recon }
+                    .keyboardShortcut("7", modifiers: .command)
                 Divider()
                 // Opens WebCaptureSheet with whatever's on the
                 // clipboard auto-parsed. Lets the operator
