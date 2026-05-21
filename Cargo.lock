@@ -7170,7 +7170,7 @@ dependencies = [
 
 [[package]]
 name = "supermgr-win"
-version = "1.0.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -7240,7 +7240,7 @@ dependencies = [
 
 [[package]]
 name = "supermgrd-win"
-version = "1.0.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -5,7 +5,30 @@
 // in-properties, fires the callbacks, and consumes the in-out form
 // state. The .slint side does no business logic and no transport.
 
-import { Button, LineEdit, TextEdit, ListView, ComboBox, CheckBox, VerticalBox, HorizontalBox, GroupBox, ScrollView } from "std-widgets.slint";
+import { Button, LineEdit, TextEdit, ListView, ComboBox, CheckBox, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+// --------------------------------------------------------------------------
+// Reusable card panel (replaces GroupBox — cleaner look)
+// --------------------------------------------------------------------------
+component Card inherits Rectangle {
+    in property <string> title;
+    background: white;
+    border-radius: 8px;
+    border-color: #cbd5e1;
+    border-width: 1px;
+    VerticalBox {
+        padding: 16px;
+        spacing: 0px;
+        if root.title != "": Text {
+            text: root.title;
+            font-size: 13px;
+            font-weight: 600;
+            color: #1d2733;
+        }
+        if root.title != "": Rectangle { height: 12px; }
+        @children
+    }
+}
 
 // --------------------------------------------------------------------------
 // Shared model structs (must match the JSON the daemon emits)
@@ -116,6 +139,7 @@ component StatusPill inherits Rectangle {
     in property <string> label;
     in property <color> fill;
     height: 22px;
+    horizontal-stretch: 0;
     background: fill;
     border-radius: 11px;
     HorizontalBox {
@@ -148,7 +172,7 @@ export component AppWindow inherits Window {
     in property <string>  last-error: "";
     in property <string>  last-status-message: "";
     in property <string>  last-refresh: "";
-    in property <string>  app-version: "1.2.0";
+    in property <string>  app-version: "1.5.0";
     in property <string>  data-root: "C:\\ProgramData\\SuperManager";
 
     // ----- Navigation -----
@@ -366,7 +390,7 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 background: white;
                                 border-radius: 8px;
-                                border-color: #e2e8f0;
+                                border-color: #cbd5e1;
                                 border-width: 1px;
                                 horizontal-stretch: 2;
                                 min-height: 140px;
@@ -374,10 +398,10 @@ export component AppWindow inherits Window {
                                     padding: 16px;
                                     spacing: 8px;
                                     HorizontalBox {
-                                        Text { text: "VPN connection"; font-size: 12px; color: #64748b; horizontal-stretch: 1; }
+                                        Text { text: "VPN connection"; font-size: 13px; font-weight: 500; color: #374151; horizontal-stretch: 1; }
                                         StatusPill {
                                             label: root.vpn-state;
-                                            fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #64748b);
+                                            fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #4b5563);
                                         }
                                     }
                                     Text {
@@ -388,8 +412,8 @@ export component AppWindow inherits Window {
                                     }
                                     if root.vpn-backend != "": Text {
                                         text: "via " + root.vpn-backend;
-                                        font-size: 12px;
-                                        color: #64748b;
+                                        font-size: 13px;
+                                        color: #374151;
                                     }
                                     Rectangle { vertical-stretch: 1; }
                                     HorizontalBox {
@@ -409,33 +433,33 @@ export component AppWindow inherits Window {
                                 Rectangle {
                                     background: white;
                                     border-radius: 8px;
-                                    border-color: #e2e8f0;
+                                    border-color: #cbd5e1;
                                     border-width: 1px;
                                     HorizontalBox {
                                         padding: 14px;
-                                        Text { text: "SSH keys"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Text { text: "SSH keys"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; horizontal-stretch: 1; }
                                         Text { text: root.keys.length; font-size: 22px; font-weight: 700; color: #1d2733; }
                                     }
                                 }
                                 Rectangle {
                                     background: white;
                                     border-radius: 8px;
-                                    border-color: #e2e8f0;
+                                    border-color: #cbd5e1;
                                     border-width: 1px;
                                     HorizontalBox {
                                         padding: 14px;
-                                        Text { text: "Managed hosts"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Text { text: "Managed hosts"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; horizontal-stretch: 1; }
                                         Text { text: root.hosts.length; font-size: 22px; font-weight: 700; color: #1d2733; }
                                     }
                                 }
                                 Rectangle {
                                     background: white;
                                     border-radius: 8px;
-                                    border-color: #e2e8f0;
+                                    border-color: #cbd5e1;
                                     border-width: 1px;
                                     HorizontalBox {
                                         padding: 14px;
-                                        Text { text: "VPN profiles"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Text { text: "VPN profiles"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; horizontal-stretch: 1; }
                                         Text { text: root.profiles.length; font-size: 22px; font-weight: 700; color: #1d2733; }
                                     }
                                 }
@@ -445,12 +469,12 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
                                 spacing: 6px;
-                                Text { text: "Recently"; font-size: 12px; color: #64748b; }
+                                Text { text: "Activity"; font-size: 13px; font-weight: 500; color: #374151; }
                                 Text {
                                     text: root.last-refresh != "" ? ("Last refresh: " + root.last-refresh) : "Refresh has not run yet";
                                     color: #1d2733;
@@ -476,9 +500,11 @@ export component AppWindow inherits Window {
                         spacing: 16px;
                         Text { text: "SSH Keys"; font-size: 22px; font-weight: 600; color: #1d2733; }
 
-                        GroupBox {
+                        Card {
                             title: "Generate new key";
                             VerticalBox {
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
                                     Text { text: "Name"; vertical-alignment: center; min-width: 120px; color: #1d2733; }
                                     LineEdit { placeholder-text: "frank@workstation"; text <=> root.new-key-name; }
@@ -511,7 +537,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
+                        Card {
                             title: "Managed keys (" + root.keys.length + ")";
                             ScrollView {
                                 min-height: 240px;
@@ -533,8 +559,8 @@ export component AppWindow inherits Window {
                                                 Text { text: key.name; font-weight: 600; color: #1d2733; }
                                                 Text {
                                                     text: key.key_type + "  ·  " + key.fingerprint;
-                                                    color: #64748b;
-                                                    font-size: 12px;
+                                                    color: #374151;
+                                                    font-size: 13px;
                                                     overflow: elide;
                                                 }
                                             }
@@ -554,9 +580,11 @@ export component AppWindow inherits Window {
                         spacing: 16px;
                         Text { text: "Hosts"; font-size: 22px; font-weight: 600; color: #1d2733; }
 
-                        GroupBox {
+                        Card {
                             title: "Add host";
                             VerticalBox {
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
                                     Text { text: "Label"; vertical-alignment: center; min-width: 100px; color: #1d2733; }
                                     LineEdit { placeholder-text: "prod-web-01"; text <=> root.new-host-label; }
@@ -614,9 +642,11 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
+                        Card {
                             title: "Managed hosts (" + root.hosts.length + ")";
                             VerticalBox {
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
                                     Text { text: "🔍"; vertical-alignment: center; }
                                     LineEdit {
@@ -657,8 +687,8 @@ export component AppWindow inherits Window {
                                                     }
                                                     Text {
                                                         text: host.username + "@" + host.hostname + "  ·  " + host.device_type;
-                                                        color: #64748b;
-                                                        font-size: 12px;
+                                                        color: #374151;
+                                                        font-size: 13px;
                                                         overflow: elide;
                                                     }
                                                 }
@@ -696,13 +726,13 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             HorizontalBox {
                                 padding: 16px;
                                 StatusPill {
                                     label: root.vpn-state;
-                                    fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #64748b);
+                                    fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #4b5563);
                                 }
                                 Text {
                                     text: root.vpn-profile-name != "" ? root.vpn-profile-name : "No active profile";
@@ -718,9 +748,11 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
+                        Card {
                             title: "Import FortiGate IKEv2 (Windows RAS)";
                             VerticalBox {
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
                                     Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
                                     LineEdit { placeholder-text: "client-fortigate-ikev2"; text <=> root.fg-import-name; }
@@ -763,15 +795,17 @@ export component AppWindow inherits Window {
 
                         HorizontalBox {
                             spacing: 16px;
-                            GroupBox {
+                            Card {
                                 title: "Import WireGuard (.conf)";
                                 horizontal-stretch: 1;
                                 VerticalBox {
+                                    spacing: 10px;
+                                    padding: 0;
                                     HorizontalBox {
                                         Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
                                         LineEdit { placeholder-text: "office-vpn"; text <=> root.wg-import-name; }
                                     }
-                                    Text { text: ".conf contents"; color: #1d2733; }
+                                    Text { text: ".conf contents"; color: #1d2733; font-size: 13px; }
                                     TextEdit {
                                         min-height: 140px;
                                         text <=> root.wg-import-text;
@@ -788,10 +822,12 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            GroupBox {
+                            Card {
                                 title: "Import FortiGate SSL VPN";
                                 horizontal-stretch: 1;
                                 VerticalBox {
+                                    spacing: 10px;
+                                    padding: 0;
                                     HorizontalBox {
                                         Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
                                         LineEdit { placeholder-text: "client-fortigate"; text <=> root.fc-import-name; }
@@ -836,7 +872,7 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
+                        Card {
                             title: "Profiles (" + root.profiles.length + ")";
                             ScrollView {
                                 min-height: 240px;
@@ -858,8 +894,8 @@ export component AppWindow inherits Window {
                                                 Text { text: prof.name; font-weight: 600; color: #1d2733; }
                                                 Text {
                                                     text: prof.backend + (prof.host != "" ? "  ·  " + prof.host : "");
-                                                    color: #64748b;
-                                                    font-size: 12px;
+                                                    color: #374151;
+                                                    font-size: 13px;
                                                     overflow: elide;
                                                 }
                                             }
@@ -889,25 +925,26 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
                                 spacing: 8px;
                                 Text { text: "Daemon"; font-size: 14px; font-weight: 600; color: #1d2733; }
                                 HorizontalBox {
-                                    Text { text: "Service status:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "Service status:"; color: #374151; min-width: 140px; vertical-alignment: center; }
                                     StatusPill {
                                         label: root.daemon-connected ? "Online" : "Offline";
                                         fill: root.daemon-connected ? #16a34a : #ef4444;
                                     }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Pipe address:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "Pipe address:"; color: #374151; min-width: 140px; }
                                     Text { text: "\\\\.\\pipe\\supermgrd"; color: #1d2733; font-size: 13px; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Data directory:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "Data directory:"; color: #374151; min-width: 140px; }
                                     Text { text: root.data-root; color: #1d2733; font-size: 13px; overflow: elide; }
                                 }
                             }
@@ -916,22 +953,22 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
                                 spacing: 8px;
                                 Text { text: "About"; font-size: 14px; font-weight: 600; color: #1d2733; }
                                 HorizontalBox {
-                                    Text { text: "Version:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "Version:"; color: #374151; min-width: 140px; }
                                     Text { text: root.app-version; color: #1d2733; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Repository:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "Repository:"; color: #374151; min-width: 140px; }
                                     Text { text: "github.com/franzjeger/SuperManager"; color: #1d2733; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "License:"; color: #64748b; min-width: 140px; }
+                                    Text { text: "License:"; color: #374151; min-width: 140px; }
                                     Text { text: "GPL-3.0-or-later"; color: #1d2733; }
                                 }
                             }
@@ -970,14 +1007,14 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
                                 spacing: 6px;
-                                Text { text: "Connection"; font-size: 12px; color: #64748b; }
+                                Text { text: "Connection details"; font-size: 13px; font-weight: 500; color: #374151; }
                                 HorizontalBox {
-                                    Text { text: "SSH target:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "SSH target:"; color: #374151; min-width: 130px; }
                                     Text {
                                         text: root.selected-host.username + "@" + root.selected-host.hostname + ":" + root.selected-host.port;
                                         color: #1d2733;
@@ -985,19 +1022,19 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Auth method:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "Auth method:"; color: #374151; min-width: 130px; }
                                     Text { text: root.selected-host.auth_method; color: #1d2733; font-size: 13px; }
                                 }
                                 if root.selected-host.group != "": HorizontalBox {
-                                    Text { text: "Group:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "Group:"; color: #374151; min-width: 130px; }
                                     Text { text: root.selected-host.group; color: #1d2733; font-size: 13px; }
                                 }
                                 if root.selected-host.customer != "": HorizontalBox {
-                                    Text { text: "Customer:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "Customer:"; color: #374151; min-width: 130px; }
                                     Text { text: root.selected-host.customer; color: #1d2733; font-size: 13px; }
                                 }
                                 if root.selected-host.created_at != "": HorizontalBox {
-                                    Text { text: "Added:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "Added:"; color: #374151; min-width: 130px; }
                                     Text { text: root.selected-host.created_at; color: #1d2733; font-size: 13px; }
                                 }
                             }
@@ -1007,7 +1044,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
@@ -1021,8 +1058,8 @@ export component AppWindow inherits Window {
                                 }
                                 if root.host-test-result != "": Text {
                                     text: root.host-test-result;
-                                    color: #475569;
-                                    font-size: 12px;
+                                    color: #374151;
+                                    font-size: 13px;
                                     wrap: word-wrap;
                                 }
                             }
@@ -1032,7 +1069,7 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
@@ -1057,7 +1094,8 @@ export component AppWindow inherits Window {
                                     Text {
                                         text: "Exit code: " + root.host-cmd-exit-code;
                                         color: root.host-cmd-exit-code == 0 ? #166534 : #b91c1c;
-                                        font-size: 12px;
+                                        font-size: 13px;
+                                        font-weight: 500;
                                     }
                                     if root.host-cmd-stdout != "": Rectangle {
                                         background: #0f172a;
@@ -1067,12 +1105,12 @@ export component AppWindow inherits Window {
                                             Text {
                                                 text: "stdout";
                                                 color: #94a3b8;
-                                                font-size: 10px;
+                                                font-size: 11px;
                                             }
                                             Text {
                                                 text: root.host-cmd-stdout;
                                                 color: #e2e8f0;
-                                                font-size: 12px;
+                                                font-size: 13px;
                                                 font-family: "Consolas, monospace";
                                                 wrap: word-wrap;
                                             }
@@ -1086,12 +1124,12 @@ export component AppWindow inherits Window {
                                             Text {
                                                 text: "stderr";
                                                 color: #fca5a5;
-                                                font-size: 10px;
+                                                font-size: 11px;
                                             }
                                             Text {
                                                 text: root.host-cmd-stderr;
                                                 color: #fecaca;
-                                                font-size: 12px;
+                                                font-size: 13px;
                                                 font-family: "Consolas, monospace";
                                                 wrap: word-wrap;
                                             }
@@ -1105,14 +1143,14 @@ export component AppWindow inherits Window {
                         Rectangle {
                             background: white;
                             border-radius: 8px;
-                            border-color: #e2e8f0;
+                            border-color: #cbd5e1;
                             border-width: 1px;
                             VerticalBox {
                                 padding: 16px;
                                 spacing: 8px;
                                 Text { text: "Credentials"; font-size: 14px; font-weight: 600; color: #1d2733; }
                                 HorizontalBox {
-                                    Text { text: "Set password:"; color: #64748b; min-width: 130px; vertical-alignment: center; }
+                                    Text { text: "Set password:"; color: #374151; min-width: 130px; vertical-alignment: center; }
                                     LineEdit {
                                         input-type: password;
                                         text <=> root.host-new-password;
@@ -1128,13 +1166,13 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Set API token:"; color: #64748b; min-width: 130px; vertical-alignment: center; }
+                                    Text { text: "Set API token:"; color: #374151; min-width: 130px; vertical-alignment: center; }
                                     LineEdit {
                                         input-type: password;
                                         text <=> root.host-new-api-token;
                                         placeholder-text: "bearer token";
                                     }
-                                    Text { text: "Port"; vertical-alignment: center; color: #64748b; }
+                                    Text { text: "Port"; vertical-alignment: center; color: #374151; }
                                     LineEdit {
                                         text: root.host-new-api-port;
                                         edited(s) => { root.host-new-api-port = s.to-float(); }

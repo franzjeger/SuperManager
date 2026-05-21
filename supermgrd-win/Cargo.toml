@@ -1,6 +1,6 @@
 [package]
 name        = "supermgrd-win"
-version     = "1.0.0"
+version     = "1.5.0"
 edition     = "2021"
 description = "SuperManager privileged daemon for Windows — runs as a Service and exposes a named-pipe RPC interface"
 license     = "GPL-3.0-or-later"
