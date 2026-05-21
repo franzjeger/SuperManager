@@ -241,18 +241,27 @@ struct DiscoveryPanel: View {
                     // Canonical home of DNS zone-transfer audit
                     // is the Recon section. Cross-section hand-off
                     // via AppState.pendingReconTool — Recon's
-                    // onAppear opens the right tile.
+                    // onAppear opens the right tile. Engagement
+                    // context is carried so Recon doesn't fall
+                    // back to "first active engagement" and file
+                    // against the wrong scope.
                     appState.pendingReconTool = ReconTool.dnsAudit.rawValue
+                    appState.pendingReconEngagementId = engagement.id
                     appState.selectedSection = .recon
                 } label: {
                     Label("Open DNS audit in Recon…", systemImage: "arrow.up.forward.app")
                 }
                 Button {
                     // Canonical home of traffic capture is the
-                    // Recon section. Cross-section hand-off via
-                    // AppState.pendingReconTool — Recon's
-                    // onAppear opens the right tile.
+                    // Recon section. Engagement MUST travel
+                    // with the hand-off because pcap files
+                    // land under `<engagement>/captures/…` —
+                    // losing the context would file captures
+                    // against whatever engagement Recon's
+                    // picker happens to default to. Same
+                    // wrong-scope bug C1 was about.
                     appState.pendingReconTool = ReconTool.trafficCapture.rawValue
+                    appState.pendingReconEngagementId = engagement.id
                     appState.selectedSection = .recon
                 } label: {
                     Label("Open traffic capture in Recon…", systemImage: "arrow.up.forward.app")

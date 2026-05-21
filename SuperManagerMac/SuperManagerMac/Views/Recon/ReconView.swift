@@ -40,6 +40,18 @@ struct ReconView: View {
             sheetFor(tool: tool)
         }
         .onAppear {
+            // Engagement context carried by a cross-section
+            // hand-off (Security's DiscoveryPanel sets this
+            // when it hands off to Recon) MUST be applied
+            // before syncEngagementSelection runs — otherwise
+            // sync picks the first active engagement and we
+            // file findings/captures against the wrong scope.
+            if let eid = appState.pendingReconEngagementId,
+               activeEngagements.contains(where: { $0.id == eid })
+            {
+                selectedEngagementId = eid
+                appState.pendingReconEngagementId = nil
+            }
             syncEngagementSelection()
             // The WebCapture "Run network scan now" action sets
             // `pendingNetworkScanTargets` and switches the

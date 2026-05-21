@@ -79,6 +79,17 @@ class AppState {
     /// Value is the `ReconTool.rawValue`. ReconView consumes
     /// + clears it on appear.
     var pendingReconTool: String?
+
+    /// Engagement context that should travel with a Recon
+    /// hand-off. Critical for traffic capture (pcap path is
+    /// `<engagement>/captures/foo.pcap`) — without carrying the
+    /// source engagement, files land in whatever Recon's own
+    /// picker selected, which is "first active engagement" by
+    /// default. That's the wrong-scope bug C1 was about; the
+    /// 1.8/1.9 cross-link is responsible for not re-introducing
+    /// it. ReconView's onAppear sets `selectedEngagementId`
+    /// from this before its usual sync, then clears it.
+    var pendingReconEngagementId: String?
     /// Last error from a Tailscale login/logout/up/down RPC.
     /// Surfaced inline in the header instead of a system alert —
     /// auth flows fail in mundane ways (network down, browser
