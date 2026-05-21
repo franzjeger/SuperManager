@@ -190,6 +190,11 @@ export component AppWindow inherits Window {
     in-out property <int>    fc-import-port: 443;
     in-out property <string> fc-import-username;
     in-out property <string> fc-import-password;
+    in-out property <string> fg-import-name;
+    in-out property <string> fg-import-host;
+    in-out property <string> fg-import-username;
+    in-out property <string> fg-import-password;
+    in-out property <string> fg-import-psk;
 
     // ----- Callbacks -----
     callback refresh();
@@ -210,6 +215,7 @@ export component AppWindow inherits Window {
 
     callback import-wireguard(string /* name */, string /* conf_text */);
     callback import-forticlient(string /* name */, string /* host */, int /* port */, string /* username */, string /* password */);
+    callback import-fortigate(string /* name */, string /* host */, string /* username */, string /* password */, string /* psk */);
     callback delete-profile(string /* profile_id */);
     callback connect-profile(string /* profile_id */);
     callback disconnect-vpn();
@@ -708,6 +714,49 @@ export component AppWindow inherits Window {
                                 if root.vpn-state == "Connected": Button {
                                     text: "Disconnect";
                                     clicked => { root.disconnect-vpn(); }
+                                }
+                            }
+                        }
+
+                        GroupBox {
+                            title: "Import FortiGate IKEv2 (Windows RAS)";
+                            VerticalBox {
+                                HorizontalBox {
+                                    Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
+                                    LineEdit { placeholder-text: "client-fortigate-ikev2"; text <=> root.fg-import-name; }
+                                    Text { text: "Host"; vertical-alignment: center; min-width: 50px; color: #1d2733; }
+                                    LineEdit { placeholder-text: "vpn.example.com"; text <=> root.fg-import-host; }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Username"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
+                                    LineEdit { text <=> root.fg-import-username; }
+                                    Text { text: "Password"; vertical-alignment: center; min-width: 70px; color: #1d2733; }
+                                    LineEdit {
+                                        text <=> root.fg-import-password;
+                                        input-type: password;
+                                    }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Group PSK"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
+                                    LineEdit {
+                                        text <=> root.fg-import-psk;
+                                        input-type: password;
+                                        placeholder-text: "IKE shared secret";
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Button {
+                                        text: "Import";
+                                        primary: true;
+                                        clicked => {
+                                            root.import-fortigate(
+                                                root.fg-import-name,
+                                                root.fg-import-host,
+                                                root.fg-import-username,
+                                                root.fg-import-password,
+                                                root.fg-import-psk
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

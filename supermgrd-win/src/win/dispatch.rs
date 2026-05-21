@@ -45,6 +45,7 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
         "import_forticlient_sslvpn" => {
             handle_import_forticlient_sslvpn(state, &req.args).await
         }
+        "import_fortigate" => handle_import_fortigate(state, &req.args).await,
 
         // ----- SSH keys -----
         "ssh_generate_key" => handle_ssh_generate_key(state, &req.args).await,
@@ -477,6 +478,65 @@ async fn handle_import_forticlient_sslvpn(
         updated_at: chrono::Utc::now(),
     };
 
+    state
+        .profile_store
+        .save(profile)
+        .await
+        .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
+    Ok(Value::String(profile_id.to_string()))
+}
+
+/// Import a FortiGate IKEv2 IPsec profile. Stores the EAP password + group
+/// PSK in Credential Manager, persists a `FortiGateConfig` profile that
+/// the FortiGateBackend then dials via Windows RAS (`Add-VpnConnection`
+/// + `rasdial`) — no third-party client needed on a standards-compliant
+/// FortiGate deployment (EAP-MSCHAPv2 + PSK).
+async fn handle_import_fortigate(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    use supermgr_core::vpn::profile::{FortiGateConfig, Profile, ProfileConfig, SecretRef};
+
+    let name = arg_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err(RpcError::Other("profile name must not be empty".into()));
+    }
+    let host = arg_str(args, "host")?;
+    let username = arg_str(args, "username")?;
+    let password = arg_str(args, "password")?;
+    let psk = arg_str(args, "psk")?;
+
+    let profile_id = uuid::Uuid::new_v4();
+    let pw_label = format!("supermgr/fg/{}/password", profile_id.simple());
+    let psk_label = format!("supermgr/fg/{}/psk", profile_id.simple());
+
+    state
+        .secret_store
+        .store(&pw_label, password.as_bytes())
+        .await
+        .map_err(|e| RpcError::Secret(format!("store FortiGate password: {e}")))?;
+    state
+        .secret_store
+        .store(&psk_label, psk.as_bytes())
+        .await
+        .map_err(|e| RpcError::Secret(format!("store FortiGate PSK: {e}")))?;
+
+    let cfg = FortiGateConfig {
+        host: host.to_owned(),
+        username: username.to_owned(),
+        password: SecretRef::new(pw_label),
+        psk: SecretRef::new(psk_label),
+        dns_servers: Vec::new(),
+        routes: Vec::new(),
+    };
+    let profile = Profile {
+        id: profile_id,
+        name: name.to_owned(),
+        auto_connect: false,
+        full_tunnel: true,
+        last_connected_at: None,
+        kill_switch: false,
+        customer: String::new(),
+        config: ProfileConfig::FortiGate(cfg),
+        updated_at: chrono::Utc::now(),
+    };
     state
         .profile_store
         .save(profile)
