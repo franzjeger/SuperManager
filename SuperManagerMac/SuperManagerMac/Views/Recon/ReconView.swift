@@ -23,7 +23,6 @@ struct ReconView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
-                quickAddCallout
                 engagementSelector
                 Divider()
                 toolsGrid
@@ -87,106 +86,6 @@ struct ReconView: View {
                 }
             }
         }
-    }
-
-    // MARK: - Quick-add callout
-
-    /// Big in-your-face "Add a device" card. Discoverability fix:
-    /// the user can land on this section and immediately see
-    /// three labelled ways to get a host into SuperManager —
-    /// no hunting through menus, no remembering keyboard
-    /// shortcuts.
-    private var quickAddCallout: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Image(systemName: "plus.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Add a device").font(.headline)
-                    Text("Three ways — pick whichever is easiest right now:")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-            }
-            HStack(spacing: 12) {
-                quickAddButton(
-                    title: "Type details",
-                    subtitle: "Manual form",
-                    icon: "keyboard"
-                ) {
-                    appState.selectedSection = .ssh
-                    NotificationCenter.default.post(
-                        name: .superManagerOpenAddHost,
-                        object: nil
-                    )
-                }
-                quickAddButton(
-                    title: "Paste / clipboard",
-                    subtitle: "IP, URL, banner",
-                    icon: "doc.on.clipboard.fill"
-                ) {
-                    appState.pendingWebCapture = WebCapture(
-                        hostname: "",
-                        label: "",
-                        deviceType: .linux,
-                        username: "root"
-                    )
-                }
-                quickAddButton(
-                    title: "Scan network",
-                    subtitle: "Find live hosts",
-                    icon: "network"
-                ) {
-                    presentedTool = .networkScan
-                }
-                quickAddButton(
-                    title: "Browser bookmarklet",
-                    subtitle: "One-click from web",
-                    icon: "bookmark.fill"
-                ) {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(
-                        SuperManagerApp.webCaptureBookmarklet,
-                        forType: .string
-                    )
-                }
-            }
-        }
-        .padding(16)
-        .background(
-            RoundedRectangle(cornerRadius: 12).fill(.tint.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12).stroke(.tint.opacity(0.25), lineWidth: 1)
-        )
-    }
-
-    private func quickAddButton(
-        title: String,
-        subtitle: String,
-        icon: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 18))
-                    .foregroundStyle(.tint)
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(subtitle).font(.caption).foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(
-                RoundedRectangle(cornerRadius: 8).fill(.background)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8).stroke(.separator, lineWidth: 0.5)
-            )
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Engagement picker
