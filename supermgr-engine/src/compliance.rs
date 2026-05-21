@@ -185,6 +185,31 @@ pub enum TriggerKind {
     PostDeploy,
 }
 
+/// Which baseline this run was executed against. Carried on every
+/// `ComplianceRun` and `RunSummary` so downstream code (and the
+/// GUI, once 1.12b lands) can distinguish FortiGate REST-API runs
+/// from Linux SSH-shell runs without sniffing check ids.
+///
+/// **Back-compat:** runs persisted before this field existed will
+/// decode with `#[serde(default)]` → `BaselineKind::Fortigate`
+/// (every legacy row was a FortiGate run — Linux runs had no
+/// persistence at all before 1.12a, so there are no Linux rows
+/// on disk to mis-tag).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BaselineKind {
+    Fortigate,
+    Linux,
+}
+
+impl Default for BaselineKind {
+    /// Default used by `#[serde(default)]` when an old persisted
+    /// run lacks the `baseline_kind` field. See type-level doc.
+    fn default() -> Self {
+        Self::Fortigate
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceRun {
     pub id: String,
@@ -195,6 +220,10 @@ pub struct ComplianceRun {
     pub model: Option<String>,
     pub hostname: Option<String>,
     pub triggered_by: TriggerKind,
+    /// Which baseline this run executed. `#[serde(default)]` so
+    /// runs persisted before 1.12a (all FortiGate) still decode.
+    #[serde(default)]
+    pub baseline_kind: BaselineKind,
     /// 0–100. See `score()` below.
     pub score: u8,
     pub passed: u32,
@@ -214,6 +243,11 @@ pub struct RunSummary {
     pub errored: u32,
     pub firmware: Option<String>,
     pub triggered_by: TriggerKind,
+    /// Surfaces the baseline kind to history-list renderers so the
+    /// row can carry a badge / icon without a second round-trip.
+    /// `#[serde(default)]` for the same reason as on `ComplianceRun`.
+    #[serde(default)]
+    pub baseline_kind: BaselineKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,23 +304,14 @@ pub async fn run(
 
     let defs = default_checks();
     let mut results: Vec<CheckResult> = Vec::with_capacity(defs.len());
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let mut errored = 0u32;
-    let mut skipped = 0u32;
     for def in &defs {
         let result = run_one(state, secrets, host_id, def, ssh_session).await;
-        match result.status {
-            Status::Pass => passed += 1,
-            Status::Fail => failed += 1,
-            Status::Error => errored += 1,
-            Status::Skip => skipped += 1,
-        }
         results.push(result);
     }
 
     let finished_at = Utc::now();
     let score = score(&results);
+    let (passed, failed, errored, skipped) = tally(&results);
     let run_id = uuid::Uuid::new_v4().simple().to_string();
     let run = ComplianceRun {
         id: run_id.clone(),
@@ -297,6 +322,7 @@ pub async fn run(
         model,
         hostname,
         triggered_by,
+        baseline_kind: BaselineKind::Fortigate,
         score,
         passed,
         failed,
@@ -483,11 +509,32 @@ fn format_pass_detail(def: &CheckDefinition, value: &str) -> String {
     }
 }
 
+/// Count pass/fail/error/skip transitions over a check vector.
+/// Returns `(passed, failed, errored, skipped)` so the FortiGate
+/// runner and the Linux runner share a single counting path —
+/// avoids the "two implementations drift" risk and gives the
+/// aggregation a direct test target.
+pub(crate) fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut errored = 0u32;
+    let mut skipped = 0u32;
+    for c in checks {
+        match c.status {
+            Status::Pass => passed += 1,
+            Status::Fail => failed += 1,
+            Status::Error => errored += 1,
+            Status::Skip => skipped += 1,
+        }
+    }
+    (passed, failed, errored, skipped)
+}
+
 /// Score: start at 100, subtract severity-weighted penalty for each
 /// failed check, ignore skips. Errors count as 1.5× their severity
 /// penalty (an unknown is worse than a known-good but better than
 /// a known-bad — they need investigation). Clamped to [0, 100].
-fn score(results: &[CheckResult]) -> u8 {
+pub(crate) fn score(results: &[CheckResult]) -> u8 {
     let mut s: f64 = 100.0;
     for r in results {
         match r.status {
@@ -1329,7 +1376,7 @@ fn host_runs_dir(host_id: &str) -> PathBuf {
     p
 }
 
-fn persist_run(run: &ComplianceRun) -> Result<()> {
+pub(crate) fn persist_run(run: &ComplianceRun) -> Result<()> {
     let dir = host_runs_dir(&run.host_id);
     std::fs::create_dir_all(&dir).context("create compliance dir")?;
     let mut path = dir;
@@ -1366,6 +1413,7 @@ pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
             errored: r.errored,
             firmware: r.firmware,
             triggered_by: r.triggered_by,
+            baseline_kind: r.baseline_kind,
         })
         .collect();
     entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
@@ -2007,6 +2055,7 @@ mod tests {
             model: Some("FG-60F".to_owned()),
             hostname: Some("test-fw".to_owned()),
             triggered_by: TriggerKind::Manual,
+            baseline_kind: BaselineKind::Fortigate,
             score: score_val,
             passed,
             failed,
@@ -2510,5 +2559,63 @@ mod tests {
         assert!(md.contains("test-fw"));
         assert!(md.contains("FG-60F"));
         assert!(md.contains("7.4.1"));
+    }
+
+    // -- BaselineKind back-compat (1.12a) ------------------------------
+    //
+    // ComplianceRun rows persisted before 1.12a have no
+    // `baseline_kind` field on disk. Decoding must default them to
+    // `BaselineKind::Fortigate` — every legacy row is a FortiGate
+    // run because Linux runs had no persistence at all before this
+    // change. If serde-default ever regresses (e.g. someone removes
+    // the attribute), the daemon would refuse to load every
+    // historical run on startup. That's customer data loss in
+    // appearance; this test prevents the regression.
+
+    #[test]
+    fn compliance_run_decodes_without_baseline_kind_as_fortigate() {
+        // JSON deliberately omits `baseline_kind`. Mirrors what
+        // ships on disk from any pre-1.12a daemon.
+        let json = r#"{
+            "id": "legacy-row-1",
+            "host_id": "00000000000000000000000000000001",
+            "started_at": "2024-01-01T00:00:00Z",
+            "finished_at": "2024-01-01T00:00:30Z",
+            "firmware": "7.4.1",
+            "model": "FG-60F",
+            "hostname": "old-fw",
+            "triggered_by": "manual",
+            "score": 88,
+            "passed": 12,
+            "failed": 3,
+            "errored": 0,
+            "skipped": 0,
+            "checks": []
+        }"#;
+        let run: ComplianceRun = serde_json::from_str(json)
+            .expect("legacy run with no baseline_kind must decode");
+        assert_eq!(run.baseline_kind, BaselineKind::Fortigate,
+            "missing baseline_kind must default to Fortigate, not Linux");
+        assert_eq!(run.id, "legacy-row-1");
+        assert_eq!(run.score, 88);
+    }
+
+    #[test]
+    fn run_summary_decodes_without_baseline_kind_as_fortigate() {
+        // history endpoint also returns rows projected through
+        // RunSummary — exercise its serde-default path too.
+        let json = r#"{
+            "id": "legacy-summary-1",
+            "started_at": "2024-01-01T00:00:00Z",
+            "score": 88,
+            "passed": 12,
+            "failed": 3,
+            "errored": 0,
+            "firmware": "7.4.1",
+            "triggered_by": "manual"
+        }"#;
+        let summary: RunSummary = serde_json::from_str(json)
+            .expect("legacy summary with no baseline_kind must decode");
+        assert_eq!(summary.baseline_kind, BaselineKind::Fortigate);
     }
 }
