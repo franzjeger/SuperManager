@@ -68,6 +68,12 @@ jobs:
         uses: cygwin/cygwin-install-action@v5
         with:
           packages: openfortivpn,ppp,cygwin
+          # cygwin.com hosts the setup.exe hash manifest behind Anubis
+          # bot protection (rejects PowerShell's Invoke-WebRequest UA),
+          # so skip the hash check. setup.exe itself is fetched over
+          # HTTPS from the same origin which is enough integrity for
+          # build inputs; we don't ship setup.exe.
+          check-hash: false
 
       - name: Stage openfortivpn bundle
         env:
