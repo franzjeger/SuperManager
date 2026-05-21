@@ -71,6 +71,14 @@ class AppState {
     /// scan tile can open pre-populated without round-tripping
     /// through another picker. ReconView clears it after use.
     var pendingNetworkScanTargets: [String]?
+
+    /// Cross-section "open this Recon tool" message. Set by
+    /// callers in other sections that previously hosted a
+    /// duplicate copy of the same sheet (the Security panel's
+    /// DNS-audit / traffic-capture buttons before Tranche 1).
+    /// Value is the `ReconTool.rawValue`. ReconView consumes
+    /// + clears it on appear.
+    var pendingReconTool: String?
     /// Last error from a Tailscale login/logout/up/down RPC.
     /// Surfaced inline in the header instead of a system alert —
     /// auth flows fail in mundane ways (network down, browser

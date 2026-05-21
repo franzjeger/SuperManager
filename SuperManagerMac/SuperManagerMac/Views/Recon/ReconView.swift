@@ -54,6 +54,16 @@ struct ReconView: View {
             {
                 presentedTool = .networkScan
             }
+            // Cross-section open-tool hook used by Tranche-1
+            // canonical-home moves: when another section hands
+            // off a Recon tool by name, open the corresponding
+            // tile and clear the request.
+            if let raw = appState.pendingReconTool,
+               let tool = ReconTool(rawValue: raw)
+            {
+                presentedTool = tool
+                appState.pendingReconTool = nil
+            }
         }
         .onChange(of: appState.engagements.map(\.id)) { _, _ in
             syncEngagementSelection()

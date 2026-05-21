@@ -28,7 +28,8 @@ struct DiscoveryPanel: View {
     @State private var credTestInFlight: Set<String> = []
     @State private var selectedFinding: PersistedFinding?
     @State private var showReport = false
-    @State private var showDnsAudit = false
+    // Traffic-capture still has a local sheet trigger; DNS audit's
+    // canonical home is Recon now (Tranche 1, 1.8).
     @State private var showTrafficCapture = false
     /// Becomes true the first time the user interacts with a finding
     /// (taps a row, toggles a pin). Suppresses the auto-open of the
@@ -106,9 +107,6 @@ struct DiscoveryPanel: View {
         }
         .sheet(isPresented: $showReport) {
             EngagementReportSheet(engagementId: engagement.id, title: engagement.title)
-        }
-        .sheet(isPresented: $showDnsAudit) {
-            DnsAuditSheet()
         }
         .sheet(isPresented: $showTrafficCapture) {
             TrafficCaptureSheet(engagementId: engagement.id)
@@ -243,9 +241,14 @@ struct DiscoveryPanel: View {
                 }
                 Divider()
                 Button {
-                    showDnsAudit = true
+                    // Canonical home of DNS zone-transfer audit
+                    // is the Recon section. Cross-section hand-off
+                    // via AppState.pendingReconTool — Recon's
+                    // onAppear opens the right tile.
+                    appState.pendingReconTool = ReconTool.dnsAudit.rawValue
+                    appState.selectedSection = .recon
                 } label: {
-                    Label("DNS zone-transfer audit…", systemImage: "network.badge.shield.half.filled")
+                    Label("Open DNS audit in Recon…", systemImage: "arrow.up.forward.app")
                 }
                 Button {
                     showTrafficCapture = true
