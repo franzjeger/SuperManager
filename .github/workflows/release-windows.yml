@@ -59,6 +59,21 @@ jobs:
           wix extension add WixToolset.Util.wixext/5.0.2 --global
           wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
 
+      # Cygwin is the only viable Windows port of openfortivpn. Install
+      # the package + the `ppp` runtime it needs, then stage the
+      # closure into vendor/openfortivpn-bundle/. The Cygwin license
+      # (GPL with linking exception) plus our chained-install model
+      # let us redistribute the runtime DLLs under GPL-3.0 aggregation.
+      - name: Install Cygwin + openfortivpn
+        uses: cygwin/cygwin-install-action@v5
+        with:
+          packages: openfortivpn,ppp,cygwin
+
+      - name: Stage openfortivpn bundle
+        env:
+          CYGWIN_ROOT: C:\cygwin
+        run: .\scripts\windows\Stage-Openfortivpn.ps1
+
       # Download + hash-verify the upstream WireGuard + OpenVPN MSIs
       # against `vendor/manifest.toml`. The Burn bundle embeds them
       # so end users don't have to install WireGuard for Windows /

@@ -143,6 +143,19 @@ jobs:
           wix extension add WixToolset.Util.wixext/5.0.2 --global
           wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
 
+      # Cygwin's openfortivpn package is the only maintained Windows
+      # build path. Pull the package + its pppd runtime, then stage
+      # the .exe + DLL closure so the MSI embeds it.
+      - name: Install Cygwin + openfortivpn
+        uses: cygwin/cygwin-install-action@v5
+        with:
+          packages: openfortivpn,ppp,cygwin
+
+      - name: Stage openfortivpn bundle
+        env:
+          CYGWIN_ROOT: C:\cygwin
+        run: .\scripts\windows\Stage-Openfortivpn.ps1
+
       # Stage WireGuard + OpenVPN upstream MSIs so the Burn bundle
       # build below works on every push - catches schema regressions
       # in bundle.wxs before a release tag.

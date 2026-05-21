@@ -69,15 +69,34 @@ foreach ($exe in @("supermgrd-win.exe", "supermgr-win.exe", "supermgr-mcp.exe"))
     }
 }
 
-# 2. Decide whether to embed openfortivpn.exe.
-$openfortivpnPath = Join-Path $vendorDir "openfortivpn.exe"
-$includeOpenfortivpn = "no"
+# 2. Decide whether to embed openfortivpn.
+#
+# Two paths:
+#   a) `vendor/openfortivpn.exe` - a single, statically-linked binary the
+#      user dropped in by hand. Embedded directly into bin\.
+#   b) `vendor/openfortivpn-bundle/` - the Cygwin-built closure
+#      (openfortivpn.exe + pppd.exe + cyg*.dll). Embedded into
+#      bin\openfortivpn-bundle\. CI populates this via
+#      `scripts/windows/Stage-Openfortivpn.ps1` after installing the
+#      Cygwin `openfortivpn` package.
+$openfortivpnPath   = Join-Path $vendorDir "openfortivpn.exe"
+$openfortivpnBundle = Join-Path $vendorDir "openfortivpn-bundle"
+
+$includeOpenfortivpn       = "no"
+$includeOpenfortivpnBundle = "no"
+
 if (Test-Path $openfortivpnPath) {
-    Write-Host "Found vendor\openfortivpn.exe -- embedding into the MSI."
+    Write-Host "Found vendor\openfortivpn.exe -- embedding into the MSI bin\."
     $includeOpenfortivpn = "yes"
-} else {
-    Write-Host "vendor\openfortivpn.exe absent -- MSI will be built without the SSL VPN client bundled."
-    Write-Host "(See vendor\README.md for the download URL.)"
+}
+if (Test-Path $openfortivpnBundle) {
+    $count = (Get-ChildItem $openfortivpnBundle).Count
+    Write-Host "Found vendor\openfortivpn-bundle\ ($count files) -- embedding into bin\openfortivpn-bundle\."
+    $includeOpenfortivpnBundle = "yes"
+}
+if (($includeOpenfortivpn -eq "no") -and ($includeOpenfortivpnBundle -eq "no")) {
+    Write-Host "openfortivpn not staged -- MSI will ship without FortiGate SSL VPN support."
+    Write-Host "(Run scripts/windows/Stage-Openfortivpn.ps1 after a Cygwin install, or drop a static .exe at vendor/openfortivpn.exe.)"
 }
 
 Push-Location $repoRoot
@@ -89,6 +108,7 @@ try {
         -arch x64 `
         -d "TargetDir=$targetDir" `
         -d "IncludeOpenfortivpn=$includeOpenfortivpn" `
+        -d "IncludeOpenfortivpnBundle=$includeOpenfortivpnBundle" `
         -ext WixToolset.UI.wixext `
         -ext WixToolset.Util.wixext `
         -out $outputMsi `

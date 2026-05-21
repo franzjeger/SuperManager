@@ -3,11 +3,12 @@
 Drop the following files into this directory before building the MSI to
 get a fully bundled SuperManager installer.
 
-| Filename                  | Source | Purpose |
-|---------------------------|--------|---------|
-| `openfortivpn.exe`        | <https://github.com/openfortivpn-windows/openfortivpn-windows/releases> | FortiGate SSL VPN client |
-| `wireguard-installer.msi` | <https://download.wireguard.com/windows-client/> | WireGuardNT driver + DLL |
-| `openvpn-installer.msi`   | <https://openvpn.net/community-downloads/> | OpenVPN Community Edition + TAP-Windows6 |
+| Filename / dir                | Source | Purpose |
+|-------------------------------|--------|---------|
+| `wireguard-installer.msi`     | Pinned in `manifest.toml`, fetched by `scripts/windows/Get-VendorFiles.ps1` from <https://download.wireguard.com/windows-client/> | WireGuardNT driver + DLL |
+| `openvpn-installer.msi`       | Pinned in `manifest.toml`, fetched by `Get-VendorFiles.ps1` from <https://build.openvpn.net/> | OpenVPN Community Edition + TAP-Windows6 |
+| `openfortivpn-bundle/`        | Produced by `scripts/windows/Stage-Openfortivpn.ps1` after installing the Cygwin `openfortivpn` + `ppp` packages | FortiGate SSL VPN client (`openfortivpn.exe` + `pppd.exe` + cygwin runtime DLLs) |
+| `openfortivpn.exe` (legacy)   | User-supplied static binary (no maintained upstream) | Single-file fallback if you've built openfortivpn statically yourself |
 
 ## What happens with each file
 

@@ -54,9 +54,14 @@ use super::{VpnBackend, VpnError};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fallback locations probed when `OPENFORTIVPN_EXE` is unset and the
-/// binary isn't on `%PATH%`. The MSI installer drops it in the first
-/// path; the second matches a manual `choco install openfortivpn`.
+/// binary isn't on `%PATH%`. Probed in order:
+/// 1. The MSI's Cygwin-bundle subdirectory (default for fresh installs
+///    built by the release workflow). Includes cygwin1.dll + pppd.exe
+///    co-located so the Cygwin runtime resolves correctly.
+/// 2. A user-supplied static binary dropped next to supermgrd-win.exe.
+/// 3. A manual `choco install openfortivpn` style install.
 const DEFAULT_LOCATIONS: &[&str] = &[
+    r"C:\Program Files\SuperManager\bin\openfortivpn-bundle\openfortivpn.exe",
     r"C:\Program Files\SuperManager\bin\openfortivpn.exe",
     r"C:\ProgramData\chocolatey\bin\openfortivpn.exe",
 ];
