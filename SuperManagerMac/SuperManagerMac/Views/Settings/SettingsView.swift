@@ -8,10 +8,14 @@ import SwiftUI
 /// every other Apple settings window.
 ///
 /// Tabs map to the operational concerns the user might want to tweak:
-///   • **General**   — appearance, menu bar, polling intervals
-///   • **Security**  — master password, auto-lock
-///   • **Backup**    — full-config export/import
-///   • **Audit**     — viewer for the daemon's audit.log
+///   • **General**     — appearance, menu bar, polling intervals
+///   • **Security**    — master password, auto-lock
+///   • **Backup**      — full-config export/import
+///   • **Audit**       — viewer for the daemon's audit.log
+///   • **Integrations** — third-party API keys
+///   • **UniFi**       — standalone controller registry
+///   • **Permissions** — macOS permissions + Homebrew tools state
+///   • **Network**     — DNS fallbacks, device-type overrides
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
 
@@ -35,6 +39,16 @@ struct SettingsView: View {
             UnifiControllersSettingsView()
                 .tabItem {
                     Label("UniFi", systemImage: "antenna.radiowaves.left.and.right")
+                }
+
+            PermissionsSettingsView()
+                .tabItem {
+                    Label("Permissions", systemImage: "lock.shield")
+                }
+
+            NetworkSettingsView()
+                .tabItem {
+                    Label("Network", systemImage: "network")
                 }
         }
         // Slight padding so each pane isn't flush against the tab strip.

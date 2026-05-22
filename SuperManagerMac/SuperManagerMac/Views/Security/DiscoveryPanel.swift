@@ -28,8 +28,9 @@ struct DiscoveryPanel: View {
     @State private var credTestInFlight: Set<String> = []
     @State private var selectedFinding: PersistedFinding?
     @State private var showReport = false
-    @State private var showDnsAudit = false
-    @State private var showTrafficCapture = false
+    // Both DNS audit and traffic capture are canonically homed
+    // in Recon now (Tranche 1, 1.8 + 1.9). DiscoveryPanel
+    // surfaces them only as cross-section "open in Recon" links.
     /// Becomes true the first time the user interacts with a finding
     /// (taps a row, toggles a pin). Suppresses the auto-open of the
     /// most-severe finding after subsequent scans — once the user
@@ -106,12 +107,6 @@ struct DiscoveryPanel: View {
         }
         .sheet(isPresented: $showReport) {
             EngagementReportSheet(engagementId: engagement.id, title: engagement.title)
-        }
-        .sheet(isPresented: $showDnsAudit) {
-            DnsAuditSheet()
-        }
-        .sheet(isPresented: $showTrafficCapture) {
-            TrafficCaptureSheet(engagementId: engagement.id)
         }
     }
 
@@ -243,14 +238,33 @@ struct DiscoveryPanel: View {
                 }
                 Divider()
                 Button {
-                    showDnsAudit = true
+                    // Canonical home of DNS zone-transfer audit
+                    // is the Recon section. Cross-section hand-off
+                    // via AppState.pendingReconTool — Recon's
+                    // onAppear opens the right tile. Engagement
+                    // context is carried so Recon doesn't fall
+                    // back to "first active engagement" and file
+                    // against the wrong scope.
+                    appState.pendingReconTool = ReconTool.dnsAudit.rawValue
+                    appState.pendingReconEngagementId = engagement.id
+                    appState.selectedSection = .recon
                 } label: {
-                    Label("DNS zone-transfer audit…", systemImage: "network.badge.shield.half.filled")
+                    Label("Open DNS audit in Recon…", systemImage: "arrow.up.forward.app")
                 }
                 Button {
-                    showTrafficCapture = true
+                    // Canonical home of traffic capture is the
+                    // Recon section. Engagement MUST travel
+                    // with the hand-off because pcap files
+                    // land under `<engagement>/captures/…` —
+                    // losing the context would file captures
+                    // against whatever engagement Recon's
+                    // picker happens to default to. Same
+                    // wrong-scope bug C1 was about.
+                    appState.pendingReconTool = ReconTool.trafficCapture.rawValue
+                    appState.pendingReconEngagementId = engagement.id
+                    appState.selectedSection = .recon
                 } label: {
-                    Label("Capture insecure traffic…", systemImage: "waveform.path.ecg.rectangle")
+                    Label("Open traffic capture in Recon…", systemImage: "arrow.up.forward.app")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")

@@ -37,6 +37,7 @@ struct UnifiControllerPanel: View {
                     Spacer()
                     statusPill
                 }
+                standaloneRegistryHint
                 if host.hasUnifiController {
                     configuredActions
                 } else {
@@ -79,6 +80,47 @@ struct UnifiControllerPanel: View {
                     await runTest()
                 }
             }
+        }
+    }
+
+    /// Cross-link to the newer standalone-controller registry
+    /// (Settings → UniFi). The host-tied model on this panel
+    /// pre-dates that registry — both paths persist different
+    /// keychain entries and don't reconcile. If the operator
+    /// has a controller registered under Settings → UniFi, it's
+    /// almost certainly the path they want to use; this card
+    /// signposts that without forcing them off the legacy
+    /// panel (Tranche 2's K3 will hide it conditionally).
+    @ViewBuilder
+    private var standaloneRegistryHint: some View {
+        if !appState.unifiControllers.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "info.circle")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Controllers are managed in Settings → UniFi")
+                        .font(.caption.weight(.medium))
+                    Text("If one of your \(appState.unifiControllers.count) registered controller\(appState.unifiControllers.count == 1 ? "" : "s") already adopts this device, you can manage it from there — devices cross-reference by MAC. The host-tied panel below is the legacy path; it stays for cases where no controller is registered.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Open Settings") {
+                    // Sonoma+ canonical; falls back to the older
+                    // preferences-selector for 14.x and below.
+                    if #available(macOS 14.0, *) {
+                        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                    } else {
+                        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+                    }
+                }
+                .controlSize(.small)
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 6).fill(.tint.opacity(0.06))
+            )
         }
     }
 

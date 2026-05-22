@@ -421,6 +421,93 @@ extension AppState {
         }
     }
 
+    /// Mirrors `engine::ssh::import::ImportCandidate`. One row
+    /// per private-key file the daemon found in `~/.ssh`.
+    /// `hasPassphrase` flags entries that we can detect but
+    /// can't import directly — the operator would have to
+    /// `ssh-keygen -p` to strip the passphrase first.
+    struct ImportCandidate: Codable, Identifiable, Hashable {
+        let path: String
+        let name: String
+        let keyType: String
+        let publicKey: String
+        let privateKeyPem: String
+        let fingerprint: String
+        let hasPassphrase: Bool
+
+        var id: String { path }
+
+        enum CodingKeys: String, CodingKey {
+            case path, name, fingerprint
+            case keyType = "key_type"
+            case publicKey = "public_key"
+            case privateKeyPem = "private_key_pem"
+            case hasPassphrase = "has_passphrase"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            path = (try? c.decode(String.self, forKey: .path)) ?? ""
+            name = (try? c.decode(String.self, forKey: .name)) ?? ""
+            // Engine ships `SshKeyType` as the lowercase variant
+            // tag (`"ed25519"`, `"rsa2048"`, `"rsa4096"`). Keep
+            // as String to dodge having to track every value
+            // change in lockstep — GUI only needs to display
+            // it and pass it back on import.
+            keyType = (try? c.decode(String.self, forKey: .keyType)) ?? "ed25519"
+            publicKey = (try? c.decode(String.self, forKey: .publicKey)) ?? ""
+            privateKeyPem = (try? c.decode(String.self, forKey: .privateKeyPem)) ?? ""
+            fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
+            hasPassphrase = (try? c.decode(Bool.self, forKey: .hasPassphrase)) ?? false
+        }
+    }
+
+    /// Scan a directory (`~/.ssh` by default) for importable
+    /// private keys. Returns one row per file the daemon could
+    /// parse; passphrase-protected keys are returned but
+    /// flagged for the caller to filter / warn on.
+    func scanSshDirectory(_ directory: String = "~/.ssh") async -> [ImportCandidate] {
+        do {
+            return try await client.call(
+                "ssh_import_keys_scan",
+                params: ["directory": directory]
+            )
+        } catch {
+            handleError(error)
+            return []
+        }
+    }
+
+    /// Import an existing SSH key. `publicKey` + `privateKeyPem`
+    /// come straight from an `ImportCandidate` returned by
+    /// `scanSshDirectory`, OR from operator-pasted text in a
+    /// future "paste" entry-point. Daemon writes the private
+    /// key into the macOS keychain.
+    @discardableResult
+    func importSshKey(
+        name: String,
+        keyType: String,
+        publicKey: String,
+        privateKeyPem: String
+    ) async -> String? {
+        do {
+            let keyId: String = try await client.call(
+                "ssh_import_key",
+                params: [
+                    "name": name,
+                    "key_type": keyType,
+                    "public_key": publicKey,
+                    "private_key_pem": privateKeyPem,
+                ]
+            )
+            await refreshKeys()
+            return keyId
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
     func generateKey(name: String, keyType: String, description: String, tags: [String]) async {
         let tagsJson = (try? JSONSerialization.data(withJSONObject: tags))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"

@@ -613,6 +613,37 @@ struct ContentView: View {
         return "Other"
     }
 
+    /// Per-backend pill colour so the operator sees at a glance
+    /// which protocol a row represents. Same buckets as
+    /// `backendDisplayGroup`. Picked to be distinguishable
+    /// from the connection-dot palette (green/yellow/red) so
+    /// the row's "is it connected?" signal and "what kind?"
+    /// signal don't visually compete.
+    private func backendBadgeColor(_ backend: String) -> Color {
+        switch backendDisplayGroup(backend) {
+        case "IKEv2":     return .blue
+        case "OpenVPN":   return .purple
+        case "WireGuard": return .teal
+        case "Azure":     return .indigo
+        default:          return .gray
+        }
+    }
+
+    /// Render the inline backend pill shown next to a profile's
+    /// name in the sidebar list. Replaces the previous plain
+    /// caption — same information, more glanceable.
+    private func backendBadge(_ backend: String) -> some View {
+        let label = backendDisplayGroup(backend)
+        let color = backendBadgeColor(backend)
+        return Text(label)
+            .font(.caption2.weight(.semibold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.18), in: Capsule())
+            .foregroundStyle(color)
+            .help("VPN backend: \(backend)")
+    }
+
     /// One row in the VPN sidebar list. Extracted from
     /// `vpnProfileList` so the SwiftUI type-checker doesn't
     /// time out on the deeply-nested HStacks + modifiers.
@@ -632,6 +663,7 @@ struct ContentView: View {
                     HStack(spacing: 4) {
                         Text(profile.name)
                             .fontWeight(appState.pinnedVpnIds.contains(profile.id) ? .semibold : .medium)
+                        backendBadge(profile.backend)
                         if appState.autoReconnectEnabled.contains(profile.id) {
                             Image(systemName: "arrow.clockwise.circle.fill")
                                 .font(.caption2)
@@ -639,9 +671,6 @@ struct ContentView: View {
                                 .help("Always-on: helper auto-reconnects every 30s")
                         }
                     }
-                    Text(profile.backend)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                     if let host = profile.host {
                         Text(host).font(.caption2).foregroundStyle(.tertiary)
                     }
