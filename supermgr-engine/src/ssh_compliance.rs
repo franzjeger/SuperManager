@@ -45,16 +45,16 @@ struct LinuxCheck {
     /// failed.
     expect_contains: &'static str,
     severity: Severity,
-    /// Currently unused by the runner — preserved here because the
-    /// 1.12b render-report fix will surface `cvss` + `recommendation`
-    /// to the operator (either by widening `compliance_list_checks`
-    /// to include Linux entries, or by carrying them inline on
-    /// `CheckResult`). Deleting them now would lose authored copy
-    /// the engine has already shipped.
+    /// CVSS score, currently unused by both the runner and the
+    /// library (the library uses `severity` as the operator-facing
+    /// magnitude; CVSS is preserved here for a future risk-score
+    /// integration). Marked allow(dead_code) until consumed.
     #[allow(dead_code)]
     cvss: f32,
     detail_on_fail: &'static str,
-    #[allow(dead_code)]
+    /// Authored remediation text. Read by `linux_default_checks()`
+    /// into `CheckDefinition.remediation` since 1.12c — drives the
+    /// in-row Remediation block and the report's Remediation column.
     recommendation: &'static str,
 }
 
@@ -205,7 +205,7 @@ where
             raw_value: Some(truncated),
             severity: map_severity(check.severity),
             title: check.title.to_owned(),
-            category: category_for(check.id),
+            category: category_for_id(check.id),
         });
     }
 
@@ -253,7 +253,16 @@ fn map_severity(v: Severity) -> compliance::Severity {
 /// rather than "Linux baseline" on every row. Aligns with the
 /// FortiGate path's `CheckDefinition.category` (which has values
 /// like "Authentication", "Logging", etc.).
-fn category_for(check_id: &str) -> String {
+///
+/// **Single source of truth** for Linux check categories. Called
+/// by both the runner (`run_baseline`, stamping
+/// `CheckResult.category`) and the library
+/// (`linux_default_checks`, stamping `CheckDefinition.category`).
+/// Drift between the two is impossible by construction — they
+/// share this function rather than referencing parallel literals.
+/// The runtime backstop for this invariant lives in
+/// `compliance::tests::linux_library_category_byte_identical_to_runner_category`.
+pub fn category_for_id(check_id: &str) -> String {
     let mid = check_id.strip_prefix("linux.").unwrap_or(check_id);
     let segment = mid.split('.').next().unwrap_or("baseline");
     match segment {
@@ -265,6 +274,113 @@ fn category_for(check_id: &str) -> String {
         _ => "Linux baseline",
     }
     .to_owned()
+}
+
+/// Library rows for every Linux baseline check (1.12c).
+///
+/// Returns one `compliance::CheckDefinition` per `LINUX_CHECKS`
+/// entry, suitable for merging into `compliance::list_checks()`.
+/// Once merged, the GUI's library browser shows Linux checks,
+/// the in-row Remediation block in `ComplianceHostView` resolves
+/// for Linux check_ids, and `render_markdown_report` produces a
+/// complete Remediation column for Linux runs — closing two of
+/// the three tracked defects named in 1.12b.
+///
+/// **Drift discipline:** category and severity are derived via
+/// the same `category_for_id` and `map_severity` helpers the runner
+/// (`run_baseline` above) already uses. There is no second
+/// source of truth — the persisted `CheckResult.category` from a
+/// run and the library `CheckDefinition.category` are byte-
+/// identical by construction because they come from the same
+/// function call, not from parallel literals.
+///
+/// **Runtime fields (cli_command, cli_grep, channel, expect,
+/// api_path, api_pointer)** are placeholders, not consulted by
+/// the Linux runner — `run_baseline` reads commands directly off
+/// `LINUX_CHECKS` and matches via `LinuxCheck.expect_contains`.
+/// The library row's value for Linux is in `description /
+/// remediation / cisReference / category / severity / title /
+/// framework` — the fields `ChecksLibrarySheet` and `CheckRow`
+/// actually render. See per-field notes below.
+pub fn linux_default_checks() -> Vec<compliance::CheckDefinition> {
+    LINUX_CHECKS
+        .iter()
+        .map(|c| compliance::CheckDefinition {
+            id: c.id.to_owned(),
+            title: c.title.to_owned(),
+            // Author-time text describing the check's *intent* —
+            // distinct from `detail_on_fail`, which is the
+            // failure-mode message the runner stamps into
+            // CheckResult.detail. See per-id authoring below.
+            description: linux_description(c.id).to_owned(),
+            // Same helpers the runner uses → identical strings on
+            // both sides by construction. Drift impossible.
+            category: category_for_id(c.id),
+            severity: map_severity(c.severity),
+            framework: "CIS Linux 4.0".to_owned(),
+            // CIS Linux 4.0 section references not authored yet.
+            // None renders cleanly (badge hides) in both the
+            // library row and the report.
+            cis_reference: None,
+            // `Channel::Cli` for shape consistency with the
+            // FortiGate CLI-channel rows. The Linux runner does
+            // not consult this field; it hardcodes its own
+            // execution path in `run_baseline`.
+            channel: compliance::Channel::Cli,
+            api_path: None,
+            api_pointer: None,
+            // `cli_command` / `cli_grep` deliberately not carried.
+            // `ChecksLibrarySheet`'s `CheckLibraryRow` renders
+            // title / category / cisReference / framework /
+            // severity / description / remediation — never these
+            // two. Carrying them as a display-string for the
+            // browser was rejected as "build matches description":
+            // not-rendered → not-carried.
+            cli_command: None,
+            cli_grep: None,
+            // Neutral placeholder. Never evaluated for Linux
+            // rows: the runner uses `LinuxCheck.expect_contains`
+            // directly, not the library row's `expect`. The
+            // empty-needle `Contains` would pass-everything if
+            // some future code path ever evaluated a library
+            // row's `expect` against a value — don't wire that
+            // up from here without an explicit decision. The
+            // runner owns the match; this field exists to
+            // satisfy the struct shape.
+            expect: compliance::Expectation::Contains {
+                needle: String::new(),
+            },
+            // Authored copy from `LinuxCheck.recommendation` —
+            // this is the load-bearing field. Lights up the
+            // in-row Remediation block and the report's
+            // Remediation column for every failed Linux check.
+            remediation: Some(c.recommendation.to_owned()),
+        })
+        .collect()
+}
+
+/// Authored *intent* descriptions for each Linux check. Distinct
+/// from `LinuxCheck.detail_on_fail` (which is what's-wrong text
+/// the runner stamps into `CheckResult.detail`). The library
+/// browser shows this when an operator expands a check row to
+/// understand what the check is for, before they ever see a
+/// failure. Keep them concise — 2-3 sentences each — and explain
+/// the threat / control rationale, not the remediation.
+fn linux_description(check_id: &str) -> &'static str {
+    match check_id {
+        "linux.ssh.password-auth-disabled" => "Enforces key-only SSH authentication on the host. Password authentication is the dominant attack vector for credential-stuffing and brute-force campaigns against internet-exposed sshd; disabling it removes that surface entirely. Verifies the effective sshd config via `sshd -T`, which reflects what the daemon actually does after parsing Match blocks.",
+        "linux.ssh.root-login-disabled" => "Requires interactive admin sessions to log in as a regular user, then escalate via sudo. The audit trail of which user invoked which command vanishes when admins share a root login — and a stolen root key compromises the host directly with no second factor. Aligns with CIS guidance against direct privileged accounts.",
+        "linux.ssh.protocol-v2-only" => "Confirms the host runs a modern OpenSSH release where SSHv1 has been fully removed. SSHv1 has known cryptographic weaknesses (downgrade attacks, session-key recovery); modern sshd (≥7.0) doesn't compile Protocol 1 support at all. This check inspects the daemon version rather than the config — if sshd doesn't speak v1, the config setting is moot.",
+        "linux.kernel.core-pattern-safe" => "Guards against the pwnkit-class privilege-escalation pattern where a crashing setuid binary can pipe its core dump into an attacker-controlled program running as root. A normal `kernel.core_pattern` value (`core.%p`, `/var/...`, empty) is safe; the dangerous form starts with `|` and pipes to a command. Reads the kernel parameter via `sysctl`.",
+        "linux.unattended-upgrades-active" => "Confirms an automatic-patching daemon is active so security updates land without manual operator intervention. CVE-to-patched-host latency is the single largest exposure window for known vulnerabilities; the CIS intent is that critical fixes apply within hours of release, not whenever an admin remembers to log in. Accepts either Debian/Ubuntu's `unattended-upgrades` or RHEL's `dnf-automatic`.",
+        "linux.audit.journald-running" => "Verifies that systemd-journald is collecting logs centrally. Without an active log collector, incidents go uninvestigable — there's no record of what processes ran, what authentication attempts happened, or what an attacker touched. This check does not enforce remote log shipping (separate concern), only that local journald is alive.",
+        "linux.firewall.active" => "Confirms a host-level firewall (firewalld, ufw, or non-trivial iptables/nftables rules) is active. Service sockets bind by default on Linux; a firewall is the layer that constrains exposure to the intended set of ports + networks regardless of what services accidentally bind to 0.0.0.0. Without one, a misconfigured listener is internet-reachable on any public-interface host.",
+        // Defensive — every entry in LINUX_CHECKS should have a
+        // description. The compile-time pair (every LinuxCheck has
+        // a match arm here) is tested below; this fallback only
+        // fires if a new check id is added without authoring text.
+        _ => "Linux baseline check. (No detailed description authored — see CIS Linux 4.0 documentation.)",
+    }
 }
 
 /// Static count of checks the baseline currently covers — handy

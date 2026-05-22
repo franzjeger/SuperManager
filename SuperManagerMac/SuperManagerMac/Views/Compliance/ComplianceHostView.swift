@@ -922,25 +922,21 @@ struct ComplianceHostView: View {
         }
     }
 
-    /// Export buttons gated by baseline. FortiGate → enabled
-    /// Markdown + PDF export. Linux → disabled buttons with a
-    /// 1.12c-tooltip explaining the gating.
+    /// Export buttons. Both FortiGate and Linux runs now produce
+    /// complete reports (since 1.12c widened `compliance_list_checks`
+    /// to include Linux `CheckDefinition` rows — the report's
+    /// lib_lookup resolves Linux check_ids and emits CIS reference,
+    /// description, and Remediation columns). The deviceType-gated
+    /// disabled-with-tooltip shipping in 1.12b is removed.
     ///
-    /// **Known degraded surface, TODO(1.12c):** even when Linux
-    /// export lights up in 1.12c, the in-row Remediation block
-    /// (CheckRow at the bottom of this file) hides for any
-    /// `check_id` that doesn't resolve in
-    /// `appState.complianceCheckLibrary` — the FortiGate-only
-    /// library today. 1.12c widens `compliance_list_checks` to
-    /// merge in `LINUX_CHECKS` from `ssh_compliance::LINUX_CHECKS`,
-    /// which lights up both the rendered report and the in-row
-    /// Remediation copy simultaneously. Documented here so the
-    /// gap is a tracked defect, not a silent "looks complete
-    /// but isn't."
+    /// Allowlist switch retained: `.notApplicable` hosts don't reach
+    /// this code path (no Run-scan button, no run, so
+    /// `displayedRun() != nil` is impossible), but the branch keeps
+    /// the switch exhaustive against future `DeviceType` additions.
     @ViewBuilder
     private func exportButtons(for deviceType: DeviceType) -> some View {
         switch deviceType.complianceDispatch {
-        case .fortigateBaseline:
+        case .fortigateBaseline, .linuxBaseline:
             Button {
                 Task { await exportReport() }
             } label: {
@@ -954,26 +950,7 @@ struct ComplianceHostView: View {
             }
             .controlSize(.small)
             .buttonStyle(.borderedProminent)
-        case .linuxBaseline:
-            // Disabled-with-tooltip — see 1.12c TODO above for why.
-            Button {} label: {
-                Label("Export Markdown…", systemImage: "doc.text")
-            }
-            .controlSize(.small)
-            .disabled(true)
-            .help("Report export lands in 1.12c. The current report would render without the CIS reference, description, or remediation columns for Linux checks — disabled to avoid shipping an incomplete deliverable.")
-            Button {} label: {
-                Label("Export PDF…", systemImage: "square.and.arrow.up")
-            }
-            .controlSize(.small)
-            .buttonStyle(.borderedProminent)
-            .disabled(true)
-            .help("Report export lands in 1.12c.")
         case .notApplicable:
-            // Not reachable: exportButtons is only rendered when
-            // displayedRun() != nil, which itself can only be set
-            // by FortiGate/Linux dispatch. Branch is here purely
-            // to keep the switch exhaustive.
             EmptyView()
         }
     }

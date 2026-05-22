@@ -1,8 +1,10 @@
 import SwiftUI
 
-/// Browser for the full compliance check library — built-in 45
-/// CIS-FortiOS-7.4 checks plus any user-supplied TOML overlays
-/// from `~/Library/Application Support/SuperManager/checks/`.
+/// Browser for the full compliance check library — built-in
+/// CIS-FortiOS-7.4 checks (FortiGate REST-API baseline) and
+/// CIS-Linux-4.0 checks (Linux SSH baseline, since 1.12c), plus
+/// any user-supplied TOML overlays from
+/// `~/Library/Application Support/SuperManager/checks/`.
 ///
 /// Layout:
 ///   - Left rail: category list (Authentication, Cryptography,

@@ -302,7 +302,10 @@ pub async fn run(
         }
     }
 
-    let defs = default_checks();
+    // FortiGate runner uses only the FortiGate library — Linux
+    // checks are not API-evaluable (no api_path), and the Linux
+    // runner has its own execution path via `ssh_compliance::run_baseline`.
+    let defs = fortigate_default_checks();
     let mut results: Vec<CheckResult> = Vec::with_capacity(defs.len());
     for def in &defs {
         let result = run_one(state, secrets, host_id, def, ssh_session).await;
@@ -547,18 +550,21 @@ pub(crate) fn score(results: &[CheckResult]) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
-// Default checks (15 high-value CIS-FortiOS-7.4 L1)
+// Default checks (CIS-FortiOS-7.4 L1)
 // ---------------------------------------------------------------------------
 
-/// Hardcoded baseline. Each check carries:
+/// Hardcoded FortiGate baseline. Each check carries:
 ///   - a stable id so history can correlate across runs
 ///   - severity that drives score impact
 ///   - remediation snippet for the GUI's "Fix" button
 ///
 /// All checks use the FortiGate API where possible. CLI fallbacks
 /// only where the API doesn't expose the data cheaply (none in
-/// the v1 set — all 15 are pure-API).
-fn default_checks() -> Vec<CheckDefinition> {
+/// the v1 set — all are pure-API).
+///
+/// Linux baseline rows live in `ssh_compliance::linux_default_checks()`
+/// and are merged into `list_checks()` alongside this set since 1.12c.
+fn fortigate_default_checks() -> Vec<CheckDefinition> {
     use Channel::*;
     use Severity::*;
 
@@ -1432,14 +1438,29 @@ pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
     Ok(run)
 }
 
-/// List the full set of available checks (built-in + any user
-/// TOML overlays). The GUI uses this for the "Checks reference"
-/// browser. Re-loads from disk on every call so user edits show
-/// up without a daemon restart — the disk read is bounded (small
-/// number of TOML files, kilobytes each), much cheaper than a
-/// FortiGate API round-trip.
+/// List the full set of available checks across every baseline
+/// kind (FortiGate + Linux as of 1.12c) plus any user TOML
+/// overlays. The GUI uses this for the "Checks reference"
+/// browser and for the per-check Remediation lookup in the host
+/// detail view + the report renderer's lib_lookup. Re-loads
+/// from disk on every call so user edits show up without a
+/// daemon restart — the disk read is bounded (small number of
+/// TOML files, kilobytes each), much cheaper than a FortiGate
+/// API round-trip.
+///
+/// **Mixed-baseline shape, 1.12c:** the returned vector contains
+/// rows from both `fortigate_default_checks()` and
+/// `ssh_compliance::linux_default_checks()`. Every consumer
+/// (`ChecksLibrarySheet`, `CheckRow`, `render_markdown_report`'s
+/// lib_lookup) is keyed by `check_id` or grouped by per-row
+/// `category` — none branch on framework or assume a homogeneous
+/// library. Drift between Linux library rows and Linux run-result
+/// rows is impossible by construction: both use
+/// `ssh_compliance::{category_for, map_severity}` as the single
+/// source of truth.
 pub fn list_checks() -> Vec<CheckDefinition> {
-    let mut checks = default_checks();
+    let mut checks = fortigate_default_checks();
+    checks.extend(crate::ssh_compliance::linux_default_checks());
     if let Ok(user_checks) = load_user_checks() {
         // User-supplied checks override built-ins by id, and
         // append novel ones to the end. Last write wins per id.
@@ -1451,23 +1472,27 @@ pub fn list_checks() -> Vec<CheckDefinition> {
             by_id.insert(c.id.clone(), c);
         }
         checks = by_id.into_values().collect();
-        // Stable order across runs: by category, then by severity,
-        // then by id. Matters for the GUI's checks-library list
-        // and for run ordering (so consecutive runs look comparable).
-        checks.sort_by(|a, b| {
-            let sev_rank = |s: &Severity| match s {
-                Severity::Critical => 0,
-                Severity::High => 1,
-                Severity::Medium => 2,
-                Severity::Low => 3,
-                Severity::Info => 4,
-            };
-            a.category
-                .cmp(&b.category)
-                .then(sev_rank(&a.severity).cmp(&sev_rank(&b.severity)))
-                .then(a.id.cmp(&b.id))
-        });
     }
+    // Stable order across runs: by category, then by severity,
+    // then by id. Sorted unconditionally — pre-1.12c this was
+    // inside the `if let Ok` branch, which meant when
+    // load_user_checks errored (no dir / I/O failure) the GUI
+    // got author-order rather than the documented sort order.
+    // Harmless but inconsistent; sorting always is cheaper than
+    // explaining the asymmetry.
+    checks.sort_by(|a, b| {
+        let sev_rank = |s: &Severity| match s {
+            Severity::Critical => 0,
+            Severity::High => 1,
+            Severity::Medium => 2,
+            Severity::Low => 3,
+            Severity::Info => 4,
+        };
+        a.category
+            .cmp(&b.category)
+            .then(sev_rank(&a.severity).cmp(&sev_rank(&b.severity)))
+            .then(a.id.cmp(&b.id))
+    });
     checks
 }
 
@@ -2504,6 +2529,142 @@ mod tests {
         let total = actionable.len();
         assert!(with_remediation * 100 / total.max(1) >= 80,
                 "≥80% of actionable checks should ship a remediation snippet — got {with_remediation}/{total}");
+    }
+
+    // -- 1.12c: Linux library merged into list_checks() ----------------
+
+    #[test]
+    fn list_checks_includes_linux_baseline_rows() {
+        // Asserts the Linux library merge in list_checks(). Without
+        // this, the in-row Remediation block in ComplianceHostView
+        // and the Remediation column in render_markdown_report
+        // would silently miss every linux.* check_id — the exact
+        // gap 1.12c was created to close. A regression here would
+        // re-open both tracked defects at once.
+        let checks = list_checks();
+        let linux_rows: Vec<_> = checks
+            .iter()
+            .filter(|c| c.framework == "CIS Linux 4.0")
+            .collect();
+        assert!(!linux_rows.is_empty(),
+            "Linux library rows must appear in list_checks() — \
+             merge from ssh_compliance::linux_default_checks() is missing");
+        // Count parity with the runner's authored set — drift here
+        // would mean the library and the runner have different
+        // numbers of Linux checks.
+        assert_eq!(linux_rows.len(), crate::ssh_compliance::check_count(),
+            "library Linux row count ({}) must equal runner LINUX_CHECKS count ({})",
+            linux_rows.len(),
+            crate::ssh_compliance::check_count());
+    }
+
+    #[test]
+    fn linux_library_rows_carry_remediation() {
+        // The load-bearing field for the in-row Remediation block
+        // and the report's Remediation column. If a linux.* row
+        // arrives with remediation: None, both surfaces silently
+        // hide for that check — the exact wrong-by-omission
+        // failure mode 1.12 was gated to prevent.
+        let checks = list_checks();
+        for c in checks.iter().filter(|c| c.id.starts_with("linux.")) {
+            assert!(c.remediation.is_some(),
+                "linux check `{}` must carry a remediation snippet — \
+                 missing remediation re-opens the 1.12b tracked defect",
+                c.id);
+            let r = c.remediation.as_ref().unwrap();
+            assert!(!r.is_empty(),
+                "linux check `{}` has Some(remediation) but the string is empty",
+                c.id);
+        }
+    }
+
+    #[test]
+    fn linux_library_category_byte_identical_to_runner_category() {
+        // Runtime backstop for Option A's "identical by construction"
+        // guarantee. The runner (ssh_compliance::run_baseline) stamps
+        // CheckResult.category via category_for(check.id); the library
+        // (ssh_compliance::linux_default_checks) stamps
+        // CheckDefinition.category via the same helper. This test
+        // asserts that guarantee at runtime — a future refactor that
+        // re-introduces a parallel string source would fail here.
+        // Same role as the DeviceType.allCases sweep plays for the
+        // 1.12b dispatch allowlist.
+        let library: Vec<crate::compliance::CheckDefinition> =
+            crate::ssh_compliance::linux_default_checks();
+        for row in &library {
+            let runner_category = crate::ssh_compliance::category_for_id(&row.id);
+            assert_eq!(row.category, runner_category,
+                "DRIFT: library category for `{}` is `{}` but \
+                 runner would stamp `{}` — parallel string sources \
+                 reintroduced, breaks Option A invariant",
+                row.id, row.category, runner_category);
+        }
+        // Cross-check: stage a fake CheckResult through the runner's
+        // helper for one specific id and confirm the library agrees
+        // on that exact string. This catches a category_for refactor
+        // that accidentally returns a different value while still
+        // satisfying the loop above (e.g. if both helpers diverged
+        // in lockstep — unlikely but the explicit single-id assertion
+        // anchors the regression test in human-readable values).
+        let runner_says_for_ssh = crate::ssh_compliance::category_for_id(
+            "linux.ssh.password-auth-disabled");
+        assert_eq!(runner_says_for_ssh, "SSH",
+            "category_for_id has drifted from the documented 1.12a mapping");
+        let library_row = library.iter()
+            .find(|c| c.id == "linux.ssh.password-auth-disabled")
+            .expect("library must contain linux.ssh.password-auth-disabled");
+        assert_eq!(library_row.category, "SSH",
+            "library row category for linux.ssh.* must be `SSH`, got `{}`",
+            library_row.category);
+    }
+
+    #[test]
+    fn render_report_emits_remediation_block_for_failed_linux_check() {
+        // End-to-end: a Linux ComplianceRun with one failed check,
+        // rendered against the widened library, must produce a
+        // **Remediation:** block. Closes the loop from 1.12b's
+        // tracked defect to 1.12c's fix — if this regresses, the
+        // report ships with a missing Remediation column on Linux
+        // runs.
+        use crate::ssh_compliance;
+        let library = list_checks();
+        let failed = CheckResult {
+            check_id: "linux.ssh.password-auth-disabled".to_owned(),
+            status: Status::Fail,
+            detail: "Password auth is enabled".to_owned(),
+            raw_value: Some("passwordauthentication yes".to_owned()),
+            severity: Severity::High,
+            title: "sshd PasswordAuthentication disabled".to_owned(),
+            // Same string the runner would stamp — see the test
+            // above for the byte-identity assertion.
+            category: ssh_compliance::category_for_id(
+                "linux.ssh.password-auth-disabled"),
+        };
+        let run = ComplianceRun {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            host_id: "test-host".to_owned(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            firmware: None,
+            model: None,
+            hostname: Some("test-linux".to_owned()),
+            triggered_by: TriggerKind::Manual,
+            baseline_kind: BaselineKind::Linux,
+            score: 90,
+            passed: 0,
+            failed: 1,
+            errored: 0,
+            skipped: 0,
+            checks: vec![failed],
+        };
+        let md = render_markdown_report(&run, None, &library);
+        assert!(md.contains("**Remediation:**"),
+            "Linux runs must produce a Remediation block in the report — \
+             1.12b tracked defect; if this regresses, the report is \
+             wrong-by-omission again. Rendered:\n{}", md);
+        // And the actual remediation text from LINUX_CHECKS:
+        assert!(md.contains("PasswordAuthentication no"),
+            "remediation text from ssh_compliance must appear in the rendered report");
     }
 
     // -- render_markdown_report() — smoke tests -------------------------
