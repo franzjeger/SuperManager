@@ -912,12 +912,18 @@ struct ComplianceHostView: View {
         let base = "Compliance baselines aren't available for \(deviceType.displayName) yet. Currently supported: FortiGate (REST API) and Linux (SSH)."
         switch deviceType {
         case .custom:
-            // No reclassification hint — picker may not have the
-            // right option for hosts mis-decoded as Custom.
+            // No reclassification hint. `.custom` may be genuinely
+            // custom OR a future-Rust-type not-yet-in-Swift (absorbed
+            // by the decoder's catch-all). In either case the picker
+            // might not offer the correct vendor — SshHostSummary's
+            // `effectiveDeviceTypeDisplayName` shows the original
+            // wire string if one was preserved, so the operator can
+            // at least see what the engine actually sent.
             return base
-        case .linux, .fortigate, .unifi, .pfSense, .openWrt, .windows:
-            // Picker offers these cases directly; reclassification
-            // hint is actionable.
+        case .linux, .fortigate, .unifi, .pfSense, .openWrt,
+             .opnSense, .sophos, .windows:
+            // Picker offers all of these directly after the schema-
+            // drift fix; reclassification hint is actionable.
             return base + " Reclassify in the SSH section if the device type was set incorrectly."
         }
     }

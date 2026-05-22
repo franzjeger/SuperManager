@@ -499,7 +499,8 @@ struct NetworkScanSheet: View {
         switch type {
         case .unifi: return "ubnt"
         case .fortigate: return "admin"
-        case .pfSense, .openWrt, .linux, .custom: return "root"
+        case .pfSense, .openWrt, .opnSense, .linux, .custom: return "root"
+        case .sophos: return "admin"
         case .windows: return "Administrator"
         }
     }
@@ -967,6 +968,8 @@ private struct HostRow: View {
         case .unifi: return ("wifi", .blue)
         case .fortigate: return ("shield.lefthalf.filled", .red)
         case .pfSense: return ("shield.lefthalf.filled", .orange)
+        case .opnSense: return ("shield.lefthalf.filled", .mint)
+        case .sophos: return ("shield.lefthalf.filled", .indigo)
         case .openWrt: return ("antenna.radiowaves.left.and.right", .purple)
         case .windows: return ("pc", .cyan)
         case .linux: return ("terminal", .green)

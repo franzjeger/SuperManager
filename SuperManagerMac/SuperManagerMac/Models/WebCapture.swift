@@ -261,8 +261,8 @@ struct WebCapture: Equatable, Identifiable {
         switch type {
         case .unifi: return "ubnt"
         case .fortigate: return "admin"
-        case .pfSense: return "root"
-        case .openWrt: return "root"
+        case .pfSense, .openWrt, .opnSense: return "root"
+        case .sophos: return "admin"
         case .windows: return "Administrator"
         case .linux, .custom: return "root"
         }

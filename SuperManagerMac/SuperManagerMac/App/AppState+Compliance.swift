@@ -30,7 +30,10 @@ extension DeviceType {
             return .fortigateBaseline
         case .linux:
             return .linuxBaseline
-        case .unifi, .pfSense, .openWrt, .windows, .custom:
+        case .unifi, .pfSense, .openWrt, .opnSense, .sophos, .windows, .custom:
+            // .opnSense (FreeBSD-based): Linux checks (sshd -T, systemctl, ufw)
+            //   all fail on FreeBSD — same reasoning as .pfSense.
+            // .sophos (proprietary SFOS): not a CIS-Linux server.
             return .notApplicable
         }
     }
