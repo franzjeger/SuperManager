@@ -185,9 +185,25 @@ impl EngineServer {
     /// Run the CIS-Linux baseline against a Linux SSH host. Distinct
     /// from `compliance_run` (FortiGate) because the check execution
     /// model is different — we shell out over SSH rather than calling
-    /// a REST API. Returns `{checks: [...], findings: [...]}` so the
-    /// UI can render both the per-check status grid and the failure
-    /// findings list.
+    /// a REST API.
+    ///
+    /// **1.12a:** returns a full `ComplianceRun` (same shape the
+    /// FortiGate path produces) and persists it via `persist_run`
+    /// before responding, so subsequent `compliance_history` /
+    /// `compliance_get_run` / `compliance_drift` calls see Linux
+    /// rows alongside FortiGate rows.
+    ///
+    /// **Known exposed gap — TODO(1.12b):** `compliance_render_report`
+    /// looks up CIS reference / description / remediation in the
+    /// library returned by `compliance_list_checks`, which today only
+    /// contains FortiGate checks. Linux runs render through that
+    /// path with their per-check `detail` field intact, but with no
+    /// remediation block — the most valuable column for the operator.
+    /// The fix is either widening `compliance_list_checks` to merge
+    /// in `ssh_compliance::LINUX_CHECKS` (preferred — the GUI's
+    /// library browser benefits too), or carrying the recommendation
+    /// inline on `CheckResult`. Land in 1.12b before exposing the
+    /// "Export report" button for Linux hosts.
     pub(crate) async fn handle_compliance_run_linux(
         &self,
         id: u64,
@@ -197,40 +213,62 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
+        let triggered_by = match params
+            .get("triggered_by")
+            .and_then(|v| v.as_str())
+            .unwrap_or("manual")
+        {
+            "scheduled" => crate::compliance::TriggerKind::Scheduled,
+            "post_deploy" => crate::compliance::TriggerKind::PostDeploy,
+            _ => crate::compliance::TriggerKind::Manual,
+        };
 
         let (host, session) = match self.connect_to_host(host_id).await {
             Ok(pair) => pair,
             Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("ssh: {e}")),
         };
 
-        let host_ip = host.hostname.clone();
-        let result = crate::ssh_compliance::run_baseline(&host_ip, |cmd| {
-            let session = &session;
-            async move {
-                let (_status, stdout, stderr) = session
-                    .exec(&cmd)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-                // Combine — checks grep against stdout but error
-                // messages tend to land on stderr.
-                Ok(if stderr.is_empty() {
-                    stdout
-                } else {
-                    format!("{stdout}\n{stderr}")
-                })
-            }
-        })
+        let host_id_str = host_id.simple().to_string();
+        let host_hostname = host.hostname.clone();
+        let run = crate::ssh_compliance::run_baseline(
+            &host_id_str,
+            Some(&host_hostname),
+            triggered_by,
+            |cmd| {
+                let session = &session;
+                async move {
+                    let (_status, stdout, stderr) = session
+                        .exec(&cmd)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // Combine — checks grep against stdout but error
+                    // messages tend to land on stderr.
+                    Ok(if stderr.is_empty() {
+                        stdout
+                    } else {
+                        format!("{stdout}\n{stderr}")
+                    })
+                }
+            },
+        )
         .await;
         let _ = session.disconnect().await;
 
-        let (checks, findings) = result;
-        Response::ok(
-            id,
-            serde_json::json!({
-                "checks": checks,
-                "findings": findings,
-            }),
-        )
+        // Persist before returning so a GUI crash doesn't lose the
+        // result. Same non-fatal pattern as the FortiGate path —
+        // we still return the run to the caller even if writing
+        // the history file fails.
+        if let Err(e) = crate::compliance::persist_run(&run) {
+            tracing::warn!(
+                "compliance(linux): failed to persist run {}: {e:#}",
+                run.id
+            );
+        }
+
+        match serde_json::to_value(&run) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
     }
 
     /// List the static set of Linux baseline checks (titles + count)
