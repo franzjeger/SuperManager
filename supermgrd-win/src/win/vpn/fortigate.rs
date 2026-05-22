@@ -222,23 +222,48 @@ async fn retrieve_string(
 /// Register the VPN connection. Idempotent — replaces any existing
 /// connection with the same name first.
 ///
-/// IKEv2 connections on Windows require `-AuthenticationMethod MSChapv2`
-/// (which the RAS stack maps to EAP-MSCHAPv2) so that `rasdial` can supply
-/// username/password non-interactively.  Using bare `-AuthenticationMethod Eap`
-/// without a matching `Set-EapConfiguration` makes Windows default to EAP-TLS,
-/// which requires an interactive certificate-selection dialog and causes
-/// `rasdial` to exit with ERROR_INTERACTIVE_MODE (703).
+/// Register an IKEv2 + EAP-MSCHAPv2 connection.
+///
+/// Windows IKEv2 only accepts `Eap` or `MachineCertificate` — `MSChapv2` is
+/// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
+/// explicit EAP type defaults to EAP-TLS (type 13), which tries to show a
+/// certificate-selection dialog.  `rasdial` cannot display UI and exits with
+/// error 703 (ERROR_INTERACTIVE_MODE).
+///
+/// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
+/// the inner auth method so `rasdial` can feed credentials non-interactively.
 async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
     let _ = remove_connection(conn_name).await;
+
+    // EAP-MSCHAPv2 (type 26) XML. Double-quoted XML attributes are safe
+    // inside PowerShell single-quoted strings.
+    let eap_xml = concat!(
+        r#"<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
+        r#"<EapMethod>"#,
+        r#"<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">26</Type>"#,
+        r#"<VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>"#,
+        r#"<VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>"#,
+        r#"<AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId>"#,
+        r#"</EapMethod>"#,
+        r#"<Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
+        r#"<EapMSChapV2 xmlns="http://www.microsoft.com/provisioning/MsChapV2User">"#,
+        r#"<UseWinLogonCredentials>false</UseWinLogonCredentials>"#,
+        r#"</EapMSChapV2></Config></EapHostConfig>"#,
+    );
+
     let cmd = format!(
-        "Add-VpnConnection -Name '{name}' \
-            -ServerAddress '{host}' \
-            -TunnelType Ikev2 \
-            -EncryptionLevel Required \
-            -AuthenticationMethod MSChapv2 \
-            -RememberCredential \
-            -AllUserConnection \
-            -Force",
+        "$xml = [xml]'{eap_xml}'; \
+         Add-VpnConnection \
+           -Name '{name}' \
+           -ServerAddress '{host}' \
+           -TunnelType Ikev2 \
+           -EncryptionLevel Required \
+           -AuthenticationMethod Eap \
+           -EapConfigXmlStream $xml \
+           -RememberCredential \
+           -AllUserConnection \
+           -Force",
+        eap_xml = eap_xml,
         name = ps_escape(conn_name),
         host = ps_escape(&cfg.host),
     );
