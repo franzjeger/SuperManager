@@ -876,7 +876,7 @@ struct ComplianceHostView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Compliance not available for this device type", systemImage: "questionmark.app.dashed")
                 .font(.headline)
-            Text("Compliance baselines aren't available for \(deviceType.displayName) yet. Currently supported: FortiGate (REST API) and Linux (SSH). Add the host's device type in the SSH section if it was mis-classified.")
+            Text(notApplicableCopy(for: deviceType))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button {
@@ -895,6 +895,31 @@ struct ComplianceHostView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(.separator, lineWidth: 0.5)
         )
+    }
+
+    /// Copy variants for `notApplicableCard`. The "reclassify in SSH"
+    /// hint is only honest when the SSH picker can actually offer
+    /// the right alternative. `.custom` is the catch-all that
+    /// absorbs unrecognized wire values via the decoder's
+    /// `default:` fall-through — Rust's `DeviceType` has cases
+    /// (OpnSense, Sophos) that Swift's enum doesn't, so a real
+    /// OpnSense or Sophos host arrives as `.custom` and the SSH
+    /// picker won't offer the correct vendor for it. Don't
+    /// promise a fix the operator can't reach. Tracked as a
+    /// follow-up gate: Swift/Rust `DeviceType` schema drift +
+    /// silent decoder default.
+    private func notApplicableCopy(for deviceType: DeviceType) -> String {
+        let base = "Compliance baselines aren't available for \(deviceType.displayName) yet. Currently supported: FortiGate (REST API) and Linux (SSH)."
+        switch deviceType {
+        case .custom:
+            // No reclassification hint — picker may not have the
+            // right option for hosts mis-decoded as Custom.
+            return base
+        case .linux, .fortigate, .unifi, .pfSense, .openWrt, .windows:
+            // Picker offers these cases directly; reclassification
+            // hint is actionable.
+            return base + " Reclassify in the SSH section if the device type was set incorrectly."
+        }
     }
 
     /// Export buttons gated by baseline. FortiGate → enabled
