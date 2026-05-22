@@ -438,6 +438,8 @@ export component AppWindow inherits Window {
     in-out property <string> fg-import-username;
     in-out property <string> fg-import-password;
     in-out property <string> fg-import-psk;
+    // 0 = none, 1 = IKEv2, 2 = WireGuard, 3 = SSL VPN
+    in-out property <int>    vpn-import-tab: 0;
 
     // ----- Callbacks -----
     callback refresh();
@@ -1022,61 +1024,117 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        // FortiGate IKEv2 import
-                        Card {
-                            title: "Import FortiGate IKEv2 (Windows RAS)";
+                        // Import picker — tab bar + single expandable form
+                        Rectangle {
+                            background: white;
+                            border-radius: 10px;
+                            border-color: #e2e8f0;
+                            border-width: 1px;
+
                             VerticalBox {
-                                spacing: 12px;
                                 padding: 0;
+                                spacing: 0;
+
+                                // Tab bar
                                 HorizontalBox {
-                                    spacing: 16px;
-                                    VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
-                                        Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
-                                        StyledInput { placeholder-text: "client-fortigate"; text <=> root.fg-import-name; }
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 12px;
+                                    padding-bottom: 0px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: "Import:";
+                                        color: #6b7280;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
                                     }
-                                    VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
-                                        Text { text: "Gateway host"; color: #374151; font-size: 12px; font-weight: 600; }
-                                        StyledInput { placeholder-text: "vpn.example.com"; text <=> root.fg-import-host; }
-                                    }
-                                }
-                                HorizontalBox {
-                                    spacing: 16px;
-                                    VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
-                                        Text { text: "Username"; color: #374151; font-size: 12px; font-weight: 600; }
-                                        StyledInput { text <=> root.fg-import-username; }
-                                    }
-                                    VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
-                                        Text { text: "Password"; color: #374151; font-size: 12px; font-weight: 600; }
-                                        StyledInput { input-type: InputType.password; text <=> root.fg-import-password; }
-                                    }
-                                    VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
-                                        Text { text: "Group PSK"; color: #374151; font-size: 12px; font-weight: 600; }
-                                        StyledInput { input-type: InputType.password; placeholder-text: "IKE shared secret"; text <=> root.fg-import-psk; }
-                                    }
-                                }
-                                HorizontalBox {
-                                    Rectangle { horizontal-stretch: 1; }
-                                    PrimaryBtn {
-                                        text: "Import IKEv2 profile";
+
+                                    for tab-info[idx] in [
+                                        { label: "IKEv2 (FortiGate)", id: 1 },
+                                        { label: "WireGuard", id: 2 },
+                                        { label: "SSL VPN", id: 3 },
+                                    ]: tab-btn := TouchArea {
+                                        width: tab-lbl.preferred-width + 24px;
+                                        height: 34px;
                                         clicked => {
-                                            root.import-fortigate(root.fg-import-name, root.fg-import-host,
-                                                root.fg-import-username, root.fg-import-password, root.fg-import-psk);
+                                            // Toggle: clicking active tab collapses it
+                                            root.vpn-import-tab = (root.vpn-import-tab == tab-info.id)
+                                                ? 0 : tab-info.id;
+                                        }
+                                        Rectangle {
+                                            background: root.vpn-import-tab == tab-info.id ? #eff6ff : transparent;
+                                            border-radius: 6px;
+                                            border-color: root.vpn-import-tab == tab-info.id ? #3b82f6 : (tab-btn.has-hover ? #cbd5e1 : transparent);
+                                            border-width: 1.5px;
+                                            animate background { duration: 80ms; }
+                                            animate border-color { duration: 80ms; }
+                                            tab-lbl := Text {
+                                                x: 12px;
+                                                y: (parent.height - self.preferred-height) / 2;
+                                                text: tab-info.label;
+                                                color: root.vpn-import-tab == tab-info.id ? #1d4ed8 : #374151;
+                                                font-size: 12px;
+                                                font-weight: root.vpn-import-tab == tab-info.id ? 600 : 500;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+
+                                // IKEv2 form
+                                if root.vpn-import-tab == 1: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    HorizontalBox {
+                                        spacing: 16px;
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { placeholder-text: "client-fortigate"; text <=> root.fg-import-name; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Gateway host"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { placeholder-text: "vpn.example.com"; text <=> root.fg-import-host; }
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        spacing: 16px;
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Username"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { text <=> root.fg-import-username; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Password"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { input-type: InputType.password; text <=> root.fg-import-password; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Group PSK"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { input-type: InputType.password; placeholder-text: "IKE shared secret"; text <=> root.fg-import-psk; }
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        PrimaryBtn {
+                                            text: "Import IKEv2 profile";
+                                            clicked => {
+                                                root.import-fortigate(root.fg-import-name, root.fg-import-host,
+                                                    root.fg-import-username, root.fg-import-password, root.fg-import-psk);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        }
 
-                        HorizontalBox {
-                            spacing: 16px;
-
-                            // WireGuard import
-                            Card {
-                                title: "Import WireGuard (.conf)";
-                                horizontal-stretch: 1;
-                                VerticalBox {
+                                // WireGuard form
+                                if root.vpn-import-tab == 2: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
                                     spacing: 12px;
-                                    padding: 0;
                                     VerticalBox { spacing: 6px; padding: 0;
                                         Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
                                         StyledInput { placeholder-text: "office-vpn"; text <=> root.wg-import-name; }
@@ -1095,15 +1153,14 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                            }
 
-                            // FortiClient SSL VPN import
-                            Card {
-                                title: "Import FortiGate SSL VPN";
-                                horizontal-stretch: 1;
-                                VerticalBox {
+                                // SSL VPN form
+                                if root.vpn-import-tab == 3: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
                                     spacing: 12px;
-                                    padding: 0;
                                     VerticalBox { spacing: 6px; padding: 0;
                                         Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
                                         StyledInput { placeholder-text: "client-fortigate-ssl"; text <=> root.fc-import-name; }
@@ -1141,6 +1198,9 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+
+                                // Collapsed state: show nothing extra — just the tab bar above
+                                if root.vpn-import-tab == 0: Rectangle { height: 12px; }
                             }
                         }
 
