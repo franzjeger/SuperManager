@@ -115,14 +115,13 @@ impl FortiGateBackend {
 
         let store = self.secret_store.as_ref().ok_or_else(|| {
             VpnError::MissingDependency(
-                "FortiGate backend has no secret store; cannot resolve PSK/EAP password".into(),
+                "FortiGate backend has no secret store; cannot resolve EAP password".into(),
             )
         })?;
-        let psk = retrieve_string(store.as_ref(), &cfg.psk, "PSK").await?;
         let password = retrieve_string(store.as_ref(), &cfg.password, "EAP password").await?;
 
         let conn_name = Self::connection_name(&profile.id);
-        register_connection(&conn_name, cfg, &psk).await?;
+        register_connection(&conn_name, cfg).await?;
         rasdial_connect(&conn_name, &cfg.username, &password).await?;
 
         // Poll until Connected — rasdial returns when the dial-up
@@ -222,11 +221,12 @@ async fn retrieve_string(
 
 /// Register the VPN connection. Idempotent — replaces any existing
 /// connection with the same name first.
-async fn register_connection(
-    conn_name: &str,
-    cfg: &FortiGateConfig,
-    psk: &str,
-) -> Result<(), VpnError> {
+///
+/// IKEv2 connections on Windows do not use `-L2tpPsk`; that parameter is
+/// L2TP/IPsec-only and Windows raises `WIN32 87` (ERROR_INVALID_PARAMETER)
+/// if it is supplied for an IKEv2 tunnel.  User authentication happens
+/// entirely through EAP-MSCHAPv2 at `rasdial` time.
+async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
     let _ = remove_connection(conn_name).await;
     let cmd = format!(
         "Add-VpnConnection -Name '{name}' \
@@ -234,12 +234,10 @@ async fn register_connection(
             -TunnelType Ikev2 \
             -EncryptionLevel Required \
             -AuthenticationMethod Eap \
-            -L2tpPsk '{psk}' \
             -AllUserConnection \
             -Force",
         name = ps_escape(conn_name),
         host = ps_escape(&cfg.host),
-        psk = ps_escape(psk),
     );
     run_powershell(&cmd).await
 }
