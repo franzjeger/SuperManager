@@ -49,24 +49,33 @@ struct ComplianceHostView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if let host {
-                    if !host.hasApi {
-                        notConfiguredCard
-                    } else {
-                        headerCard(for: host)
-                        if let run = displayedRun() {
-                            if history.count >= 2 {
-                                trendChartSection
-                            }
-                            if let drift = appState.complianceDrift[hostId],
-                               drift.previousRunId != nil {
-                                driftSection(drift: drift)
-                            } else if history.count == 1 {
-                                baselineEstablishedCard
-                            }
-                            breakdownSection(for: run)
+                    // Allowlist dispatch (1.12b). Switch on the
+                    // `complianceDispatch` allowlist — never on a
+                    // bare `deviceType ==` or an open `else`. The
+                    // `.notApplicable` branch is the guardrail
+                    // against the 1.12 trap: silently routing a
+                    // non-baseline-able device type (pfSense,
+                    // UniFi, OpenWrt, Windows, Custom) to a
+                    // baseline runner and producing false failures.
+                    switch host.deviceType.complianceDispatch {
+                    case .fortigateBaseline:
+                        if !host.hasApi {
+                            // FortiGate-specific precondition —
+                            // hasApi is the REST-API token flag,
+                            // no Linux equivalent.
+                            notConfiguredCard
                         } else {
-                            emptyStateCard
+                            fortigateOrLinuxBody(for: host)
                         }
+                    case .linuxBaseline:
+                        // Linux hosts in the SSH list already carry
+                        // credentials; no `notConfiguredCard`
+                        // equivalent needed. Credential failures
+                        // surface per-check as Status::Error in
+                        // the run output.
+                        fortigateOrLinuxBody(for: host)
+                    case .notApplicable:
+                        notApplicableCard(for: host.deviceType)
                     }
                 } else {
                     Text("Host not found")
@@ -86,6 +95,52 @@ struct ComplianceHostView: View {
                 await appState.loadComplianceDrift(hostId: hostId, runId: mostRecent.id)
             }
             displayedRunId = nil
+        }
+    }
+
+    /// Shared body once a host is dispatched to an allowlisted
+    /// baseline runner. Same shape for FortiGate and Linux — the
+    /// per-baseline differences live in the copy variants of
+    /// `emptyStateCard(for:)` and the export-button gate.
+    @ViewBuilder
+    private func fortigateOrLinuxBody(for host: SshHostSummary) -> some View {
+        headerCard(for: host)
+        if let run = displayedRun() {
+            if history.count >= 2 {
+                trendChartSection
+            }
+            if let drift = appState.complianceDrift[hostId],
+               drift.previousRunId != nil {
+                driftSection(drift: drift)
+            } else if history.count == 1 {
+                baselineEstablishedCard
+            }
+            breakdownSection(for: run)
+        } else {
+            emptyStateCard(for: host.deviceType)
+        }
+    }
+
+    /// Dispatch the manual scan to the right RPC based on the host's
+    /// baseline. The switch is exhaustive — adding a `DeviceType`
+    /// case without classifying it in `complianceDispatch` fails
+    /// to compile, preventing silent fall-through.
+    private func runScanForHost() async {
+        guard let host = host else { return }
+        let result: AppState.ComplianceRun?
+        switch host.deviceType.complianceDispatch {
+        case .fortigateBaseline:
+            result = await appState.runCompliance(hostId: hostId)
+        case .linuxBaseline:
+            result = await appState.runComplianceLinux(hostId: hostId)
+        case .notApplicable:
+            // Unreachable in practice: the Run-scan button is only
+            // rendered inside `fortigateOrLinuxBody`. Keeping the
+            // branch explicit so the switch stays exhaustive.
+            result = nil
+        }
+        if let result {
+            displayedRunId = result.id
         }
     }
 
@@ -148,12 +203,7 @@ struct ComplianceHostView: View {
                 Spacer()
                 VStack(spacing: 6) {
                     Button {
-                        Task {
-                            let result = await appState.runCompliance(hostId: hostId)
-                            if let result {
-                                displayedRunId = result.id
-                            }
-                        }
+                        Task { await runScanForHost() }
                     } label: {
                         if isRunning {
                             HStack(spacing: 6) {
@@ -170,19 +220,7 @@ struct ComplianceHostView: View {
                     .disabled(isRunning)
 
                     if displayedRun() != nil {
-                        Button {
-                            Task { await exportReport() }
-                        } label: {
-                            Label("Export Markdown…", systemImage: "doc.text")
-                        }
-                        .controlSize(.small)
-                        Button {
-                            Task { await exportPdf() }
-                        } label: {
-                            Label("Export PDF…", systemImage: "square.and.arrow.up")
-                        }
-                        .controlSize(.small)
-                        .buttonStyle(.borderedProminent)
+                        exportButtons(for: host.deviceType)
                     }
                 }
             }
@@ -581,7 +619,7 @@ struct ComplianceHostView: View {
             .plainText,
         ]
         let date = run.startedAt.formatted(.iso8601.year().month().day())
-        let safeHost = (run.hostname ?? "fortigate")
+        let safeHost = (run.hostname ?? defaultExportSafeHost(for: host?.deviceType))
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: " ", with: "_")
         panel.nameFieldStringValue = "compliance-\(safeHost)-\(date).md"
@@ -689,7 +727,7 @@ struct ComplianceHostView: View {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType.pdf]
         let date = run.startedAt.formatted(.iso8601.year().month().day())
-        let safeHost = (run.hostname ?? "fortigate")
+        let safeHost = (run.hostname ?? defaultExportSafeHost(for: host?.deviceType))
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: " ", with: "_")
         panel.nameFieldStringValue = "compliance-\(safeHost)-\(date).pdf"
@@ -790,20 +828,144 @@ struct ComplianceHostView: View {
         )
     }
 
-    private var emptyStateCard: some View {
+    /// "No scans yet" state with baseline-specific copy. FortiGate
+    /// → CIS FortiOS L1; Linux → CIS Linux 4.0. Switch is exhaustive
+    /// at the call site (this is only invoked from
+    /// `fortigateOrLinuxBody`); the `.notApplicable` branch
+    /// never reaches here but the switch stays positive-only.
+    @ViewBuilder
+    private func emptyStateCard(for deviceType: DeviceType) -> some View {
         VStack(spacing: 8) {
             Image(systemName: "checkmark.shield")
                 .font(.system(size: 40))
                 .foregroundStyle(.tertiary)
             Text("No scans yet")
                 .font(.headline)
-            Text("Click 'Run scan' to evaluate this host against the CIS FortiOS 7.4 Level 1 baseline.")
+            Text(emptyStateCopy(for: deviceType))
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 40)
+    }
+
+    private func emptyStateCopy(for deviceType: DeviceType) -> String {
+        switch deviceType.complianceDispatch {
+        case .fortigateBaseline:
+            return "Click 'Run scan' to evaluate this host against the CIS FortiOS 7.4 Level 1 baseline."
+        case .linuxBaseline:
+            return "Click 'Run scan' to evaluate this host against the CIS Linux 4.0 baseline (7 checks over SSH)."
+        case .notApplicable:
+            // Unreachable — `emptyStateCard` is only called from
+            // `fortigateOrLinuxBody`, which is only invoked when
+            // dispatch is FortiGate or Linux. Keeping the branch
+            // explicit so the switch is exhaustive.
+            return "Click 'Run scan' to evaluate this host."
+        }
+    }
+
+    /// Three-state card for device types outside the compliance
+    /// allowlist (UniFi, pfSense, OpenWrt, Windows, Custom). 1.12b
+    /// only routes FortiGate and Linux; everything else lands here
+    /// rather than getting silently swept into the Linux runner —
+    /// the exact false-failure surface 1.12 was created to prevent.
+    /// No "Run scan" button is rendered; the card is informational
+    /// only.
+    private func notApplicableCard(for deviceType: DeviceType) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Compliance not available for this device type", systemImage: "questionmark.app.dashed")
+                .font(.headline)
+            Text("Compliance baselines aren't available for \(deviceType.displayName) yet. Currently supported: FortiGate (REST API) and Linux (SSH). Add the host's device type in the SSH section if it was mis-classified.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                appState.selectedSection = .ssh
+            } label: {
+                Label("Open host detail in SSH", systemImage: "arrow.right.circle")
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(20)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.secondary.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.separator, lineWidth: 0.5)
+        )
+    }
+
+    /// Export buttons gated by baseline. FortiGate → enabled
+    /// Markdown + PDF export. Linux → disabled buttons with a
+    /// 1.12c-tooltip explaining the gating.
+    ///
+    /// **Known degraded surface, TODO(1.12c):** even when Linux
+    /// export lights up in 1.12c, the in-row Remediation block
+    /// (CheckRow at the bottom of this file) hides for any
+    /// `check_id` that doesn't resolve in
+    /// `appState.complianceCheckLibrary` — the FortiGate-only
+    /// library today. 1.12c widens `compliance_list_checks` to
+    /// merge in `LINUX_CHECKS` from `ssh_compliance::LINUX_CHECKS`,
+    /// which lights up both the rendered report and the in-row
+    /// Remediation copy simultaneously. Documented here so the
+    /// gap is a tracked defect, not a silent "looks complete
+    /// but isn't."
+    @ViewBuilder
+    private func exportButtons(for deviceType: DeviceType) -> some View {
+        switch deviceType.complianceDispatch {
+        case .fortigateBaseline:
+            Button {
+                Task { await exportReport() }
+            } label: {
+                Label("Export Markdown…", systemImage: "doc.text")
+            }
+            .controlSize(.small)
+            Button {
+                Task { await exportPdf() }
+            } label: {
+                Label("Export PDF…", systemImage: "square.and.arrow.up")
+            }
+            .controlSize(.small)
+            .buttonStyle(.borderedProminent)
+        case .linuxBaseline:
+            // Disabled-with-tooltip — see 1.12c TODO above for why.
+            Button {} label: {
+                Label("Export Markdown…", systemImage: "doc.text")
+            }
+            .controlSize(.small)
+            .disabled(true)
+            .help("Report export lands in 1.12c. The current report would render without the CIS reference, description, or remediation columns for Linux checks — disabled to avoid shipping an incomplete deliverable.")
+            Button {} label: {
+                Label("Export PDF…", systemImage: "square.and.arrow.up")
+            }
+            .controlSize(.small)
+            .buttonStyle(.borderedProminent)
+            .disabled(true)
+            .help("Report export lands in 1.12c.")
+        case .notApplicable:
+            // Not reachable: exportButtons is only rendered when
+            // displayedRun() != nil, which itself can only be set
+            // by FortiGate/Linux dispatch. Branch is here purely
+            // to keep the switch exhaustive.
+            EmptyView()
+        }
+    }
+
+    /// Default filename stem when a run has no embedded hostname.
+    /// FortiGate retains `"fortigate"` (the historical value, kept
+    /// stable to avoid silently renaming user-exported files); Linux
+    /// runs use `"linux-host"`; unknown / non-allowlisted use a
+    /// neutral `"host"` (defensive — exportReport/exportPdf are
+    /// not reachable from `.notApplicable` in 1.12b).
+    private func defaultExportSafeHost(for deviceType: DeviceType?) -> String {
+        guard let deviceType else { return "host" }
+        switch deviceType.complianceDispatch {
+        case .fortigateBaseline: return "fortigate"
+        case .linuxBaseline: return "linux-host"
+        case .notApplicable: return "host"
+        }
     }
 }
 

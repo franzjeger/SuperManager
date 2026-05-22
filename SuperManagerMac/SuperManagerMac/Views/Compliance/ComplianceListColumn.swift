@@ -17,16 +17,31 @@ struct ComplianceListColumn: View {
     @State private var showingAddHost = false
     @State private var scanAllResultBanner: String?
 
-    /// FortiGate hosts only — compliance checks target FortiOS.
-    /// Filtered by global customer-context when set; otherwise
-    /// all FortiGate hosts across the fleet.
-    /// Other device types will surface in later phases (UniFi,
-    /// pfSense, …) once we have framework definitions for them.
-    private var fortigateHosts: [SshHostSummary] {
+    /// Hosts the compliance allowlist routes to a baseline runner —
+    /// FortiGate (REST API) and Linux (SSH) today (1.12b). Anything
+    /// outside the allowlist is filtered out so the list never
+    /// surfaces a row that would dispatch to nothing.
+    ///
+    /// Allowlist source-of-truth lives on `DeviceType.complianceDispatch`;
+    /// adding a new DeviceType case fails the build there until
+    /// classified, which keeps this filter in sync without manual
+    /// updates here.
+    private var complianceCapableHosts: [SshHostSummary] {
         let global = appState.globalCustomerSlug
         return appState.sshHosts
-            .filter { $0.deviceType == .fortigate }
+            .filter { $0.deviceType.complianceDispatch != .notApplicable }
             .filter { global.isEmpty || $0.group == global }
+    }
+
+    /// FortiGate-only subset, used to gate the "Scan all" toolbar
+    /// affordance. Auto-scan-on-launch and scan-all stay FortiGate-
+    /// only in 1.12b by design — widening them to Linux would
+    /// sweep every credentialed SSH host on launch (SSH pool
+    /// pressure, drift-notification volume on a previously-
+    /// unscanned fleet). 1.12c+ can revisit once there's real
+    /// Linux-host usage to size the blast radius against.
+    private var fortigateScannableHosts: [SshHostSummary] {
+        complianceCapableHosts.filter { $0.deviceType == .fortigate && $0.hasApi }
     }
 
     var body: some View {
@@ -37,7 +52,7 @@ struct ComplianceListColumn: View {
             // right — looked disconnected from anything. The
             // Library now lives as a secondary CTA inside the
             // empty state itself.
-            if !fortigateHosts.isEmpty {
+            if !complianceCapableHosts.isEmpty {
                 actionsBar
             }
             if let banner = scanAllResultBanner {
@@ -47,21 +62,21 @@ struct ComplianceListColumn: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.tint.opacity(0.12))
             }
-            if fortigateHosts.isEmpty {
+            if complianceCapableHosts.isEmpty {
                 ContentUnavailableView {
-                    Label("No FortiGate hosts", systemImage: "shield.lefthalf.filled")
+                    Label("No compliance-capable hosts", systemImage: "shield.lefthalf.filled")
                 } description: {
-                    Text("Compliance scans require a FortiGate host with a REST API token. Add the host below — device type is pre-set to FortiGate; once it's created, drop into the host's API panel to generate the token.")
+                    Text("Compliance scans run against FortiGate hosts (REST API) and Linux hosts (SSH). Add a host below — device type defaults to FortiGate; switch the picker to Linux for Ubuntu/Debian/RHEL hosts.")
                 } actions: {
                     VStack(spacing: 8) {
-                        // Primary CTA: open AddHostSheet with the
-                        // device type pre-set to FortiGate. Saves
-                        // the operator from walking through the
-                        // picker manually.
+                        // Primary CTA stays on FortiGate as the
+                        // default — the dominant use case today.
+                        // Operator can switch the picker in
+                        // AddHostSheet to Linux.
                         Button {
                             showingAddHost = true
                         } label: {
-                            Label("Add FortiGate host…", systemImage: "plus")
+                            Label("Add host…", systemImage: "plus")
                         }
                         .buttonStyle(.borderedProminent)
                         Button {
@@ -78,7 +93,7 @@ struct ComplianceListColumn: View {
                     get: { appState.selectedHostId },
                     set: { appState.selectedHostId = $0 }
                 )) {
-                    ForEach(fortigateHosts) { host in
+                    ForEach(complianceCapableHosts) { host in
                         row(for: host)
                             .tag(host.id)
                     }
@@ -87,10 +102,14 @@ struct ComplianceListColumn: View {
             }
         }
         .task {
-            // On entry to the section, kick off a parallel
-            // history fetch for every FortiGate host so the
+            // On entry to the section, kick off a parallel history
+            // fetch for every compliance-capable host so the
             // score pills render with cached data, not "—".
-            for host in fortigateHosts where host.hasApi {
+            // FortiGate without an API token can't be scanned so
+            // skip those (no history exists). Linux has no
+            // hasApi concept — fetch unconditionally.
+            for host in complianceCapableHosts {
+                if host.deviceType == .fortigate && !host.hasApi { continue }
                 Task { await appState.loadComplianceHistory(hostId: host.id, limit: 5) }
             }
             await appState.loadComplianceCheckLibrary()
@@ -99,12 +118,13 @@ struct ComplianceListColumn: View {
             ChecksLibrarySheet()
         }
         .sheet(isPresented: $showingAddHost) {
-            // Pre-select the device type so the operator drops
-            // directly into the FortiGate-shaped form. After save,
-            // the new host appears in the SSH list AND in the
-            // compliance list (via the deviceType==.fortigate
-            // filter), so the empty state self-replaces with the
-            // host row + scan-all action bar.
+            // Default to FortiGate as the dominant case; operator
+            // can switch to Linux in the device-type picker before
+            // saving. After save, the new host appears in the SSH
+            // list AND in this compliance list (via the
+            // allowlist filter on `complianceDispatch`), so the
+            // empty state self-replaces with the host row +
+            // (for FortiGate) scan-all action bar.
             AddHostSheet(defaultDeviceType: .fortigate)
         }
     }
@@ -121,7 +141,7 @@ struct ComplianceListColumn: View {
                 Label("Library", systemImage: "books.vertical")
             }
             .controlSize(.small)
-            if !fortigateHosts.filter(\.hasApi).isEmpty {
+            if !fortigateScannableHosts.isEmpty {
                 Button {
                     Task { await runScanAll() }
                 } label: {
@@ -189,7 +209,11 @@ struct ComplianceListColumn: View {
                     Text("Last run \(lastRunAt.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                } else if !host.hasApi {
+                } else if host.deviceType == .fortigate && !host.hasApi {
+                    // "API token required" is FortiGate-specific —
+                    // `hasApi` is the FortiGate REST API token
+                    // flag, with no Linux equivalent. Linux hosts
+                    // never reach this branch.
                     Text("API token required")
                         .font(.caption2)
                         .foregroundStyle(.orange)
@@ -200,16 +224,18 @@ struct ComplianceListColumn: View {
                 }
             }
             Spacer()
-            scorePill(score: lastScore, hasApi: host.hasApi)
+            scorePill(score: lastScore, host: host)
         }
         .padding(.vertical, 2)
     }
 
     /// Three-state pill: explicit number when we have a run, "—"
-    /// when API token is missing or no scan has run yet. Number
-    /// pill colour follows the score-grade table (green ≥ 90,
-    /// yellow ≥ 70, red < 70).
-    private func scorePill(score: UInt8?, hasApi: Bool) -> some View {
+    /// when there's no score yet. The "—" colour signals whether
+    /// setup is needed (orange for FortiGate-without-API-token —
+    /// actionable; secondary for everything else — just waiting
+    /// for a scan). Number pill colour follows the score-grade
+    /// table (green ≥ 90, yellow ≥ 70, red < 70).
+    private func scorePill(score: UInt8?, host: SshHostSummary) -> some View {
         if let s = score {
             let color: Color = s >= 90 ? .green : (s >= 70 ? .orange : .red)
             return AnyView(
@@ -223,7 +249,8 @@ struct ComplianceListColumn: View {
                     .clipShape(Capsule())
             )
         }
-        let color: Color = hasApi ? .secondary : .orange
+        let needsSetup = host.deviceType == .fortigate && !host.hasApi
+        let color: Color = needsSetup ? .orange : .secondary
         return AnyView(
             Text("—")
                 .font(.callout)
