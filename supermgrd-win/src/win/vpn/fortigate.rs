@@ -222,10 +222,12 @@ async fn retrieve_string(
 /// Register the VPN connection. Idempotent — replaces any existing
 /// connection with the same name first.
 ///
-/// IKEv2 connections on Windows do not use `-L2tpPsk`; that parameter is
-/// L2TP/IPsec-only and Windows raises `WIN32 87` (ERROR_INVALID_PARAMETER)
-/// if it is supplied for an IKEv2 tunnel.  User authentication happens
-/// entirely through EAP-MSCHAPv2 at `rasdial` time.
+/// IKEv2 connections on Windows require `-AuthenticationMethod MSChapv2`
+/// (which the RAS stack maps to EAP-MSCHAPv2) so that `rasdial` can supply
+/// username/password non-interactively.  Using bare `-AuthenticationMethod Eap`
+/// without a matching `Set-EapConfiguration` makes Windows default to EAP-TLS,
+/// which requires an interactive certificate-selection dialog and causes
+/// `rasdial` to exit with ERROR_INTERACTIVE_MODE (703).
 async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
     let _ = remove_connection(conn_name).await;
     let cmd = format!(
@@ -233,7 +235,8 @@ async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(
             -ServerAddress '{host}' \
             -TunnelType Ikev2 \
             -EncryptionLevel Required \
-            -AuthenticationMethod Eap \
+            -AuthenticationMethod MSChapv2 \
+            -RememberCredential \
             -AllUserConnection \
             -Force",
         name = ps_escape(conn_name),
