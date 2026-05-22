@@ -14,15 +14,21 @@ extension AppState {
     }
 
     func addHost(label: String, hostname: String, port: UInt16, username: String,
-                 group: String, deviceType: DeviceType, authMethod: AuthMethod,
+                 group: String, deviceType: DeviceType,
+                 unrecognizedDeviceTypeRawValue: String? = nil,
+                 authMethod: AuthMethod,
                  authKeyId: String? = nil, password: String? = nil) async {
+        // Use the original wire string for unrecognised types to
+        // prevent round-trip data loss. For all known types (and
+        // genuinely-.custom hosts), rawValue is the right thing.
+        let wireDeviceType = unrecognizedDeviceTypeRawValue ?? deviceType.rawValue
         var host: [String: Any] = [
             "label": label,
             "hostname": hostname,
             "port": port,
             "username": username,
             "group": group,
-            "device_type": deviceType.rawValue,
+            "device_type": wireDeviceType,
             "auth_method": authMethod.rawValue,
             "pinned": false,
         ]
@@ -45,15 +51,22 @@ extension AppState {
 
     func updateHost(id: String, label: String, hostname: String, port: UInt16,
                     username: String, group: String, deviceType: DeviceType,
+                    unrecognizedDeviceTypeRawValue: String? = nil,
                     authMethod: AuthMethod, authKeyId: String? = nil,
                     password: String? = nil) async {
+        // Same write-amplification prevention as addHost: prefer the
+        // original wire string when the host's type was unrecognised.
+        // If the operator explicitly changed the picker (in which
+        // case the call site clears unrecognizedDeviceTypeRawValue),
+        // rawValue of the chosen type is used instead.
+        let wireDeviceType = unrecognizedDeviceTypeRawValue ?? deviceType.rawValue
         var host: [String: Any] = [
             "label": label,
             "hostname": hostname,
             "port": port,
             "username": username,
             "group": group,
-            "device_type": deviceType.rawValue,
+            "device_type": wireDeviceType,
             "auth_method": authMethod.rawValue,
         ]
         if let keyId = authKeyId { host["auth_key_id"] = keyId }

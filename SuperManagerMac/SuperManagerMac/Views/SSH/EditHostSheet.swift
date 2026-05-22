@@ -11,6 +11,13 @@ struct EditHostSheet: View {
     @State private var username: String = ""
     @State private var group: String = ""
     @State private var deviceType: DeviceType = .linux
+    /// The original wire string when the host's type was unrecognised
+    /// on decode. Cleared when the operator explicitly picks a new
+    /// type from the picker. The write path (updateHost) sends this
+    /// back to the engine instead of `deviceType.rawValue`, preventing
+    /// the silent write-amplification that would otherwise permanently
+    /// overwrite the engine's type with "custom" on first save.
+    @State private var unrecognizedDeviceTypeRaw: String? = nil
     @State private var authMethod: AuthMethod = .key
     @State private var selectedKeyId: String?
     @State private var password: String = ""
@@ -33,6 +40,13 @@ struct EditHostSheet: View {
                     ForEach(DeviceType.allCases, id: \.self) { type in
                         Text(type.displayName).tag(type)
                     }
+                }
+                // Clear the carried raw string the moment the
+                // operator makes an explicit picker choice — from
+                // that point the rawValue of their selection is
+                // the authoritative type, not the engine's original.
+                .onChange(of: deviceType) {
+                    unrecognizedDeviceTypeRaw = nil
                 }
 
                 Picker("Auth Method", selection: $authMethod) {
@@ -68,6 +82,7 @@ struct EditHostSheet: View {
                             username: username,
                             group: group,
                             deviceType: deviceType,
+                            unrecognizedDeviceTypeRawValue: unrecognizedDeviceTypeRaw,
                             authMethod: authMethod,
                             authKeyId: authMethod == .key ? selectedKeyId : nil,
                             password: authMethod == .password ? password : nil
@@ -88,6 +103,7 @@ struct EditHostSheet: View {
             username = host.username
             group = host.group
             deviceType = host.deviceType
+            unrecognizedDeviceTypeRaw = host.unrecognizedDeviceTypeRawValue
             authMethod = host.authMethod
             selectedKeyId = host.authKeyId
         }
