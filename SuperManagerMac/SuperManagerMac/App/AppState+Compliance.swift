@@ -2,6 +2,40 @@ import AppKit
 import Foundation
 import SwiftUI
 
+/// Routing intent for a host's compliance baseline. The view code
+/// switches on this — never on a bare `if deviceType == .fortigate`
+/// or an open `else` — so the allowlist is a positive enumeration,
+/// not a negation. Adding a new `DeviceType` case fails the build
+/// here at the exhaustiveness check until you decide which bucket
+/// it belongs in. That's the guardrail against the trap 1.12 was
+/// created to prevent: silently dispatching a non-baseline-able
+/// device type (pfSense's FreeBSD, UniFi's controller-only model,
+/// OpenWrt's busybox) to `compliance_run_linux` and surfacing a
+/// screen of false failures.
+enum ComplianceDispatch: Equatable {
+    case fortigateBaseline
+    case linuxBaseline
+    case notApplicable
+}
+
+extension DeviceType {
+    /// Map a device type to its compliance routing intent. Two
+    /// allowlisted destinations (`fortigate` → REST API runner,
+    /// `linux` → SSH baseline runner); everything else is
+    /// `.notApplicable`. Exhaustive switch — adding a new
+    /// DeviceType case fails to compile until classified.
+    var complianceDispatch: ComplianceDispatch {
+        switch self {
+        case .fortigate:
+            return .fortigateBaseline
+        case .linux:
+            return .linuxBaseline
+        case .unifi, .pfSense, .openWrt, .windows, .custom:
+            return .notApplicable
+        }
+    }
+}
+
 extension AppState {
     @discardableResult
     func runCompliance(hostId: String) async -> ComplianceRun? {
@@ -24,7 +58,8 @@ extension AppState {
                 failed: run.failed,
                 errored: run.errored,
                 firmware: run.firmware,
-                triggeredBy: run.triggeredBy
+                triggeredBy: run.triggeredBy,
+                baselineKind: run.baselineKind
             )
             var existing = complianceHistory[hostId] ?? []
             existing.insert(summary, at: 0)
@@ -33,6 +68,49 @@ extension AppState {
             // "since last scan" panel renders without waiting for
             // a second user action. First-ever run will get a
             // drift report with previous_run_id == nil.
+            await loadComplianceDrift(hostId: hostId, runId: run.id)
+            return run
+        } catch {
+            handleError(error)
+            return nil
+        }
+    }
+
+    /// Run the CIS Linux baseline against a Linux SSH host. Mirrors
+    /// `runCompliance(hostId:)` — same in-flight guard, same
+    /// cache-and-head-insert pattern, same drift auto-load. Engine
+    /// returns the full `ComplianceRun` shape since 1.12a; before
+    /// 1.12a this RPC returned `{checks, findings}` and had no
+    /// Swift caller, so reshaping the return is free here.
+    ///
+    /// Dispatch happens at the call site via
+    /// `ComplianceDispatch` — never call this directly without
+    /// confirming `host.deviceType.complianceDispatch == .linuxBaseline`.
+    @discardableResult
+    func runComplianceLinux(hostId: String) async -> ComplianceRun? {
+        guard !complianceRunInFlight.contains(hostId) else { return nil }
+        complianceRunInFlight.insert(hostId)
+        defer { complianceRunInFlight.remove(hostId) }
+        do {
+            let run: ComplianceRun = try await client.call(
+                "compliance_run_linux",
+                params: ["host_id": hostId, "triggered_by": "manual"]
+            )
+            complianceLatestRun[hostId] = run
+            let summary = ComplianceRunSummary(
+                id: run.id,
+                startedAt: run.startedAt,
+                score: run.score,
+                passed: run.passed,
+                failed: run.failed,
+                errored: run.errored,
+                firmware: run.firmware,
+                triggeredBy: run.triggeredBy,
+                baselineKind: run.baselineKind
+            )
+            var existing = complianceHistory[hostId] ?? []
+            existing.insert(summary, at: 0)
+            complianceHistory[hostId] = existing
             await loadComplianceDrift(hostId: hostId, runId: run.id)
             return run
         } catch {

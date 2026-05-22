@@ -621,6 +621,15 @@ class AppState {
         case postDeploy = "post_deploy"
     }
 
+    /// Which baseline a run was executed against. Mirrors the
+    /// engine's `compliance::BaselineKind` (1.12a). Decoded from the
+    /// `baseline_kind` JSON key; absence defaults to `.fortigate`
+    /// for back-compat with rows that pre-date 1.12a.
+    enum BaselineKind: String, Codable {
+        case fortigate
+        case linux
+    }
+
     struct ComplianceCheckResult: Codable, Identifiable {
         let checkId: String
         let title: String
@@ -646,6 +655,10 @@ class AppState {
         let model: String?
         let hostname: String?
         let triggeredBy: ComplianceTrigger
+        /// Engine sets this on every run since 1.12a. Decoded with a
+        /// default of `.fortigate` so pre-1.12a runs lacking the key
+        /// still decode — matches the engine's `#[serde(default)]`.
+        let baselineKind: BaselineKind
         let score: UInt8
         let passed: UInt32
         let failed: UInt32
@@ -658,6 +671,60 @@ class AppState {
             case startedAt = "started_at"
             case finishedAt = "finished_at"
             case triggeredBy = "triggered_by"
+            case baselineKind = "baseline_kind"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            hostId = try c.decode(String.self, forKey: .hostId)
+            startedAt = try c.decode(Date.self, forKey: .startedAt)
+            finishedAt = try c.decode(Date.self, forKey: .finishedAt)
+            firmware = try c.decodeIfPresent(String.self, forKey: .firmware)
+            model = try c.decodeIfPresent(String.self, forKey: .model)
+            hostname = try c.decodeIfPresent(String.self, forKey: .hostname)
+            triggeredBy = try c.decode(ComplianceTrigger.self, forKey: .triggeredBy)
+            baselineKind = try c.decodeIfPresent(BaselineKind.self, forKey: .baselineKind) ?? .fortigate
+            score = try c.decode(UInt8.self, forKey: .score)
+            passed = try c.decode(UInt32.self, forKey: .passed)
+            failed = try c.decode(UInt32.self, forKey: .failed)
+            errored = try c.decode(UInt32.self, forKey: .errored)
+            skipped = try c.decode(UInt32.self, forKey: .skipped)
+            checks = try c.decode([ComplianceCheckResult].self, forKey: .checks)
+        }
+
+        init(
+            id: String,
+            hostId: String,
+            startedAt: Date,
+            finishedAt: Date,
+            firmware: String?,
+            model: String?,
+            hostname: String?,
+            triggeredBy: ComplianceTrigger,
+            baselineKind: BaselineKind,
+            score: UInt8,
+            passed: UInt32,
+            failed: UInt32,
+            errored: UInt32,
+            skipped: UInt32,
+            checks: [ComplianceCheckResult]
+        ) {
+            self.id = id
+            self.hostId = hostId
+            self.startedAt = startedAt
+            self.finishedAt = finishedAt
+            self.firmware = firmware
+            self.model = model
+            self.hostname = hostname
+            self.triggeredBy = triggeredBy
+            self.baselineKind = baselineKind
+            self.score = score
+            self.passed = passed
+            self.failed = failed
+            self.errored = errored
+            self.skipped = skipped
+            self.checks = checks
         }
     }
 
@@ -670,10 +737,48 @@ class AppState {
         let errored: UInt32
         let firmware: String?
         let triggeredBy: ComplianceTrigger
+        /// Same back-compat default as `ComplianceRun.baselineKind`.
+        let baselineKind: BaselineKind
         enum CodingKeys: String, CodingKey {
             case id, score, passed, failed, errored, firmware
             case startedAt = "started_at"
             case triggeredBy = "triggered_by"
+            case baselineKind = "baseline_kind"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            startedAt = try c.decode(Date.self, forKey: .startedAt)
+            score = try c.decode(UInt8.self, forKey: .score)
+            passed = try c.decode(UInt32.self, forKey: .passed)
+            failed = try c.decode(UInt32.self, forKey: .failed)
+            errored = try c.decode(UInt32.self, forKey: .errored)
+            firmware = try c.decodeIfPresent(String.self, forKey: .firmware)
+            triggeredBy = try c.decode(ComplianceTrigger.self, forKey: .triggeredBy)
+            baselineKind = try c.decodeIfPresent(BaselineKind.self, forKey: .baselineKind) ?? .fortigate
+        }
+
+        init(
+            id: String,
+            startedAt: Date,
+            score: UInt8,
+            passed: UInt32,
+            failed: UInt32,
+            errored: UInt32,
+            firmware: String?,
+            triggeredBy: ComplianceTrigger,
+            baselineKind: BaselineKind
+        ) {
+            self.id = id
+            self.startedAt = startedAt
+            self.score = score
+            self.passed = passed
+            self.failed = failed
+            self.errored = errored
+            self.firmware = firmware
+            self.triggeredBy = triggeredBy
+            self.baselineKind = baselineKind
         }
     }
 
