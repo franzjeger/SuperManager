@@ -235,20 +235,52 @@ async fn retrieve_string(
 async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
     let _ = remove_connection(conn_name).await;
 
-    // EAP-MSCHAPv2 (type 26) XML. Double-quoted XML attributes are safe
-    // inside PowerShell single-quoted strings.
+    // PEAP (type 25) wrapping EAP-MSCHAPv2 (type 26).
+    //
+    // Windows IKEv2 EAP requires PEAP as the outer method; raw type-26
+    // standalone XML is rejected by the EAP subsystem with
+    // "Failed to generate the EAP Configuration" (WIN32 1).
+    //
+    // DisableUserPromptForServerValidation=true + PerformServerValidation=false
+    // prevent an interactive certificate-trust dialog even if the FortiGate
+    // presents a self-signed or private-CA certificate.
+    //
+    // All attribute values use double quotes, which are safe inside the
+    // PowerShell single-quoted string wrapper.
     let eap_xml = concat!(
         r#"<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
         r#"<EapMethod>"#,
-        r#"<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">26</Type>"#,
+        r#"<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">25</Type>"#,
         r#"<VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>"#,
         r#"<VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>"#,
         r#"<AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId>"#,
         r#"</EapMethod>"#,
         r#"<Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
-        r#"<EapMSChapV2 xmlns="http://www.microsoft.com/provisioning/MsChapV2User">"#,
+        r#"<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">"#,
+        r#"<Type>25</Type>"#,
+        r#"<EapType xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1">"#,
+        r#"<ServerValidation>"#,
+        r#"<DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation>"#,
+        r#"<ServerNames></ServerNames>"#,
+        r#"</ServerValidation>"#,
+        r#"<FastReconnect>true</FastReconnect>"#,
+        r#"<InnerEapOptional>false</InnerEapOptional>"#,
+        r#"<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">"#,
+        r#"<Type>26</Type>"#,
+        r#"<EapType xmlns="http://www.microsoft.com/provisioning/MsChapV2ConnectionPropertiesV1">"#,
         r#"<UseWinLogonCredentials>false</UseWinLogonCredentials>"#,
-        r#"</EapMSChapV2></Config></EapHostConfig>"#,
+        r#"</EapType>"#,
+        r#"</Eap>"#,
+        r#"<EnableQuarantineChecks>false</EnableQuarantineChecks>"#,
+        r#"<RequireCryptoBinding>false</RequireCryptoBinding>"#,
+        r#"<PeapExtensions>"#,
+        r#"<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</PerformServerValidation>"#,
+        r#"<AcceptServerName xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</AcceptServerName>"#,
+        r#"</PeapExtensions>"#,
+        r#"</EapType>"#,
+        r#"</Eap>"#,
+        r#"</Config>"#,
+        r#"</EapHostConfig>"#,
     );
 
     let cmd = format!(
