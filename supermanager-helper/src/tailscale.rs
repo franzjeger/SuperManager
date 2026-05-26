@@ -685,14 +685,21 @@ pub fn test_exit_reachability(_: TestExitArgs) -> Result<TestExitResult> {
         });
     }
 
-    // Probe with a hard 2-second timeout. We expect 1.1.1.1 to
-    // return HTTP 301 (redirect to https://www.cloudflare.com/...)
-    // when reachable. Any 2xx/3xx counts as success.
+    // Probe with an 8-second timeout. We expect 1.1.1.1 to return
+    // HTTP 301 (redirect to https://www.cloudflare.com/...) when
+    // reachable. Any 2xx/3xx counts as success.
+    //
+    // 8 s rationale: peers on FreeBSD (OPNsense) or behind a DERP
+    // relay add 3-6 s of TLS-handshake latency over a working path.
+    // The original 2 s limit caused false-positives — probe timed out
+    // (HTTP 000) while the exit-node was fully functional and approved
+    // in the Tailscale admin console.  8 s is conservative enough to
+    // let DERP settle without making the UX feel hung.
     let probe = Command::new("/usr/bin/curl")
         .args([
             "-sS",
-            "--max-time", "2",
-            "--connect-timeout", "2",
+            "--max-time", "8",
+            "--connect-timeout", "8",
             "-o", "/dev/null",
             "-w", "%{http_code}",
             &format!("https://{test_ip}"),

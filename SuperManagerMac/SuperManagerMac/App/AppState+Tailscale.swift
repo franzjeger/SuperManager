@@ -435,8 +435,14 @@ extension AppState {
         DebugLog.write("[ts/exit] step 2/4 result: success=\(testOK) code=\(testCode) msg=\(testMsg)")
         if !testOK {
             DebugLog.write("[ts/exit] AUTO-REVERT: pre-flight failed, peer doesn't forward")
+            // Surface the raw HTTP code in the UI so the operator can
+            // tell "000" (timeout/no route) from "403" (peer reachable
+            // but not forwarding) without opening the helper log.
+            let codeHint = testCode == "000" || testCode.isEmpty
+                ? "timed out (no route through peer)"
+                : "HTTP \(testCode)"
             tailscaleActionError =
-                "Exit node didn't forward traffic. Probe failed; daemon pref reverted."
+                "Exit node didn't forward traffic — probe \(codeHint). Daemon pref reverted."
             _ = try? await TailscaleClient.setExitNode("")
             _ = try? await HelperClient.shared.tailscaleResumeWatchdog()
             await refreshTailscale()
