@@ -1138,6 +1138,24 @@ struct VpnDetailView: View {
             // Don't surface poll errors — they spam the UI. Log to console.
             print("vpn status poll error: \(error)")
         }
+
+        // Propagate fresh state back to AppState so the sidebar dot,
+        // header VPN count, and throughput rows stay in sync with what
+        // we just learned from the helper.
+        //
+        // Without this write-back the sidebar reads a stale
+        // vpnConnectionStates entry (updated only every 4 s by the
+        // global poll, or skipped entirely when the global poll detects
+        // helper-unreachable and bails early). The detail view's own
+        // 3-second poll is authoritative for the selected profile while
+        // it's on screen — its result should win immediately.
+        appState.vpnConnectionStates[profileId] = vpnState
+        if vpnState != "connected" {
+            // Clear stale byte counters so the Throughput row doesn't
+            // show leftover data from a previous connection session.
+            appState.vpnByteCounters.removeValue(forKey: profileId)
+            appState.vpnByteRates.removeValue(forKey: profileId)
+        }
     }
 
     /// Copy `interface` / `virtual_ip` / `virtual_gateway` /
