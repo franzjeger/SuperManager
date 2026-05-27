@@ -14,9 +14,14 @@ struct VpnDetailView: View {
     @State private var busy = false
 
     /// Tunnel state as reported by the helper, refreshed on a 3 s poll.
-    /// "disconnected" / "connecting" / "connected".
+    /// "disconnected" / "connecting" / "connected" / "reconnecting".
     @State private var vpnState: String = "disconnected"
     @State private var stateDetail: String = ""
+    /// Last error surfaced from the VPN log when state is "reconnecting"
+    /// or "disconnected" — e.g. "EVENT: TRANSPORT_ERROR NETWORK_EOF_ERROR".
+    /// Shown as a small caption below the status pill so the user knows
+    /// WHY the connection is retrying without having to open the log viewer.
+    @State private var reconnectReason: String? = nil
     // Live tunnel metadata, populated from `ovpn_status` /
     // `wg_status` once the tunnel is up. Empty when nothing's
     // connected so the "Live tunnel" section can hide itself.
@@ -474,7 +479,9 @@ struct VpnDetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
-                    } else if vpnState == "connected" {
+                    } else if vpnState == "connected" || vpnState == "reconnecting" {
+                        // Show Disconnect for both states — if reconnecting,
+                        // the user can abort the retry loop and restart cleanly.
                         Button("Disconnect", role: .destructive) {
                             Task { await disconnectOpenVPN(profile) }
                         }
@@ -495,7 +502,13 @@ struct VpnDetailView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
-                    } else if vpnState == "connected" {
+                    } else if vpnState == "connected" || vpnState == "reconnecting" {
+                        // "reconnecting" shows Disconnect so the user can
+                        // abort the loop and re-authenticate via Entra ID.
+                        // Azure P2S Entra ID tokens expire (~1 h); when they
+                        // do, the gateway sends TCP EOF and ovpncli retries
+                        // with the same expired token forever. The correct
+                        // recovery is Disconnect → Connect (new device-code flow).
                         Button("Disconnect", role: .destructive) {
                             Task { await disconnectOpenVPN(profile) }
                         }
@@ -583,6 +596,29 @@ struct VpnDetailView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 4)
+            }
+
+            // Reconnect diagnostic — shown when the helper reports
+            // state="reconnecting" and supplies an error_reason.
+            // Gives the user immediate visibility into WHY the
+            // connection is retrying (e.g. NETWORK_EOF_ERROR means
+            // the Azure gateway rejected the token; user knows to
+            // hit Disconnect and re-authenticate rather than waiting
+            // for a retry that will never succeed).
+            if vpnState == "reconnecting", let reason = reconnectReason {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.clockwise.circle")
+                        .foregroundStyle(.orange)
+                    Text(reason)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .lineLimit(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
         }
     }
@@ -992,8 +1028,9 @@ struct VpnDetailView: View {
 
     private func displayState(_ state: String) -> String {
         switch state {
-        case "connected": return "Connected"
-        case "connecting": return "Connecting…"
+        case "connected":    return "Connected"
+        case "connecting":   return "Connecting…"
+        case "reconnecting": return "Reconnecting…"
         case "disconnected":
             return helperReachable ? "Disconnected" : "Helper not installed"
         default: return state.capitalized
@@ -1002,9 +1039,10 @@ struct VpnDetailView: View {
 
     private func statusColor(_ state: String) -> Color {
         switch state {
-        case "connected": return .green
-        case "connecting": return .orange
-        default: return .gray.opacity(0.5)
+        case "connected":    return .green
+        case "connecting":   return .yellow    // initial handshake in progress
+        case "reconnecting": return .orange    // session dropped, retrying — warmer than yellow
+        default:             return .gray.opacity(0.5)
         }
     }
 
@@ -1111,6 +1149,7 @@ struct VpnDetailView: View {
             case .openvpn:
                 let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
                 vpnState = result["state"] as? String ?? "disconnected"
+                reconnectReason = result["error_reason"] as? String
                 if let pid = result["pid"] as? Int, vpnState == "connected" {
                     stateDetail = "openvpn pid \(pid)"
                 } else {
@@ -1124,6 +1163,9 @@ struct VpnDetailView: View {
                 // the same `ovpn_status` endpoint.
                 let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
                 vpnState = result["state"] as? String ?? "disconnected"
+                // Surface the last transport error so the user knows
+                // why the connection is in a retry loop.
+                reconnectReason = result["error_reason"] as? String
                 if let pid = result["pid"] as? Int, vpnState == "connected" {
                     stateDetail = "openvpn pid \(pid)"
                 } else {
@@ -1134,6 +1176,21 @@ struct VpnDetailView: View {
                 vpnState = "disconnected"
                 stateDetail = ""
             }
+
+            // ── State write-back (P3 — single source of truth) ──────────
+            // The detail view and the sidebar/header use independent 3 s / 4 s
+            // polls and can diverge: sidebar shows green while detail shows
+            // "Reconnecting…", or vice versa. Writing the freshly-learned
+            // state back to AppState keeps both in sync without requiring an
+            // architectural merge of the two polling loops.
+            appState.vpnConnectionStates[profileId] = vpnState
+            if vpnState != "connected" {
+                // Drop stale throughput counters so the sidebar + header
+                // never show bytes-per-second for a tunnel that isn't up.
+                appState.vpnByteCounters.removeValue(forKey: profileId)
+                appState.vpnByteRates.removeValue(forKey: profileId)
+            }
+
         } catch {
             // Don't surface poll errors — they spam the UI. Log to console.
             print("vpn status poll error: \(error)")
