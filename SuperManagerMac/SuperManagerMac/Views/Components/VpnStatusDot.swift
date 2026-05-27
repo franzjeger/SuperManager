@@ -27,6 +27,7 @@ struct VpnStatusDot: View {
         switch state {
         case "connected":     return .green
         case "connecting":    return .yellow
+        case "reconnecting":  return .orange   // session dropped, retrying automatically
         case "disconnecting": return .orange
         case "disconnected":  return .secondary
         case .some(let s) where s.contains("error"):
@@ -39,6 +40,7 @@ struct VpnStatusDot: View {
         switch state {
         case "connected":     return "connected"
         case "connecting":    return "connecting"
+        case "reconnecting":  return "reconnecting"
         case "disconnecting": return "disconnecting"
         case "disconnected":  return "disconnected"
         case .some(let s):    return s
@@ -50,11 +52,12 @@ struct VpnStatusDot: View {
 #if DEBUG
 #Preview("VPN status dots") {
     HStack(spacing: 16) {
-        VStack { VpnStatusDot(state: "connected"); Text("connected").font(.caption) }
-        VStack { VpnStatusDot(state: "connecting"); Text("connecting").font(.caption) }
+        VStack { VpnStatusDot(state: "connected");     Text("connected").font(.caption) }
+        VStack { VpnStatusDot(state: "connecting");    Text("connecting").font(.caption) }
+        VStack { VpnStatusDot(state: "reconnecting");  Text("reconnecting").font(.caption) }
         VStack { VpnStatusDot(state: "disconnecting"); Text("disconnecting").font(.caption) }
-        VStack { VpnStatusDot(state: "disconnected"); Text("disconnected").font(.caption) }
-        VStack { VpnStatusDot(state: nil); Text("unknown").font(.caption) }
+        VStack { VpnStatusDot(state: "disconnected");  Text("disconnected").font(.caption) }
+        VStack { VpnStatusDot(state: nil);             Text("unknown").font(.caption) }
     }
     .padding()
 }
