@@ -28,6 +28,16 @@ use tokio::process::Command;
 /// left behind by a previous helper crash. Called once on helper startup.
 /// Failures are silent — if strongSwan isn't installed, there's nothing
 /// to sweep, and if a directory is missing the glob just yields nothing.
+///
+/// Also sweeps stale kernel host routes for any VPN server address found
+/// in the leftover config files. When charon is killed without a clean
+/// disconnect it leaves a host route like:
+///
+///   193.213.13.22  192.168.200.1  UGHS  en0
+///
+/// pointing at the old gateway. A fresh connect attempt fails with
+/// "unable to determine source address" because charon tries to reach
+/// the server via the stale route (wrong gateway, wrong network).
 pub async fn sweep_stale_configs() {
     for prefix in BREW_PATHS {
         for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
@@ -38,6 +48,11 @@ pub async fn sweep_stale_configs() {
                     continue;
                 };
                 if name.starts_with("supermanager-") {
+                    // Extract server host before deleting the file so we
+                    // can also sweep the kernel host route.
+                    if let Ok(host) = extract_remote_addr(entry.path()).await {
+                        delete_server_host_route(&host);
+                    }
                     let _ = tokio::fs::remove_file(entry.path()).await;
                     tracing::debug!(path = %entry.path().display(), "swept stale config");
                 }
@@ -304,9 +319,24 @@ impl Strongswan {
         let etc = self.etc.as_ref().unwrap().clone();
         let conf_path = etc.join(format!("swanctl/conf.d/supermanager-{}.conf", args.profile_id));
         let secrets_path = etc.join(format!("swanctl/conf.d/supermanager-{}-secrets.conf", args.profile_id));
+
+        // Extract the server host BEFORE removing the config file — we need
+        // it to clean up the kernel host route that charon installed.
+        // IKEv2 full-tunnel adds: `<server_ip>  <original_gw>  UGHS  en0`
+        // so that control traffic bypasses the tunnel. After disconnect the
+        // route must be removed; if the user changes networks before the
+        // next connect, the stale route points at the old gateway and charon
+        // can't determine a source address → "unable to determine source
+        // address, faking NAT situation" → every packet fails with EADDRNOTAVAIL.
+        let server_host = extract_remote_addr(&conf_path).await.ok();
+
         tokio::fs::remove_file(&conf_path).await.ok();
         tokio::fs::remove_file(&secrets_path).await.ok();
         let _ = run(swanctl, &["--load-all"]).await;
+
+        if let Some(host) = server_host {
+            delete_server_host_route(&host);
+        }
 
         Ok(DisconnectResult { ok: true, message: out.lines().last().unwrap_or("").to_owned() })
     }
@@ -494,6 +524,74 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     }
     s.push_str("}\n");
     s
+}
+
+/// Delete the VPN-server host route that charon installs during an
+/// IKEv2 full-tunnel connect.
+///
+/// When charon brings up a full tunnel it adds a host route so that
+/// IKE keep-alives and rekeying reach the peer directly instead of
+/// looping back through the tunnel:
+///
+///   `<server>  <original-gw>  UGHS  en0`
+///
+/// On a clean disconnect charon removes this route. When charon is
+/// killed (helper crash, SIGKILL, machine sleep mid-connect), the
+/// route persists. On the next connect attempt — especially after a
+/// network change — charon can't determine a source address because
+/// the route still points at the old gateway on the old network →
+/// "unable to determine source address, faking NAT situation" →
+/// every IKE_SA_INIT packet fails with EADDRNOTAVAIL.
+///
+/// This function is called from `disconnect()` (before cleaning up
+/// the config file) and from `sweep_stale_configs()` (at startup).
+/// Safe to call unconditionally — `route delete` is a no-op if the
+/// route doesn't exist.
+fn delete_server_host_route(host: &str) {
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-q", "delete", host])
+        .output();
+    match out {
+        Ok(o) if o.status.success() =>
+            tracing::info!("route_cleanup: deleted host route for {host}"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            // "not in table" is expected when the route was already gone.
+            if !msg.contains("not in table") && !msg.contains("No such process") {
+                tracing::debug!("route_cleanup: route delete {host}: {msg}");
+            }
+        }
+        Err(e) => tracing::warn!("route_cleanup: route delete {host}: {e}"),
+    }
+}
+
+/// Extract the `remote_addrs` value from a swanctl conf file.
+///
+/// Config format:
+/// ```
+/// connections {
+///     <id> {
+///         remote_addrs = 79.161.11.170
+///         ...
+///     }
+/// }
+/// ```
+///
+/// Returns the first `remote_addrs` value found, trimmed. Returns
+/// `Err` if the file can't be read or the key is absent (e.g.
+/// secrets-only file).
+async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Result<String> {
+    let content = tokio::fs::read_to_string(path.as_ref()).await?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("remote_addrs") {
+            // Matches both `remote_addrs = host` and `remote_addrs=host`
+            let host = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+            if !host.is_empty() {
+                return Ok(host.to_string());
+            }
+        }
+    }
+    anyhow::bail!("remote_addrs not found in {}", path.as_ref().display())
 }
 
 /// swanctl uses double-quoted strings; we need to escape `"` and `\`.
