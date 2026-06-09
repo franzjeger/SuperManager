@@ -59,6 +59,10 @@ pub async fn sweep_stale_configs() {
             }
         }
     }
+    // On wake (the primary caller of this function) any full-tunnel routes
+    // from a pre-sleep session may have survived. Remove them so the first
+    // post-wake ping doesn't black-hole into a dead tunnel.
+    delete_full_tunnel_routes();
 }
 
 /// Where brew puts the strongSwan install root on Apple Silicon Macs.
@@ -337,6 +341,14 @@ impl Strongswan {
         if let Some(host) = server_host {
             delete_server_host_route(&host);
         }
+        // Belt-and-braces: charon removes the full-tunnel split-default routes
+        // (0/1 + 128/1) when it terminates the SA cleanly. But if the SA was
+        // already gone before --terminate ran (server timeout, network change,
+        // unexpected drop), charon has nothing to clean up and the routes stay
+        // in the kernel — routing ALL subsequent traffic into a dead tunnel and
+        // breaking internet access until the next VPN connect or reboot.
+        // Deleting them here is idempotent: `route delete` ignores missing routes.
+        delete_full_tunnel_routes();
 
         Ok(DisconnectResult { ok: true, message: out.lines().last().unwrap_or("").to_owned() })
     }
@@ -565,6 +577,33 @@ fn delete_server_host_route(host: &str) {
     }
 }
 
+/// Remove the split-default routes that strongSwan installs for full-tunnel
+/// IKEv2 connections. These two routes redirect ALL IPv4 traffic through the
+/// VPN tunnel — if they linger after a disconnect (e.g., because the SA was
+/// already gone when `swanctl --terminate` ran), the entire machine loses
+/// internet access until a reboot or another VPN connect.
+///
+/// Safe to call unconditionally: `/sbin/route delete` returns "not in table"
+/// if the route doesn't exist, which we treat as success.
+fn delete_full_tunnel_routes() {
+    for net in &["0/1", "128.0/1"] {
+        let out = std::process::Command::new("/sbin/route")
+            .args(["-q", "delete", "-net", net])
+            .output();
+        match out {
+            Ok(o) if o.status.success() =>
+                tracing::info!("route_cleanup: deleted full-tunnel route {net}"),
+            Ok(o) => {
+                let msg = String::from_utf8_lossy(&o.stderr);
+                if !msg.contains("not in table") && !msg.contains("No such process") {
+                    tracing::debug!("route_cleanup: route delete {net}: {msg}");
+                }
+            }
+            Err(e) => tracing::warn!("route_cleanup: route delete {net}: {e}"),
+        }
+    }
+}
+
 /// Extract the `remote_addrs` value from a swanctl conf file.
 ///
 /// Config format:
@@ -663,6 +702,10 @@ pub async fn terminate_and_sweep() {
         }
         // Reload so charon sees the now-empty supermanager namespace.
         let _ = run(&swanctl, &["--load-all"]).await;
+        // Explicitly remove full-tunnel split-default routes. charon removes
+        // these when --terminate succeeds, but if a SA was already gone they
+        // linger in the kernel and black-hole all internet traffic.
+        delete_full_tunnel_routes();
         break; // Found a valid brew prefix; done.
     }
 }
