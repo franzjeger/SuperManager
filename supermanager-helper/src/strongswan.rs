@@ -594,6 +594,79 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
     anyhow::bail!("remote_addrs not found in {}", path.as_ref().display())
 }
 
+/// Terminate all active supermanager IKE SAs and sweep their config files.
+///
+/// Called on system-sleep notification (belt-and-braces after the Swift
+/// layer has already fired per-profile disconnect RPCs) and can also be
+/// called stand-alone. Safe to call when no VPNs are active — every
+/// underlying command is idempotent.
+///
+/// Steps:
+///   1. For each `supermanager-<id>.conf` in swanctl's conf.d:
+///      a. Run `swanctl --terminate --ike <id>` (best-effort).
+///      b. Extract `remote_addrs` and delete the kernel host route.
+///      c. Remove the conf file.
+///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
+///   3. Run `swanctl --load-all` so charon sees the empty namespace.
+pub async fn terminate_and_sweep() {
+    // Find the first working swanctl binary. Return early if strongSwan
+    // isn't installed — nothing to clean up.
+    let swanctl_path = BREW_PATHS
+        .iter()
+        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
+        .find(|p| p.exists());
+    let Some(swanctl) = swanctl_path else {
+        tracing::debug!("terminate_and_sweep: swanctl not found, skipping");
+        return;
+    };
+
+    for prefix in BREW_PATHS {
+        let conf_dir = std::path::Path::new(prefix).join("etc/swanctl/conf.d");
+        let Ok(mut entries) = tokio::fs::read_dir(&conf_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let fname = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // Only touch our namespace; leave other strongSwan configs alone.
+            if !fname.starts_with("supermanager-") || !fname.ends_with(".conf") {
+                continue;
+            }
+            // Secrets files (supermanager-<id>-secrets.conf) — remove but
+            // don't try to terminate an IKE SA named "<id>-secrets".
+            if fname.ends_with("-secrets.conf") {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+                tracing::debug!(file = %fname, "terminate_and_sweep: removed secrets file");
+                continue;
+            }
+            // Derive the connection name: `supermanager-<id>.conf` → `<id>`
+            let conn_name = fname
+                .strip_prefix("supermanager-")
+                .and_then(|s| s.strip_suffix(".conf"))
+                .unwrap_or("");
+            if conn_name.is_empty() {
+                continue;
+            }
+            // Terminate the IKE SA (best-effort — it may already be gone).
+            let _ = run(&swanctl, &["--terminate", "--ike", conn_name]).await;
+            tracing::info!(conn = %conn_name, "terminate_and_sweep: terminated IKE SA");
+
+            // Sweep the kernel host route charon installed.
+            if let Ok(host) = extract_remote_addr(entry.path()).await {
+                delete_server_host_route(&host);
+            }
+            // Remove the config file.
+            let _ = tokio::fs::remove_file(entry.path()).await;
+            tracing::debug!(file = %fname, "terminate_and_sweep: removed conf");
+        }
+        // Reload so charon sees the now-empty supermanager namespace.
+        let _ = run(&swanctl, &["--load-all"]).await;
+        break; // Found a valid brew prefix; done.
+    }
+}
+
 /// swanctl uses double-quoted strings; we need to escape `"` and `\`.
 /// Newlines aren't valid inside a swanctl secret so we drop them defensively.
 fn escape_swanctl(s: &str) -> String {

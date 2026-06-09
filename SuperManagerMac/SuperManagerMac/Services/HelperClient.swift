@@ -391,6 +391,28 @@ final class HelperClient {
         return result["log"] as? String ?? ""
     }
 
+    // MARK: - System sleep / wake
+
+    /// Notify the helper that the system is about to sleep.
+    /// Belt-and-braces cleanup after the Swift layer has already
+    /// fired individual disconnect RPCs: terminates any lingering
+    /// IKEv2 SAs and kills orphaned ovpncli processes so they
+    /// don't hold stale tunnel state across the sleep boundary.
+    @discardableResult
+    func systemSleep() async throws -> [String: Any] {
+        try await call("system_sleep", params: [:])
+    }
+
+    /// Notify the helper that the system just woke from sleep.
+    /// Clears the route guardian's pre-sleep snapshot (stale
+    /// gateway from the old network) and sweeps leftover strongSwan
+    /// configs + kernel host routes so the first post-wake connect
+    /// attempt starts from a clean slate.
+    @discardableResult
+    func systemWake() async throws -> [String: Any] {
+        try await call("system_wake", params: [:])
+    }
+
     // MARK: - Wire protocol
 
     private static var nextId: UInt64 = 0

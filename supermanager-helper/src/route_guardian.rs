@@ -128,6 +128,30 @@ pub fn current_snapshot() -> Option<(String, String)> {
         .map(|s| (s.gateway, s.interface))
 }
 
+/// Clear both v4 and v6 snapshots.
+///
+/// Call this on system wake. Before sleep the guardian snapshotted the
+/// gateway for whatever network was active (e.g. `192.168.1.1 via en0`).
+/// After wake the machine may be on a completely different network
+/// (different gateway, different subnet). If we don't clear the snapshot
+/// the guardian sees "default missing, restore from snapshot" and re-adds
+/// the *old* gateway — which is now unreachable. The next tick after the
+/// new network comes up will snapshot the correct gateway; clearing the
+/// stale one bridges that gap cleanly.
+pub fn reset_snapshot() {
+    if let Some(m) = SNAPSHOT_V4.get() {
+        if let Ok(mut s) = m.lock() {
+            *s = None;
+        }
+    }
+    if let Some(m) = SNAPSHOT_V6.get() {
+        if let Ok(mut s) = m.lock() {
+            *s = None;
+        }
+    }
+    tracing::info!("route guardian: snapshots cleared on system wake");
+}
+
 /// Out-of-band restore — called by the connectivity watchdog
 /// when the regular 500ms polling hasn't caught up yet but
 /// internet is already failing. Synchronous; runs the route-add

@@ -358,6 +358,8 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 "kill_switch_enable",
                 "kill_switch_disable",
                 "traffic_capture",
+                "system_sleep",
+                "system_wake",
             ];
             Response::ok(id, serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -853,6 +855,61 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
             }
+        }
+
+        // ── System sleep / wake ──────────────────────────────────────────
+        //
+        // The Swift app fires these when it receives NSWorkspace
+        // willSleepNotification / didWakeNotification.  We use them to:
+        //   sleep  — terminate all active IKEv2 SAs + kill ovpncli
+        //   wake   — reset route guardian snapshot + sweep stale configs
+        //
+        // This handles the "lid close / open" failure modes where VPN
+        // state becomes stale after sleep and the route guardian's
+        // pre-sleep snapshot points at the wrong gateway.
+        "system_sleep" => {
+            info!("system_sleep: running pre-sleep VPN teardown");
+            // Terminate all managed IKEv2 SAs and sweep leftover configs.
+            // Belt-and-braces: the Swift layer has already disconnected
+            // individual profiles, but this catches anything that slipped
+            // through (GUI not open, connect happened from auto-reconnect,
+            // etc.). terminate_and_sweep is idempotent — no-op if nothing
+            // is active.
+            strongswan::terminate_and_sweep().await;
+
+            // Kill any orphaned ovpncli processes. ovpncli is a foreground
+            // daemon we spawn as a child; if it outlived a helper restart
+            // or the Swift disconnect path didn't fire, it would hold the
+            // tunnel open across sleep, leaving macOS with no useful VPN
+            // (the physical connection is gone but the process thinks it's
+            // still alive). pkill -f is a fuzzy match — safe here because
+            // we own the namespace ("ovpncli" is not a system binary).
+            let _ = tokio::process::Command::new("/usr/bin/pkill")
+                .args(["-TERM", "-f", "ovpncli"])
+                .output()
+                .await;
+
+            info!("system_sleep: done");
+            Response::ok(id, serde_json::json!({"ok": true}))
+        }
+
+        "system_wake" => {
+            info!("system_wake: running post-wake cleanup");
+            // Clear the route guardian's pre-sleep snapshot. After sleep
+            // the machine may be on a completely different network; the
+            // old gateway address is likely unreachable. Clearing lets the
+            // guardian re-snapshot from the freshly-configured network
+            // rather than flooding the routing table with restore attempts.
+            route_guardian::reset_snapshot();
+
+            // Sweep any configs charon left behind. This also deletes
+            // stale kernel host routes, which prevents "unable to
+            // determine source address" errors on the first post-wake
+            // connect attempt.
+            strongswan::sweep_stale_configs().await;
+
+            info!("system_wake: done");
+            Response::ok(id, serde_json::json!({"ok": true}))
         }
 
         other => Response::err(id, -32601, format!("unknown method: {other}")),

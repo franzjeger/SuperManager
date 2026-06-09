@@ -61,6 +61,11 @@ struct SuperManagerApp: App {
                     await startDaemon()
                     await appState.connectToDaemon()
                     startAutoLockTimer()
+                    // Register for sleep/wake notifications so VPN state
+                    // and the route guardian reset cleanly on lid-close/open.
+                    // Must run on the main actor (NSWorkspace requirement);
+                    // the startSleepWakeMonitor() call is @MainActor-safe.
+                    appState.startSleepWakeMonitor()
                 }
             }
             // Handle `supermgr://` URLs. The Info.plist
