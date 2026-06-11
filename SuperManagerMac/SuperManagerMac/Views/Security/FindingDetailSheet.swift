@@ -116,6 +116,15 @@ struct FindingDetailSheet: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                     CopyButton(value: finding.finding.hostIp, helpText: "Copy host IP")
+                    // Bridge the IP-keyed finding back to a known SSH host via
+                    // the HostIndex, so the operator sees which managed device
+                    // this finding is on instead of a bare IP.
+                    if let known = appState.hostIndex.host(forIp: finding.finding.hostIp) {
+                        Label(known.label, systemImage: "desktopcomputer")
+                            .font(.caption2)
+                            .foregroundStyle(.tint)
+                            .help("Managed SSH host \(known.label) (\(known.deviceType.displayName))")
+                    }
                     if let port = finding.finding.port {
                         Text("port \(port)")
                             .font(.caption)
