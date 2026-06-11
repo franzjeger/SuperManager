@@ -368,9 +368,13 @@ struct ProvisioningView: View {
     /// Diff/deploy needs an actual device target — without one,
     /// the buttons stay disabled.
     private func pickFortigateHostId(customer: Customer, site: Site) -> String? {
-        // Prefer site-attached hosts.
-        for hostId in site.hostIds {
-            if let host = appState.sshHosts.first(where: { $0.id == hostId }),
+        // Prefer site-attached hosts. Resolve each Site.hostIds token through
+        // the HostIndex: the token is usually an IP (what the discovery/
+        // autodetect writers store), not a record id, so a raw `$0.id ==
+        // hostId` match never resolved an auto-discovered FortiGate — which
+        // is what kept Preview-diff/deploy permanently disabled for them.
+        for token in site.hostIds {
+            if let host = appState.hostIndex.host(forToken: token),
                host.deviceType == .fortigate {
                 return host.id
             }
@@ -380,8 +384,8 @@ struct ProvisioningView: View {
         // multiple sites (uncommon but happens with shared HQ
         // gateways) deploy without explicit attachment.
         for s in customer.sites {
-            for hostId in s.hostIds {
-                if let host = appState.sshHosts.first(where: { $0.id == hostId }),
+            for token in s.hostIds {
+                if let host = appState.hostIndex.host(forToken: token),
                    host.deviceType == .fortigate {
                     return host.id
                 }
@@ -393,8 +397,8 @@ struct ProvisioningView: View {
     private func hasFortigateHost(in customer: Customer) -> Bool {
         customer.sites
             .flatMap(\.hostIds)
-            .contains { id in
-                appState.sshHosts.contains { $0.id == id && $0.deviceType == .fortigate }
+            .contains { token in
+                appState.hostIndex.host(forToken: token)?.deviceType == .fortigate
             }
     }
 

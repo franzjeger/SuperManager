@@ -923,7 +923,11 @@ struct ContentView: View {
     private var filteredHosts: [SshHostSummary] {
         let global = appState.globalCustomerSlug
         let hosts = appState.sshHosts
-            .filter { global.isEmpty || $0.group == global }
+            // Resolve customer membership through the HostIndex, not a raw
+            // `group == slug` match, so a host linked to its customer only by
+            // IP in Site.hostIds (or carrying group:"Discovered") still shows
+            // when that customer is selected.
+            .filter { global.isEmpty || appState.hostIndex.customerSlug(forHost: $0) == global }
             .sorted { a, b in
                 if a.pinned != b.pinned { return a.pinned }
                 if a.group != b.group { return a.group < b.group }
