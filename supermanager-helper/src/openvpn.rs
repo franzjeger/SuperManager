@@ -928,6 +928,50 @@ fn pid_path_for(safe: &str) -> PathBuf {
     Path::new(PID_DIR).join(format!("supermgr-ovpn-{safe}.pid"))
 }
 
+/// SIGTERM every live OpenVPN tunnel the helper manages and clean up its
+/// pidfiles. Used by the system-sleep teardown — a global, profile-agnostic
+/// "kill all our tunnels" that doesn't need the per-profile id.
+///
+/// Replaces the old `pkill -f ovpncli`, which never matched anything: the
+/// binary we actually spawn is `openvpn3` / `openvpn-patched` / `openvpn`
+/// (the comments call it "ovpncli" after the upstream client name, but no
+/// process is named that). We instead SIGTERM by tracked pid — exactly what
+/// `disconnect()` does per profile.
+///
+/// Returns the number of processes signalled.
+pub async fn terminate_all() -> usize {
+    let mut killed = 0usize;
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return 0 };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        let Some(safe) = fname
+            .strip_prefix("supermgr-ovpn-")
+            .and_then(|s| s.strip_suffix(".pid"))
+        else {
+            continue;
+        };
+        if let Some(pid) = read_pid_file(&entry.path()) {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                // SIGTERM lets openvpn flush its log and run its down script.
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                killed += 1;
+            }
+        }
+        // Belt-and-braces: ps-scan for stragglers carrying this profile's
+        // daemon-name fingerprint (catches a tunnel whose pidfile was lost).
+        for pid in collect_openvpn_pids_for(safe).await {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                killed += 1;
+            }
+        }
+        let _ = std::fs::remove_file(entry.path());
+        let _ = std::fs::remove_file(log_path_for(safe));
+    }
+    killed
+}
+
 /// Kernel interfaces (`utunN`) of every OpenVPN tunnel that is currently
 /// alive. Cheap, no `&mut self`: scans the helper's pidfiles in `/var/run`,
 /// checks liveness with `kill(pid, 0)`, and parses the bound interface from

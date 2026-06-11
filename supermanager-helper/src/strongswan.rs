@@ -304,6 +304,19 @@ impl Strongswan {
 
         // swanctl prints "initiate completed successfully" on the happy path.
         let ok = out.contains("completed successfully") || out.contains("CHILD_SA");
+
+        // IPv6 leak protection. Our full-tunnel config is IPv4-only
+        // (vips = 0.0.0.0, remote_ts = 0.0.0.0/0) — charon installs the
+        // 0/1 + 128/1 split-defaults for IPv4 but nothing for IPv6, so
+        // every IPv6 packet keeps routing out the physical `default
+        // ...%en0` gateway in cleartext while the user believes ALL their
+        // traffic is tunnelled. Since the FortiGate side doesn't carry v6,
+        // we fail closed: blackhole all IPv6 for the duration of the
+        // tunnel. Torn down by delete_full_tunnel_routes() on disconnect.
+        if ok && args.full_tunnel {
+            install_ipv6_leak_block();
+        }
+
         Ok(ConnectResult {
             ok,
             message: out.lines().last().unwrap_or("").to_owned(),
@@ -601,41 +614,100 @@ fn delete_full_tunnel_routes() {
     // Interfaces owned by a live WireGuard or OpenVPN tunnel. Never delete a
     // split-default that points at one of these.
     let foreign = foreign_tunnel_ifaces();
-    // (get-spec, delete-spec): `route get` wants a full address, `route
+
+    // IPv4 split-defaults charon installs for a full tunnel. (get-spec,
+    // delete-spec, family-flag): `route get` wants a full address, `route
     // delete` accepts the short CIDR form charon/wg-quick install.
-    for (get_spec, del_spec) in &[("0.0.0.0/1", "0/1"), ("128.0.0.0/1", "128.0/1")] {
-        if let Some(iface) = route_iface(get_spec) {
-            if foreign.contains(&iface) {
-                tracing::info!(
-                    "route_cleanup: keeping {del_spec} — owned by live tunnel {iface}"
-                );
-                continue;
+    let v4 = [("0.0.0.0/1", "0/1"), ("128.0.0.0/1", "128.0/1")];
+    for (get_spec, del_spec) in &v4 {
+        delete_split_default(get_spec, del_spec, "-inet", &foreign);
+    }
+    // IPv6 split-defaults: charon never installs these (our conf is v4-only),
+    // but install_ipv6_leak_block() does — as blackhole routes via lo0 — to
+    // stop v6 leaking past the tunnel. wg-quick installs the same ::/1 +
+    // 8000::/1 pair for its own v6 full tunnel, so the ownership gate
+    // (skip if backed by a live foreign utun) protects those too; our
+    // blackhole routes resolve to lo0, which is never foreign, so they delete.
+    let v6 = [("::/1", "::/1"), ("8000::/1", "8000::/1")];
+    for (get_spec, del_spec) in &v6 {
+        delete_split_default(get_spec, del_spec, "-inet6", &foreign);
+    }
+}
+
+/// Delete one split-default route unless it belongs to a live foreign tunnel.
+/// `family` is `-inet` or `-inet6`. Idempotent: a missing route is success.
+fn delete_split_default(
+    get_spec: &str,
+    del_spec: &str,
+    family: &str,
+    foreign: &std::collections::HashSet<String>,
+) {
+    if let Some(iface) = route_iface_family(get_spec, family) {
+        if foreign.contains(&iface) {
+            tracing::info!("route_cleanup: keeping {del_spec} — owned by live tunnel {iface}");
+            return;
+        }
+    }
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-q", "delete", family, "-net", del_spec])
+        .output();
+    match out {
+        Ok(o) if o.status.success() =>
+            tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            if !msg.contains("not in table") && !msg.contains("No such process") {
+                tracing::debug!("route_cleanup: route delete {del_spec}: {msg}");
             }
         }
+        Err(e) => tracing::warn!("route_cleanup: route delete {del_spec}: {e}"),
+    }
+}
+
+/// Install IPv6 leak protection for an IPv4-only full tunnel: blackhole the
+/// two IPv6 split-defaults (`::/1` + `8000::/1`) so they take precedence over
+/// the physical `::/0` default and the kernel silently drops all IPv6. Routed
+/// via `::1`/lo0 with `-blackhole` (RTF_BLACKHOLE). Idempotent: we delete any
+/// prior copy first so a reconnect doesn't error on "route already in table".
+fn install_ipv6_leak_block() {
+    for net in &["::/1", "8000::/1"] {
+        // Don't clobber a real v6 tunnel route if one somehow points here.
+        if let Some(iface) = route_iface_family(net, "-inet6") {
+            if iface != "lo0" && iface.starts_with("utun") {
+                let foreign = foreign_tunnel_ifaces();
+                if foreign.contains(&iface) {
+                    tracing::warn!(
+                        "ipv6_leak_block: {net} already owned by live tunnel {iface}, skipping"
+                    );
+                    continue;
+                }
+            }
+        }
+        let _ = std::process::Command::new("/sbin/route")
+            .args(["-q", "delete", "-inet6", "-net", net])
+            .output();
         let out = std::process::Command::new("/sbin/route")
-            .args(["-q", "delete", "-net", del_spec])
+            .args(["-q", "add", "-inet6", "-net", net, "::1", "-blackhole"])
             .output();
         match out {
             Ok(o) if o.status.success() =>
-                tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}"),
-            Ok(o) => {
-                let msg = String::from_utf8_lossy(&o.stderr);
-                if !msg.contains("not in table") && !msg.contains("No such process") {
-                    tracing::debug!("route_cleanup: route delete {del_spec}: {msg}");
-                }
-            }
-            Err(e) => tracing::warn!("route_cleanup: route delete {del_spec}: {e}"),
+                tracing::info!("ipv6_leak_block: blackholed {net}"),
+            Ok(o) => tracing::warn!(
+                "ipv6_leak_block: add {net} failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => tracing::warn!("ipv6_leak_block: add {net}: {e}"),
         }
     }
 }
 
 /// Resolve the kernel interface that a packet to `dest` would use, by parsing
-/// `route -n get -inet <dest>`. Returns `None` if the lookup fails or prints
-/// no `interface:` line. Used to identify which backend owns a full-tunnel
-/// split-default route before we consider deleting it.
-fn route_iface(dest: &str) -> Option<String> {
+/// `route -n get <family> <dest>` (family = `-inet` or `-inet6`). Returns
+/// `None` if the lookup fails or prints no `interface:` line. Used to identify
+/// which backend owns a full-tunnel split-default route before we delete it.
+fn route_iface_family(dest: &str, family: &str) -> Option<String> {
     let out = std::process::Command::new("/sbin/route")
-        .args(["-n", "get", "-inet", dest])
+        .args(["-n", "get", family, dest])
         .output()
         .ok()?;
     if !out.status.success() {

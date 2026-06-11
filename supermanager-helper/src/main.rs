@@ -877,17 +877,17 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // is active.
             strongswan::terminate_and_sweep().await;
 
-            // Kill any orphaned ovpncli processes. ovpncli is a foreground
-            // daemon we spawn as a child; if it outlived a helper restart
-            // or the Swift disconnect path didn't fire, it would hold the
-            // tunnel open across sleep, leaving macOS with no useful VPN
-            // (the physical connection is gone but the process thinks it's
-            // still alive). pkill -f is a fuzzy match — safe here because
-            // we own the namespace ("ovpncli" is not a system binary).
-            let _ = tokio::process::Command::new("/usr/bin/pkill")
-                .args(["-TERM", "-f", "ovpncli"])
-                .output()
-                .await;
+            // SIGTERM any live OpenVPN tunnels we manage. If one outlived a
+            // helper restart or the Swift disconnect path didn't fire, it
+            // would hold the tunnel open across sleep, leaving macOS with no
+            // useful VPN (the physical connection is gone but the process
+            // thinks it's still alive). The old `pkill -f ovpncli` was dead
+            // code — the spawned binary is `openvpn3`/`openvpn`, never named
+            // "ovpncli" — so we kill by tracked pid instead.
+            let killed = openvpn::terminate_all().await;
+            if killed > 0 {
+                info!("system_sleep: terminated {killed} OpenVPN process(es)");
+            }
 
             info!("system_sleep: done");
             Response::ok(id, serde_json::json!({"ok": true}))
