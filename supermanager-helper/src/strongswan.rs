@@ -39,6 +39,18 @@ use tokio::process::Command;
 /// "unable to determine source address" because charon tries to reach
 /// the server via the stale route (wrong gateway, wrong network).
 pub async fn sweep_stale_configs() {
+    // Wake-sweep race guard. This runs at startup AND on system_wake. If a
+    // strongSwan tunnel is ESTABLISHED right now, this is almost certainly a
+    // post-wake sweep racing auto_reconnect's replay: the tunnel was just
+    // re-established and its conf + 0/1+128/1 routes are legitimate. Deleting
+    // them here would strip a live tunnel's default routes (a cleartext leak)
+    // and remove the conf charon is actively using. Skip the whole sweep — at
+    // startup (the other caller) charon isn't running yet, so no SA is
+    // ESTABLISHED and the sweep runs normally to clean genuine leftovers.
+    if has_established_strongswan_sa() {
+        tracing::info!("sweep_stale_configs: live strongSwan SA present — skipping sweep to avoid racing auto_reconnect");
+        return;
+    }
     for prefix in BREW_PATHS {
         for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
             let dir = std::path::Path::new(prefix).join(subdir);
@@ -614,13 +626,18 @@ fn delete_full_tunnel_routes() {
     // Interfaces owned by a live WireGuard or OpenVPN tunnel. Never delete a
     // split-default that points at one of these.
     let foreign = foreign_tunnel_ifaces();
+    // Is a strongSwan tunnel ESTABLISHED right now? If so, a utun-backed /1
+    // route belongs to it (e.g. auto_reconnect re-established the tunnel after
+    // wake, or another IKEv2 profile is up while this one disconnects). We must
+    // not delete a live IKEv2 tunnel's default routes.
+    let live_sa = has_established_strongswan_sa();
 
     // IPv4 split-defaults charon installs for a full tunnel. (get-spec,
     // delete-spec, family-flag): `route get` wants a full address, `route
     // delete` accepts the short CIDR form charon/wg-quick install.
     let v4 = [("0.0.0.0/1", "0/1"), ("128.0.0.0/1", "128.0/1")];
     for (get_spec, del_spec) in &v4 {
-        delete_split_default(get_spec, del_spec, "-inet", &foreign);
+        delete_split_default(get_spec, del_spec, "-inet", &foreign, live_sa);
     }
     // IPv6 split-defaults: charon never installs these (our conf is v4-only),
     // but install_ipv6_leak_block() does — as blackhole routes via lo0 — to
@@ -630,21 +647,49 @@ fn delete_full_tunnel_routes() {
     // blackhole routes resolve to lo0, which is never foreign, so they delete.
     let v6 = [("::/1", "::/1"), ("8000::/1", "8000::/1")];
     for (get_spec, del_spec) in &v6 {
-        delete_split_default(get_spec, del_spec, "-inet6", &foreign);
+        delete_split_default(get_spec, del_spec, "-inet6", &foreign, live_sa);
     }
 }
 
-/// Delete one split-default route unless it belongs to a live foreign tunnel.
-/// `family` is `-inet` or `-inet6`. Idempotent: a missing route is success.
+/// True if `swanctl --list-sas` shows any ESTABLISHED IKE SA — i.e. a live
+/// strongSwan tunnel exists right now. Used to keep route/config cleanup from
+/// stripping a tunnel that auto_reconnect (or always-on) re-established before
+/// a wake sweep ran, and to protect one IKEv2 profile while another disconnects.
+fn has_established_strongswan_sa() -> bool {
+    let Some(swanctl) = BREW_PATHS
+        .iter()
+        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
+        .find(|p| p.exists())
+    else {
+        return false;
+    };
+    std::process::Command::new(&swanctl)
+        .arg("--list-sas")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
+        .unwrap_or(false)
+}
+
+/// Delete one split-default route unless it belongs to a live tunnel.
+/// `family` is `-inet` or `-inet6`. Skips the delete when the route is owned by
+/// a live WireGuard/OpenVPN interface (`foreign`) or, when `live_sa` is set, by
+/// any utun (a live strongSwan tunnel's route). Idempotent: a missing route is
+/// success. Our own IPv6 blackhole routes resolve to lo0, not a utun, so the
+/// `live_sa` guard never blocks their cleanup.
 fn delete_split_default(
     get_spec: &str,
     del_spec: &str,
     family: &str,
     foreign: &std::collections::HashSet<String>,
+    live_sa: bool,
 ) {
     if let Some(iface) = route_iface_family(get_spec, family) {
         if foreign.contains(&iface) {
             tracing::info!("route_cleanup: keeping {del_spec} — owned by live tunnel {iface}");
+            return;
+        }
+        if live_sa && iface.starts_with("utun") {
+            tracing::info!("route_cleanup: keeping {del_spec} — live strongSwan SA on {iface}");
             return;
         }
     }
