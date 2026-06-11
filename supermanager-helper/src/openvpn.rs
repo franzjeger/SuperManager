@@ -928,6 +928,41 @@ fn pid_path_for(safe: &str) -> PathBuf {
     Path::new(PID_DIR).join(format!("supermgr-ovpn-{safe}.pid"))
 }
 
+/// Kernel interfaces (`utunN`) of every OpenVPN tunnel that is currently
+/// alive. Cheap, no `&mut self`: scans the helper's pidfiles in `/var/run`,
+/// checks liveness with `kill(pid, 0)`, and parses the bound interface from
+/// each session's log.
+///
+/// Used by the strongSwan teardown path so it never deletes the shared
+/// full-tunnel split-default routes (`0/1` + `128.0/1`) out from under a
+/// live OpenVPN session — those routes belong to whatever backend installed
+/// them, and OpenVPN's `redirect-gateway def1` uses the exact same pair.
+pub fn live_tunnel_interfaces() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return out };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        let Some(safe) = fname
+            .strip_prefix("supermgr-ovpn-")
+            .and_then(|s| s.strip_suffix(".pid"))
+        else {
+            continue;
+        };
+        let Some(pid) = read_pid_file(&entry.path()) else { continue };
+        // Skip dead/stale pidfiles — a stale full-tunnel route from a dead
+        // OpenVPN session SHOULD be swept, so we only protect live ones.
+        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            continue;
+        }
+        let body = std::fs::read_to_string(log_path_for(safe)).unwrap_or_default();
+        if let (Some(iface), _, _) = parse_tunnel_metadata(&body) {
+            out.push(iface);
+        }
+    }
+    out
+}
+
 fn log_path_for(safe: &str) -> PathBuf {
     Path::new(LOG_DIR).join(format!("supermgr-ovpn-{safe}.log"))
 }

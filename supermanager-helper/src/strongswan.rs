@@ -583,25 +583,106 @@ fn delete_server_host_route(host: &str) {
 /// already gone when `swanctl --terminate` ran), the entire machine loses
 /// internet access until a reboot or another VPN connect.
 ///
+/// CRITICAL: `0/1` + `128.0/1` are a SHARED kernel resource. WireGuard
+/// (wg-quick) and OpenVPN (`redirect-gateway def1`) install the exact same
+/// pair for their own full tunnels. `route delete -net 0/1` matches purely on
+/// destination, so a blind delete would strip a live WireGuard/OpenVPN
+/// tunnel's routes and silently leak all traffic in cleartext via en0 while
+/// the GUI still shows "Connected".
+///
+/// We therefore gate the deletion on OWNERSHIP: look up the interface backing
+/// each route and skip the delete when that interface belongs to a live
+/// non-strongSwan tunnel. We only delete routes that point at a dead/charon
+/// interface — exactly the stale-route case this function exists to fix.
+///
 /// Safe to call unconditionally: `/sbin/route delete` returns "not in table"
 /// if the route doesn't exist, which we treat as success.
 fn delete_full_tunnel_routes() {
-    for net in &["0/1", "128.0/1"] {
+    // Interfaces owned by a live WireGuard or OpenVPN tunnel. Never delete a
+    // split-default that points at one of these.
+    let foreign = foreign_tunnel_ifaces();
+    // (get-spec, delete-spec): `route get` wants a full address, `route
+    // delete` accepts the short CIDR form charon/wg-quick install.
+    for (get_spec, del_spec) in &[("0.0.0.0/1", "0/1"), ("128.0.0.0/1", "128.0/1")] {
+        if let Some(iface) = route_iface(get_spec) {
+            if foreign.contains(&iface) {
+                tracing::info!(
+                    "route_cleanup: keeping {del_spec} — owned by live tunnel {iface}"
+                );
+                continue;
+            }
+        }
         let out = std::process::Command::new("/sbin/route")
-            .args(["-q", "delete", "-net", net])
+            .args(["-q", "delete", "-net", del_spec])
             .output();
         match out {
             Ok(o) if o.status.success() =>
-                tracing::info!("route_cleanup: deleted full-tunnel route {net}"),
+                tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}"),
             Ok(o) => {
                 let msg = String::from_utf8_lossy(&o.stderr);
                 if !msg.contains("not in table") && !msg.contains("No such process") {
-                    tracing::debug!("route_cleanup: route delete {net}: {msg}");
+                    tracing::debug!("route_cleanup: route delete {del_spec}: {msg}");
                 }
             }
-            Err(e) => tracing::warn!("route_cleanup: route delete {net}: {e}"),
+            Err(e) => tracing::warn!("route_cleanup: route delete {del_spec}: {e}"),
         }
     }
+}
+
+/// Resolve the kernel interface that a packet to `dest` would use, by parsing
+/// `route -n get -inet <dest>`. Returns `None` if the lookup fails or prints
+/// no `interface:` line. Used to identify which backend owns a full-tunnel
+/// split-default route before we consider deleting it.
+fn route_iface(dest: &str) -> Option<String> {
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-n", "get", "-inet", dest])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    for line in body.lines() {
+        if let Some(rest) = line.trim().strip_prefix("interface:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Set of kernel interfaces currently owned by a live non-strongSwan VPN
+/// tunnel — WireGuard (`wg show interfaces`) and OpenVPN
+/// (`openvpn::live_tunnel_interfaces`). The strongSwan route cleanup must
+/// never delete a split-default route pointing at one of these.
+fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    // WireGuard: `wg show interfaces` prints a space-separated list of the
+    // utun devices wireguard-go currently owns.
+    for prefix in BREW_PATHS {
+        let wg = std::path::Path::new(prefix).join("bin/wg");
+        if !wg.exists() {
+            continue;
+        }
+        if let Ok(out) = std::process::Command::new(&wg)
+            .args(["show", "interfaces"])
+            .output()
+        {
+            if out.status.success() {
+                for name in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+        break;
+    }
+    // OpenVPN: live tunnels expose their utun via the helper's log parse.
+    for iface in crate::openvpn::live_tunnel_interfaces() {
+        set.insert(iface);
+    }
+    set
 }
 
 /// Extract the `remote_addrs` value from a swanctl conf file.
