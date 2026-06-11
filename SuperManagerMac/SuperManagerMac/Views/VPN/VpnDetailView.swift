@@ -84,12 +84,14 @@ struct VpnDetailView: View {
             .padding()
         }
         .task(id: profileId) {
-            // Wipe per-view state on profile switch. Without this,
-            // bouncing between profiles in the sidebar carries stale
-            // status from the previously-selected profile until the
-            // next poll arrives — making it look like every profile
-            // is "Connected" when only one actually is.
-            vpnState = "disconnected"
+            // Seed from the GLOBAL poller's last known state for this
+            // profile rather than hardcoding "disconnected". The global
+            // poller (AppState.startVpnStatusPolling) drives the sidebar
+            // dot and runs continuously; seeding from it means a profile
+            // that is actually connected shows "Connected" immediately on
+            // selection instead of flashing "disconnected" until the
+            // local poll catches up (or never, if its Task has died).
+            vpnState = appState.vpnConnectionStates[profileId] ?? "disconnected"
             stateDetail = ""
             actionError = nil
             strongswanMissing = false
@@ -97,6 +99,20 @@ struct VpnDetailView: View {
         }
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
+        // Single source of truth (for real): mirror the global poller
+        // into the detail pane. The detail pane used to rely solely on
+        // its own `startPolling` Task, whose lifecycle is tied to
+        // onAppear/onDisappear and could die (e.g. after a connect/
+        // disconnect cycle), leaving `vpnState` stuck on "disconnected"
+        // while the sidebar dot — driven by the always-on global poller
+        // — correctly showed green. Reading both from
+        // `vpnConnectionStates` makes that divergence structurally
+        // impossible. We skip the sync while a user action is in flight
+        // so the optimistic local "connecting" state isn't clobbered.
+        .onChange(of: appState.vpnConnectionStates[profileId]) { _, newValue in
+            guard !busy, let s = newValue else { return }
+            vpnState = s
+        }
         .sheet(isPresented: $showingLog) { logSheet }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
