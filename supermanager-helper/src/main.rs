@@ -169,6 +169,45 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn dns health watchdog: {e:#}");
     }
 
+    // Helper-side wake detector — covers the GUI-CLOSED sleep/wake case.
+    //
+    // The Swift app fires system_sleep / system_wake from NSWorkspace, but
+    // when the app is closed the helper (a LaunchDaemon) gets no such signal.
+    // A tunnel left up across sleep then leaves stale full-tunnel routes
+    // black-holing traffic on wake, with nothing to clean them.
+    //
+    // We can't observe *will-sleep* without IOKit, but we can detect that a
+    // sleep HAPPENED: tokio's timer runs on the monotonic clock, which does
+    // NOT advance while the machine is suspended, whereas the wall clock does.
+    // So a `sleep(TICK)` that comes back with a wall-clock delta far exceeding
+    // TICK means the machine was suspended in between. On detection we run the
+    // same post-wake cleanup as the system_wake RPC — snapshot reset plus the
+    // race-guarded stale-config/route sweep (which no-ops if a tunnel
+    // auto-reconnected). Pre-sleep teardown for the GUI-closed case still
+    // wants IOKit IORegisterForSystemPower; tracked as a follow-up.
+    tokio::spawn(async {
+        use std::time::{Duration, SystemTime};
+        const TICK: Duration = Duration::from_secs(30);
+        const SLEEP_THRESHOLD: Duration = Duration::from_secs(60);
+        let mut last = SystemTime::now();
+        loop {
+            tokio::time::sleep(TICK).await;
+            let now = SystemTime::now();
+            let elapsed = now.duration_since(last).unwrap_or(TICK);
+            if elapsed > TICK + SLEEP_THRESHOLD {
+                info!(
+                    "wake detector: {}s wall-clock jump across a {}s tick — \
+                     machine slept; running post-wake cleanup",
+                    elapsed.as_secs(),
+                    TICK.as_secs()
+                );
+                route_guardian::reset_snapshot();
+                strongswan::sweep_stale_configs().await;
+            }
+            last = now;
+        }
+    });
+
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind {}", socket_path.display()))?;
 
