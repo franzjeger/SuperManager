@@ -745,15 +745,50 @@ pub struct TestExitResult {
     pub message: String,
 }
 
+/// Delete one split-default route unless a live WireGuard/OpenVPN full tunnel
+/// currently owns it. `family` is `-inet` or `-inet6`; `net` is both the
+/// `route get` target and the `route delete` prefix. Idempotent: a missing
+/// route is a no-op.
+fn delete_split_default_if_unowned(
+    family: &str,
+    net: &str,
+    foreign: &std::collections::HashSet<String>,
+) {
+    if let Some(iface) = crate::strongswan::route_iface_family(net, family) {
+        if foreign.contains(&iface) {
+            tracing::info!("exit_routes: keeping {net} — owned by live tunnel {iface}");
+            return;
+        }
+    }
+    let mut args: Vec<&str> = vec!["delete"];
+    if family == "-inet6" {
+        args.push("-inet6");
+    }
+    args.push("-net");
+    args.push(net);
+    let _ = Command::new("/sbin/route").args(&args).output();
+}
+
 /// Remove the split-default exit-node routes. Always succeeds —
 /// missing routes are a no-op. Called when the user clears the
 /// exit node, when auto-revert kicks in, and from `panic_reset`.
 pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
-    // 1. Drop the /1 split routes.
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "128.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "::/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "8000::/1"]).output();
+    // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
+    //
+    // This runs from panic_reset (fired by the connectivity watchdog on a
+    // ~6s internet blip) and from auto-revert. The `0/1` + `128/1` (+ v6)
+    // split-defaults are a SHARED kernel resource: WireGuard and OpenVPN
+    // full tunnels install the exact same pair. A blind delete here would
+    // rip a live WG/OpenVPN tunnel's default routes out from under it on any
+    // transient outage, silently leaking all traffic in cleartext via en0.
+    // So we skip any /1 route currently owned by a live foreign tunnel;
+    // tailscale's own exit-node routes point at the tailscale utun (not a
+    // WG/OpenVPN interface) and are still removed.
+    let foreign = crate::strongswan::foreign_tunnel_ifaces();
+    delete_split_default_if_unowned("-inet", "0.0.0.0/1", &foreign);
+    delete_split_default_if_unowned("-inet", "128.0.0.0/1", &foreign);
+    delete_split_default_if_unowned("-inet6", "::/1", &foreign);
+    delete_split_default_if_unowned("-inet6", "8000::/1", &foreign);
 
     // 2. Drop the per-underlay-IP exemption host routes we
     // installed alongside. Without this, those /32 entries would

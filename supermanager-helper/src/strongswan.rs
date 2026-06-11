@@ -705,7 +705,7 @@ fn install_ipv6_leak_block() {
 /// `route -n get <family> <dest>` (family = `-inet` or `-inet6`). Returns
 /// `None` if the lookup fails or prints no `interface:` line. Used to identify
 /// which backend owns a full-tunnel split-default route before we delete it.
-fn route_iface_family(dest: &str, family: &str) -> Option<String> {
+pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
     let out = std::process::Command::new("/sbin/route")
         .args(["-n", "get", family, dest])
         .output()
@@ -729,7 +729,7 @@ fn route_iface_family(dest: &str, family: &str) -> Option<String> {
 /// tunnel — WireGuard (`wg show interfaces`) and OpenVPN
 /// (`openvpn::live_tunnel_interfaces`). The strongSwan route cleanup must
 /// never delete a split-default route pointing at one of these.
-fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
+pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     // WireGuard: `wg show interfaces` prints a space-separated list of the
     // utun devices wireguard-go currently owns.
