@@ -101,7 +101,12 @@ struct ProvisioningView: View {
                     hostLabel: host.label,
                     templateId: templateId,
                     customerSlug: customer.slug,
-                    siteId: site.id
+                    siteId: site.id,
+                    // Carry the same one-off render variables the operator
+                    // entered on the form, so the diff + deploy use the exact
+                    // config they rendered and reviewed — not one rendered
+                    // with empty extras.
+                    extras: Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
                 )
             }
         }
@@ -111,6 +116,24 @@ struct ProvisioningView: View {
                 await appState.loadProvisioningTemplates()
             }
         }
+        // Render output + form inputs are view-local @State on this
+        // persistent view. Without resetting them when the operator
+        // switches site or customer, the header would show the new
+        // selection while Copy / Save / Deploy still acted on the
+        // PREVIOUS site's rendered config — worst case deploying site
+        // A's config to site B. Clear the stale state on every switch.
+        .onChange(of: appState.selectedSiteId) { _, _ in resetRenderState() }
+        .onChange(of: appState.selectedCustomerSlug) { _, _ in resetRenderState() }
+    }
+
+    /// Wipe everything derived from the previously-selected site so a
+    /// fresh selection starts clean. Called on site/customer switch.
+    private func resetRenderState() {
+        selectedTemplateId = nil
+        extras = []
+        rendered = nil
+        renderError = nil
+        rendering = false
     }
 
     // MARK: - Empty states

@@ -9,6 +9,11 @@ struct ContentView: View {
     @State private var showingAddVpn = false
     @State private var showingImportVpn = false
     @State private var showingDisconnectAllConfirm = false
+    /// Profile the operator asked to delete, awaiting confirmation.
+    /// Deleting a VPN profile irreversibly wipes the tunnel and every
+    /// stored credential, so we gate it behind an alert rather than
+    /// firing on the bare context-menu click.
+    @State private var vpnProfilePendingDelete: VpnProfileSummary?
     /// Drives the visual drop-zone overlay during a drag-and-drop
     /// VPN import. Bound to `.onDrop(isTargeted:)`.
     @State private var vpnImportTargeted = false
@@ -312,6 +317,22 @@ struct ContentView: View {
         } message: {
             Text("This tears down every active VPN tunnel — IKEv2, WireGuard, and OpenVPN. Reconnect manually afterwards.")
         }
+        .alert(
+            "Delete this VPN profile?",
+            isPresented: Binding(
+                get: { vpnProfilePendingDelete != nil },
+                set: { if !$0 { vpnProfilePendingDelete = nil } }
+            ),
+            presenting: vpnProfilePendingDelete
+        ) { profile in
+            Button("Cancel", role: .cancel) { vpnProfilePendingDelete = nil }
+            Button("Delete", role: .destructive) {
+                Task { await appState.deleteVpnProfile(profile.id, profileName: profile.name) }
+                vpnProfilePendingDelete = nil
+            }
+        } message: { profile in
+            Text("This permanently removes \"\(profile.name)\" and every stored credential for it. This cannot be undone.")
+        }
         // Lock-state branching is handled at the root in `RootView` —
         // ContentView is only built when the app is unlocked, so we
         // don't need to think about the lock state in here.
@@ -443,15 +464,25 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         case .compliance:
+            // Gate on the SAME allowlist the list column uses
+            // (`complianceDispatch != .notApplicable`), not on
+            // `deviceType == .fortigate`. The list deliberately includes
+            // Linux hosts and tells operators to add them; pinning the
+            // detail gate to FortiGate dead-ended every Linux row on
+            // "Select a FortiGate host" and made the whole Linux CIS scan
+            // path unreachable. ComplianceHostView already branches on
+            // complianceDispatch, so it renders Linux hosts correctly.
             if let hostId = appState.selectedHostId,
-               appState.sshHosts.contains(where: { $0.id == hostId && $0.deviceType == .fortigate }) {
+               appState.sshHosts.contains(where: {
+                   $0.id == hostId && $0.deviceType.complianceDispatch != .notApplicable
+               }) {
                 ComplianceHostView(hostId: hostId)
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "checkmark.shield")
                         .font(.system(size: 48))
                         .foregroundStyle(.tertiary)
-                    Text("Select a FortiGate host to view compliance")
+                    Text("Select a compliance-capable host to view compliance")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -698,7 +729,7 @@ struct ContentView: View {
             }
             Divider()
             Button("Delete", role: .destructive) {
-                Task { await appState.deleteVpnProfile(profile.id, profileName: profile.name) }
+                vpnProfilePendingDelete = profile
             }
         }
     }
