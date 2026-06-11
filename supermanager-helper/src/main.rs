@@ -53,6 +53,7 @@ mod connectivity_watchdog;
 mod dns_health_watchdog;
 mod kill_switch;
 mod openvpn;
+mod power;
 mod route_guardian;
 mod strongswan;
 mod tailscale;
@@ -169,7 +170,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn dns health watchdog: {e:#}");
     }
 
-    // Helper-side wake detector — covers the GUI-CLOSED sleep/wake case.
+    // Register for IOKit system-power notifications so the helper tears down
+    // VPNs on sleep and cleans up on wake even when the GUI is closed (the
+    // GUI-CLOSED case the NSWorkspace-based RPCs can't cover). Does the
+    // pre-sleep teardown the wall-clock detector below cannot. Falls back
+    // gracefully if registration fails.
+    power::spawn_power_monitor();
+
+    // Helper-side wake detector — fallback for the GUI-CLOSED wake case if the
+    // IOKit registration above failed; also a cheap belt-and-braces.
     //
     // The Swift app fires system_sleep / system_wake from NSWorkspace, but
     // when the app is closed the helper (a LaunchDaemon) gets no such signal.

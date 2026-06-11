@@ -276,8 +276,32 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
     let args = crate::strongswan::StatusArgs {
         profile_id: p.profile_id.clone(),
     };
-    let mut g = sw.lock().await;
-    matches!(g.status(&args).await, Ok(s) if s.state == "connected")
+    let connected = {
+        let mut g = sw.lock().await;
+        matches!(g.status(&args).await, Ok(s) if s.state == "connected")
+    };
+    if !connected {
+        return false;
+    }
+    // Route-aware health: a full-tunnel SA can be ESTABLISHED while its
+    // 0/1+128/1 split-defaults were externally flushed, leaving a live-but-
+    // routeless tunnel that leaks traffic in cleartext while status reads
+    // "connected". Treat that as not-connected so the watchdog replays the
+    // connect and re-installs the routes. Split-tunnel profiles install no
+    // 0/1, so only apply this when the profile asked for a full tunnel.
+    let full_tunnel = serde_json::from_value::<crate::strongswan::ConnectArgs>(
+        p.last_connect_args.clone(),
+    )
+    .map(|a| a.full_tunnel)
+    .unwrap_or(false);
+    if full_tunnel && !crate::strongswan::full_tunnel_routes_present() {
+        tracing::warn!(
+            profile = %p.profile_id,
+            "auto_reconnect: SA established but full-tunnel routes missing — forcing replay"
+        );
+        return false;
+    }
+    true
 }
 
 async fn replay_sw(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> Result<()> {

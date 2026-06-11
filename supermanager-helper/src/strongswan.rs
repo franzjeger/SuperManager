@@ -651,6 +651,18 @@ fn delete_full_tunnel_routes() {
     }
 }
 
+/// True if the IPv4 full-tunnel split-default (`0/1`) is currently installed
+/// on a utun interface — i.e. a full tunnel's routes are actually present, not
+/// merely its SA. auto_reconnect uses this to detect an ESTABLISHED-but-
+/// routeless tunnel (e.g. the split-defaults were externally flushed) so it
+/// can replay the connect and re-install them instead of reporting "connected"
+/// for a tunnel that is silently leaking.
+pub(crate) fn full_tunnel_routes_present() -> bool {
+    route_iface_family("0.0.0.0/1", "-inet")
+        .map(|i| i.starts_with("utun"))
+        .unwrap_or(false)
+}
+
 /// True if `swanctl --list-sas` shows any ESTABLISHED IKE SA — i.e. a live
 /// strongSwan tunnel exists right now. Used to keep route/config cleanup from
 /// stripping a tunnel that auto_reconnect (or always-on) re-established before

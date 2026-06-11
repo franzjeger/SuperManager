@@ -17,6 +17,11 @@ fn main() {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     println!("cargo:rustc-env=HELPER_BUILD_TIMESTAMP={ts}");
+    // Link the macOS frameworks the power monitor (power.rs) needs:
+    // IOKit for IORegisterForSystemPower / IOAllowPowerChange, and
+    // CoreFoundation for the CFRunLoop the notifications are delivered on.
+    println!("cargo:rustc-link-lib=framework=IOKit");
+    println!("cargo:rustc-link-lib=framework=CoreFoundation");
     // Force re-run on every build so the env var doesn't get
     // cached. Touching `build.rs` itself is the laziest trick.
     println!("cargo:rerun-if-changed=build.rs");
