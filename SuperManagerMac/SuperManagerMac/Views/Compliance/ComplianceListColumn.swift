@@ -30,7 +30,12 @@ struct ComplianceListColumn: View {
         let global = appState.globalCustomerSlug
         return appState.sshHosts
             .filter { $0.deviceType.complianceDispatch != .notApplicable }
-            .filter { global.isEmpty || $0.group == global }
+            // Resolve customer membership through the HostIndex, not a raw
+            // `group == slug` match. A FortiGate carrying group:"Discovered"
+            // (or linked to its customer only by IP in Site.hostIds) was
+            // previously dropped here, producing "No compliance-capable hosts"
+            // for a customer whose FortiGate is sitting in Provisioning.
+            .filter { global.isEmpty || appState.hostIndex.customerSlug(forHost: $0) == global }
     }
 
     /// FortiGate-only subset, used to gate the "Scan all" toolbar

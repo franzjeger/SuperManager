@@ -17,6 +17,19 @@ class AppState {
     var sshKeys: [SshKeySummary] = []
     var hostHealth: [String: Bool] = [:]
 
+    /// Unified Customer→Site→Host resolver, derived from `sshHosts` +
+    /// `customers`. Rebuilt at the tail of `refreshHosts()` /
+    /// `refreshCustomers()` so it is always current. Lets the customer-scoped
+    /// surfaces (Compliance, SSH sidebar, Provisioning, Fleet) agree on which
+    /// host belongs to which customer despite the four legacy identity schemes.
+    /// See `HostIndex` for the full rationale.
+    var hostIndex = HostIndex(hosts: [], customers: [])
+
+    /// Recompute `hostIndex` from the current stores. Cheap (O(hosts + sites)).
+    func rebuildHostIndex() {
+        hostIndex = HostIndex(hosts: sshHosts, customers: customers)
+    }
+
     // VPN
     var vpnProfiles: [VpnProfileSummary] = []
     var vpnState: VpnConnectionState = .disconnected

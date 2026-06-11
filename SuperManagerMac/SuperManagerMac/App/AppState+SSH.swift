@@ -8,6 +8,7 @@ extension AppState {
     func refreshHosts() async {
         do {
             sshHosts = try await client.call("ssh_list_hosts")
+            rebuildHostIndex()
         } catch {
             handleError(error)
         }
