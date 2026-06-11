@@ -85,21 +85,41 @@ struct PowerContext {
 
 /// Run the VPN teardown, bounded so the sleep acknowledgement is never
 /// starved. Best-effort: every underlying step swallows its own errors.
+///
+/// `block_on` is driven by the multi-thread Tokio runtime's worker threads
+/// (`#[tokio::main]` + `features = ["full"]`), so parking this CFRunLoop
+/// thread inside it does not stall the async work. If the runtime flavor were
+/// ever switched to current-thread, this would deadlock — keep it multi-thread.
+///
+/// `catch_unwind`: we're called from an `extern "C"` callback; a panic
+/// unwinding across the FFI boundary into CoreFoundation is undefined
+/// behavior. Contain it so the WillSleep path always reaches the mandatory
+/// `IOAllowPowerChange` that follows this call.
 fn teardown_for_sleep(ctx: &PowerContext) {
-    ctx.handle.block_on(async {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-            crate::strongswan::terminate_and_sweep().await;
-            let _ = crate::openvpn::terminate_all().await;
-        })
-        .await;
-    });
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.handle.block_on(async {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                crate::strongswan::terminate_and_sweep().await;
+                let _ = crate::openvpn::terminate_all().await;
+            })
+            .await;
+        });
+    }));
 }
 
+/// Post-wake cleanup. Bounded + panic-contained for the same reasons as
+/// `teardown_for_sleep`: it runs on the CFRunLoop thread (a hung sweep would
+/// stall later power callbacks) and must not unwind across the FFI boundary.
 fn cleanup_after_wake(ctx: &PowerContext) {
-    ctx.handle.block_on(async {
-        crate::route_guardian::reset_snapshot();
-        crate::strongswan::sweep_stale_configs().await;
-    });
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ctx.handle.block_on(async {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                crate::route_guardian::reset_snapshot();
+                crate::strongswan::sweep_stale_configs().await;
+            })
+            .await;
+        });
+    }));
 }
 
 extern "C" fn power_callback(
