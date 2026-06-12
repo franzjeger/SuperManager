@@ -397,14 +397,21 @@ impl Strongswan {
         // actually up. On timeout we report the interim "connecting" state
         // and return, releasing the lock so the next poll retries and other
         // RPCs proceed.
-        let out = match run_with_timeout(
-            swanctl,
-            &["--list-sas"],
+        // Distinguish a genuine TIMEOUT (charon's vici wedged → report the
+        // interim "connecting" so the lock releases) from swanctl simply
+        // exiting non-zero (e.g. charon not running → no SA → that's just
+        // "disconnected", the original behaviour). Conflating the two would
+        // wrongly show "Connecting…" for a tunnel that is plainly down.
+        let out = match tokio::time::timeout(
             std::time::Duration::from_secs(5),
+            run(swanctl, &["--list-sas"]),
         )
         .await
         {
-            Ok(o) => o,
+            // swanctl finished in time: use its output, or empty on a
+            // non-zero exit (no charon / no SAs) → resolves to "disconnected".
+            Ok(result) => result.unwrap_or_default(),
+            // genuinely hung past the deadline.
             Err(_) => {
                 return Ok(StatusResult {
                     state: "connecting".to_owned(),
