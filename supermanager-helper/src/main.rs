@@ -53,7 +53,11 @@ mod connectivity_watchdog;
 mod dns_health_watchdog;
 mod kill_switch;
 mod openvpn;
-mod power;
+// `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
+// links IOKit + CoreFoundation, and a cargo linker-signed ad-hoc signature on
+// a framework-linking root daemon is rejected by AMFI (OS_REASON_CODESIGNING).
+// Re-enable in the Developer-ID-signed release flow only. See build.rs.
+// mod power;
 mod route_guardian;
 mod strongswan;
 mod tailscale;
@@ -170,15 +174,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn dns health watchdog: {e:#}");
     }
 
-    // Register for IOKit system-power notifications so the helper tears down
-    // VPNs on sleep and cleans up on wake even when the GUI is closed (the
-    // GUI-CLOSED case the NSWorkspace-based RPCs can't cover). Does the
-    // pre-sleep teardown the wall-clock detector below cannot. Falls back
-    // gracefully if registration fails.
-    power::spawn_power_monitor();
+    // (IOKit power monitor disabled in dev/ad-hoc builds — see `mod power`
+    // note above. The wall-clock wake detector below covers the GUI-closed
+    // POST-wake case without linking any framework.)
 
-    // Helper-side wake detector — fallback for the GUI-CLOSED wake case if the
-    // IOKit registration above failed; also a cheap belt-and-braces.
+    // Helper-side wake detector — covers the GUI-CLOSED wake case (post-wake
+    // cleanup even when the app is closed) without linking any framework.
     //
     // The Swift app fires system_sleep / system_wake from NSWorkspace, but
     // when the app is closed the helper (a LaunchDaemon) gets no such signal.

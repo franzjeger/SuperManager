@@ -17,11 +17,15 @@ fn main() {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     println!("cargo:rustc-env=HELPER_BUILD_TIMESTAMP={ts}");
-    // Link the macOS frameworks the power monitor (power.rs) needs:
-    // IOKit for IORegisterForSystemPower / IOAllowPowerChange, and
-    // CoreFoundation for the CFRunLoop the notifications are delivered on.
-    println!("cargo:rustc-link-lib=framework=IOKit");
-    println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    // NOTE: the IOKit power monitor (power.rs) needs IOKit + CoreFoundation
+    // framework links here, but linking system frameworks makes the cargo
+    // linker-signed ad-hoc signature unacceptable to AMFI for a root
+    // LaunchDaemon (OS_REASON_CODESIGNING crash-loop). The module is therefore
+    // disabled in dev/ad-hoc builds; re-enable these links + `mod power` only
+    // in the Developer-ID-signed release flow (scripts/release.sh) where the
+    // proper signature is applied.
+    //   println!("cargo:rustc-link-lib=framework=IOKit");
+    //   println!("cargo:rustc-link-lib=framework=CoreFoundation");
     // Force re-run on every build so the env var doesn't get
     // cached. Touching `build.rs` itself is the laziest trick.
     println!("cargo:rerun-if-changed=build.rs");
