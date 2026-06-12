@@ -389,7 +389,29 @@ impl Strongswan {
             });
         }
         let swanctl = self.swanctl.as_ref().expect("just resolved");
-        let out = run(swanctl, &["--list-sas"]).await.unwrap_or_default();
+        // Bound the swanctl call. Without a timeout a wedged charon (vici
+        // socket unresponsive) makes `--list-sas` hang FOREVER — and because
+        // status() holds the strongSwan controller lock, that wedges EVERY
+        // VPN operation (connect, disconnect, and all subsequent status
+        // polls), freezing the GUI on "Connecting…" for a tunnel that is
+        // actually up. On timeout we report the interim "connecting" state
+        // and return, releasing the lock so the next poll retries and other
+        // RPCs proceed.
+        let out = match run_with_timeout(
+            swanctl,
+            &["--list-sas"],
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(_) => {
+                return Ok(StatusResult {
+                    state: "connecting".to_owned(),
+                    detail: "status query timed out (charon busy)".to_owned(),
+                });
+            }
+        };
         let block_marker = format!("{}: ", args.profile_id);
         let block = out
             .lines()
