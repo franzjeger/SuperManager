@@ -153,6 +153,47 @@ final class HelperClient {
         try await call("ovpn_status", params: ["profile_id": profileId])
     }
 
+    // MARK: - FortiGate SSL-VPN (openfortivpn)
+
+    /// Bring up a FortiGate SSL-VPN tunnel via openfortivpn.
+    /// `host` is the gateway address (e.g. `vpn.sybr.no`).
+    /// `port` defaults to 443; admins occasionally move it.
+    /// `trustedCert` is an optional SHA-256 fingerprint —
+    /// only needed for gateways with non-public CAs.
+    @discardableResult
+    func fortiConnect(
+        profileId: String,
+        host: String,
+        port: UInt16 = 443,
+        username: String,
+        password: String,
+        trustedCert: String? = nil,
+        noDefaultRoute: Bool = false
+    ) async throws -> [String: Any] {
+        var params: [String: Any] = [
+            "profile_id": profileId,
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "no_default_route": noDefaultRoute,
+        ]
+        if let cert = trustedCert, !cert.isEmpty {
+            params["trusted_cert"] = cert
+        }
+        return try await call("forti_connect", params: params)
+    }
+
+    @discardableResult
+    func fortiDisconnect(profileId: String) async throws -> [String: Any] {
+        try await call("forti_disconnect", params: ["profile_id": profileId])
+    }
+
+    @discardableResult
+    func fortiStatus(profileId: String) async throws -> [String: Any] {
+        try await call("forti_status", params: ["profile_id": profileId])
+    }
+
     // MARK: - Helper self-management (dev iteration)
 
     /// Probe the deployed helper for its version + capabilities.

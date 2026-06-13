@@ -27,6 +27,23 @@ struct VpnDetailView: View {
     @State private var helperReachable: Bool = false
     @State private var pollTask: Task<Void, Never>?
 
+    /// "Edit credentials" sheet — triggered from the
+    /// auth-failure inline button. Focused on just the
+    /// username + password (vs the full profile edit sheet)
+    /// so the operator can fix a typo'd case in two clicks.
+    @State private var showEditCredentialsSheet = false
+
+    /// IKEv2 / strongSwan live metrics, populated by
+    /// `vpnStatus` each poll. All zero/empty when not
+    /// connected. Drives the FortiClient-style status card.
+    @State private var ikeServerAddr: String = ""
+    @State private var ikeCipherSuite: String = ""
+    @State private var ikeUptimeSeconds: UInt64 = 0
+    @State private var ikeBytesIn: UInt64 = 0
+    @State private var ikeBytesOut: UInt64 = 0
+    @State private var ikePacketsIn: UInt64 = 0
+    @State private var ikePacketsOut: UInt64 = 0
+
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
     @State private var showingLog = false
@@ -93,6 +110,28 @@ struct VpnDetailView: View {
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
         .sheet(isPresented: $showingLog) { logSheet }
+        .sheet(isPresented: $showEditCredentialsSheet) {
+            if let profile, case .ikev2(let cfg) = profile.config {
+                IkeCredentialsEditSheet(
+                    profileId: profile.id,
+                    profileName: profile.name,
+                    currentUsername: cfg.username,
+                    onSaved: {
+                        // Re-load the profile so the displayed
+                        // username updates, then auto-retry the
+                        // connect. The whole point of this
+                        // sheet is "fix and try again."
+                        Task {
+                            await load()
+                            if let p = self.profile {
+                                await connect(p)
+                            }
+                        }
+                    }
+                )
+                .environment(appState)
+            }
+        }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
                 // Reading the stored username inline in `details(_:)`
@@ -552,18 +591,81 @@ struct VpnDetailView: View {
 
             if let actionError {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(actionError)
-                        .font(.caption)
+                    // The helper now formats errors as
+                    //   "{diagnosis}\n\n--- swanctl output ---\n{raw log}"
+                    // — split on that boundary so the operator
+                    // sees the clean diagnosis first and the
+                    // raw log only on demand. Lines that don't
+                    // contain the boundary fall back to
+                    // single-text rendering.
+                    let parts = ParsedActionError(raw: actionError)
+                    Text(parts.headline)
+                        .font(.caption.weight(.medium))
                         .foregroundStyle(.red)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if let detail = parts.detail {
+                        DisclosureGroup {
+                            ScrollView {
+                                Text(detail)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(8)
+                            }
+                            .frame(maxHeight: 240)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(.red.opacity(0.05))
+                            )
+                        } label: {
+                            Text("Show raw swanctl output")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                     // The error text from swanctl is usually truncated and
                     // unhelpful; the actual diagnosis lives in the charon
                     // log lines a few KB above. Surface a one-click jump
                     // into them so users don't have to open Console.app
                     // and chase root permission.
+                    // Auth-failure shortcut: when the error is
+                    // about credentials, surface the username
+                    // we're actually sending + an inline "Edit
+                    // credentials" button. Case-sensitive
+                    // backends (FortiGate against a local DB,
+                    // Windows RADIUS, LDAP) reject `sybr_admin`
+                    // vs `Sybr_admin` silently; making the
+                    // value visible catches that in one glance.
+                    if isAuthFailure(actionError), case .ikev2(let cfg) = profile.config {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 4) {
+                                Text("Sending username:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("'\(cfg.username)'")
+                                    .font(.caption.monospaced().weight(.medium))
+                                    .textSelection(.enabled)
+                            }
+                            Text("If FortiClient succeeds with a different case (e.g. `Sybr_admin`), fix it below.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(.top, 4)
+                    }
                     if helperReachable {
                         HStack(spacing: 8) {
+                            if isAuthFailure(actionError) {
+                                Button {
+                                    isRenaming = false
+                                    showEditCredentialsSheet = true
+                                } label: {
+                                    Label("Edit credentials…", systemImage: "person.crop.circle.badge.exclamationmark")
+                                }
+                                .controlSize(.small)
+                                .buttonStyle(.borderedProminent)
+                            }
                             Button("View Helper Log…") {
                                 Task { await loadLog() }
                             }
@@ -577,14 +679,135 @@ struct VpnDetailView: View {
                 .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
 
+            // FortiClient-style connected-tunnel status card.
+            // Only renders for IKEv2 profiles in connected state
+            // where the helper handed us a parsed assigned IP.
+            // For WireGuard/OpenVPN the existing `stateDetail`
+            // line above already shows what they expose.
+            if vpnState == "connected" && !liveVirtualIp.isEmpty {
+                ikeStatusCard(profile)
+            }
+
             if !stateDetail.isEmpty {
-                Text(stateDetail)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
+                DisclosureGroup("Raw swanctl block") {
+                    Text(stateDetail)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 4)
             }
         }
+    }
+
+    /// Connected-state status card for IKEv2/IPsec tunnels —
+    /// mirrors what FortiClient shows after a successful
+    /// connect: VPN name, gateway, virtual IP, username,
+    /// duration, bytes in / out, plus the cipher suite for
+    /// admins who care.
+    private func ikeStatusCard(_ profile: VpnProfile) -> some View {
+        let username: String = {
+            if case .ikev2(let cfg) = profile.config { return cfg.username }
+            return ""
+        }()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield.fill")
+                    .foregroundStyle(.green)
+                Text("Tunnel established")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.green)
+                Spacer()
+                Text(formatDuration(ikeUptimeSeconds))
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Divider()
+            statusRow("Profile", profile.name)
+            if !ikeServerAddr.isEmpty {
+                statusRow("Gateway", ikeServerAddr, mono: true)
+            }
+            statusRow("Assigned IP", liveVirtualIp, mono: true)
+            if !username.isEmpty {
+                statusRow("Username", username, mono: true)
+            }
+            HStack(spacing: 16) {
+                metricCol(
+                    label: "Received",
+                    value: formatBytes(ikeBytesIn),
+                    sub: "\(ikePacketsIn) packets"
+                )
+                metricCol(
+                    label: "Sent",
+                    value: formatBytes(ikeBytesOut),
+                    sub: "\(ikePacketsOut) packets"
+                )
+            }
+            .padding(.top, 4)
+            if !ikeCipherSuite.isEmpty {
+                Text(ikeCipherSuite)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(10)
+        .background(.green.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.green.opacity(0.25), lineWidth: 0.5)
+        )
+    }
+
+    private func statusRow(_ label: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .trailing)
+            Text(value)
+                .font(mono ? .caption.monospaced() : .caption)
+                .textSelection(.enabled)
+            Spacer()
+        }
+    }
+
+    private func metricCol(label: String, value: String, sub: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.body.monospaced().weight(.semibold))
+            Text(sub)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func formatBytes(_ n: UInt64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB"]
+        var value = Double(n)
+        var unit = 0
+        while value >= 1024 && unit < units.count - 1 {
+            value /= 1024
+            unit += 1
+        }
+        return unit == 0
+            ? "\(n) B"
+            : String(format: "%.2f %@", value, units[unit] as CVarArg)
+    }
+
+    private func formatDuration(_ seconds: UInt64) -> String {
+        let h = seconds / 3600
+        let m = (seconds % 3600) / 60
+        let s = seconds % 60
+        return String(format: "%02d:%02d:%02d", h, m, s)
     }
 
     /// Mirror of the daemon's match-arms in `handle_vpn_set_routing`.
@@ -1094,10 +1317,21 @@ struct VpnDetailView: View {
                 stateDetail = result["detail"] as? String ?? ""
                 // The helper reports "strongSwan not installed" via
                 // the status detail when its binary probe fails.
-                // Surfacing that in `actionError` would drown the
-                // user in noise; flip the dedicated flag and the
-                // detail view renders a setup banner instead.
                 strongswanMissing = stateDetail.contains("strongSwan not installed")
+                // Pull the structured fields the helper now
+                // parses out of `swanctl --list-sas`. Each
+                // is optional — fall back to zero/empty when
+                // not connected. UInt64 round-trip via Double
+                // because JSON numbers decode as Double in
+                // [String: Any].
+                liveVirtualIp = result["assigned_ip"] as? String ?? ""
+                ikeServerAddr = result["server_addr"] as? String ?? ""
+                ikeCipherSuite = result["cipher_suite"] as? String ?? ""
+                ikeUptimeSeconds = UInt64(result["uptime_seconds"] as? Double ?? 0)
+                ikeBytesIn = UInt64(result["bytes_in"] as? Double ?? 0)
+                ikeBytesOut = UInt64(result["bytes_out"] as? Double ?? 0)
+                ikePacketsIn = UInt64(result["packets_in"] as? Double ?? 0)
+                ikePacketsOut = UInt64(result["packets_out"] as? Double ?? 0)
             case .wireguard:
                 let result = try await HelperClient.shared.wgStatus(profileId: profileId)
                 vpnState = result["state"] as? String ?? "disconnected"
@@ -1384,4 +1618,57 @@ struct VpnDetailView: View {
         }
     }
 
+}
+
+// MARK: - Action-error parser
+
+/// Split a connect-error string into a one-line diagnosis +
+/// optional raw log. The helper formats VPN failures as:
+///
+///     {diagnosis} ({exit status})
+///     \n\n--- swanctl output ---\n
+///     {raw log}
+///
+/// or, when the helper can't diagnose, falls back to:
+///
+///     {bin} {args} exited {status}
+///     \n\n--- swanctl output ---\n
+///     {raw log}
+///
+/// Either shape is split on the literal boundary. Strings
+/// that don't contain it fall through to single-line render.
+private struct ParsedActionError {
+    let headline: String
+    let detail: String?
+
+    init(raw: String) {
+        let marker = "\n\n--- swanctl output ---\n"
+        if let r = raw.range(of: marker) {
+            self.headline = String(raw[..<r.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let body = String(raw[r.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            self.detail = body.isEmpty ? nil : body
+        } else {
+            self.headline = raw
+            self.detail = nil
+        }
+    }
+}
+
+/// Classify a connect-error message as "auth-side" so the
+/// VPN-detail toast knows to surface the inline
+/// "Edit credentials" shortcut. Matches both the helper's
+/// canonical diagnoser output (PR #74's
+/// `diagnose_strongswan_failure`) and lower-level lines from
+/// the raw swanctl log in case the diagnoser missed them.
+fileprivate func isAuthFailure(_ message: String) -> Bool {
+    let lower = message.lowercased()
+    return lower.contains("eap-mschapv2")
+        || lower.contains("eap_mschapv2")
+        || lower.contains("authentication_failed")
+        || lower.contains("authentication failed")
+        || lower.contains("username or password rejected")
+        || lower.contains("credentials may be wrong")
+        || lower.contains("login failed")
 }

@@ -116,8 +116,36 @@ pub struct DisconnectResult {
 pub struct StatusResult {
     /// "connected", "connecting", or "disconnected".
     pub state: String,
-    /// Optional human-readable detail (e.g. ESP rekey time).
+    /// Raw swanctl block kept for the "Show raw output" disclosure.
     pub detail: String,
+    /// Virtual IP the gateway assigned us inside the tunnel
+    /// (e.g. `10.0.60.100`). Empty when not yet established.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub assigned_ip: String,
+    /// Server-side public IP we tunnel through.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub server_addr: String,
+    /// Negotiated IKE cipher suite, e.g.
+    /// `AES_CBC-256/HMAC_SHA2_256_128/MODP_2048`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cipher_suite: String,
+    /// Seconds the SA has been established. 0 when not connected.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub uptime_seconds: u64,
+    /// Bytes counters from kernel SAD. Sampled at every poll
+    /// tick so the GUI can render a live rate.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bytes_in: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub bytes_out: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub packets_in: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub packets_out: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -248,6 +276,16 @@ impl Strongswan {
         tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await.ok();
         tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await.ok();
 
+        // Drop the updown script in place so swanctl's
+        // per-child `updown = …` directive has a target to
+        // invoke on connect / disconnect. The script handles
+        // the routing + DNS adjustments macOS strongSwan
+        // doesn't do automatically — without it, full-tunnel
+        // mode brings the SA up but leaves the operator
+        // unable to resolve names or reach the public
+        // internet through the tunnel.
+        write_updown_script().await?;
+
         let conf_path = swanctl_dir.join(format!("conf.d/supermanager-{}.conf", args.profile_id));
         let secrets_path = swanctl_dir.join(format!("conf.d/supermanager-{}-secrets.conf", args.profile_id));
 
@@ -319,25 +357,248 @@ impl Strongswan {
             return Ok(StatusResult {
                 state: "disconnected".to_owned(),
                 detail: "strongSwan not installed".to_owned(),
+                ..Default::default()
             });
         }
         let swanctl = self.swanctl.as_ref().expect("just resolved");
         let out = run(swanctl, &["--list-sas"]).await.unwrap_or_default();
-        let block_marker = format!("{}: ", args.profile_id);
-        let block = out
-            .lines()
-            .skip_while(|l| !l.starts_with(&block_marker))
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
-        let state = if block.is_empty() {
-            "disconnected"
-        } else if block.contains("ESTABLISHED") {
-            "connected"
-        } else {
-            "connecting"
+        Ok(parse_swanctl_list_sas(&out, &args.profile_id))
+    }
+}
+
+impl Default for StatusResult {
+    fn default() -> Self {
+        Self {
+            state: "disconnected".to_owned(),
+            detail: String::new(),
+            assigned_ip: String::new(),
+            server_addr: String::new(),
+            cipher_suite: String::new(),
+            uptime_seconds: 0,
+            bytes_in: 0,
+            bytes_out: 0,
+            packets_in: 0,
+            packets_out: 0,
+        }
+    }
+}
+
+/// Parse `swanctl --list-sas` for a specific profile block.
+///
+/// Output shape we work with (one block per IKE SA):
+///
+/// ```text
+/// <profile>: #1, ESTABLISHED, IKEv2, <spi-i>:<spi-r>
+///   local  '<id>' @ <our-ip>[<port>]
+///   remote '<id>' @ <gateway-ip>[<port>] [<assigned-vip>]
+///   AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
+///   established 42s ago, rekeying in 1h 12m
+///   <profile>: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_CBC-256/HMAC_SHA2_256_128
+///     installed 42s ago, rekeying in 50m, expires in 1h
+///     in  c0ffee01,   2048 bytes,    12 packets,     1s ago
+///     out deadbeef,   1789 bytes,    11 packets,     1s ago
+///     local  0.0.0.0/0
+///     remote 10.0.60.0/24
+/// ```
+///
+/// The assigned tunnel IP appears in one of two places:
+///   1. Inside square brackets on the `remote '...' @ ...` line
+///      when the gateway sends CFG_REPLY with INTERNAL_IP4_ADDRESS.
+///   2. In a `local <vip>/<prefix>` line under the CHILD_SA.
+/// We try both.
+pub(crate) fn parse_swanctl_list_sas(raw: &str, profile_id: &str) -> StatusResult {
+    let marker = format!("{profile_id}: ");
+    // Pull the contiguous run of lines starting at the profile
+    // header up to the next non-indented section.
+    let mut block: Vec<&str> = Vec::new();
+    let mut in_block = false;
+    for line in raw.lines() {
+        if line.starts_with(&marker) {
+            in_block = true;
+        } else if in_block && !line.starts_with(' ') && !line.is_empty() {
+            // Next top-level entry — different SA, stop.
+            break;
+        }
+        if in_block {
+            block.push(line);
+        }
+    }
+    let detail = block.join("\n");
+    if detail.is_empty() {
+        return StatusResult::default();
+    }
+
+    let state = if detail.contains("ESTABLISHED") {
+        "connected"
+    } else {
+        "connecting"
+    };
+
+    let mut r = StatusResult {
+        state: state.to_owned(),
+        detail: detail.clone(),
+        ..Default::default()
+    };
+
+    for raw_line in detail.lines() {
+        let line = raw_line.trim();
+
+        // remote 'identity' @ a.b.c.d[port] [virtual-ip]
+        if let Some(rest) = line.strip_prefix("remote ") {
+            // Server address: the first `a.b.c.d[port]` token.
+            if let Some(at_idx) = rest.find(" @ ") {
+                let after_at = &rest[at_idx + 3..];
+                if let Some(bracket) = after_at.find('[') {
+                    r.server_addr = after_at[..bracket].to_owned();
+                }
+                // Virtual IP — last bracketed token on this line.
+                if let Some(open) = after_at.rfind('[') {
+                    if let Some(close) = after_at.rfind(']') {
+                        if close > open {
+                            let inner = &after_at[open + 1..close];
+                            // Skip the port — virtual IPs look
+                            // like `10.0.60.100`, ports are bare
+                            // 4-5 digit numbers.
+                            if inner.contains('.') {
+                                r.assigned_ip = inner.to_owned();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cipher suite line: `AES_CBC-256/HMAC_SHA2_256_128/...`
+        if line.starts_with("AES_") || line.starts_with("CHACHA")
+            || line.starts_with("3DES_")
+        {
+            if r.cipher_suite.is_empty() {
+                r.cipher_suite = line.to_owned();
+            }
+        }
+
+        // `established 42s ago, rekeying in ...`
+        if line.starts_with("established ") {
+            if let Some(rest) = line.strip_prefix("established ") {
+                if let Some(ago_idx) = rest.find(" ago") {
+                    let dur_str = &rest[..ago_idx];
+                    r.uptime_seconds = parse_duration_to_seconds(dur_str);
+                }
+            }
+        }
+
+        // `in  c0ffee01,   2048 bytes,    12 packets,     1s ago`
+        if let Some(rest) = line.strip_prefix("in ") {
+            let (bytes, packets) = parse_bytes_packets(rest);
+            r.bytes_in = bytes;
+            r.packets_in = packets;
+        }
+        if let Some(rest) = line.strip_prefix("out ") {
+            let (bytes, packets) = parse_bytes_packets(rest);
+            r.bytes_out = bytes;
+            r.packets_out = packets;
+        }
+        // `local 10.0.60.100/32` under the CHILD_SA — fallback
+        // virtual IP source for when the remote line didn't have
+        // it (some FortiGate firmwares).
+        if r.assigned_ip.is_empty() {
+            if let Some(rest) = line.strip_prefix("local ") {
+                if let Some(slash) = rest.find('/') {
+                    let candidate = &rest[..slash];
+                    if candidate.split('.').count() == 4
+                        && candidate != "0.0.0.0"
+                    {
+                        r.assigned_ip = candidate.to_owned();
+                    }
+                }
+            }
+        }
+    }
+    r
+}
+
+/// Parse strongSwan's compact human duration: `42s`, `5m 12s`,
+/// `1h 30m`, `2d 4h`. Returns total seconds.
+fn parse_duration_to_seconds(s: &str) -> u64 {
+    let mut total: u64 = 0;
+    for tok in s.split_whitespace() {
+        let (digits, unit) = tok.split_at(tok.find(|c: char| !c.is_ascii_digit()).unwrap_or(tok.len()));
+        let n: u64 = digits.parse().unwrap_or(0);
+        total += match unit {
+            "s" => n,
+            "m" => n * 60,
+            "h" => n * 3600,
+            "d" => n * 86_400,
+            _ => 0,
         };
-        Ok(StatusResult { state: state.to_owned(), detail: block })
+    }
+    total
+}
+
+/// Pull `<bytes>` and `<packets>` out of a line like
+/// `c0ffee01,   2048 bytes,    12 packets,     1s ago`.
+fn parse_bytes_packets(s: &str) -> (u64, u64) {
+    let mut bytes = 0u64;
+    let mut packets = 0u64;
+    // Split on commas to isolate "<n> bytes" and "<n> packets".
+    for chunk in s.split(',') {
+        let trimmed = chunk.trim();
+        if let Some(rest) = trimmed.strip_suffix(" bytes") {
+            bytes = rest.trim().parse().unwrap_or(0);
+        } else if let Some(rest) = trimmed.strip_suffix(" packets") {
+            packets = rest.trim().parse().unwrap_or(0);
+        }
+    }
+    (bytes, packets)
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    // Use a raw string so leading whitespace on each line is
+    // preserved — swanctl indents continuation lines, and our
+    // block-collection logic depends on that indentation.
+    const SAMPLE: &str = r"motavo: #1, ESTABLISHED, IKEv2, c0ffee:f00d
+  local  '192.168.200.132' @ 192.168.200.132[4500]
+  remote '213.52.37.87' @ 213.52.37.87[4500] [10.0.60.100]
+  AES_CBC-256/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/MODP_2048
+  established 142s ago, rekeying in 1h 12m
+  motavo: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_CBC-256/HMAC_SHA2_256_128
+    installed 142s ago, rekeying in 50m, expires in 1h
+    in  c0ffee01, 80264 bytes, 612 packets, 1s ago
+    out deadbeef, 72360 bytes, 511 packets, 1s ago
+    local  0.0.0.0/0
+    remote 10.0.60.0/24
+";
+
+    #[test]
+    fn parses_full_block() {
+        let r = parse_swanctl_list_sas(SAMPLE, "motavo");
+        assert_eq!(r.state, "connected");
+        assert_eq!(r.server_addr, "213.52.37.87");
+        assert_eq!(r.assigned_ip, "10.0.60.100");
+        assert!(r.cipher_suite.starts_with("AES_CBC-256/"));
+        assert_eq!(r.uptime_seconds, 142);
+        assert_eq!(r.bytes_in, 80264);
+        assert_eq!(r.bytes_out, 72360);
+        assert_eq!(r.packets_in, 612);
+        assert_eq!(r.packets_out, 511);
+    }
+
+    #[test]
+    fn unknown_profile_returns_disconnected() {
+        let r = parse_swanctl_list_sas(SAMPLE, "other");
+        assert_eq!(r.state, "disconnected");
+        assert_eq!(r.uptime_seconds, 0);
+    }
+
+    #[test]
+    fn parses_duration_strings() {
+        assert_eq!(parse_duration_to_seconds("42s"), 42);
+        assert_eq!(parse_duration_to_seconds("5m 12s"), 312);
+        assert_eq!(parse_duration_to_seconds("1h 30m"), 5400);
+        assert_eq!(parse_duration_to_seconds("2d 4h"), 187200);
     }
 }
 
@@ -348,16 +609,171 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
+        let combined = format!("{stderr}{stdout}");
+        // Interpret common strongSwan failure patterns into a
+        // short human-actionable diagnosis. Falls back to the
+        // raw exit message when nothing matches so we never
+        // lose information.
+        let diagnosis = diagnose_strongswan_failure(&combined);
+        let header = match diagnosis {
+            Some(d) => format!("{} ({})", d, output.status),
+            None => format!(
+                "{} {:?} exited {}",
+                bin.display(),
+                args,
+                output.status,
+            ),
+        };
         return Err(anyhow!(
-            "{} {:?} exited {}: {}{}",
-            bin.display(),
-            args,
-            output.status,
-            stderr,
-            stdout
+            "{header}\n\n--- swanctl output ---\n{combined}"
         ));
     }
     Ok([stdout, stderr].concat())
+}
+
+/// Map strongSwan's verbose negotiation log onto a one-line
+/// human diagnosis. Returns `None` for novel failures so the
+/// caller falls back to the raw exit message — we never hide
+/// the original.
+///
+/// Patterns are matched in priority order: the first one that
+/// hits wins, so more specific patterns come first.
+pub(crate) fn diagnose_strongswan_failure(log: &str) -> Option<String> {
+    let l = log.to_ascii_lowercase();
+
+    // Authentication-side failures — most common operator
+    // confusion, deserves the clearest message.
+    if l.contains("eap-ms-chapv2 failed")
+        || l.contains("eap_mschapv2 method failed")
+    {
+        return Some(
+            "EAP-MSCHAPv2 authentication failed. Username or \
+             password rejected by the server. If your FortiGate / \
+             Windows RADIUS expects a domain prefix, try \
+             `DOMAIN\\user` or `user@realm` in the username field."
+                .to_owned(),
+        );
+    }
+    if l.contains("received authentication_failed notify") {
+        return Some(
+            "Server rejected our credentials (AUTHENTICATION_FAILED). \
+             Most often a wrong pre-shared key for IKEv2, or the \
+             user account is locked / disabled."
+                .to_owned(),
+        );
+    }
+    if l.contains("invalid_id_information") || l.contains("invalid_id") {
+        return Some(
+            "Server rejected our identity (INVALID_ID_INFORMATION). \
+             Check the `local_id` / `remote_id` in the profile."
+                .to_owned(),
+        );
+    }
+
+    // Crypto / proposal-mismatch failures.
+    if l.contains("no_proposal_chosen") || l.contains("no proposal chosen") {
+        return Some(
+            "No matching IKE/ESP proposal. The server didn't accept \
+             any cipher suite we offered. Pin a specific proposal in \
+             the profile (Advanced → IKE proposals)."
+                .to_owned(),
+        );
+    }
+    // ECP/MODP mismatch is recoverable — strongSwan retries
+    // with the requested group automatically. We only see this
+    // if the retry ALSO failed.
+    if l.contains("ts_unacceptable") {
+        return Some(
+            "Traffic-selector mismatch (TS_UNACCEPTABLE). The local \
+             or remote subnets in your profile don't match what the \
+             gateway is configured to allow."
+                .to_owned(),
+        );
+    }
+
+    // Network / reachability.
+    if l.contains("retransmit") && l.contains("giving up") {
+        return Some(
+            "Gateway unreachable — every retransmit timed out. \
+             Check the server address / port and that UDP 500 + \
+             4500 aren't blocked between you and the gateway."
+                .to_owned(),
+        );
+    }
+    if l.contains("no route to host") || l.contains("network is unreachable") {
+        return Some(
+            "Kernel returned 'no route to host' for the gateway. \
+             You may need to grant SuperManager the Local Network \
+             permission under System Settings → Privacy & Security."
+                .to_owned(),
+        );
+    }
+    if l.contains("connection refused") {
+        return Some(
+            "Gateway actively refused the connection (TCP). For an \
+             IKEv2 dial-up the gateway must listen on UDP 500/4500, \
+             not TCP — verify the address + port."
+                .to_owned(),
+        );
+    }
+
+    // Config / profile problems.
+    if l.contains("no matching peer config found") {
+        return Some(
+            "Server doesn't have a peer config that matches our \
+             identity / IP. The user account or group on the \
+             gateway may not exist, or the local_id is wrong."
+                .to_owned(),
+        );
+    }
+    if l.contains("unable to install policy")
+        || l.contains("kernel install")
+    {
+        return Some(
+            "Tunnel established but the kernel rejected the routing \
+             policy. Usually a conflict with an existing route to \
+             the same subnet — disconnect other VPNs and retry."
+                .to_owned(),
+        );
+    }
+
+    // Catch-all: connection attempt finished without a successful
+    // CHILD_SA. Common when the EAP phase was never reached.
+    if l.contains("establishing child_sa") && l.contains("failed") {
+        return Some(
+            "IKE_AUTH completed but CHILD_SA setup failed — usually \
+             a phase-2 proposal mismatch or traffic-selector issue."
+                .to_owned(),
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod diagnose_tests {
+    use super::diagnose_strongswan_failure;
+
+    #[test]
+    fn mschapv2_auth_failure() {
+        let log = "[IKE] EAP-MS-CHAPv2 failed with error \
+                   ERROR_AUTHENTICATION_FAILURE: 'FAILED'\n\
+                   [IKE] EAP_MSCHAPV2 method failed";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("EAP-MSCHAPv2 authentication failed"));
+        assert!(d.contains("DOMAIN"));
+    }
+
+    #[test]
+    fn proposal_mismatch() {
+        let log = "[IKE] received NO_PROPOSAL_CHOSEN notify error";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("No matching IKE/ESP proposal"));
+    }
+
+    #[test]
+    fn unknown_failure_returns_none() {
+        assert!(diagnose_strongswan_failure("something we've never seen before").is_none());
+    }
 }
 
 async fn run_with_timeout(
@@ -431,6 +847,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
                 remote_ts = {remote_ts}
                 start_action = none
                 close_action = none
+                updown = {updown_script}
             }}
         }}
     }}
@@ -441,7 +858,136 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         username = args.username,
         local_ts = local_ts,
         remote_ts = remote_ts,
+        updown_script = UPDOWN_SCRIPT_PATH,
     )
+}
+
+/// Stable on-disk location for the updown script. Same path
+/// regardless of brew prefix because charon invokes it via
+/// absolute path from the swanctl `updown = …` directive.
+const UPDOWN_SCRIPT_PATH: &str = "/etc/strongswan-updown.sh";
+
+/// macOS-specific updown script. charon invokes this on every
+/// CHILD_SA up/down event with `PLUTO_VERB`, `PLUTO_PEER`,
+/// `PLUTO_MY_SOURCEIP`, and `PLUTO_PEER_DNS_INFO` (space-
+/// separated DNS servers from CFG_REPLY) in the environment.
+///
+/// What this handles that strongSwan doesn't do automatically
+/// on macOS:
+///
+///   1. **Host route to the gateway** via the original default
+///      gateway. Without this, the moment we install
+///      split-default routes (next step) ESP packets bound for
+///      the VPN server itself try to route through the tunnel
+///      and the SA collapses on itself.
+///   2. **Split-default routes** (`0.0.0.0/1` + `128.0.0.0/1`
+///      via the IPsec interface). Apple's networking stack
+///      doesn't have Linux's xfrm policies; for a full tunnel
+///      we need explicit kernel routes that win over the
+///      original `default` because their prefix is longer.
+///   3. **DNS push via scutil**. We register a State key under
+///      `com.sybr.supermanager.vpn/DNS` so the resolver picks
+///      up the gateway-pushed DNS servers (and a catch-all
+///      SupplementalMatchDomain so they apply to every query
+///      while the tunnel is up).
+///   4. **Symmetric teardown** on down-client so the operator's
+///      original routing + DNS state is restored even if
+///      strongSwan crashes.
+///
+/// Logs to /tmp/supermgr-strongswan-updown.log world-readable
+/// so the GUI can tail it for diagnostics.
+const UPDOWN_SCRIPT: &str = r##"#!/bin/bash
+# SuperManager strongSwan updown script — macOS specifics for
+# full-tunnel IKEv2. See strongswan.rs::UPDOWN_SCRIPT for the
+# canonical commentary.
+
+LOG=/tmp/supermgr-strongswan-updown.log
+exec >>"$LOG" 2>&1
+echo "[$(date +%H:%M:%S)] verb=$PLUTO_VERB peer=$PLUTO_PEER vip=$PLUTO_MY_SOURCEIP dns='$PLUTO_PEER_DNS_INFO' my_clnt=$PLUTO_MY_CLIENT peer_clnt=$PLUTO_PEER_CLIENT"
+
+GATEWAY_FILE=/var/run/supermgr-strongswan-orig-gateway
+DNS_STATE_KEY="State:/Network/Service/com.sybr.supermanager.vpn/DNS"
+
+ensure_host_route_to_peer() {
+    # Pin the VPN server's IP to the original default gateway
+    # so subsequent IKE/ESP packets keep flowing once we
+    # install split-default routes that would otherwise pull
+    # them into the tunnel.
+    local peer="$1"
+    local orig_gw
+    orig_gw=$(/sbin/route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+    if [ -n "$orig_gw" ] && [ -n "$peer" ]; then
+        echo "$orig_gw" > "$GATEWAY_FILE"
+        /sbin/route -q add -host "$peer" -gateway "$orig_gw" 2>&1 || true
+        echo "  pinned $peer -> $orig_gw"
+    fi
+}
+
+restore_peer_route() {
+    local peer="$1"
+    /sbin/route -q delete -host "$peer" 2>&1 || true
+    rm -f "$GATEWAY_FILE"
+}
+
+push_dns() {
+    # PLUTO_PEER_DNS_INFO is a whitespace-separated list of DNS
+    # IPs from the gateway's CFG_REPLY. If empty, fall back to
+    # Cloudflare + Google so the operator's tunnel isn't
+    # useless for name resolution.
+    local servers="$PLUTO_PEER_DNS_INFO"
+    if [ -z "$servers" ]; then
+        servers="1.1.1.1 8.8.8.8"
+        echo "  no DNS from peer — falling back to public resolvers"
+    fi
+    local server_xml=""
+    for s in $servers; do
+        server_xml="${server_xml}\nd.add ServerAddresses * $s"
+    done
+    /usr/sbin/scutil <<EOF >/dev/null
+d.init
+$(for s in $servers; do echo "d.add ServerAddresses * $s"; done | sed 's/^/    /' | sed -e 's/^    //')
+d.add SupplementalMatchDomains * ""
+d.add SupplementalMatchDomainsNoSearch # 0
+set $DNS_STATE_KEY
+quit
+EOF
+    echo "  pushed DNS: $servers"
+}
+
+remove_dns() {
+    /usr/sbin/scutil <<EOF >/dev/null
+remove $DNS_STATE_KEY
+quit
+EOF
+    echo "  removed DNS state"
+}
+
+case "$PLUTO_VERB" in
+    up-client|up-host)
+        ensure_host_route_to_peer "$PLUTO_PEER"
+        push_dns
+        ;;
+    down-client|down-host)
+        remove_dns
+        restore_peer_route "$PLUTO_PEER"
+        ;;
+esac
+
+exit 0
+"##;
+
+/// Drop the updown script at the canonical path with 0755.
+/// Idempotent: we re-write it on every connect so a stale
+/// helper version's script can't linger.
+async fn write_updown_script() -> anyhow::Result<()> {
+    let path = std::path::Path::new(UPDOWN_SCRIPT_PATH);
+    tokio::fs::write(path, UPDOWN_SCRIPT)
+        .await
+        .with_context(|| format!("write updown script {UPDOWN_SCRIPT_PATH}"))?;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
 }
 
 /// `connections.<name>` keys must be ident-like. We only accept hex digits,
