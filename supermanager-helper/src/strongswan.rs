@@ -840,6 +840,17 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     for iface in crate::openvpn::live_tunnel_interfaces() {
         set.insert(iface);
     }
+    // Tailscale exit node: it installs the SAME 0/1 + 128/1 split-defaults via
+    // its own utun. Without protecting that interface, the strongSwan route
+    // cleanup — and especially the post-wake sweep — wipes a live exit node's
+    // routes, silently dropping egress back to the local uplink on every wake.
+    // The tailscale utun is the one that routes tailscale's magic-DNS address
+    // (100.100.100.100, in the 100.64.0.0/10 CGNAT range).
+    if let Some(ts) = route_iface_family("100.100.100.100", "-inet") {
+        if ts.starts_with("utun") {
+            set.insert(ts);
+        }
+    }
     set
 }
 
