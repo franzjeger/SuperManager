@@ -212,6 +212,11 @@ async fn main() -> anyhow::Result<()> {
                     elapsed.as_secs(),
                     TICK.as_secs()
                 );
+                // Suspend watchdog escalation for the fragile post-wake settle
+                // window (interface reconfig + tailscaled re-handshake + the
+                // reconciler's re-install) so accumulated probe misses can't
+                // fire panic_reset before the exit node is re-established.
+                connectivity_watchdog::pause_for(45);
                 route_guardian::reset_snapshot();
                 strongswan::sweep_stale_configs().await;
             }
@@ -959,6 +964,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "system_wake" => {
             info!("system_wake: running post-wake cleanup");
+            // Suspend watchdog escalation for the post-wake settle window so it
+            // can't panic_reset a still-handshaking exit node before the
+            // reconciler re-establishes it (same as the helper wake detector).
+            connectivity_watchdog::pause_for(45);
             // Clear the route guardian's pre-sleep snapshot. After sleep
             // the machine may be on a completely different network; the
             // old gateway address is likely unreachable. Clearing lets the

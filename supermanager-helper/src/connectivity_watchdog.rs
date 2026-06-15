@@ -186,13 +186,21 @@ fn watchdog_loop() {
     }
 }
 
-/// TCP-connect to 1.1.1.1:443 with a 1-second timeout. Pure
-/// connectivity check — doesn't depend on DNS, doesn't rely on
-/// a specific HTTPS response. If the SYN/ACK lands within 1s,
-/// we have internet.
+/// TCP-connect to 1.1.1.1:443. Pure connectivity check — no DNS, no specific
+/// HTTPS response needed. If the SYN/ACK lands within the budget, we have
+/// internet.
+///
+/// The budget adapts to whether a tailscale exit node is active: when it is,
+/// the probe routes THROUGH the exit peer, and a DERP-relayed peer adds 3-6s
+/// of latency — a 1s budget false-negatives and the watchdog would tear down a
+/// perfectly healthy node (the user's reported flap). Use a generous 8s budget
+/// then (matching test_exit_reachability), and the snappy 1s otherwise. A
+/// genuinely dead peer still fails at 8s and escalates, so this never hides a
+/// real outage.
 fn probe_internet() -> bool {
+    let budget = if crate::tailscale_state::load().desired { "8" } else { "1" };
     let out = Command::new("/usr/bin/nc")
-        .args(["-z", "-G", "1", "-w", "1", "1.1.1.1", "443"])
+        .args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"])
         .output();
     match out {
         Ok(o) => o.status.success(),
