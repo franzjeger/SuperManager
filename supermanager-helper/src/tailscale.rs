@@ -1058,6 +1058,74 @@ pub fn current_exit_node() -> (String, String) {
     (id, ip)
 }
 
+/// Self-heal the tailscale exit node — the core of the no-brick design.
+///
+/// Called every `auto_reconnect` tick (always-on, GUI-closed-safe LaunchDaemon).
+/// If the user wants an exit node (persisted intent in `tailscale_state`) but
+/// its `0/1` split-default is NOT on the CURRENT tailscale utun — because sleep
+/// renumbered the utun or a connectivity blip tore the route down — it
+/// re-establishes the routes, but ONLY after a real reachability probe confirms
+/// the peer forwards traffic. If the peer is not reachable, it does nothing
+/// this tick and the machine stays on the local uplink (fail open).
+///
+/// NO-BRICK: `install_exit_routes` runs exclusively behind
+/// `test_exit_reachability` (a self-cleaning /32 probe through the peer) — the
+/// exact gate the safe user flow uses. It can never install `0/1` into a dead
+/// tunnel, and it never removes a working local default.
+pub fn reconcile_exit_node() {
+    let desired = crate::tailscale_state::load();
+    if !desired.desired {
+        return; // no exit node wanted — nothing to heal
+    }
+    // Re-detect the tailscale utun (it is renumbered across sleep/wake).
+    let Some(ts_utun) = detect_tailscale_utun() else {
+        return; // tailscaled not up yet (mid-wake handshake) — retry next tick
+    };
+    // Healthy if 0/1 already points at the CURRENT tailscale utun.
+    if crate::strongswan::route_iface_family("0.0.0.0/1", "-inet").as_deref()
+        == Some(ts_utun.as_str())
+    {
+        return;
+    }
+    tracing::info!(utun = %ts_utun, "reconcile: exit node desired but routes absent — checking reachability");
+
+    // Belt-and-braces: re-assert the exit-node pref in tailscaled. panic_reset
+    // with clear_pref=false keeps it, but a hard-cleared or freshly-restarted
+    // daemon may have lost it; without it test_exit_reachability would probe a
+    // tunnel with no exit and fail. Only when we recorded the peer IP.
+    if !desired.exit_node_ip.is_empty() {
+        if let Some(cli) = tailscale_cli() {
+            let _ = Command::new(cli)
+                .args([
+                    "--socket=/var/run/tailscaled.socket",
+                    "set",
+                    &format!("--exit-node={}", desired.exit_node_ip),
+                ])
+                .output();
+        }
+    }
+
+    // GATE: a real /32 probe through the peer (self-cleaning, never persists a
+    // route). Only a 2xx/3xx response — i.e. the peer actually forwards — lets
+    // us re-install the split-defaults.
+    match test_exit_reachability(TestExitArgs {}) {
+        Ok(r) if r.success => {
+            // Pause the connectivity watchdog so the reinstall's brief
+            // disruption can't itself trip panic_reset.
+            crate::connectivity_watchdog::pause_for(20);
+            match install_exit_routes(ExitRoutesArgs {}) {
+                Ok(_) => tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established"),
+                Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
+            }
+        }
+        Ok(r) => tracing::debug!(
+            code = %r.response_code,
+            "reconcile: exit node not reachable yet — staying on local uplink"
+        ),
+        Err(e) => tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink"),
+    }
+}
+
 /// Best-effort detection of the active "primary" network interface.
 /// Reads `networksetup -listnetworkserviceorder` which lists
 /// services in priority order. We pick the first one that has a

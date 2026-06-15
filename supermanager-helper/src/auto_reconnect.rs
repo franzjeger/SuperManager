@@ -169,6 +169,16 @@ async fn watchdog_loop(
     ticker.tick().await;
     loop {
         ticker.tick().await;
+
+        // Tailscale exit-node self-heal. Runs EVERY tick, independent of any
+        // enrolled always-on VPN profile (so it must come before the
+        // empty-snapshot `continue` below). spawn_blocking because the
+        // reconcile does synchronous route/CLI/curl work (up to an ~8s
+        // reachability probe) and must not block the async runtime. It is
+        // no-brick: it only (re)installs the exit-node split routes behind a
+        // live reachability gate, and stays on the local uplink otherwise.
+        tokio::task::spawn_blocking(crate::tailscale::reconcile_exit_node);
+
         let snapshot: Vec<WatchedProfile> = {
             let g = state.lock().await;
             g.watched.values().cloned().collect()
