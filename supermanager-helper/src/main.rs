@@ -61,6 +61,7 @@ mod openvpn;
 mod route_guardian;
 mod strongswan;
 mod tailscale;
+mod tailscale_state;
 mod traffic_capture;
 mod wireguard;
 
@@ -731,7 +732,13 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // we can auto-revert if traffic dies.
         "tailscale_install_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
             Ok(args) => match tailscale::install_exit_routes(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                Ok(s) => {
+                    // Routes are up — record the user's intent so the reconciler
+                    // can re-establish them after sleep/wake or a blip.
+                    let (node_id, node_ip) = tailscale::current_exit_node();
+                    tailscale_state::set_desired(&node_id, &node_ip);
+                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                }
                 Err(e) => Response::err(id, -32000, format!("install_exit_routes failed: {e:#}")),
             },
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
@@ -739,7 +746,15 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscale_remove_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
             Ok(args) => match tailscale::remove_exit_routes(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                Ok(s) => {
+                    // This RPC is the INTENTIONAL clear (user cleared the exit
+                    // node) — stop self-heal. The watchdog's blip recovery goes
+                    // through panic_reset (clear_pref=false), which does NOT
+                    // touch the desired-state, so a transient drop never wipes
+                    // intent.
+                    tailscale_state::clear_desired();
+                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                }
                 Err(e) => Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}")),
             },
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),

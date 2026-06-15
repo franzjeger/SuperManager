@@ -931,57 +931,50 @@ pub struct MagicdnsResolverArgs {
 /// drop the user's authenticated session. Just clearing the
 /// exit-node pref is enough on the daemon side; the route fix is
 /// `ipconfig set en0 DHCP` which is fast (< 1 s) and idempotent.
-pub fn panic_reset(_: PanicResetArgs) -> Result<InstallResult> {
+pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // 0. Wipe the split-default exit-node routes FIRST. If the
     // user got here by selecting an exit-node that broke
     // routing, those /1 routes are why their internet is dead.
     // Removing them lets the existing local default route work
     // again immediately — ipconfig DHCP renew below is belt-
-    // and-braces.
+    // and-braces. Removing routes is always FAIL OPEN (egress
+    // falls back to the local uplink); it can never black-hole.
     let _ = remove_exit_routes(ExitRoutesArgs {});
 
-    // 1. Tell the daemon to drop exit-node + accept-routes. We
-    // shell out to the bundled tailscale CLI by looking it up
-    // relative to our own binary path. Tailscaled lives at
-    // /usr/local/sbin/supermanager-tailscaled and the CLI is
-    // bundled in the .app — we find it by the user-supplied path
-    // argument when it exists, but for the panic case we rely on
-    // a fixed install location plus a fallback to homebrew.
-    let cli_candidates = [
-        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/usr/local/bin/tailscale",
-    ];
+    // 1. Optionally tell the daemon to drop exit-node + accept-routes.
+    //
+    // FAIL-OPEN vs HARD-CLEAR: the connectivity watchdog fires this
+    // automatically on a transient blip (clear_pref = false). In that
+    // case we must NOT clear the tailscaled pref or the persisted
+    // desired-state — doing so destroys the only record of "the user
+    // wants this exit node", which is exactly what left the machine
+    // wedged (egress already failed open above; the reconciler will
+    // re-establish the routes once the peer is reachable again). Only a
+    // user-initiated hard reset (clear_pref = true, the in-app "Panic
+    // reset" menu) actually clears intent.
     let mut last_err = String::new();
-    let mut cleared = false;
-    for cli in cli_candidates {
-        if !Path::new(cli).exists() {
-            continue;
-        }
-        let out = Command::new(cli)
-            .args([
-                "--socket=/var/run/tailscaled.socket",
-                "set",
-                "--exit-node=",
-                "--accept-routes=false",
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                cleared = true;
-                break;
-            }
-            Ok(o) => {
-                last_err = String::from_utf8_lossy(&o.stderr).to_string();
-            }
-            Err(e) => {
-                last_err = e.to_string();
+    if args.clear_pref {
+        crate::tailscale_state::clear_desired();
+        let mut cleared = false;
+        if let Some(cli) = tailscale_cli() {
+            let out = Command::new(cli)
+                .args([
+                    "--socket=/var/run/tailscaled.socket",
+                    "set",
+                    "--exit-node=",
+                    "--accept-routes=false",
+                ])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => cleared = true,
+                Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).to_string(),
+                Err(e) => last_err = e.to_string(),
             }
         }
-    }
-    if !cleared {
-        // Don't bail — we still want to try the DHCP renew. The
-        // exit-node clear is best-effort.
+        if !cleared {
+            // Don't bail — we still want to try the DHCP renew. The
+            // exit-node clear is best-effort.
+        }
     }
 
     // 2. Find the active network interface (usually en0 for WiFi
@@ -1023,8 +1016,47 @@ pub fn panic_reset(_: PanicResetArgs) -> Result<InstallResult> {
     })
 }
 
-#[derive(Deserialize, Debug)]
-pub struct PanicResetArgs {}
+#[derive(Deserialize, Debug, Default)]
+pub struct PanicResetArgs {
+    /// `true` (the user-initiated "Panic reset" menu) → hard reset: also clear
+    /// the tailscaled exit-node pref and the persisted desired-state.
+    /// `false` (the connectivity watchdog's automatic blip recovery, the serde
+    /// default) → fail open only: remove routes + DHCP renew, but KEEP intent
+    /// so the reconciler can re-establish the exit node when the peer returns.
+    #[serde(default)]
+    pub clear_pref: bool,
+}
+
+/// Locate the bundled/installed tailscale CLI (same candidates the panic path
+/// uses). Returns the first existing path.
+fn tailscale_cli() -> Option<&'static str> {
+    const CANDIDATES: [&str; 3] = [
+        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+    ];
+    CANDIDATES.into_iter().find(|p| Path::new(p).exists())
+}
+
+/// Read the currently-selected exit node `(id, ip)` from tailscaled's prefs.
+/// Best-effort: returns `("", "")` when there is no exit node or the CLI is
+/// unavailable. Used only to record intent — never changes any state.
+pub fn current_exit_node() -> (String, String) {
+    let Some(cli) = tailscale_cli() else {
+        return (String::new(), String::new());
+    };
+    let out = Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "debug", "prefs"])
+        .output();
+    let Ok(o) = out else {
+        return (String::new(), String::new());
+    };
+    let v: serde_json::Value =
+        serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null);
+    let id = v.get("ExitNodeID").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let ip = v.get("ExitNodeIP").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    (id, ip)
+}
 
 /// Best-effort detection of the active "primary" network interface.
 /// Reads `networksetup -listnetworkserviceorder` which lists

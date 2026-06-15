@@ -378,7 +378,12 @@ final class HelperClient {
     /// bailing — the user is in trouble and any progress helps.
     @discardableResult
     func tailscalePanicReset() async throws -> [String: Any] {
-        try await call("tailscale_panic_reset", params: [:])
+        // This is the user-initiated hard reset (the "Panic reset" menu), so
+        // clear_pref=true: the helper also clears the tailscaled exit-node pref
+        // and the persisted desired-state. The connectivity watchdog's
+        // automatic blip recovery calls panic_reset in-process with
+        // clear_pref=false (fail open, keep intent for self-heal).
+        try await call("tailscale_panic_reset", params: ["clear_pref": true])
     }
 
     /// Tail the helper's log file. Returns the trailing `bytes` of

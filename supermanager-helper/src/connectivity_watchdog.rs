@@ -153,13 +153,15 @@ fn watchdog_loop() {
                 }
             }
             _ if consecutive_failures >= 3 && !already_panic_reset => {
-                // 6s+. Nuclear: clear all tailscale exit-node
-                // state. Only does this once per outage — if
-                // probe still fails after panic_reset, the
-                // problem is genuine (ISP, WiFi) and panic_reset
-                // doesn't help.
-                tracing::error!("6s no internet — escalating to panic_reset");
-                match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {}) {
+                // 6s+. FAIL OPEN: remove the exit-node split routes so egress
+                // falls back to the local uplink, and DHCP-renew — but
+                // clear_pref=false means we KEEP the tailscaled exit-node pref
+                // and the persisted desired-state, so the reconciler can
+                // re-establish the exit node once the network returns. Only the
+                // user-initiated "Panic reset" menu hard-clears intent.
+                // Fires once per outage.
+                tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
+                match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
                     Ok(_) => {
                         tracing::info!("panic_reset complete");
                         already_panic_reset = true;
