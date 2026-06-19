@@ -654,7 +654,16 @@ fn delete_server_host_route(host: &str) {
 fn delete_full_tunnel_routes() {
     // Interfaces owned by a live WireGuard or OpenVPN tunnel. Never delete a
     // split-default that points at one of these.
-    let foreign = foreign_tunnel_ifaces();
+    let mut foreign = foreign_tunnel_ifaces();
+    // ALSO protect a live tailscale exit node's utun. tailscale uses the same
+    // 0/1+128/1 pair; this sweep fires on every wake, and without protecting
+    // the tailscale utun it would silently wipe a live exit node's routes and
+    // drop egress to the local uplink. Unlike foreign_tunnel_ifaces (which
+    // remove_exit_routes uses and must be able to delete tailscale routes from),
+    // this protection is local to the sweep only.
+    if let Some(ts) = tailscale_tunnel_iface() {
+        foreign.insert(ts);
+    }
     // Is a strongSwan tunnel ESTABLISHED right now? If so, a utun-backed /1
     // route belongs to it (e.g. auto_reconnect re-established the tunnel after
     // wake, or another IKEv2 profile is up while this one disconnects). We must
@@ -758,9 +767,17 @@ fn delete_split_default(
 fn install_ipv6_leak_block() {
     for net in &["::/1", "8000::/1"] {
         // Don't clobber a real v6 tunnel route if one somehow points here.
+        // Protect WG/OpenVPN AND a live tailscale exit node here: tailscale's
+        // ::/1 routes v6 through the exit peer (encrypted), so leaving it is not
+        // a leak — clobbering it with a lo0 blackhole would just break a working
+        // exit node's v6. (remove_exit_routes still deletes tailscale's routes;
+        // only THIS install path skips them.)
         if let Some(iface) = route_iface_family(net, "-inet6") {
             if iface != "lo0" && iface.starts_with("utun") {
-                let foreign = foreign_tunnel_ifaces();
+                let mut foreign = foreign_tunnel_ifaces();
+                if let Some(ts) = tailscale_tunnel_iface() {
+                    foreign.insert(ts);
+                }
                 if foreign.contains(&iface) {
                     tracing::warn!(
                         "ipv6_leak_block: {net} already owned by live tunnel {iface}, skipping"
@@ -815,6 +832,16 @@ pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
 /// tunnel — WireGuard (`wg show interfaces`) and OpenVPN
 /// (`openvpn::live_tunnel_interfaces`). The strongSwan route cleanup must
 /// never delete a split-default route pointing at one of these.
+///
+/// NOTE: this set deliberately does NOT include the tailscale utun. The
+/// tailscale exit node ALSO installs `0/1`+`128/1` via its own utun, but
+/// `tailscale::remove_exit_routes` (panic_reset / auto-revert) calls this to
+/// decide what to skip and MUST be able to delete tailscale's own routes —
+/// that is the fail-open path. The strongSwan post-wake sweep needs the
+/// opposite (keep a live exit node's routes), so it protects the tailscale
+/// utun separately via `tailscale_tunnel_iface()` in `delete_full_tunnel_routes`.
+/// (An earlier version folded the tailscale utun in here and silently broke
+/// panic_reset's fail-open — it KEPT the routes it was meant to drop.)
 pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     // WireGuard: `wg show interfaces` prints a space-separated list of the
@@ -840,18 +867,28 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     for iface in crate::openvpn::live_tunnel_interfaces() {
         set.insert(iface);
     }
-    // Tailscale exit node: it installs the SAME 0/1 + 128/1 split-defaults via
-    // its own utun. Without protecting that interface, the strongSwan route
-    // cleanup — and especially the post-wake sweep — wipes a live exit node's
-    // routes, silently dropping egress back to the local uplink on every wake.
-    // The tailscale utun is the one that routes tailscale's magic-DNS address
-    // (100.100.100.100, in the 100.64.0.0/10 CGNAT range).
-    if let Some(ts) = route_iface_family("100.100.100.100", "-inet") {
-        if ts.starts_with("utun") {
-            set.insert(ts);
+    set
+}
+
+/// The kernel interface tailscaled owns, if the daemon is up. Detected from the
+/// `100.64/10` (CGNAT) route tailscaled installs for the tailnet — present as
+/// long as the daemon runs, independent of any active exit node OR a momentary
+/// connectivity blip (unlike a `route get 100.100.100.100`, which goes dark
+/// mid-blip). The strongSwan post-wake sweep uses this to avoid wiping a live
+/// exit node's `0/1` split-defaults.
+pub(crate) fn tailscale_tunnel_iface() -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 4 && fields[0] == "100.64/10" && fields[3].starts_with("utun") {
+            return Some(fields[3].to_string());
         }
     }
-    set
+    None
 }
 
 /// Extract the `remote_addrs` value from a swanctl conf file.

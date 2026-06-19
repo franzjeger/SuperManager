@@ -6,10 +6,14 @@
 //! - **1 miss (2s)**: noted, no action — could be transient.
 //! - **2 misses (4s)**: trigger `route_guardian::force_restore()`
 //!   in case tailscaled out-raced our 500ms poll.
-//! - **3 misses (6s)**: full `tailscale::panic_reset` —
-//!   clears exit-node pref, removes split-default routes,
-//!   DHCP-renews. Always recoverable; only acts on tailscale
-//!   state.
+//! - **3 misses (6s)**: fail-open `tailscale::panic_reset`
+//!   (clear_pref=false) — removes the exit-node split routes so
+//!   egress drops to the local uplink, DHCP-renews, but KEEPS the
+//!   exit-node pref + persisted intent so the reconciler can
+//!   re-establish it. Always recoverable; only acts on tailscale
+//!   state. **Suppressed when an exit node is desired AND the
+//!   local uplink itself is down** (sleep/roam/hotspot blip) —
+//!   that is the reconciler's to recover, not ours to tear down.
 //!
 //! ## Why not just rely on the route guardian?
 //!
@@ -25,19 +29,30 @@
 //! ## False-positive concerns
 //!
 //! What if the user's ISP is genuinely out, or they're roaming
-//! between WiFi APs, or DHCP is mid-renewal? The watchdog will
-//! still fire panic_reset. That's acceptable because:
+//! between WiFi APs, or DHCP is mid-renewal? When NO exit node is
+//! active the watchdog still fires panic_reset, which is
+//! acceptable because:
 //!
-//! 1. `panic_reset` only touches tailscale state — clears the
-//!    exit-node pref (a no-op if none was set), removes split-
-//!    default routes (no-op if not installed), and DHCP-renews
-//!    (which is what the user wants if they're between APs
-//!    anyway).
+//! 1. `panic_reset` (fail-open) only touches tailscale state —
+//!    removes split-default routes (no-op if not installed) and
+//!    DHCP-renews (which is what the user wants if they're between
+//!    APs anyway); it keeps the exit-node pref + intent.
 //! 2. The user does not lose data — TCP connections are
 //!    already dead by then.
 //! 3. The alternative (do nothing) leaves the user offline
 //!    indefinitely, which we have empirically learned is
 //!    worse.
+//!
+//! When an exit node IS active the calculus flips: a transient
+//! local-uplink outage must NOT tear the exit node down, or every
+//! sleep/blip rips a healthy node and the user has to reconnect
+//! (the reported "exit node bugs on any idle"). So the escalation
+//! is gated on `tailscale::local_uplink_up()` (carrier + IPv4 link
+//! state, NOT an ICMP ping that a filtering gateway would fail): a
+//! DOWN uplink means "wait" — tailscale and the reconciler recover
+//! when the link returns; an UP uplink with no egress past a
+//! sustained window (`EXIT_DEAD_PEER_MISSES`) means the exit peer
+//! is the dead part, so we fail open to the local uplink.
 
 use anyhow::Result;
 use std::process::Command;
@@ -99,6 +114,16 @@ pub fn spawn_watchdog() -> Result<()> {
     Ok(())
 }
 
+/// When an exit node is active and the physical uplink is UP, this many
+/// consecutive probe misses before we conclude the exit PEER is dead and fail
+/// open. The probe budget is ~8s when an exit node is desired, plus a 2s sleep,
+/// so each miss is ~10s of real outage — 6 misses ≈ 60s. Long enough to ride
+/// out an upstream hotspot blip (WiFi association stays up, internet drops for a
+/// few seconds) without flapping the exit node; short enough that a genuinely
+/// dead peer recovers to the local uplink promptly. A DOWN uplink is never torn
+/// down regardless of this count.
+const EXIT_DEAD_PEER_MISSES: u32 = 6;
+
 fn watchdog_loop() {
     let mut consecutive_failures: u32 = 0;
     // Track whether we've already escalated to panic_reset for
@@ -153,21 +178,61 @@ fn watchdog_loop() {
                 }
             }
             _ if consecutive_failures >= 3 && !already_panic_reset => {
-                // 6s+. FAIL OPEN: remove the exit-node split routes so egress
-                // falls back to the local uplink, and DHCP-renew — but
-                // clear_pref=false means we KEEP the tailscaled exit-node pref
-                // and the persisted desired-state, so the reconciler can
-                // re-establish the exit node once the network returns. Only the
-                // user-initiated "Panic reset" menu hard-clears intent.
-                // Fires once per outage.
-                tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
-                match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
-                    Ok(_) => {
-                        tracing::info!("panic_reset complete");
-                        already_panic_reset = true;
+                // Sustained outage. With NO exit node active this is the simple
+                // unconditional fail-open. With an exit node active the handling
+                // splits on LINK STATE, because tearing the node down on a
+                // transient local outage is exactly the flap the user reported
+                // ("bugs on any idle"):
+                //
+                //   * uplink DOWN → our own link blipped (sleep/roam/WiFi drop).
+                //     DO NOTHING. tailscale recovers when it returns; the
+                //     reconciler reinstalls routes if the utun renumbered. A
+                //     panic_reset here rips a perfectly healthy exit node on
+                //     every sleep.
+                //   * uplink UP but still no egress after a sustained window
+                //     (>= EXIT_DEAD_PEER_MISSES) → the exit PEER is genuinely
+                //     dead while our link is fine → fail open. Below that window
+                //     we wait it out (an upstream hotspot blip with the WiFi
+                //     association still up recovers on its own without a flap).
+                //
+                // Link state (carrier + IPv4), NOT an ICMP ping: a ping-filtering
+                // gateway must never wedge a dead peer offline forever.
+                let exit_desired = crate::tailscale_state::load().desired;
+                if exit_desired {
+                    if !crate::tailscale::local_uplink_up() {
+                        tracing::warn!(
+                            "{}s no internet, physical uplink down — link blip, NOT tearing down exit node",
+                            consecutive_failures * 2
+                        );
+                    } else if consecutive_failures >= EXIT_DEAD_PEER_MISSES {
+                        tracing::error!(
+                            "{}s no internet with uplink UP — exit peer appears dead, failing open (panic_reset)",
+                            consecutive_failures * 2
+                        );
+                        match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
+                            Ok(_) => {
+                                tracing::info!("panic_reset complete (exit peer dead, failed open to local uplink)");
+                                already_panic_reset = true;
+                            }
+                            Err(e) => tracing::error!("panic_reset failed: {e}"),
+                        }
+                    } else {
+                        tracing::warn!(
+                            "{}s no internet, uplink up — riding out possible upstream blip before failing open",
+                            consecutive_failures * 2
+                        );
                     }
-                    Err(e) => {
-                        tracing::error!("panic_reset failed: {e}");
+                } else {
+                    // No exit node — fail open immediately. Removes split-default
+                    // routes (no-op if none) and DHCP-renews; clear_pref=false
+                    // keeps any intent. Fires once per outage.
+                    tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
+                    match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
+                        Ok(_) => {
+                            tracing::info!("panic_reset complete");
+                            already_panic_reset = true;
+                        }
+                        Err(e) => tracing::error!("panic_reset failed: {e}"),
                     }
                 }
             }

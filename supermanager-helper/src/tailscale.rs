@@ -1041,6 +1041,13 @@ fn tailscale_cli() -> Option<&'static str> {
 /// Read the currently-selected exit node `(id, ip)` from tailscaled's prefs.
 /// Best-effort: returns `("", "")` when there is no exit node or the CLI is
 /// unavailable. Used only to record intent — never changes any state.
+///
+/// tailscaled's prefs frequently expose `ExitNodeID` (the stable node ID) with
+/// an EMPTY `ExitNodeIP` (the IP is resolved from the netmap at runtime). The
+/// reconciler can only re-assert the pref with an IP/hostname, not the stable
+/// ID — so when the IP is blank we resolve it from `status --json`. Without this
+/// the persisted intent carried an empty IP, the reconciler's re-assert never
+/// fired, and a daemon that had lost its pref stayed wedged (the reported bug).
 pub fn current_exit_node() -> (String, String) {
     let Some(cli) = tailscale_cli() else {
         return (String::new(), String::new());
@@ -1054,8 +1061,113 @@ pub fn current_exit_node() -> (String, String) {
     let v: serde_json::Value =
         serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null);
     let id = v.get("ExitNodeID").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let ip = v.get("ExitNodeIP").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mut ip = v.get("ExitNodeIP").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if ip.is_empty() && !id.is_empty() {
+        ip = resolve_exit_node_ip(&id).unwrap_or_default();
+    }
     (id, ip)
+}
+
+/// Resolve an exit node's current Tailscale IP from its stable node ID by
+/// parsing `tailscale status --json` (the `Peer` map). Prefers the IPv4
+/// (100.x) address. Returns `None` if the CLI is unavailable, the peer is not
+/// in the current netmap, or it has no addresses. Read-only — never changes
+/// any state.
+fn resolve_exit_node_ip(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return None;
+    }
+    let cli = tailscale_cli()?;
+    let out = Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "status", "--json"])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let peers = v.get("Peer")?.as_object()?;
+    for (_k, p) in peers {
+        if p.get("ID").and_then(|x| x.as_str()) != Some(id) {
+            continue;
+        }
+        let ips = p.get("TailscaleIPs")?.as_array()?;
+        let mut v4 = None;
+        let mut v6 = None;
+        for ip in ips {
+            if let Some(s) = ip.as_str() {
+                if s.contains('.') {
+                    v4.get_or_insert_with(|| s.to_string());
+                } else {
+                    v6.get_or_insert_with(|| s.to_string());
+                }
+            }
+        }
+        return v4.or(v6);
+    }
+    None
+}
+
+/// True if the PHYSICAL local uplink is up — carrier/association present AND an
+/// assigned IPv4 on the hardware interface backing the default route. The
+/// connectivity watchdog uses this to tell apart two outages that look identical
+/// from a 1.1.1.1 probe but need OPPOSITE handling when a tailscale exit node is
+/// active:
+///
+/// - **uplink DOWN** → OUR link blipped (sleep/roam/WiFi drop). Do NOTHING:
+///   tearing the exit node down here is the flap the user reported ("bugs on any
+///   idle"). tailscale recovers when the link returns; routes stay valid (or the
+///   reconciler reinstalls if the utun renumbered across sleep).
+/// - **uplink UP but egress still dead after a sustained window** → the exit
+///   PEER is genuinely dead while our own link is fine → fail open (panic_reset
+///   removes the routes, egress drops to the local uplink, reconciler
+///   re-establishes when the peer returns).
+///
+/// CRITICAL: this is a LINK-STATE check, deliberately NOT an ICMP ping of the
+/// gateway. An earlier ping-based version false-read "down" on any gateway that
+/// filters ICMP (corporate / hardened / hotspot / CGN gateways) — which would
+/// suppress the fail-open forever and leave a genuinely dead exit peer
+/// black-holing the machine with no recovery. Carrier + IPv4 state has no such
+/// blind spot. Biased toward "down" only when the link is genuinely unusable.
+pub(crate) fn local_uplink_up() -> bool {
+    let Some(iface) = physical_uplink_iface() else {
+        return false; // no hardware uplink at all — treat as a blip, don't tear down
+    };
+    let Ok(out) = Command::new("/sbin/ifconfig").arg(&iface).output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let admin_up = s.lines().next().map(|l| l.contains("UP")).unwrap_or(false);
+    // macOS prints `status: active` when a link/association is present,
+    // `status: inactive` when not. Treat an explicit "inactive" as down; if the
+    // field is absent (rare for hardware) fall back to admin-up + IPv4.
+    let carrier_down = s.contains("status: inactive");
+    // A routable IPv4 (skip APIPA link-local 169.254/16 and the v6-only case).
+    let has_v4 = s.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("inet ") && !l.starts_with("inet 169.254")
+    });
+    admin_up && has_v4 && !carrier_down
+}
+
+/// The hardware interface backing the physical default route (`en0`, `en6`…).
+/// The exit node installs more-specific `0/1`+`128/1`, so the `0/0` default
+/// stays on the real uplink; we read its interface from there. If the `0/0`
+/// default itself points at a utun (some tailscaled builds install one), fall
+/// back to the OS's primary hardware service.
+fn physical_uplink_iface() -> Option<String> {
+    if let Ok(out) = Command::new("/sbin/route").args(["-n", "get", "default"]).output() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if let Some(rest) = line.trim().strip_prefix("interface:") {
+                let i = rest.trim();
+                if i.starts_with("en") {
+                    return Some(i.to_string());
+                }
+            }
+        }
+    }
+    detect_active_interface()
 }
 
 /// Self-heal the tailscale exit node — the core of the no-brick design.
@@ -1092,16 +1204,28 @@ pub fn reconcile_exit_node() {
     // Belt-and-braces: re-assert the exit-node pref in tailscaled. panic_reset
     // with clear_pref=false keeps it, but a hard-cleared or freshly-restarted
     // daemon may have lost it; without it test_exit_reachability would probe a
-    // tunnel with no exit and fail. Only when we recorded the peer IP.
-    if !desired.exit_node_ip.is_empty() {
+    // tunnel with no exit and fail forever. We need the peer's IP to re-assert —
+    // resolve it from the stable ID when intent recorded only the ID (the common
+    // case: tailscaled prefs expose ExitNodeID with a blank ExitNodeIP).
+    let eff_ip = if !desired.exit_node_ip.is_empty() {
+        Some(desired.exit_node_ip.clone())
+    } else {
+        resolve_exit_node_ip(&desired.exit_node_id)
+    };
+    if let Some(ip) = eff_ip.as_deref() {
         if let Some(cli) = tailscale_cli() {
             let _ = Command::new(cli)
                 .args([
                     "--socket=/var/run/tailscaled.socket",
                     "set",
-                    &format!("--exit-node={}", desired.exit_node_ip),
+                    &format!("--exit-node={ip}"),
                 ])
                 .output();
+        }
+        // Persist the resolved IP so subsequent ticks skip the status lookup
+        // and so the intent file is self-describing.
+        if desired.exit_node_ip.is_empty() {
+            crate::tailscale_state::set_desired(&desired.exit_node_id, ip);
         }
     }
 
