@@ -8,6 +8,9 @@
 //! The whole UI lives in [`win`], gated to Windows so the workspace can
 //! still `cargo metadata` on Linux/macOS without Slint's native deps.
 
+// Suppress the console window in release builds — GUI-only process.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[cfg(target_os = "windows")]
 mod win;
 

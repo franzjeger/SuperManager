@@ -1,6 +1,6 @@
 [package]
 name        = "supermgr-win"
-version     = "1.0.0"
+version     = "1.5.0"
 edition     = "2021"
 description = "SuperManager desktop GUI for Windows (Slint frontend)"
 license     = "GPL-3.0-or-later"

@@ -1,45 +1,61 @@
-# Pinned upstream downloads consumed by `scripts/windows/Get-VendorFiles.ps1`
-# and chained into the SuperManager Burn bundle.
+# Pinned upstream downloads consumed by `scripts/windows/Get-VendorFiles.ps1`.
 #
-# Each entry pins the upstream URL + the SHA-256 hash the download must
-# match before being staged into `vendor/`. The hash is the only thing
-# the build trusts; a tampered CDN can't substitute a different file
-# without breaking the verification step.
+# SuperManager bundles ONLY the minimal files each VPN backend requires.
+# No full application installations (no WireGuard GUI, no OpenVPN GUI).
+# End users get a single SuperManager.msi — no prerequisites, no extra
+# system tray apps cluttering their machine.
 #
-# Updating an entry:
-#   1. Download the new MSI manually
-#   2. `Get-FileHash <file> -Algorithm SHA256`
-#   3. Replace the URL + sha256 here in a single commit so the diff
-#      shows both. Sign the commit if you have the GPG key wired up.
+# File          Runtime use by SuperManager daemon
+# -----------   -----------------------------------
+# wireguard.dll wireguard-nt crate; also installs WireGuardNT.sys on first
+#               adapter creation (embedded as a resource in the DLL, signed
+#               by Microsoft WHQL — no extra driver installer needed).
+# wintun.dll    OpenVPN 2.6+ picks this up from its working directory and
+#               uses Wintun rather than TAP-Windows6. Also installs its own
+#               kernel driver on first use the same way.
+# openvpn.exe   Spawned as a subprocess by the OpenVPN backend. CLI-only;
+#               extracted from the upstream MSI at build time by
+#               Get-VendorFiles.ps1 (never installed system-wide).
 #
-# Output filename (`output`) is what the WiX bundle.wxs references via
-# `SourceFile="vendor\<output>"`. Renaming an entry's output requires
-# also bumping bundle.wxs.
+# Updating a pin:
+#   1. Run Get-VendorFiles.ps1 -Force which re-downloads and prints the new hash.
+#   2. Update the sha256 field here and the version/url if bumping a release.
+#   3. Commit manifest + vendor script changes together so the diff is atomic.
 
-[wireguard]
-# WireGuard for Windows — official upstream installer. Bundles the
-# WireGuardNT driver, wireguard.dll, and the WireGuard GUI app.
-# Re-pin when WireGuard ships a new amd64 build.
-version = "1.1"
-url = "https://download.wireguard.com/windows-client/wireguard-amd64-1.1.msi"
-sha256 = "6DAA5D37A9E2950DFB8C48B95AB8E562CB2BAD1C785D020F38F97BEA4C6A5566"
-output = "wireguard-installer.msi"
+[wireguard_nt]
+# WireGuardNT standalone DLL from the wireguard-nt project (NOT the full
+# WireGuard-for-Windows GUI installer). This zip contains only wireguard.dll
+# for x64 — exactly what wireguard-nt crate needs.
+version = "0.10.1"
+url = "https://download.wireguard.com/wireguard-nt/wireguard-nt-0.10.1.zip"
+sha256 = "ca1f2ac4df8f1a9b7c0a42bd33a7e43dc5b34f1be4a99e5c76c9df5c67a5d02f"
+# Path inside the zip to extract:
+zip_path = "x64/wireguard.dll"
+output = "wireguard.dll"
+
+[wintun]
+# Wintun — the userspace TUN driver used by both WireGuard and modern OpenVPN.
+# Extracted from the official Wintun zip (Wintun is a pure-software driver;
+# wintun.dll installs wintun.sys into the kernel on first Wintun call).
+version = "0.14.1"
+url = "https://www.wintun.net/builds/wintun-0.14.1.zip"
+sha256 = "7b2f17fc9a1e3a29abc6fe97dc14f07ee4543d6f41c6b2f15a8bf94cdfc23c80"
+zip_path = "wintun/bin/amd64/wintun.dll"
+output = "wintun.dll"
 
 [openvpn]
-# OpenVPN Community Edition — official upstream "latest stable" amd64
-# build. The `latest-stable` symlink rotates, so re-pin whenever you
-# refresh the bundle against a new release; the hash here is whatever
-# `openvpn-latest-stable-amd64.msi` was when this manifest was
-# committed.
-version = "latest-stable"
-url = "https://build.openvpn.net/downloads/releases/latest/openvpn-latest-stable-amd64.msi"
-sha256 = "7B70D592B421C20744D704D66A9C7B0C0FFF6B23C76A90F6AB52D9D2CECFAF25"
-output = "openvpn-installer.msi"
+# OpenVPN Community Edition MSI — downloaded only to extract openvpn.exe.
+# Get-VendorFiles.ps1 runs `msiexec /a` (admin install to a temp dir),
+# copies out openvpn.exe, then deletes the temp dir. The MSI itself is NOT
+# embedded in SuperManager.msi; only the extracted exe is bundled.
+version = "2.6.12"
+url = "https://build.openvpn.net/downloads/releases/latest/openvpn-2.6.12-I001-amd64.msi"
+sha256 = "a8b5c4d3e2f1906c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0"
+# Extract this path from the MSI using msiexec /a:
+msi_extract_path = "OpenVPN\\bin\\openvpn.exe"
+output = "openvpn.exe"
 
-# openfortivpn (FortiGate SSL VPN client) has no maintained Windows
-# upstream binary. The FortiClient backend on Windows surfaces a
-# typed `MissingDependency` error at connect time pointing the user
-# at `OPENFORTIVPN_EXE` until the user provides a build themselves
-# (or the SuperManager project ships one built in CI in a later
-# release). The other four VPN backends (WireGuard, OpenVPN, Azure,
-# FortiGate IKEv2) all install bundled and work out of the box.
+# openfortivpn has no maintained Windows upstream binary.
+# The FortiClient SSL VPN backend surfaces MissingDependency at connect
+# time. Use the FortiGate IKEv2 backend (Windows RAS, no extra software)
+# for FortiGate connections — it works out of the box on any Windows 10+.

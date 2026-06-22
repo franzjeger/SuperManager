@@ -1,16 +1,333 @@
-// SuperManager Windows UI — Slint declarative definition.
+// SuperManager Windows UI — complete custom widget library.
 //
-// Sidebar navigation switches the main pane between five views:
-// Dashboard / SSH Keys / Hosts / VPN / Settings. Rust populates the
-// in-properties, fires the callbacks, and consumes the in-out form
-// state. The .slint side does no business logic and no transport.
+// Zero native Windows controls. Every interactive element is drawn
+// entirely in Slint/Skia — consistent look regardless of Windows
+// system theme or DPI setting.
+//
+// Widget hierarchy:
+//   StyledInput  — single-line text / password / numeric input
+//   PrimaryBtn   — solid blue action button
+//   GhostBtn     — outline secondary button
+//   StyledSelect — dropdown (PopupWindow, white, no native popup)
+//   Card         — white panel with title + border
+//   SidebarItem  — dark sidebar nav row
+//   StatusPill   — rounded badge
 
-import { Button, LineEdit, TextEdit, ListView, ComboBox, CheckBox, VerticalBox, HorizontalBox, GroupBox, ScrollView } from "std-widgets.slint";
+import { TextEdit, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
 
-// --------------------------------------------------------------------------
-// Shared model structs (must match the JSON the daemon emits)
-// --------------------------------------------------------------------------
+// ==========================================================================
+// StyledInput
+// ==========================================================================
+component StyledInput {
+    in property  <string>    placeholder-text: "";
+    in-out property <string> text: "";
+    in property  <bool>      enabled: true;
+    in property  <InputType> input-type: InputType.text;
+    callback edited(string);
 
+    height: 38px;
+    min-width: 60px;
+
+    outer := Rectangle {
+        background: root.enabled ? white : #f8fafc;
+        border-radius: 6px;
+        border-color: inp.has-focus  ? #3b82f6
+                    : ta.has-hover   ? #93c5fd
+                    : #cbd5e1;
+        border-width: 1.5px;
+        clip: true;
+        animate border-color { duration: 100ms; }
+
+        ta := TouchArea { clicked => { inp.focus(); } }
+
+        if root.text == "" && !inp.has-focus: Text {
+            x: 12px;
+            y: (outer.height - self.preferred-height) / 2;
+            text: root.placeholder-text;
+            color: #9ca3af;
+            font-size: 13px;
+        }
+
+        inp := TextInput {
+            x: 12px;
+            y: (outer.height - self.preferred-height) / 2;
+            width: outer.width - 24px;
+            text <=> root.text;
+            input-type: root.input-type;
+            enabled: root.enabled;
+            color: #1d2733;
+            font-size: 13px;
+            single-line: true;
+            wrap: no-wrap;
+            selection-background-color: #bfdbfe;
+            selection-foreground-color: #1e3a5f;
+            edited => { root.edited(self.text); }
+        }
+    }
+}
+
+// ==========================================================================
+// PrimaryBtn — solid blue
+// ==========================================================================
+component PrimaryBtn {
+    in property <string> text;
+    in property <bool>   enabled: true;
+    callback clicked();
+
+    height: 38px;
+    min-width: 80px;
+
+    r := Rectangle {
+        background: !root.enabled ? #94a3b8
+                    : ta.pressed  ? #1d4ed8
+                    : ta.has-hover ? #2563eb
+                    : #3b82f6;
+        border-radius: 6px;
+        animate background { duration: 80ms; }
+
+        Text {
+            text: root.text;
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        ta := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// ==========================================================================
+// GhostBtn — outline secondary
+// ==========================================================================
+component GhostBtn {
+    in property <string> text;
+    in property <bool>   enabled: true;
+    callback clicked();
+
+    height: 38px;
+    min-width: 70px;
+
+    r := Rectangle {
+        background: ta.pressed  ? #f1f5f9
+                    : ta.has-hover ? #f8fafc
+                    : white;
+        border-radius: 6px;
+        border-color: !root.enabled  ? #e2e8f0
+                    : ta.has-hover   ? #93c5fd
+                    : #cbd5e1;
+        border-width: 1.5px;
+        animate background   { duration: 80ms; }
+        animate border-color { duration: 80ms; }
+
+        Text {
+            text: root.text;
+            color: root.enabled ? #1d2733 : #94a3b8;
+            font-size: 13px;
+            font-weight: 500;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        ta := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+// ==========================================================================
+// StyledSelect — custom dropdown, no native popup
+// ==========================================================================
+component StyledSelect {
+    in property <[string]> model;
+    in-out property <int>  current-index: 0;
+
+    height: 38px;
+    min-width: 120px;
+
+    btn := Rectangle {
+        background: ta.pressed ? #f8fafc : white;
+        border-radius: 6px;
+        border-color: ta.has-hover ? #93c5fd : #cbd5e1;
+        border-width: 1.5px;
+        animate border-color { duration: 80ms; }
+
+        HorizontalBox {
+            padding-left: 12px;
+            padding-right: 10px;
+            spacing: 6px;
+            Text {
+                text: root.model[root.current-index];
+                color: #1d2733;
+                font-size: 13px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            // chevron drawn with Path — no font/unicode dependency
+            Path {
+                width: 12px;
+                height: 8px;
+                viewbox-width: 12;
+                viewbox-height: 8;
+                stroke: #6b7280;
+                stroke-width: 2px;
+                fill: transparent;
+                MoveTo { x: 1; y: 1; }
+                LineTo { x: 6; y: 6; }
+                LineTo { x: 11; y: 1; }
+            }
+        }
+
+        ta := TouchArea { clicked => { popup.show(); } }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: max(root.width, 160px);
+        height: root.model.length * 36px + 16px;
+
+        Rectangle {
+            background: white;
+            border-radius: 8px;
+            border-color: #cbd5e1;
+            border-width: 1px;
+            drop-shadow-blur: 20px;
+            drop-shadow-offset-x: 0px;
+            drop-shadow-offset-y: 6px;
+            drop-shadow-color: #1d273328;
+
+            VerticalBox {
+                padding: 8px;
+                spacing: 2px;
+                for opt[i] in root.model: row := TouchArea {
+                    height: 32px;
+                    clicked => { root.current-index = i; }
+                    Rectangle {
+                        background: row.has-hover               ? #eff6ff
+                                    : i == root.current-index   ? #dbeafe
+                                    : transparent;
+                        border-radius: 4px;
+                        animate background { duration: 60ms; }
+                        HorizontalBox {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            Text {
+                                text: opt;
+                                color: i == root.current-index ? #1d4ed8 : #1d2733;
+                                font-size: 13px;
+                                font-weight: i == root.current-index ? 600 : 400;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ==========================================================================
+// Card — white section panel
+// ==========================================================================
+component Card inherits Rectangle {
+    in property <string> title;
+    background: white;
+    border-radius: 8px;
+    border-color: #e2e8f0;
+    border-width: 1px;
+    VerticalBox {
+        padding: 20px;
+        spacing: 0px;
+        if root.title != "": Text {
+            text: root.title;
+            font-size: 13px;
+            font-weight: 700;
+            color: #1d2733;
+        }
+        if root.title != "": Rectangle { height: 16px; }
+        @children
+    }
+}
+
+// ==========================================================================
+// SidebarItem
+// ==========================================================================
+component SidebarItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool>   selected;
+    in property <int>    badge;
+    callback clicked();
+
+    height: 44px;
+    background: selected ? #253449 : (touch.has-hover ? #1e2d3e : transparent);
+    border-radius: 6px;
+    animate background { duration: 80ms; }
+
+    HorizontalBox {
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 10px;
+        Text {
+            text: icon;
+            color: selected ? #60aff0 : #5d7896;
+            font-size: 14px;
+            vertical-alignment: center;
+            width: 22px;
+        }
+        Text {
+            text: label;
+            color: selected ? #f0f6ff : #b8cce0;
+            font-size: 13px;
+            font-weight: selected ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if badge > 0: Rectangle {
+            background: selected ? #32496a : #243245;
+            border-radius: 9px;
+            min-width: 24px;
+            height: 18px;
+            Text {
+                text: badge;
+                color: #8aacce;
+                font-size: 11px;
+                font-weight: 600;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+// ==========================================================================
+// StatusPill
+// ==========================================================================
+component StatusPill inherits Rectangle {
+    in property <string> label;
+    in property <color>  fill;
+    height: 22px;
+    horizontal-stretch: 0;
+    background: fill;
+    border-radius: 11px;
+    HorizontalBox {
+        padding-left: 10px;
+        padding-right: 10px;
+        Text { text: label; color: white; font-size: 11px; font-weight: 600; vertical-alignment: center; }
+    }
+}
+
+// ==========================================================================
+// Data structs
+// ==========================================================================
 export struct KeyRow {
     id: string,
     name: string,
@@ -39,9 +356,6 @@ export struct ProfileRow {
     auto_connect: bool,
 }
 
-// Full host detail surfaced on the Host detail view. Mirrors the
-// JSON the daemon's `get_host` RPC emits, with Slint-friendly
-// integer ports + bool flags.
 export struct HostDetail {
     id: string,
     label: string,
@@ -56,117 +370,46 @@ export struct HostDetail {
     created_at: string,
 }
 
-// --------------------------------------------------------------------------
-// Sidebar item
-// --------------------------------------------------------------------------
-
-component SidebarItem inherits Rectangle {
-    in property <string> label;
-    in property <string> icon;
-    in property <bool> selected;
-    in property <int> badge;
-    callback clicked();
-
-    height: 44px;
-    background: selected ? #2a3b52 : (touch.has-hover ? #1e2a3a : transparent);
-    border-radius: 4px;
-    animate background { duration: 80ms; }
-
-    HorizontalBox {
-        padding-left: 12px;
-        padding-right: 12px;
-        spacing: 10px;
-        Text {
-            text: icon;
-            color: selected ? #6ec1ff : #93a4bb;
-            font-size: 16px;
-            vertical-alignment: center;
-            width: 22px;
-        }
-        Text {
-            text: label;
-            color: selected ? white : #c4d2e3;
-            font-weight: selected ? 600 : 400;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-        if badge > 0: Rectangle {
-            background: #4d6079;
-            border-radius: 9px;
-            min-width: 26px;
-            height: 18px;
-            Text {
-                text: badge;
-                color: white;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-    }
-
-    touch := TouchArea { clicked => { root.clicked(); } }
-}
-
-// --------------------------------------------------------------------------
-// Reusable status pill
-// --------------------------------------------------------------------------
-
-component StatusPill inherits Rectangle {
-    in property <string> label;
-    in property <color> fill;
-    height: 22px;
-    background: fill;
-    border-radius: 11px;
-    HorizontalBox {
-        padding-left: 10px;
-        padding-right: 10px;
-        Text { text: label; color: white; font-size: 11px; vertical-alignment: center; }
-    }
-}
-
-// --------------------------------------------------------------------------
-// Top-level window
-// --------------------------------------------------------------------------
-
+// ==========================================================================
+// AppWindow
+// ==========================================================================
 export component AppWindow inherits Window {
     title: "SuperManager";
     preferred-width: 1080px;
     preferred-height: 720px;
-    background: #f5f7fa;
+    background: #f1f5f9;
 
-    // ----- State pushed in from Rust -----
+    // ----- State -----
     in property <[KeyRow]>     keys: [];
     in property <[HostRow]>    hosts: [];
     in property <[ProfileRow]> profiles: [];
 
-    in property <string>  daemon-status: "Connecting…";
-    in property <bool>    daemon-connected: false;
-    in property <string>  vpn-state: "Disconnected";
-    in property <string>  vpn-profile-name: "";
-    in property <string>  vpn-backend: "";
-    in property <string>  last-error: "";
-    in property <string>  last-status-message: "";
-    in property <string>  last-refresh: "";
-    in property <string>  app-version: "1.2.0";
-    in property <string>  data-root: "C:\\ProgramData\\SuperManager";
+    in property <string> daemon-status: "Connecting...";
+    in property <bool>   daemon-connected: false;
+    in property <string> vpn-state: "Disconnected";
+    in property <string> vpn-profile-name: "";
+    in property <string> vpn-backend: "";
+    in property <string> last-error: "";
+    in property <string> last-status-message: "";
+    in property <string> last-refresh: "";
+    in property <string> app-version: "1.5.0";
+    in property <string> data-root: "C:\\ProgramData\\SuperManager";
 
     // ----- Navigation -----
-    in-out property <int> current-view: 0;  // 0=Dashboard 1=SSH 2=Hosts 3=VPN 4=Settings 5=HostDetail
+    in-out property <int> current-view: 0;
 
     // ----- Host detail state -----
     in property <HostDetail> selected-host;
     in-out property <string> host-cmd;
-    in property <string> host-cmd-stdout;
-    in property <string> host-cmd-stderr;
-    in property <int>    host-cmd-exit-code: 0;
-    in property <bool>   host-cmd-running: false;
-    in property <string> host-test-result;
+    in property <string>     host-cmd-stdout;
+    in property <string>     host-cmd-stderr;
+    in property <int>        host-cmd-exit-code: 0;
+    in property <bool>       host-cmd-running: false;
+    in property <string>     host-test-result;
     in-out property <string> host-new-password;
     in-out property <string> host-new-api-token;
     in-out property <int>    host-new-api-port: 443;
 
-    // Customer filter for the Hosts list.
     in-out property <string> hosts-customer-filter;
 
     // ----- Form bindings -----
@@ -180,7 +423,7 @@ export component AppWindow inherits Window {
     in-out property <int>    new-host-port: 22;
     in-out property <string> new-host-group;
     in-out property <int>    new-host-device-type-index: 0;
-    in-out property <int>    new-host-auth-method-index: 0;  // 0=password 1=key 2=api-token 3=none
+    in-out property <int>    new-host-auth-method-index: 0;
     in-out property <string> host-search;
 
     in-out property <string> wg-import-name;
@@ -195,308 +438,324 @@ export component AppWindow inherits Window {
     in-out property <string> fg-import-username;
     in-out property <string> fg-import-password;
     in-out property <string> fg-import-psk;
+    // 0 = none, 1 = IKEv2, 2 = WireGuard, 3 = SSL VPN
+    in-out property <int>    vpn-import-tab: 0;
 
     // ----- Callbacks -----
     callback refresh();
-    callback generate-key(string /* name */, string /* description */, string /* key_type */);
-    callback delete-key(string /* key_id */);
-    callback export-key(string /* key_id */);
+    callback generate-key(string, string, string);
+    callback delete-key(string);
+    callback export-key(string);
 
-    callback add-host(string /* label */, string /* hostname */, int /* port */, string /* username */, string /* group */, string /* device_type */, string /* auth_method */);
-    callback delete-host(string /* host_id */);
-    callback toggle-host-pin(string /* host_id */);
-    callback host-search-changed(string /* query */);
-    callback open-host(string /* host_id */);
+    callback add-host(string, string, int, string, string, string, string);
+    callback delete-host(string);
+    callback toggle-host-pin(string);
+    callback host-search-changed(string);
+    callback open-host(string);
     callback close-host-detail();
-    callback test-host-connection(string /* host_id */);
-    callback ssh-execute(string /* host_id */, string /* command */);
-    callback set-host-password(string /* host_id */, string /* password */);
-    callback set-host-api-token(string /* host_id */, string /* token */, int /* port */);
+    callback test-host-connection(string);
+    callback ssh-execute(string, string);
+    callback set-host-password(string, string);
+    callback set-host-api-token(string, string, int);
 
-    callback import-wireguard(string /* name */, string /* conf_text */);
-    callback import-forticlient(string /* name */, string /* host */, int /* port */, string /* username */, string /* password */);
-    callback import-fortigate(string /* name */, string /* host */, string /* username */, string /* password */, string /* psk */);
-    callback delete-profile(string /* profile_id */);
-    callback connect-profile(string /* profile_id */);
+    callback import-wireguard(string, string);
+    callback import-forticlient(string, string, int, string, string);
+    callback import-fortigate(string, string, string, string, string);
+    callback delete-profile(string);
+    callback connect-profile(string);
     callback disconnect-vpn();
     callback dismiss-error();
 
     // ======================================================================
-    // Layout
+    // Root layout
     // ======================================================================
-
     HorizontalBox {
         spacing: 0;
         padding: 0;
 
-        // ----- Sidebar -----
+        // ── Sidebar ──────────────────────────────────────────────────────
         Rectangle {
-            background: #1d2733;
+            background: #1a2535;
             width: 220px;
+
             VerticalBox {
                 padding: 12px;
                 spacing: 4px;
 
-                // Brand
+                // Brand header
                 Rectangle {
-                    height: 56px;
+                    height: 60px;
                     HorizontalBox {
                         spacing: 10px;
                         padding-left: 4px;
+                        padding-top: 4px;
                         Rectangle {
-                            background: #6ec1ff;
-                            border-radius: 8px;
-                            width: 32px;
-                            height: 32px;
-                            Text { text: "S"; color: #1d2733; font-size: 18px; font-weight: 800; horizontal-alignment: center; vertical-alignment: center; }
+                            background: #3b82f6;
+                            border-radius: 10px;
+                            width: 36px;
+                            height: 36px;
+                            Text {
+                                text: "S";
+                                color: white;
+                                font-size: 20px;
+                                font-weight: 800;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                         VerticalBox {
-                            spacing: 0;
+                            spacing: 2px;
                             padding: 0;
-                            Text { text: "SuperManager"; color: white; font-size: 16px; font-weight: 700; }
-                            Text { text: "v" + root.app-version; color: #7d8da4; font-size: 11px; }
+                            Text { text: "SuperManager"; color: #f0f6ff; font-size: 15px; font-weight: 700; }
+                            Text { text: "v" + root.app-version; color: #4e6685; font-size: 11px; }
                         }
                     }
                 }
 
-                Rectangle { height: 8px; }
+                Rectangle { height: 6px; }
 
-                SidebarItem { label: "Dashboard"; icon: "▦"; selected: root.current-view == 0; clicked => { root.current-view = 0; } }
-                SidebarItem { label: "SSH Keys";  icon: "🔑"; selected: root.current-view == 1; badge: root.keys.length;     clicked => { root.current-view = 1; } }
-                SidebarItem { label: "Hosts";     icon: "▤"; selected: root.current-view == 2; badge: root.hosts.length;    clicked => { root.current-view = 2; } }
-                SidebarItem { label: "VPN";       icon: "⇄"; selected: root.current-view == 3; badge: root.profiles.length; clicked => { root.current-view = 3; } }
-                SidebarItem { label: "Settings";  icon: "⚙"; selected: root.current-view == 4; clicked => { root.current-view = 4; } }
+                SidebarItem { label: "Dashboard"; icon: "D"; selected: root.current-view == 0; clicked => { root.current-view = 0; } }
+                SidebarItem { label: "SSH Keys";  icon: "K"; selected: root.current-view == 1; badge: root.keys.length; clicked => { root.current-view = 1; } }
+                SidebarItem { label: "Hosts";     icon: "H"; selected: root.current-view == 2; badge: root.hosts.length; clicked => { root.current-view = 2; } }
+                SidebarItem { label: "VPN";       icon: "V"; selected: root.current-view == 3; badge: root.profiles.length; clicked => { root.current-view = 3; } }
+                SidebarItem { label: "Settings";  icon: "S"; selected: root.current-view == 4; clicked => { root.current-view = 4; } }
 
                 Rectangle { vertical-stretch: 1; }
 
-                // Bottom status block
+                // Status footer
                 Rectangle {
-                    background: #16202b;
-                    border-radius: 6px;
-                    height: 76px;
+                    background: #111c29;
+                    border-radius: 8px;
+                    height: 72px;
                     VerticalBox {
-                        padding: 10px;
-                        spacing: 4px;
+                        padding: 12px;
+                        spacing: 6px;
                         HorizontalBox {
-                            spacing: 6px;
+                            spacing: 8px;
                             Rectangle {
-                                background: root.daemon-connected ? #4ade80 : #ef4444;
-                                border-radius: 4px;
+                                background: root.daemon-connected ? #22c55e : #ef4444;
+                                border-radius: 5px;
                                 width: 8px;
                                 height: 8px;
-                                y: 5px;
+                                y: 2px;
                             }
                             Text {
                                 text: root.daemon-connected ? "Daemon online" : "Daemon offline";
-                                color: white;
-                                font-size: 11px;
+                                color: #d4e4f7;
+                                font-size: 12px;
+                                font-weight: 500;
                                 vertical-alignment: center;
                             }
                         }
                         Text {
                             text: "VPN: " + root.vpn-state;
-                            color: root.vpn-state == "Connected" ? #6ec1ff : #93a4bb;
+                            color: root.vpn-state == "Connected" ? #60aff0 : #4e6685;
                             font-size: 11px;
-                        }
-                        if root.vpn-profile-name != "": Text {
-                            text: root.vpn-profile-name;
-                            color: #c4d2e3;
-                            font-size: 10px;
-                            overflow: elide;
                         }
                     }
                 }
             }
         }
 
-        // ----- Main pane -----
+        // ── Main pane ────────────────────────────────────────────────────
         Rectangle {
-            background: #f5f7fa;
+            background: #f1f5f9;
             horizontal-stretch: 1;
             VerticalBox {
-                padding: 24px;
+                padding: 28px;
                 spacing: 16px;
 
                 // Error banner
                 if root.last-error != "": Rectangle {
-                    background: #fee2e2;
+                    background: #fef2f2;
                     border-color: #fca5a5;
                     border-width: 1px;
-                    border-radius: 6px;
+                    border-radius: 8px;
                     HorizontalBox {
-                        padding: 12px;
+                        padding: 14px;
+                        spacing: 12px;
                         Text {
-                            text: "⚠ " + root.last-error;
+                            text: root.last-error;
                             color: #991b1b;
                             horizontal-stretch: 1;
                             wrap: word-wrap;
+                            font-size: 13px;
                         }
-                        Button {
-                            text: "✕";
-                            clicked => { root.dismiss-error(); }
-                        }
+                        GhostBtn { text: "Dismiss"; clicked => { root.dismiss-error(); } }
                     }
                 }
+
+                // Success banner
                 if root.last-status-message != "": Rectangle {
-                    background: #dcfce7;
+                    background: #f0fdf4;
                     border-color: #86efac;
                     border-width: 1px;
-                    border-radius: 6px;
+                    border-radius: 8px;
                     HorizontalBox {
-                        padding: 10px;
+                        padding: 12px;
                         Text {
-                            text: "✓ " + root.last-status-message;
+                            text: root.last-status-message;
                             color: #166534;
                             horizontal-stretch: 1;
+                            font-size: 13px;
                         }
                     }
                 }
 
-                // Switchable view
-                if root.current-view == 0: dashboard-view := Rectangle {
+                // ── Dashboard ──────────────────────────────────────────
+                if root.current-view == 0: Rectangle {
                     VerticalBox {
                         padding: 0;
-                        spacing: 16px;
-                        Text { text: "Dashboard"; font-size: 22px; font-weight: 600; color: #1d2733; }
+                        spacing: 20px;
+
+                        Text { text: "Dashboard"; font-size: 24px; font-weight: 700; color: #0f172a; }
 
                         HorizontalBox {
-                            spacing: 12px;
+                            spacing: 16px;
 
                             // VPN status card
                             Rectangle {
                                 background: white;
-                                border-radius: 8px;
+                                border-radius: 10px;
                                 border-color: #e2e8f0;
                                 border-width: 1px;
                                 horizontal-stretch: 2;
-                                min-height: 140px;
+                                min-height: 160px;
                                 VerticalBox {
-                                    padding: 16px;
-                                    spacing: 8px;
+                                    padding: 20px;
+                                    spacing: 10px;
                                     HorizontalBox {
-                                        Text { text: "VPN connection"; font-size: 12px; color: #64748b; horizontal-stretch: 1; }
+                                        Text { text: "VPN Connection"; font-size: 12px; font-weight: 600; color: #64748b; letter-spacing: 0.5px; horizontal-stretch: 1; }
                                         StatusPill {
                                             label: root.vpn-state;
-                                            fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #64748b);
+                                            fill: root.vpn-state == "Connected" ? #16a34a
+                                                : root.vpn-state == "Connecting" ? #d97706
+                                                : #475569;
                                         }
                                     }
                                     Text {
                                         text: root.vpn-profile-name != "" ? root.vpn-profile-name : "No active profile";
-                                        font-size: 20px;
-                                        font-weight: 600;
-                                        color: #1d2733;
+                                        font-size: 22px;
+                                        font-weight: 700;
+                                        color: #0f172a;
                                     }
                                     if root.vpn-backend != "": Text {
                                         text: "via " + root.vpn-backend;
-                                        font-size: 12px;
+                                        font-size: 13px;
                                         color: #64748b;
                                     }
                                     Rectangle { vertical-stretch: 1; }
                                     HorizontalBox {
-                                        if root.vpn-state == "Connected": Button {
+                                        spacing: 8px;
+                                        if root.vpn-state == "Connected": GhostBtn {
                                             text: "Disconnect";
                                             clicked => { root.disconnect-vpn(); }
                                         }
-                                        Button { text: "Manage profiles"; clicked => { root.current-view = 3; } }
+                                        PrimaryBtn { text: "Manage VPN"; clicked => { root.current-view = 3; } }
                                     }
                                 }
                             }
 
-                            // Counts cards
+                            // Count cards
                             VerticalBox {
                                 horizontal-stretch: 1;
                                 spacing: 12px;
-                                Rectangle {
+                                for item in [
+                                    { label: "SSH Keys", count: root.keys.length },
+                                    { label: "Managed Hosts", count: root.hosts.length },
+                                    { label: "VPN Profiles", count: root.profiles.length },
+                                ]: Rectangle {
                                     background: white;
-                                    border-radius: 8px;
+                                    border-radius: 10px;
                                     border-color: #e2e8f0;
                                     border-width: 1px;
                                     HorizontalBox {
-                                        padding: 14px;
-                                        Text { text: "SSH keys"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                        Text { text: root.keys.length; font-size: 22px; font-weight: 700; color: #1d2733; }
-                                    }
-                                }
-                                Rectangle {
-                                    background: white;
-                                    border-radius: 8px;
-                                    border-color: #e2e8f0;
-                                    border-width: 1px;
-                                    HorizontalBox {
-                                        padding: 14px;
-                                        Text { text: "Managed hosts"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                        Text { text: root.hosts.length; font-size: 22px; font-weight: 700; color: #1d2733; }
-                                    }
-                                }
-                                Rectangle {
-                                    background: white;
-                                    border-radius: 8px;
-                                    border-color: #e2e8f0;
-                                    border-width: 1px;
-                                    HorizontalBox {
-                                        padding: 14px;
-                                        Text { text: "VPN profiles"; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
-                                        Text { text: root.profiles.length; font-size: 22px; font-weight: 700; color: #1d2733; }
+                                        padding: 16px;
+                                        Text { text: item.label; color: #475569; font-size: 13px; font-weight: 500; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Text { text: item.count; font-size: 26px; font-weight: 700; color: #0f172a; }
                                     }
                                 }
                             }
                         }
 
+                        // Activity card
                         Rectangle {
                             background: white;
-                            border-radius: 8px;
+                            border-radius: 10px;
                             border-color: #e2e8f0;
                             border-width: 1px;
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 6px;
-                                Text { text: "Recently"; font-size: 12px; color: #64748b; }
-                                Text {
-                                    text: root.last-refresh != "" ? ("Last refresh: " + root.last-refresh) : "Refresh has not run yet";
-                                    color: #1d2733;
+                                padding: 20px;
+                                spacing: 8px;
+                                HorizontalBox {
+                                    Text { text: "Activity"; font-size: 12px; font-weight: 600; color: #64748b; horizontal-stretch: 1; }
+                                    GhostBtn { text: "Refresh"; clicked => { root.refresh(); } }
                                 }
                                 Text {
-                                    text: "Daemon status: " + root.daemon-status;
-                                    color: #1d2733;
+                                    text: root.last-refresh != "" ? "Last refresh: " + root.last-refresh : "Not yet refreshed";
+                                    color: #334155;
+                                    font-size: 13px;
+                                }
+                                Text {
+                                    text: "Daemon: " + root.daemon-status;
+                                    color: #334155;
+                                    font-size: 13px;
                                 }
                             }
                         }
 
                         Rectangle { vertical-stretch: 1; }
-                        HorizontalBox {
-                            Rectangle { horizontal-stretch: 1; }
-                            Button { text: "Refresh"; clicked => { root.refresh(); } }
-                        }
                     }
                 }
 
-                if root.current-view == 1: ssh-view := Rectangle {
+                // ── SSH Keys ──────────────────────────────────────────
+                if root.current-view == 1: Rectangle {
                     VerticalBox {
                         padding: 0;
-                        spacing: 16px;
-                        Text { text: "SSH Keys"; font-size: 22px; font-weight: 600; color: #1d2733; }
+                        spacing: 20px;
+                        Text { text: "SSH Keys"; font-size: 24px; font-weight: 700; color: #0f172a; }
 
-                        GroupBox {
+                        Card {
                             title: "Generate new key";
                             VerticalBox {
+                                spacing: 12px;
+                                padding: 0;
                                 HorizontalBox {
-                                    Text { text: "Name"; vertical-alignment: center; min-width: 120px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "frank@workstation"; text <=> root.new-key-name; }
+                                    spacing: 12px;
+                                    Rectangle {
+                                        width: 110px;
+                                        Text { text: "Name"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                    }
+                                    StyledInput {
+                                        placeholder-text: "frank@workstation";
+                                        text <=> root.new-key-name;
+                                    }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Description"; vertical-alignment: center; min-width: 120px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "primary workstation key"; text <=> root.new-key-description; }
+                                    spacing: 12px;
+                                    Rectangle {
+                                        width: 110px;
+                                        Text { text: "Description"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                    }
+                                    StyledInput {
+                                        placeholder-text: "primary workstation key";
+                                        text <=> root.new-key-description;
+                                    }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Type"; vertical-alignment: center; min-width: 120px; color: #1d2733; }
-                                    ComboBox {
+                                    spacing: 12px;
+                                    Rectangle {
+                                        width: 110px;
+                                        Text { text: "Key type"; color: #374151; font-size: 13px; font-weight: 500; vertical-alignment: center; }
+                                    }
+                                    StyledSelect {
                                         model: ["ed25519", "rsa4096", "rsa2048"];
                                         current-index <=> root.new-key-type-index;
+                                        min-width: 160px;
                                     }
                                     Rectangle { horizontal-stretch: 1; }
-                                    Button {
-                                        text: "Generate";
-                                        primary: true;
+                                    PrimaryBtn {
+                                        text: "Generate key";
                                         clicked => {
                                             root.generate-key(
                                                 root.new-key-name,
@@ -511,35 +770,35 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
-                            title: "Managed keys (" + root.keys.length + ")";
+                        Card {
+                            title: "Keys (" + root.keys.length + ")";
                             ScrollView {
-                                min-height: 240px;
+                                min-height: 260px;
                                 VerticalBox {
-                                    spacing: 0;
+                                    spacing: 1px;
                                     padding: 0;
                                     for key[i] in root.keys: Rectangle {
                                         height: 64px;
                                         background: mod(i, 2) == 0 ? #fafafa : white;
-                                        border-radius: 4px;
+                                        border-radius: 6px;
                                         HorizontalBox {
-                                            padding-left: 12px;
+                                            padding-left: 16px;
                                             padding-right: 12px;
                                             spacing: 12px;
                                             VerticalBox {
                                                 horizontal-stretch: 1;
-                                                spacing: 2px;
+                                                spacing: 4px;
                                                 padding: 0;
-                                                Text { text: key.name; font-weight: 600; color: #1d2733; }
+                                                Text { text: key.name; font-size: 14px; font-weight: 600; color: #0f172a; }
                                                 Text {
-                                                    text: key.key_type + "  ·  " + key.fingerprint;
+                                                    text: key.key_type + "   " + key.fingerprint;
                                                     color: #64748b;
                                                     font-size: 12px;
                                                     overflow: elide;
                                                 }
                                             }
-                                            Button { text: "Copy"; clicked => { root.export-key(key.id); } }
-                                            Button { text: "Delete"; clicked => { root.delete-key(key.id); } }
+                                            GhostBtn { text: "Copy public key"; clicked => { root.export-key(key.id); } }
+                                            GhostBtn { text: "Delete"; clicked => { root.delete-key(key.id); } }
                                         }
                                     }
                                 }
@@ -548,286 +807,116 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.current-view == 2: hosts-view := Rectangle {
+                // ── Hosts ────────────────────────────────────────────
+                if root.current-view == 2: Rectangle {
                     VerticalBox {
                         padding: 0;
-                        spacing: 16px;
-                        Text { text: "Hosts"; font-size: 22px; font-weight: 600; color: #1d2733; }
+                        spacing: 20px;
+                        Text { text: "Hosts"; font-size: 24px; font-weight: 700; color: #0f172a; }
 
-                        GroupBox {
+                        Card {
                             title: "Add host";
                             VerticalBox {
-                                HorizontalBox {
-                                    Text { text: "Label"; vertical-alignment: center; min-width: 100px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "prod-web-01"; text <=> root.new-host-label; }
-                                    Text { text: "Hostname"; vertical-alignment: center; min-width: 90px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "10.0.1.42"; text <=> root.new-host-hostname; }
-                                }
-                                HorizontalBox {
-                                    Text { text: "Username"; vertical-alignment: center; min-width: 100px; color: #1d2733; }
-                                    LineEdit { text <=> root.new-host-username; }
-                                    Text { text: "Port"; vertical-alignment: center; min-width: 50px; color: #1d2733; }
-                                    LineEdit {
-                                        text: root.new-host-port;
-                                        edited(s) => { root.new-host-port = s.to-float(); }
-                                    }
-                                    Text { text: "Group"; vertical-alignment: center; min-width: 60px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "prod"; text <=> root.new-host-group; }
-                                }
-                                HorizontalBox {
-                                    Text { text: "Device type"; vertical-alignment: center; min-width: 100px; color: #1d2733; }
-                                    ComboBox {
-                                        model: ["linux", "fortigate", "unifi", "opnsense", "sophos", "openwrt", "pfsense"];
-                                        current-index <=> root.new-host-device-type-index;
-                                    }
-                                    Text { text: "Auth"; vertical-alignment: center; min-width: 50px; color: #1d2733; }
-                                    ComboBox {
-                                        model: ["password", "key", "api-token", "none"];
-                                        current-index <=> root.new-host-auth-method-index;
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button {
-                                        text: "Add";
-                                        primary: true;
-                                        clicked => {
-                                            root.add-host(
-                                                root.new-host-label,
-                                                root.new-host-hostname,
-                                                root.new-host-port,
-                                                root.new-host-username,
-                                                root.new-host-group,
-                                                root.new-host-device-type-index == 0 ? "linux"
-                                                    : root.new-host-device-type-index == 1 ? "fortigate"
-                                                    : root.new-host-device-type-index == 2 ? "unifi"
-                                                    : root.new-host-device-type-index == 3 ? "opnsense"
-                                                    : root.new-host-device-type-index == 4 ? "sophos"
-                                                    : root.new-host-device-type-index == 5 ? "openwrt"
-                                                    : "pfsense",
-                                                root.new-host-auth-method-index == 0 ? "password"
-                                                    : root.new-host-auth-method-index == 1 ? "key"
-                                                    : root.new-host-auth-method-index == 2 ? "api-token"
-                                                    : "none"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                                spacing: 12px;
+                                padding: 0;
 
-                        GroupBox {
-                            title: "Managed hosts (" + root.hosts.length + ")";
-                            VerticalBox {
+                                // Row 1: Label + Hostname
                                 HorizontalBox {
-                                    Text { text: "🔍"; vertical-alignment: center; }
-                                    LineEdit {
-                                        placeholder-text: "search by label or hostname";
-                                        text <=> root.host-search;
-                                        edited(s) => { root.host-search-changed(s); }
-                                    }
-                                }
-                                ScrollView {
-                                    min-height: 280px;
+                                    spacing: 16px;
                                     VerticalBox {
-                                        spacing: 0;
+                                        spacing: 6px;
                                         padding: 0;
-                                        // Filter happens server-side: Rust rebuilds the
-                                        // `hosts` model when `host-search` changes. We
-                                        // render whatever the model contains here.
-                                        for host[i] in root.hosts: host-row := Rectangle {
-                                            height: 60px;
-                                            background: host-row-touch.has-hover ? #eff6ff
-                                                : (mod(i, 2) == 0 ? #fafafa : white);
-                                            border-radius: 4px;
-                                            animate background { duration: 60ms; }
-                                            host-row-touch := TouchArea {
-                                                clicked => { root.open-host(host.id); }
-                                            }
-                                            HorizontalBox {
-                                                padding-left: 12px;
-                                                padding-right: 12px;
-                                                spacing: 12px;
-                                                VerticalBox {
-                                                    horizontal-stretch: 1;
-                                                    spacing: 2px;
-                                                    padding: 0;
-                                                    Text {
-                                                        text: (host.pinned ? "★ " : "") + host.label;
-                                                        font-weight: 600;
-                                                        color: #1d2733;
-                                                    }
-                                                    Text {
-                                                        text: host.username + "@" + host.hostname + "  ·  " + host.device_type;
-                                                        color: #64748b;
-                                                        font-size: 12px;
-                                                        overflow: elide;
-                                                    }
-                                                }
-                                                if host.customer != "": StatusPill {
-                                                    label: host.customer;
-                                                    fill: #475569;
-                                                }
-                                                Button {
-                                                    text: host.pinned ? "Unpin" : "Pin";
-                                                    clicked => { root.toggle-host-pin(host.id); }
-                                                }
-                                                Button {
-                                                    text: "Open";
-                                                    clicked => { root.open-host(host.id); }
-                                                }
-                                                Button {
-                                                    text: "Delete";
-                                                    clicked => { root.delete-host(host.id); }
-                                                }
-                                            }
-                                        }
+                                        horizontal-stretch: 1;
+                                        Text { text: "Label"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { placeholder-text: "prod-web-01"; text <=> root.new-host-label; }
+                                    }
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Hostname / IP"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { placeholder-text: "10.0.1.42"; text <=> root.new-host-hostname; }
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
 
-                if root.current-view == 3: vpn-view := Rectangle {
-                    VerticalBox {
-                        padding: 0;
-                        spacing: 16px;
-                        Text { text: "VPN profiles"; font-size: 22px; font-weight: 600; color: #1d2733; }
-
-                        Rectangle {
-                            background: white;
-                            border-radius: 8px;
-                            border-color: #e2e8f0;
-                            border-width: 1px;
-                            HorizontalBox {
-                                padding: 16px;
-                                StatusPill {
-                                    label: root.vpn-state;
-                                    fill: root.vpn-state == "Connected" ? #16a34a : (root.vpn-state == "Connecting" ? #d97706 : #64748b);
-                                }
-                                Text {
-                                    text: root.vpn-profile-name != "" ? root.vpn-profile-name : "No active profile";
-                                    color: #1d2733;
-                                    font-weight: 600;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                }
-                                if root.vpn-state == "Connected": Button {
-                                    text: "Disconnect";
-                                    clicked => { root.disconnect-vpn(); }
-                                }
-                            }
-                        }
-
-                        GroupBox {
-                            title: "Import FortiGate IKEv2 (Windows RAS)";
-                            VerticalBox {
+                                // Row 2: Username + Port + Group
                                 HorizontalBox {
-                                    Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "client-fortigate-ikev2"; text <=> root.fg-import-name; }
-                                    Text { text: "Host"; vertical-alignment: center; min-width: 50px; color: #1d2733; }
-                                    LineEdit { placeholder-text: "vpn.example.com"; text <=> root.fg-import-host; }
-                                }
-                                HorizontalBox {
-                                    Text { text: "Username"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                    LineEdit { text <=> root.fg-import-username; }
-                                    Text { text: "Password"; vertical-alignment: center; min-width: 70px; color: #1d2733; }
-                                    LineEdit {
-                                        text <=> root.fg-import-password;
-                                        input-type: password;
+                                    spacing: 16px;
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        horizontal-stretch: 2;
+                                        Text { text: "Username"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { text <=> root.new-host-username; }
                                     }
-                                }
-                                HorizontalBox {
-                                    Text { text: "Group PSK"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                    LineEdit {
-                                        text <=> root.fg-import-psk;
-                                        input-type: password;
-                                        placeholder-text: "IKE shared secret";
-                                    }
-                                    Rectangle { horizontal-stretch: 1; }
-                                    Button {
-                                        text: "Import";
-                                        primary: true;
-                                        clicked => {
-                                            root.import-fortigate(
-                                                root.fg-import-name,
-                                                root.fg-import-host,
-                                                root.fg-import-username,
-                                                root.fg-import-password,
-                                                root.fg-import-psk
-                                            );
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        min-width: 80px;
+                                        Text { text: "Port"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput {
+                                            text: root.new-host-port;
+                                            edited(s) => { root.new-host-port = s.to-float(); }
                                         }
                                     }
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Group"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { placeholder-text: "prod"; text <=> root.new-host-group; }
+                                    }
                                 }
-                            }
-                        }
 
-                        HorizontalBox {
-                            spacing: 16px;
-                            GroupBox {
-                                title: "Import WireGuard (.conf)";
-                                horizontal-stretch: 1;
-                                VerticalBox {
-                                    HorizontalBox {
-                                        Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                        LineEdit { placeholder-text: "office-vpn"; text <=> root.wg-import-name; }
-                                    }
-                                    Text { text: ".conf contents"; color: #1d2733; }
-                                    TextEdit {
-                                        min-height: 140px;
-                                        text <=> root.wg-import-text;
-                                        placeholder-text: "[Interface]\nPrivateKey = ...\nAddress = 10.0.0.2/24\n\n[Peer]\n...";
-                                    }
-                                    HorizontalBox {
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Button {
-                                            text: "Import";
-                                            primary: true;
-                                            clicked => { root.import-wireguard(root.wg-import-name, root.wg-import-text); }
+                                // Row 3: Device type + Auth + Add button
+                                HorizontalBox {
+                                    spacing: 16px;
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Device type"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledSelect {
+                                            model: ["linux", "fortigate", "unifi", "opnsense", "sophos", "openwrt", "pfsense"];
+                                            current-index <=> root.new-host-device-type-index;
                                         }
                                     }
-                                }
-                            }
-
-                            GroupBox {
-                                title: "Import FortiGate SSL VPN";
-                                horizontal-stretch: 1;
-                                VerticalBox {
-                                    HorizontalBox {
-                                        Text { text: "Name"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                        LineEdit { placeholder-text: "client-fortigate"; text <=> root.fc-import-name; }
-                                    }
-                                    HorizontalBox {
-                                        Text { text: "Host"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                        LineEdit { placeholder-text: "vpn.example.com"; text <=> root.fc-import-host; }
-                                        Text { text: "Port"; vertical-alignment: center; min-width: 50px; color: #1d2733; }
-                                        LineEdit {
-                                            text: root.fc-import-port;
-                                            edited(s) => { root.fc-import-port = s.to-float(); }
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        horizontal-stretch: 1;
+                                        Text { text: "Auth method"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledSelect {
+                                            model: ["password", "ssh-key", "api-token", "none"];
+                                            current-index <=> root.new-host-auth-method-index;
                                         }
                                     }
-                                    HorizontalBox {
-                                        Text { text: "Username"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                        LineEdit { text <=> root.fc-import-username; }
-                                    }
-                                    HorizontalBox {
-                                        Text { text: "Password"; vertical-alignment: center; min-width: 80px; color: #1d2733; }
-                                        LineEdit {
-                                            text <=> root.fc-import-password;
-                                            input-type: password;
-                                        }
-                                    }
-                                    HorizontalBox {
-                                        Rectangle { horizontal-stretch: 1; }
-                                        Button {
-                                            text: "Import";
-                                            primary: true;
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        min-width: 100px;
+                                        // spacer to align button with fields
+                                        Text { text: " "; font-size: 12px; }
+                                        PrimaryBtn {
+                                            text: "Add host";
                                             clicked => {
-                                                root.import-forticlient(
-                                                    root.fc-import-name,
-                                                    root.fc-import-host,
-                                                    root.fc-import-port,
-                                                    root.fc-import-username,
-                                                    root.fc-import-password
+                                                root.add-host(
+                                                    root.new-host-label,
+                                                    root.new-host-hostname,
+                                                    root.new-host-port,
+                                                    root.new-host-username,
+                                                    root.new-host-group,
+                                                    root.new-host-device-type-index == 0 ? "linux"
+                                                        : root.new-host-device-type-index == 1 ? "fortigate"
+                                                        : root.new-host-device-type-index == 2 ? "unifi"
+                                                        : root.new-host-device-type-index == 3 ? "opnsense"
+                                                        : root.new-host-device-type-index == 4 ? "sophos"
+                                                        : root.new-host-device-type-index == 5 ? "openwrt"
+                                                        : "pfsense",
+                                                    root.new-host-auth-method-index == 0 ? "password"
+                                                        : root.new-host-auth-method-index == 1 ? "key"
+                                                        : root.new-host-auth-method-index == 2 ? "api-token"
+                                                        : "none"
                                                 );
                                             }
                                         }
@@ -836,41 +925,59 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        GroupBox {
-                            title: "Profiles (" + root.profiles.length + ")";
-                            ScrollView {
-                                min-height: 240px;
-                                VerticalBox {
-                                    spacing: 0;
-                                    padding: 0;
-                                    for prof[i] in root.profiles: Rectangle {
-                                        height: 64px;
-                                        background: mod(i, 2) == 0 ? #fafafa : white;
-                                        border-radius: 4px;
-                                        HorizontalBox {
-                                            padding-left: 12px;
-                                            padding-right: 12px;
-                                            spacing: 12px;
-                                            VerticalBox {
-                                                horizontal-stretch: 1;
-                                                spacing: 2px;
-                                                padding: 0;
-                                                Text { text: prof.name; font-weight: 600; color: #1d2733; }
-                                                Text {
-                                                    text: prof.backend + (prof.host != "" ? "  ·  " + prof.host : "");
-                                                    color: #64748b;
-                                                    font-size: 12px;
-                                                    overflow: elide;
+                        Card {
+                            title: "Managed hosts (" + root.hosts.length + ")";
+                            VerticalBox {
+                                spacing: 12px;
+                                padding: 0;
+                                // Search bar
+                                StyledInput {
+                                    placeholder-text: "Search by label or hostname...";
+                                    text <=> root.host-search;
+                                    edited(s) => { root.host-search-changed(s); }
+                                }
+                                ScrollView {
+                                    min-height: 300px;
+                                    VerticalBox {
+                                        spacing: 2px;
+                                        padding: 0;
+                                        for host[i] in root.hosts: host-row := Rectangle {
+                                            height: 62px;
+                                            background: host-ta.has-hover ? #f0f7ff
+                                                : mod(i, 2) == 0 ? #fafafa : white;
+                                            border-radius: 6px;
+                                            animate background { duration: 60ms; }
+                                            host-ta := TouchArea {
+                                                clicked => { root.open-host(host.id); }
+                                            }
+                                            HorizontalBox {
+                                                padding-left: 16px;
+                                                padding-right: 12px;
+                                                spacing: 10px;
+                                                VerticalBox {
+                                                    horizontal-stretch: 1;
+                                                    spacing: 4px;
+                                                    padding: 0;
+                                                    Text {
+                                                        text: (host.pinned ? "* " : "") + host.label;
+                                                        font-size: 14px;
+                                                        font-weight: 600;
+                                                        color: #0f172a;
+                                                    }
+                                                    Text {
+                                                        text: host.username + "@" + host.hostname + "   " + host.device_type;
+                                                        color: #64748b;
+                                                        font-size: 12px;
+                                                        overflow: elide;
+                                                    }
                                                 }
-                                            }
-                                            Button {
-                                                text: "Connect";
-                                                enabled: root.vpn-state != "Connected" || root.vpn-profile-name != prof.name;
-                                                clicked => { root.connect-profile(prof.id); }
-                                            }
-                                            Button {
-                                                text: "Delete";
-                                                clicked => { root.delete-profile(prof.id); }
+                                                if host.customer != "": StatusPill { label: host.customer; fill: #475569; }
+                                                GhostBtn {
+                                                    text: host.pinned ? "Unpin" : "Pin";
+                                                    clicked => { root.toggle-host-pin(host.id); }
+                                                }
+                                                GhostBtn { text: "Open"; clicked => { root.open-host(host.id); } }
+                                                GhostBtn { text: "Delete"; clicked => { root.delete-host(host.id); } }
                                             }
                                         }
                                     }
@@ -880,59 +987,312 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.current-view == 4: settings-view := Rectangle {
+                // ── VPN ──────────────────────────────────────────────
+                if root.current-view == 3: Rectangle {
                     VerticalBox {
                         padding: 0;
-                        spacing: 16px;
-                        Text { text: "Settings"; font-size: 22px; font-weight: 600; color: #1d2733; }
+                        spacing: 20px;
+                        Text { text: "VPN Profiles"; font-size: 24px; font-weight: 700; color: #0f172a; }
 
+                        // Active tunnel bar
                         Rectangle {
                             background: white;
-                            border-radius: 8px;
+                            border-radius: 10px;
                             border-color: #e2e8f0;
                             border-width: 1px;
-                            VerticalBox {
+                            HorizontalBox {
                                 padding: 16px;
-                                spacing: 8px;
-                                Text { text: "Daemon"; font-size: 14px; font-weight: 600; color: #1d2733; }
-                                HorizontalBox {
-                                    Text { text: "Service status:"; color: #64748b; min-width: 140px; }
-                                    StatusPill {
-                                        label: root.daemon-connected ? "Online" : "Offline";
-                                        fill: root.daemon-connected ? #16a34a : #ef4444;
-                                    }
+                                spacing: 12px;
+                                StatusPill {
+                                    label: root.vpn-state;
+                                    fill: root.vpn-state == "Connected" ? #16a34a
+                                        : root.vpn-state == "Connecting" ? #d97706
+                                        : #475569;
                                 }
-                                HorizontalBox {
-                                    Text { text: "Pipe address:"; color: #64748b; min-width: 140px; }
-                                    Text { text: "\\\\.\\pipe\\supermgrd"; color: #1d2733; font-size: 13px; }
+                                Text {
+                                    text: root.vpn-profile-name != "" ? root.vpn-profile-name : "No active tunnel";
+                                    color: #0f172a;
+                                    font-size: 14px;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
                                 }
-                                HorizontalBox {
-                                    Text { text: "Data directory:"; color: #64748b; min-width: 140px; }
-                                    Text { text: root.data-root; color: #1d2733; font-size: 13px; overflow: elide; }
+                                if root.vpn-state == "Connected": GhostBtn {
+                                    text: "Disconnect";
+                                    clicked => { root.disconnect-vpn(); }
                                 }
                             }
                         }
 
+                        // Import picker — tab bar + single expandable form
                         Rectangle {
                             background: white;
-                            border-radius: 8px;
+                            border-radius: 10px;
                             border-color: #e2e8f0;
                             border-width: 1px;
+
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 8px;
-                                Text { text: "About"; font-size: 14px; font-weight: 600; color: #1d2733; }
+                                padding: 0;
+                                spacing: 0;
+
+                                // Tab bar
                                 HorizontalBox {
-                                    Text { text: "Version:"; color: #64748b; min-width: 140px; }
-                                    Text { text: root.app-version; color: #1d2733; }
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 12px;
+                                    padding-bottom: 0px;
+                                    spacing: 8px;
+
+                                    Text {
+                                        text: "Import:";
+                                        color: #6b7280;
+                                        font-size: 12px;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                    }
+
+                                    for tab-info[idx] in [
+                                        { label: "IKEv2 (FortiGate)", id: 1 },
+                                        { label: "WireGuard", id: 2 },
+                                        { label: "SSL VPN", id: 3 },
+                                    ]: tab-btn := TouchArea {
+                                        width: tab-lbl.preferred-width + 24px;
+                                        height: 34px;
+                                        clicked => {
+                                            // Toggle: clicking active tab collapses it
+                                            root.vpn-import-tab = (root.vpn-import-tab == tab-info.id)
+                                                ? 0 : tab-info.id;
+                                        }
+                                        Rectangle {
+                                            background: root.vpn-import-tab == tab-info.id ? #eff6ff : transparent;
+                                            border-radius: 6px;
+                                            border-color: root.vpn-import-tab == tab-info.id ? #3b82f6 : (tab-btn.has-hover ? #cbd5e1 : transparent);
+                                            border-width: 1.5px;
+                                            animate background { duration: 80ms; }
+                                            animate border-color { duration: 80ms; }
+                                            tab-lbl := Text {
+                                                x: 12px;
+                                                y: (parent.height - self.preferred-height) / 2;
+                                                text: tab-info.label;
+                                                color: root.vpn-import-tab == tab-info.id ? #1d4ed8 : #374151;
+                                                font-size: 12px;
+                                                font-weight: root.vpn-import-tab == tab-info.id ? 600 : 500;
+                                            }
+                                        }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+
+                                // IKEv2 form
+                                if root.vpn-import-tab == 1: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    HorizontalBox {
+                                        spacing: 16px;
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { placeholder-text: "client-fortigate"; text <=> root.fg-import-name; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Gateway host"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { placeholder-text: "vpn.example.com"; text <=> root.fg-import-host; }
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        spacing: 16px;
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Username"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { text <=> root.fg-import-username; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Password"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { input-type: InputType.password; text <=> root.fg-import-password; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Group PSK"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { input-type: InputType.password; placeholder-text: "IKE shared secret"; text <=> root.fg-import-psk; }
+                                        }
+                                    }
+                                    HorizontalBox {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        PrimaryBtn {
+                                            text: "Import IKEv2 profile";
+                                            clicked => {
+                                                root.import-fortigate(root.fg-import-name, root.fg-import-host,
+                                                    root.fg-import-username, root.fg-import-password, root.fg-import-psk);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // WireGuard form
+                                if root.vpn-import-tab == 2: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    VerticalBox { spacing: 6px; padding: 0;
+                                        Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { placeholder-text: "office-vpn"; text <=> root.wg-import-name; }
+                                    }
+                                    Text { text: "Paste .conf contents"; color: #374151; font-size: 12px; font-weight: 600; }
+                                    TextEdit {
+                                        min-height: 140px;
+                                        text <=> root.wg-import-text;
+                                        placeholder-text: "[Interface]\nPrivateKey = ...\n\n[Peer]\n...";
+                                    }
+                                    HorizontalBox {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        PrimaryBtn {
+                                            text: "Import WireGuard";
+                                            clicked => { root.import-wireguard(root.wg-import-name, root.wg-import-text); }
+                                        }
+                                    }
+                                }
+
+                                // SSL VPN form
+                                if root.vpn-import-tab == 3: VerticalBox {
+                                    padding-left: 16px;
+                                    padding-right: 16px;
+                                    padding-top: 14px;
+                                    padding-bottom: 16px;
+                                    spacing: 12px;
+                                    VerticalBox { spacing: 6px; padding: 0;
+                                        Text { text: "Profile name"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { placeholder-text: "client-fortigate-ssl"; text <=> root.fc-import-name; }
+                                    }
+                                    HorizontalBox {
+                                        spacing: 12px;
+                                        VerticalBox { spacing: 6px; padding: 0; horizontal-stretch: 1;
+                                            Text { text: "Host"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput { placeholder-text: "vpn.example.com"; text <=> root.fc-import-host; }
+                                        }
+                                        VerticalBox { spacing: 6px; padding: 0; min-width: 80px;
+                                            Text { text: "Port"; color: #374151; font-size: 12px; font-weight: 600; }
+                                            StyledInput {
+                                                text: root.fc-import-port;
+                                                edited(s) => { root.fc-import-port = s.to-float(); }
+                                            }
+                                        }
+                                    }
+                                    VerticalBox { spacing: 6px; padding: 0;
+                                        Text { text: "Username"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { text <=> root.fc-import-username; }
+                                    }
+                                    VerticalBox { spacing: 6px; padding: 0;
+                                        Text { text: "Password"; color: #374151; font-size: 12px; font-weight: 600; }
+                                        StyledInput { input-type: InputType.password; text <=> root.fc-import-password; }
+                                    }
+                                    HorizontalBox {
+                                        Rectangle { horizontal-stretch: 1; }
+                                        PrimaryBtn {
+                                            text: "Import SSL VPN";
+                                            clicked => {
+                                                root.import-forticlient(root.fc-import-name, root.fc-import-host,
+                                                    root.fc-import-port, root.fc-import-username, root.fc-import-password);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Collapsed state: show nothing extra — just the tab bar above
+                                if root.vpn-import-tab == 0: Rectangle { height: 12px; }
+                            }
+                        }
+
+                        // Profiles list
+                        Card {
+                            title: "Profiles (" + root.profiles.length + ")";
+                            ScrollView {
+                                min-height: 220px;
+                                VerticalBox {
+                                    spacing: 2px;
+                                    padding: 0;
+                                    for prof[i] in root.profiles: Rectangle {
+                                        height: 62px;
+                                        background: mod(i, 2) == 0 ? #fafafa : white;
+                                        border-radius: 6px;
+                                        HorizontalBox {
+                                            padding-left: 16px;
+                                            padding-right: 12px;
+                                            spacing: 12px;
+                                            VerticalBox {
+                                                horizontal-stretch: 1;
+                                                spacing: 4px;
+                                                padding: 0;
+                                                Text { text: prof.name; font-size: 14px; font-weight: 600; color: #0f172a; }
+                                                Text {
+                                                    text: prof.backend + (prof.host != "" ? "   " + prof.host : "");
+                                                    color: #64748b;
+                                                    font-size: 12px;
+                                                    overflow: elide;
+                                                }
+                                            }
+                                            PrimaryBtn {
+                                                text: "Connect";
+                                                enabled: root.vpn-state != "Connected";
+                                                clicked => { root.connect-profile(prof.id); }
+                                            }
+                                            GhostBtn { text: "Delete"; clicked => { root.delete-profile(prof.id); } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Settings ─────────────────────────────────────────
+                if root.current-view == 4: Rectangle {
+                    VerticalBox {
+                        padding: 0;
+                        spacing: 20px;
+                        Text { text: "Settings"; font-size: 24px; font-weight: 700; color: #0f172a; }
+
+                        Card {
+                            title: "Daemon";
+                            VerticalBox {
+                                spacing: 12px;
+                                padding: 0;
+                                HorizontalBox {
+                                    Text { text: "Service status"; color: #374151; font-size: 13px; min-width: 160px; vertical-alignment: center; }
+                                    StatusPill {
+                                        label: root.daemon-connected ? "Online" : "Offline";
+                                        fill: root.daemon-connected ? #16a34a : #ef4444;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Repository:"; color: #64748b; min-width: 140px; }
-                                    Text { text: "github.com/franzjeger/SuperManager"; color: #1d2733; }
+                                    Text { text: "Pipe"; color: #374151; font-size: 13px; min-width: 160px; vertical-alignment: center; }
+                                    Text { text: "\\\\.\\pipe\\supermgrd"; color: #0f172a; font-size: 13px; }
                                 }
                                 HorizontalBox {
-                                    Text { text: "License:"; color: #64748b; min-width: 140px; }
-                                    Text { text: "GPL-3.0-or-later"; color: #1d2733; }
+                                    Text { text: "Data directory"; color: #374151; font-size: 13px; min-width: 160px; vertical-alignment: center; }
+                                    Text { text: root.data-root; color: #0f172a; font-size: 13px; overflow: elide; }
+                                }
+                            }
+                        }
+
+                        Card {
+                            title: "About";
+                            VerticalBox {
+                                spacing: 12px;
+                                padding: 0;
+                                HorizontalBox {
+                                    Text { text: "Version"; color: #374151; font-size: 13px; min-width: 160px; }
+                                    Text { text: root.app-version; color: #0f172a; font-size: 13px; font-weight: 600; }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Repository"; color: #374151; font-size: 13px; min-width: 160px; }
+                                    Text { text: "github.com/franzjeger/SuperManager"; color: #0f172a; font-size: 13px; }
+                                }
+                                HorizontalBox {
+                                    Text { text: "License"; color: #374151; font-size: 13px; min-width: 160px; }
+                                    Text { text: "GPL-3.0-or-later"; color: #0f172a; font-size: 13px; }
                                 }
                             }
                         }
@@ -941,158 +1301,133 @@ export component AppWindow inherits Window {
                     }
                 }
 
-                if root.current-view == 5: host-detail-view := Rectangle {
+                // ── Host Detail ───────────────────────────────────────
+                if root.current-view == 5: Rectangle {
                     VerticalBox {
                         padding: 0;
-                        spacing: 16px;
+                        spacing: 20px;
 
                         HorizontalBox {
-                            Button {
-                                text: "← Back to hosts";
-                                clicked => { root.close-host-detail(); }
-                            }
+                            spacing: 12px;
+                            GhostBtn { text: "Back to hosts"; clicked => { root.close-host-detail(); } }
                             Text {
                                 text: root.selected-host.label != "" ? root.selected-host.label : "(host)";
-                                font-size: 22px;
-                                font-weight: 600;
-                                color: #1d2733;
+                                font-size: 24px;
+                                font-weight: 700;
+                                color: #0f172a;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
                             }
                             if root.selected-host.pinned: StatusPill { label: "Pinned"; fill: #f59e0b; }
-                            StatusPill {
-                                label: root.selected-host.device_type;
-                                fill: #475569;
-                            }
+                            StatusPill { label: root.selected-host.device_type; fill: #475569; }
                         }
 
-                        // Metadata card
-                        Rectangle {
-                            background: white;
-                            border-radius: 8px;
-                            border-color: #e2e8f0;
-                            border-width: 1px;
+                        // Metadata
+                        Card {
+                            title: "Connection details";
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 6px;
-                                Text { text: "Connection"; font-size: 12px; color: #64748b; }
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
-                                    Text { text: "SSH target:"; color: #64748b; min-width: 130px; }
+                                    Text { text: "SSH target"; color: #374151; font-size: 13px; min-width: 140px; }
                                     Text {
                                         text: root.selected-host.username + "@" + root.selected-host.hostname + ":" + root.selected-host.port;
-                                        color: #1d2733;
+                                        color: #0f172a;
                                         font-size: 13px;
+                                        font-weight: 500;
                                     }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Auth method:"; color: #64748b; min-width: 130px; }
-                                    Text { text: root.selected-host.auth_method; color: #1d2733; font-size: 13px; }
+                                    Text { text: "Auth method"; color: #374151; font-size: 13px; min-width: 140px; }
+                                    Text { text: root.selected-host.auth_method; color: #0f172a; font-size: 13px; }
                                 }
                                 if root.selected-host.group != "": HorizontalBox {
-                                    Text { text: "Group:"; color: #64748b; min-width: 130px; }
-                                    Text { text: root.selected-host.group; color: #1d2733; font-size: 13px; }
-                                }
-                                if root.selected-host.customer != "": HorizontalBox {
-                                    Text { text: "Customer:"; color: #64748b; min-width: 130px; }
-                                    Text { text: root.selected-host.customer; color: #1d2733; font-size: 13px; }
+                                    Text { text: "Group"; color: #374151; font-size: 13px; min-width: 140px; }
+                                    Text { text: root.selected-host.group; color: #0f172a; font-size: 13px; }
                                 }
                                 if root.selected-host.created_at != "": HorizontalBox {
-                                    Text { text: "Added:"; color: #64748b; min-width: 130px; }
-                                    Text { text: root.selected-host.created_at; color: #1d2733; font-size: 13px; }
+                                    Text { text: "Added"; color: #374151; font-size: 13px; min-width: 140px; }
+                                    Text { text: root.selected-host.created_at; color: #0f172a; font-size: 13px; }
                                 }
                             }
                         }
 
-                        // Test connection
-                        Rectangle {
-                            background: white;
-                            border-radius: 8px;
-                            border-color: #e2e8f0;
-                            border-width: 1px;
+                        // Connectivity
+                        Card {
+                            title: "Connectivity";
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 8px;
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
-                                    Text { text: "Connectivity"; font-size: 14px; font-weight: 600; color: #1d2733; horizontal-stretch: 1; }
-                                    Button {
-                                        text: "Test connection";
-                                        clicked => { root.test-host-connection(root.selected-host.id); }
+                                    GhostBtn { text: "Test connection"; clicked => { root.test-host-connection(root.selected-host.id); } }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                if root.host-test-result != "": Rectangle {
+                                    background: #f8fafc;
+                                    border-radius: 6px;
+                                    border-color: #e2e8f0;
+                                    border-width: 1px;
+                                    HorizontalBox {
+                                        padding: 12px;
+                                        Text { text: root.host-test-result; color: #334155; font-size: 13px; wrap: word-wrap; }
                                     }
                                 }
-                                if root.host-test-result != "": Text {
-                                    text: root.host-test-result;
-                                    color: #475569;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
                             }
                         }
 
-                        // SSH execute
-                        Rectangle {
-                            background: white;
-                            border-radius: 8px;
-                            border-color: #e2e8f0;
-                            border-width: 1px;
+                        // SSH command runner
+                        Card {
+                            title: "Run SSH command";
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 8px;
-                                Text { text: "Run command via SSH"; font-size: 14px; font-weight: 600; color: #1d2733; }
+                                spacing: 10px;
+                                padding: 0;
                                 HorizontalBox {
-                                    LineEdit {
+                                    spacing: 10px;
+                                    StyledInput {
                                         placeholder-text: "uname -a";
                                         text <=> root.host-cmd;
                                         enabled: !root.host-cmd-running;
+                                        horizontal-stretch: 1;
                                     }
-                                    Button {
-                                        text: root.host-cmd-running ? "Running…" : "Run";
-                                        primary: true;
+                                    PrimaryBtn {
+                                        text: root.host-cmd-running ? "Running..." : "Run";
                                         enabled: !root.host-cmd-running && root.host-cmd != "";
                                         clicked => { root.ssh-execute(root.selected-host.id, root.host-cmd); }
                                     }
                                 }
-                                if root.host-cmd-stdout != "" || root.host-cmd-stderr != "" || root.host-cmd-running: VerticalBox {
-                                    spacing: 4px;
+                                if root.host-cmd-stdout != "" || root.host-cmd-stderr != "": VerticalBox {
+                                    spacing: 6px;
                                     padding: 0;
                                     Text {
                                         text: "Exit code: " + root.host-cmd-exit-code;
                                         color: root.host-cmd-exit-code == 0 ? #166534 : #b91c1c;
                                         font-size: 12px;
+                                        font-weight: 600;
                                     }
                                     if root.host-cmd-stdout != "": Rectangle {
                                         background: #0f172a;
-                                        border-radius: 4px;
+                                        border-radius: 6px;
                                         VerticalBox {
-                                            padding: 8px;
-                                            Text {
-                                                text: "stdout";
-                                                color: #94a3b8;
-                                                font-size: 10px;
-                                            }
+                                            padding: 12px;
+                                            Text { text: "stdout"; color: #64748b; font-size: 11px; font-weight: 600; }
                                             Text {
                                                 text: root.host-cmd-stdout;
                                                 color: #e2e8f0;
                                                 font-size: 12px;
-                                                font-family: "Consolas, monospace";
                                                 wrap: word-wrap;
                                             }
                                         }
                                     }
                                     if root.host-cmd-stderr != "": Rectangle {
-                                        background: #450a0a;
-                                        border-radius: 4px;
+                                        background: #3b0000;
+                                        border-radius: 6px;
                                         VerticalBox {
-                                            padding: 8px;
-                                            Text {
-                                                text: "stderr";
-                                                color: #fca5a5;
-                                                font-size: 10px;
-                                            }
+                                            padding: 12px;
+                                            Text { text: "stderr"; color: #fca5a5; font-size: 11px; font-weight: 600; }
                                             Text {
                                                 text: root.host-cmd-stderr;
                                                 color: #fecaca;
                                                 font-size: 12px;
-                                                font-family: "Consolas, monospace";
                                                 wrap: word-wrap;
                                             }
                                         }
@@ -1102,23 +1437,20 @@ export component AppWindow inherits Window {
                         }
 
                         // Credentials
-                        Rectangle {
-                            background: white;
-                            border-radius: 8px;
-                            border-color: #e2e8f0;
-                            border-width: 1px;
+                        Card {
+                            title: "Credentials";
                             VerticalBox {
-                                padding: 16px;
-                                spacing: 8px;
-                                Text { text: "Credentials"; font-size: 14px; font-weight: 600; color: #1d2733; }
+                                spacing: 16px;
+                                padding: 0;
                                 HorizontalBox {
-                                    Text { text: "Set password:"; color: #64748b; min-width: 130px; vertical-alignment: center; }
-                                    LineEdit {
-                                        input-type: password;
+                                    spacing: 12px;
+                                    Text { text: "Password"; color: #374151; font-size: 13px; font-weight: 500; min-width: 130px; vertical-alignment: center; }
+                                    StyledInput {
+                                        input-type: InputType.password;
+                                        placeholder-text: "new password";
                                         text <=> root.host-new-password;
-                                        placeholder-text: "•••••••";
                                     }
-                                    Button {
+                                    PrimaryBtn {
                                         text: "Save";
                                         enabled: root.host-new-password != "";
                                         clicked => {
@@ -1128,26 +1460,24 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 HorizontalBox {
-                                    Text { text: "Set API token:"; color: #64748b; min-width: 130px; vertical-alignment: center; }
-                                    LineEdit {
-                                        input-type: password;
-                                        text <=> root.host-new-api-token;
+                                    spacing: 12px;
+                                    Text { text: "API token"; color: #374151; font-size: 13px; font-weight: 500; min-width: 130px; vertical-alignment: center; }
+                                    StyledInput {
+                                        input-type: InputType.password;
                                         placeholder-text: "bearer token";
+                                        text <=> root.host-new-api-token;
                                     }
-                                    Text { text: "Port"; vertical-alignment: center; color: #64748b; }
-                                    LineEdit {
+                                    Text { text: "Port"; color: #374151; font-size: 13px; vertical-alignment: center; }
+                                    StyledInput {
                                         text: root.host-new-api-port;
                                         edited(s) => { root.host-new-api-port = s.to-float(); }
+                                        min-width: 70px;
                                     }
-                                    Button {
+                                    PrimaryBtn {
                                         text: "Save";
                                         enabled: root.host-new-api-token != "";
                                         clicked => {
-                                            root.set-host-api-token(
-                                                root.selected-host.id,
-                                                root.host-new-api-token,
-                                                root.host-new-api-port
-                                            );
+                                            root.set-host-api-token(root.selected-host.id, root.host-new-api-token, root.host-new-api-port);
                                             root.host-new-api-token = "";
                                         }
                                     }

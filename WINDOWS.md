@@ -44,19 +44,33 @@ any host.
 
 ## Installing
 
-The recommended install is the **`SuperManager-Setup-<version>.exe`**
-Burn bootstrapper from the latest GitHub Release. It is a single
-executable that chain-installs everything SuperManager needs:
+The recommended install is **`SuperManager-Setup-<version>.exe`** from
+the latest GitHub Release. It is a single executable that installs
+everything SuperManager needs — **no additional applications required**.
 
-1. WireGuard for Windows (driver + DLL)
-2. OpenVPN Community Edition (openvpn.exe + TAP-Windows6 driver)
-3. SuperManager itself (daemon + GUI + MCP server + Windows Service registration)
+- **WireGuard**: `wireguard.dll` (WireGuardNT) + `wintun.dll` are
+  bundled directly inside `SuperManager.msi`. The WireGuardNT kernel
+  driver (`wireguard.sys`, signed by Microsoft WHQL) is embedded inside
+  `wireguard.dll` and self-installs on first adapter creation. No
+  WireGuard for Windows GUI, no system tray app, nothing in
+  Add/Remove Programs beyond SuperManager itself.
+- **OpenVPN**: `openvpn.exe` (CLI only, extracted from the upstream
+  OpenVPN Community MSI at build time) is bundled directly inside
+  `SuperManager.msi`. OpenVPN 2.6+ picks up `wintun.dll` from the
+  same `bin\` directory and uses it as its TUN driver — no
+  TAP-Windows6 driver, no OpenVPN GUI, no OpenVPN system service.
+- **SuperManager**: daemon + GUI + MCP server + Windows Service
+  registration, all in one MSI.
 
-You get one UAC prompt, one progress UI, no separate installs.
+You get **one UAC prompt**, and the only thing that appears in
+Add/Remove Programs is "SuperManager". WireGuard and OpenVPN are not
+installed as separate applications.
 
-If you already manage WireGuard and OpenVPN out-of-band (e.g. via
-Group Policy / Intune), grab the bare **`SuperManager-<version>.msi`**
-instead — same payload as the bundle minus the chained installers.
+To install the bare MSI directly (e.g. via Intune / SCCM):
+
+```powershell
+msiexec /i SuperManager-<version>.msi /qn
+```
 
 ### Manual service registration (developer flow)
 
@@ -108,8 +122,8 @@ To remove:
 ## Packaging the installer
 
 For end-user distribution, [`installer/wix/`](installer/wix/) contains a
-WiX v5 MSI specification plus a Burn bootstrapper that chains the
-WireGuardNT and OpenVPN Community installers as prerequisites.
+WiX v5 MSI specification. The Burn bootstrapper wraps only the
+SuperManager MSI — **no chained WireGuard or OpenVPN installers**.
 
 ```powershell
 # Prerequisite: .NET SDK 8+ and WiX Toolset v5.
@@ -118,24 +132,27 @@ WireGuardNT and OpenVPN Community installers as prerequisites.
 #   wix extension add WixToolset.Util.wixext/5.0.2 --global
 #   wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
 
-# Bare MSI (just SuperManager, assumes drivers already installed):
-.\installer\wix\build-msi.ps1
-
-# Burn bundle (auto-installs WireGuard + OpenVPN alongside SuperManager):
+# 1. Fetch + hash-verify the individual vendor binaries:
 .\scripts\windows\Get-VendorFiles.ps1
-.\installer\wix\build-msi.ps1 -Bundle
+
+# 2. Build the MSI (and optionally the Burn bundle wrapper):
+.\installer\wix\build-msi.ps1          # bare MSI
+.\installer\wix\build-msi.ps1 -Bundle  # Burn .exe wrapper around the MSI
 ```
 
-`Get-VendorFiles.ps1` downloads + hash-verifies the upstream MSIs
-listed in [`vendor/manifest.toml`](vendor/manifest.toml). The pinned
-hashes are the only thing the build trusts; a tampered CDN won't
-get past the manifest check. Re-pin the manifest when you bump
-either upstream installer.
+`Get-VendorFiles.ps1` downloads the upstream packages listed in
+[`vendor/manifest.toml`](vendor/manifest.toml), verifies their
+SHA-256 hashes, and **extracts only the specific files SuperManager
+needs** — it does not install WireGuard or OpenVPN system-wide.
+Re-pin the manifest when you bump upstream versions.
 
-The script runs `cargo build --release` (skip with `-SkipBuild`), then
-compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
+The build script runs `cargo build --release` (skip with `-SkipBuild`),
+then compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
 
-- Installs the three binaries under `%ProgramFiles%\SuperManager\bin\`.
+- Installs all binaries + vendor files under `%ProgramFiles%\SuperManager\bin\`:
+  `supermgrd-win.exe`, `supermgr-win.exe`, `supermgr-mcp.exe`,
+  `wireguard.dll`, `wintun.dll`, `openvpn.exe`, and optionally
+  `openfortivpn.exe`.
 - Registers `supermgrd-win.exe` as the `SuperManager` Windows Service
   (LocalSystem, Automatic start, Tcpip + Dhcp dependencies).
 - Drops the install/uninstall/smoke-test PowerShell scripts under `scripts\`.
@@ -150,18 +167,15 @@ compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
 `vendor/` is `.gitignore`d on purpose (license separation + version
 drift). The only thing committed there is
 [`vendor/manifest.toml`](vendor/manifest.toml), which pins the upstream
-URLs + SHA-256 hashes of the WireGuard and OpenVPN installers chained
-by the Burn bundle. `Get-VendorFiles.ps1` populates the directory on
-every CI run + lets you populate it locally before a release build.
+URLs + SHA-256 hashes. `Get-VendorFiles.ps1` populates the directory on
+every CI run and locally before a release build.
 
-| File                            | Source             | Effect when present |
-|---------------------------------|--------------------|--------------------|
-| `vendor/wireguard-installer.msi` | Pinned in `manifest.toml`, fetched by `Get-VendorFiles.ps1` | Chained into `SuperManager-Setup.exe` by `-Bundle`. Installs WireGuardNT driver + `wireguard.dll`. |
-| `vendor/openvpn-installer.msi`   | Pinned in `manifest.toml`, fetched by `Get-VendorFiles.ps1` | Chained into `SuperManager-Setup.exe` by `-Bundle`. Installs `openvpn.exe` + TAP-Windows6 driver. |
-| `vendor/openfortivpn.exe`        | User-supplied (no upstream Windows release exists) | Embedded directly into `SuperManager.msi`. Absent → FortiClient SSL VPN backend surfaces a typed `MissingDependency` error at connect time. |
-
-`-Bundle` additionally requires `installer/wix/license.rtf` (the
-bootstrapper's RTF license file shown on the welcome page).
+| File                     | Source                                      | Runtime role |
+|--------------------------|---------------------------------------------|--------------|
+| `vendor/wireguard.dll`   | Extracted from WireGuardNT zip by `Get-VendorFiles.ps1` | Loaded by `wireguard-nt` crate at connect time. Embeds and self-installs `wireguard.sys` (WHQL-signed kernel driver) on first adapter creation. |
+| `vendor/wintun.dll`      | Extracted from Wintun zip by `Get-VendorFiles.ps1` | Loaded by OpenVPN 2.6+ from its working directory. Embeds and self-installs `wintun.sys` on first use. |
+| `vendor/openvpn.exe`     | Extracted from upstream OpenVPN Community MSI by `Get-VendorFiles.ps1` | Spawned as a subprocess by the OpenVPN backend. CLI-only; no GUI, no system service, not installed system-wide. |
+| `vendor/openfortivpn.exe` | User-supplied (no upstream Windows binary exists) | Spawned by the FortiClient SSL VPN backend. Absent → `MissingDependency` error at connect time. Use FortiGate IKEv2 (Windows RAS, no extra software) for FortiGate connections. |
 
 ## Developer / console mode
 
@@ -183,7 +197,7 @@ Application event log.
 - **VPN profile store**: TOML files under `%PROGRAMDATA%\SuperManager\profiles\`, fully compatible with the on-disk format the Linux daemon writes. Save / list / list-summary / get / delete.
 - **WireGuard import**: parses `wg-quick` `.conf` files end-to-end, persists private key + PSKs to Credential Manager, writes the profile TOML.
 - **WireGuard connect/disconnect** via `wireguard-nt` (requires the official WireGuardNT driver installed). Creates the adapter, applies config, assigns IPs and `AllowedIPs` routes via `Adapter::set_default_route`, brings the interface up, pushes DNS via `Set-DnsClientServerAddress`, applies MTU override via `Set-NetIPInterface`. Disconnect drops the adapter (kernel removes the interface) and reverts DNS. Gracefully reports a typed error when `wireguard.dll` isn't present.
-- **OpenVPN connect/disconnect** via subprocess. Spawns `openvpn.exe` (located via `OPENVPN_EXE` env var, `%PATH%`, or the default install path), opens its management socket on `127.0.0.1`, authenticates with a random per-connection token, waits for `>STATE:...,CONNECTED,SUCCESS` or a `>FATAL:` event. Disconnect sends `signal SIGTERM` over the management socket and falls back to `Child::kill` after 5 s. Resolves auth-user-pass from Credential Manager and cleans up the credentials file on disconnect.
+- **OpenVPN connect/disconnect** via subprocess. Spawns `openvpn.exe` (probed from `%ProgramFiles%\SuperManager\bin\openvpn.exe` first — the bundled copy — then `OPENVPN_EXE` env var, then `%PATH%`, then the legacy OpenVPN install path). The subprocess working directory is set to `bin\` so OpenVPN 2.6+ finds `wintun.dll` automatically and uses it instead of TAP-Windows6 (no separate TUN driver installation needed). Opens its management socket on `127.0.0.1`, authenticates with a random per-connection token, waits for `>STATE:...,CONNECTED,SUCCESS` or a `>FATAL:` event. Disconnect sends `signal SIGTERM` over the management socket and falls back to `Child::kill` after 5 s. Resolves auth-user-pass from Credential Manager and cleans up the credentials file on disconnect.
 - **IKEv2 connect/disconnect** (FortiGate profiles + any standards-compliant IKEv2 endpoint) via Windows' built-in RAS stack: `Add-VpnConnection` to register, `rasdial` to dial, polled `(Get-VpnConnection ...).ConnectionStatus` until `Connected`. Disconnect via `rasdial /disconnect` + `Remove-VpnConnection`. PSK + EAP password resolved from Credential Manager.
 - **Azure Point-to-Site VPN** via Entra ID PKCE auth + generated `.ovpn`: token refresh from Credential Manager → fallback browser flow (PKCE code+challenge, loopback redirect listener) → access-token exchange → write `tls-auth.key` + `auth.txt` + `client.ovpn` to `%PROGRAMDATA%\SuperManager\runtime\azure-<id>\` → spawn `openvpn.exe` → wait for `Initialization Sequence Completed` → push DNS to the TAP/Wintun adapter via `Set-DnsClientServerAddress`. Refresh tokens are cached in Credential Manager so subsequent connects skip the browser flow.
 - **FortiGate IKEv2** via Windows RAS — `Add-VpnConnection -TunnelType Ikev2 -AuthenticationMethod Eap -L2tpPsk <psk>` then `rasdial <name> <user> <password>`, polled to `Connected`. PSK + EAP password resolved from Credential Manager. GUI import form on the VPN tab; RPC method `import_fortigate`. No third-party client required — Windows ships everything needed.
@@ -235,7 +249,7 @@ polishing and code-signing for distribution — see the roadmap below.
 9. ✅ ~~Sophos XG XML Configuration API (`sophos_xml_api`).~~
 10. ✅ ~~WiX MSI installer specification + `build-msi.ps1` build script.~~
 11. ✅ ~~FortiGate SSL VPN via `openfortivpn` (new `ForticlientSslvpn` profile type + `import_forticlient_sslvpn` RPC).~~
-12. ✅ ~~Burn bootstrapper that chain-installs the WireGuard for Windows + OpenVPN Community MSIs alongside `SuperManager.msi`. End users run one `SuperManager-Setup-<version>.exe` and get every dependency installed.~~
+12. ✅ ~~Bundle `wireguard.dll` (WireGuardNT), `wintun.dll`, and `openvpn.exe` directly inside `SuperManager.msi`. No separate WireGuard for Windows or OpenVPN application installs — end users run one `SuperManager-Setup-<version>.exe` and get a single entry in Add/Remove Programs.~~
 13. Code-signing (`signtool sign /fd SHA256` on the MSI + EXEs) is
     optional. The release workflow at `.github/workflows/release-windows.yml`
     has a commented-out signing block ready: drop a PFX cert into the
