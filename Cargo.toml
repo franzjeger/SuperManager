@@ -76,7 +76,7 @@ russh-sftp  = "2.0"
 # SSH key loading for russh authentication
 russh-keys  = "0.46"
 # Random number generation
-rand        = "0.8"
+rand        = "0.9"
 # Template engine for FortiGate / UniFi configuration generation.
 # Tera is Jinja-like, supports loops + conditionals + filters,
 # and is embedded so users can ship custom templates as plain
