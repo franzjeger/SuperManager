@@ -670,6 +670,15 @@ impl EngineServer {
         };
         drop(state);
 
+        // Whether this profile routes ALL traffic through the tunnel. Captured
+        // before `profile.config` is moved below. Used to gate the `DNS =` line:
+        // wg-quick on macOS applies `DNS =` by hijacking the ENTIRE system
+        // resolver via networksetup — correct for a full tunnel (avoids DNS
+        // leak), but wrong for a split tunnel (esp. a VPN on the same subnet),
+        // where it breaks local name resolution. So we only emit DNS for full
+        // tunnels.
+        let full_tunnel = profile.full_tunnel;
+
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
                 id,
@@ -714,13 +723,25 @@ impl EngineServer {
             let _ = writeln!(out, "Address = {addrs}");
         }
         if !wg.dns.is_empty() {
-            let dns = wg
-                .dns
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(out, "DNS = {dns}");
+            if full_tunnel {
+                let dns = wg
+                    .dns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "DNS = {dns}");
+            } else {
+                // Split tunnel: deliberately OMIT the DNS line. wg-quick would
+                // otherwise point the whole system resolver at the tunnel's DNS
+                // via networksetup, hijacking local name resolution (the
+                // reported "connects to a same-subnet VPN and it sets static
+                // DNS" bug). Split tunnels keep the existing system DNS.
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: split tunnel — omitting DNS line (no system resolver hijack)"
+                );
+            }
         }
         if let Some(mtu) = wg.mtu {
             let _ = writeln!(out, "MTU = {mtu}");
