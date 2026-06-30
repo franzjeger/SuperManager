@@ -705,7 +705,7 @@ pub(crate) fn full_tunnel_routes_present() -> bool {
 /// strongSwan tunnel exists right now. Used to keep route/config cleanup from
 /// stripping a tunnel that auto_reconnect (or always-on) re-established before
 /// a wake sweep ran, and to protect one IKEv2 profile while another disconnects.
-fn has_established_strongswan_sa() -> bool {
+pub(crate) fn has_established_strongswan_sa() -> bool {
     let Some(swanctl) = BREW_PATHS
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))

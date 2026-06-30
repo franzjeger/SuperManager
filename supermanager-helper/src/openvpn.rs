@@ -175,6 +175,14 @@ impl OpenVpn {
             openvpn.display()
         );
 
+        // Suppress the connectivity watchdog during the connect/handshake window.
+        // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
+        // no working egress while TLS/auth/route-push complete; without this the
+        // watchdog would count that as an outage and fire panic_reset, ripping
+        // the just-installed split-defaults out from under the connecting tunnel.
+        // The reconciler arms the same pause around its own route work.
+        crate::connectivity_watchdog::pause_for(45);
+
         // Pre-flight: refuse to launch if the .ovpn doesn't exist.
         // Otherwise the failure surfaces only via the log file the
         // child never finished writing.
@@ -1132,6 +1140,31 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
         }
     }
     out
+}
+
+/// True if ANY supermgr OpenVPN tunnel process is alive, REGARDLESS of whether
+/// it has reached `EVENT: CONNECTED` yet. `live_tunnel_interfaces()` only
+/// reports a tunnel once its log shows CONNECTED (so it can name the utun); but
+/// the exit-node ownership gate needs to recognize an Azure/OpenVPN full tunnel
+/// during its entire connect/handshake window — the moment `redirect-gateway`
+/// installs the shared `0/1`+`128/1` pair, before the CONNECTED line is
+/// parseable. This is the cheap liveness-only scan: a live pidfile is enough to
+/// say "a foreign full tunnel may own the split-default; do not steal it".
+pub fn has_live_tunnel() -> bool {
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return false };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        if fname.strip_prefix("supermgr-ovpn-").and_then(|s| s.strip_suffix(".pid")).is_none() {
+            continue;
+        }
+        if let Some(pid) = read_pid_file(&entry.path()) {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn log_path_for(safe: &str) -> PathBuf {

@@ -355,6 +355,32 @@ fn read_exemption_state() -> Vec<String> {
 /// follow installation with an internet probe. If the probe fails,
 /// call `remove_exit_routes` plus `tailscale set --exit-node=`
 /// before the user is stranded.
+///
+/// Returns the interface name if the IPv4 split-default `0.0.0.0/1` is currently
+/// owned by a LIVE foreign full tunnel (Azure/OpenVPN, WireGuard, or strongSwan
+/// IKEv2) on a utun OTHER than `ts_utun`. The exit-node machinery must never
+/// delete/steal `0/1` from such a tunnel — it installs the exact same
+/// `0/1`+`128/1` split-default pair, and stealing it black-holes that VPN's
+/// entire traffic (and all DNS), freezing the Mac.
+fn foreign_full_tunnel_owns_default(ts_utun: &str) -> Option<String> {
+    let iface = crate::strongswan::route_iface_family("0.0.0.0/1", "-inet")?;
+    if iface == ts_utun || !iface.starts_with("utun") {
+        return None; // ours, or not a tunnel at all
+    }
+    // A non-tailscale utun holds 0/1. Confirm a live foreign backend owns it:
+    // WG/OpenVPN already in the protected set, OR a live OpenVPN pid (catches
+    // Azure/OpenVPN during its connect window before the CONNECTED log line),
+    // OR a live strongSwan SA.
+    let foreign = crate::strongswan::foreign_tunnel_ifaces();
+    if foreign.contains(&iface)
+        || crate::openvpn::has_live_tunnel()
+        || crate::strongswan::has_established_strongswan_sa()
+    {
+        return Some(iface);
+    }
+    None
+}
+
 pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     tracing::info!("install_exit_routes: starting");
     let utun = detect_tailscale_utun()
@@ -414,6 +440,25 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
         }
     }
     write_exemption_state(&installed_exemptions);
+
+    // 2.5 OWNERSHIP GATE — never steal the shared split-default from a live
+    // FOREIGN full tunnel. Azure VPN (rendered as an OpenVPN redirect-gateway
+    // full tunnel), WireGuard, and strongSwan all install the EXACT same
+    // 0/1+128/1 pair. If one currently owns 0/1 and we blindly `route delete` it
+    // (step 3) to point the pair at the tailscale utun, that VPN's entire
+    // traffic — and on macOS all DNS with it — black-holes, and the machine
+    // appears frozen. The user explicitly brought that tunnel up; the exit node
+    // must stand down. (This is the bug that bricked the Mac when connecting the
+    // Azure VPN while a tailscale exit node was active: reconcile_exit_node kept
+    // calling this every 30s and stealing 0/1 from Azure.)
+    if let Some(owner) = foreign_full_tunnel_owns_default(&utun) {
+        rollback_exemptions(&installed_exemptions);
+        bail!(
+            "refusing to install exit-node routes: 0.0.0.0/1 is owned by a live \
+             foreign full tunnel ({owner}). Disconnect that VPN before using a \
+             tailscale exit node."
+        );
+    }
 
     // 3. Idempotent: nuke any existing split routes before adding.
     let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
@@ -1197,6 +1242,18 @@ pub fn reconcile_exit_node() {
     if crate::strongswan::route_iface_family("0.0.0.0/1", "-inet").as_deref()
         == Some(ts_utun.as_str())
     {
+        return;
+    }
+    // STAND DOWN if a live FOREIGN full tunnel (Azure/OpenVPN, WireGuard,
+    // strongSwan) currently owns 0/1. The user explicitly brought that tunnel
+    // up; re-asserting the exit-node routes would `route delete` 0/1 out from
+    // under it and black-hole the whole machine. (This is the Azure-VPN brick:
+    // without this gate the reconciler stole 0/1 from Azure every 30s.)
+    if let Some(owner) = foreign_full_tunnel_owns_default(&ts_utun) {
+        tracing::warn!(
+            iface = %owner,
+            "reconcile: 0/1 owned by a live foreign full tunnel — standing down (not stealing exit-node routes)"
+        );
         return;
     }
     tracing::info!(utun = %ts_utun, "reconcile: exit node desired but routes absent — checking reachability");
