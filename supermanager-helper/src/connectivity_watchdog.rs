@@ -124,6 +124,59 @@ pub fn spawn_watchdog() -> Result<()> {
 /// down regardless of this count.
 const EXIT_DEAD_PEER_MISSES: u32 = 6;
 
+/// Enforce the no-brick invariant: the shared full-tunnel split-defaults
+/// (`0/1`, `128/1`, and the IPv6 `::/1`+`8000::/1` pair) must NEVER linger on a
+/// utun that no live VPN backend owns. When a full-tunnel VPN — Azure/OpenVPN,
+/// WireGuard, strongSwan IKEv2, or the tailscale exit node — dies WITHOUT
+/// cleaning up (auth failure, crash, unclean disconnect, sleep/wake), its routes
+/// orphan on a dead utun and black-hole ALL IPv4 + DNS, freezing the whole
+/// machine; disconnecting the VPN or WiFi doesn't help because nothing removes
+/// the orphan and only a reboot clears it. This runs every 2s watchdog cycle and
+/// reaps any such orphaned route within ~2s, failing egress open to the local
+/// uplink. Ownership-gated via `tailscale::utun_has_live_owner` — it never
+/// touches a route a live tunnel still owns, so a working full tunnel is safe.
+fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
+    const NETS: [(&str, &str); 4] = [
+        ("0.0.0.0/1", "-inet"),
+        ("128.0.0.0/1", "-inet"),
+        ("::/1", "-inet6"),
+        ("8000::/1", "-inet6"),
+    ];
+    for (i, (net, fam)) in NETS.into_iter().enumerate() {
+        let orphaned = match crate::strongswan::route_iface_family(net, fam) {
+            // Only a utun-borne split-default can be a dead-tunnel orphan (a
+            // physical iface or the lo0 IPv6 leak-block is handled elsewhere),
+            // and only if no live VPN backend owns that utun.
+            Some(iface) => iface.starts_with("utun") && !crate::tailscale::utun_has_live_owner(&iface),
+            None => false,
+        };
+        if !orphaned {
+            streak[i] = 0;
+            continue;
+        }
+        // Debounce: require the orphan to persist across two ~2s cycles before
+        // reaping, so we never rip a full tunnel's `0/1` during the sub-second
+        // window where it's installed but the backend hasn't yet reported the SA
+        // as established (legit connect), only when it's genuinely dead.
+        streak[i] = streak[i].saturating_add(1);
+        if streak[i] < 2 {
+            continue;
+        }
+        streak[i] = 0;
+        tracing::error!(
+            net = %net,
+            "reaping ORPHANED full-tunnel route on a dead utun (no live VPN backend) — failing egress open to the local uplink"
+        );
+        let mut args: Vec<&str> = vec!["delete"];
+        if fam == "-inet6" {
+            args.push("-inet6");
+        }
+        args.push("-net");
+        args.push(net);
+        let _ = Command::new("/sbin/route").args(&args).output();
+    }
+}
+
 fn watchdog_loop() {
     let mut consecutive_failures: u32 = 0;
     // Track whether we've already escalated to panic_reset for
@@ -132,8 +185,17 @@ fn watchdog_loop() {
     // outage). Reset to false the first time a probe succeeds.
     let mut already_panic_reset = false;
 
+    // Per-net orphan streak for reap_orphaned_full_tunnel_routes (0/1,128/1,::/1,8000::/1).
+    let mut orphan_streak = [0u8; 4];
+
     loop {
         thread::sleep(Duration::from_secs(2));
+
+        // NO-BRICK INVARIANT, enforced every cycle and NEVER gated on the
+        // panic-reset state: reap any full-tunnel split-default that is orphaned
+        // on a dead utun. This is the backstop for "a VPN went down and bricked
+        // the whole client" — independent of which backend died or how.
+        reap_orphaned_full_tunnel_routes(&mut orphan_streak);
 
         if probe_internet() {
             if consecutive_failures > 0 {

@@ -362,6 +362,34 @@ fn read_exemption_state() -> Vec<String> {
 /// delete/steal `0/1` from such a tunnel — it installs the exact same
 /// `0/1`+`128/1` split-default pair, and stealing it black-holes that VPN's
 /// entire traffic (and all DNS), freezing the Mac.
+/// True if `iface` (a utun) is currently owned by a LIVE VPN backend: the
+/// tailscale exit node, a live WireGuard/OpenVPN tunnel, an OpenVPN/Azure
+/// session mid-connect, or a live strongSwan IKEv2 SA. The connectivity
+/// watchdog's orphaned-route reaper uses this to tell a working full tunnel's
+/// `0/1` (keep) from a DEAD tunnel's orphaned `0/1` that black-holed the machine
+/// (reap). Conservative on the ambiguous cases — it would rather keep a live
+/// tunnel's route than risk dropping a working VPN.
+pub(crate) fn utun_has_live_owner(iface: &str) -> bool {
+    if !iface.starts_with("utun") {
+        return false;
+    }
+    // tailscale exit node (the 100.64/10 utun) — only if an exit node is wanted
+    if crate::tailscale_state::load().desired && detect_tailscale_utun().as_deref() == Some(iface) {
+        return true;
+    }
+    // a live WireGuard / OpenVPN tunnel bound to this exact utun
+    if crate::strongswan::foreign_tunnel_ifaces().contains(iface) {
+        return true;
+    }
+    // OpenVPN/Azure mid-connect (utun not yet in the CONNECTED-parsed set) or any
+    // live strongSwan IKEv2 SA — process→utun isn't always mappable, so keep
+    // while any such backend is alive rather than risk reaping a working tunnel.
+    if crate::openvpn::has_live_tunnel() || crate::strongswan::has_established_strongswan_sa() {
+        return true;
+    }
+    false
+}
+
 fn foreign_full_tunnel_owns_default(ts_utun: &str) -> Option<String> {
     let iface = crate::strongswan::route_iface_family("0.0.0.0/1", "-inet")?;
     if iface == ts_utun || !iface.starts_with("utun") {
