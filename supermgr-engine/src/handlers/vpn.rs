@@ -548,7 +548,12 @@ impl EngineServer {
                 }
                 let mut path = dir;
                 path.push(format!("{}.ovpn", profile.id));
-                let body = crate::azure_vpn::render_azure_ovpn(&cfg, profile.full_tunnel);
+                // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
+        // the VNet routes at connect, and forcing redirect-gateway on an
+        // internal-only gateway black-holes all public internet + DNS (froze the
+        // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
+        // internal access while public traffic stays on the local uplink.
+        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
                 if let Err(e) = std::fs::write(&path, body.as_bytes()) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("write ovpn: {e}"));
                 }
@@ -621,7 +626,12 @@ impl EngineServer {
             }
         };
 
-        let body = crate::azure_vpn::render_azure_ovpn(&cfg, profile.full_tunnel);
+        // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
+        // the VNet routes at connect, and forcing redirect-gateway on an
+        // internal-only gateway black-holes all public internet + DNS (froze the
+        // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
+        // internal access while public traffic stays on the local uplink.
+        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
         tracing::info!(
             "vpn_render_azure_ovpn: profile={} body={} bytes ca_pem={} bytes secret_hex={} chars routes={} dns={} full_tunnel={}",
             profile.id,
