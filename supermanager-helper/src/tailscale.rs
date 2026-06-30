@@ -384,7 +384,10 @@ pub(crate) fn utun_has_live_owner(iface: &str) -> bool {
     // OpenVPN/Azure mid-connect (utun not yet in the CONNECTED-parsed set) or any
     // live strongSwan IKEv2 SA — process→utun isn't always mappable, so keep
     // while any such backend is alive rather than risk reaping a working tunnel.
-    if crate::openvpn::has_live_tunnel() || crate::strongswan::has_established_strongswan_sa() {
+    // The IKEv2 probe is the FAIL-SAFE variant: a transient swanctl hiccup
+    // resolves to "keep", so the reaper never leaks a live tunnel; it reaps an
+    // IKEv2 utun's 0/1 only when swanctl cleanly confirms no SA remains.
+    if crate::openvpn::has_live_tunnel() || crate::strongswan::ikev2_sa_present_or_unknown() {
         return true;
     }
     false

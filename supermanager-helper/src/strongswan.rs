@@ -720,6 +720,36 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
         .unwrap_or(false)
 }
 
+/// FAIL-SAFE liveness probe for the orphan-route reaper. Returns `true` if an IKE
+/// SA is ESTABLISHED, OR if the probe could not be completed (swanctl missing,
+/// spawn error, or a wedged charon making `--list-sas` hang). The reaper must
+/// NEVER rip a LIVE IKEv2 tunnel's split-default on a transient swanctl hiccup —
+/// that silently leaks all traffic cleartext — so "uncertain" resolves to KEEP.
+/// Returns `false` ONLY when swanctl succeeds and shows no established SA, i.e.
+/// the tunnel is genuinely gone. Bounded with a 3s timeout (a non-tokio std
+/// thread, so we use a worker thread + recv_timeout).
+pub(crate) fn ikev2_sa_present_or_unknown() -> bool {
+    let Some(swanctl) = BREW_PATHS
+        .iter()
+        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
+        .find(|p| p.exists())
+    else {
+        return true; // can't probe → a tunnel may be live → keep
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&swanctl).arg("--list-sas").output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        // Only a CLEAN run with no ESTABLISHED is a confident "gone".
+        Ok(Ok(o)) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED")
+        }
+        // non-zero exit, spawn error, or 3s timeout → uncertain → keep.
+        _ => true,
+    }
+}
+
 /// Delete one split-default route unless it belongs to a live tunnel.
 /// `family` is `-inet` or `-inet6`. Skips the delete when the route is owned by
 /// a live WireGuard/OpenVPN interface (`foreign`) or, when `live_sa` is set, by
