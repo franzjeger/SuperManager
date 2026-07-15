@@ -115,6 +115,12 @@ pub struct ConnectArgs {
     /// selector in the strongSwan child config.
     #[serde(default)]
     pub routes: Vec<String>,
+    /// Optional IKE identity to send as IDi (`local.id`). Empty means
+    /// omit it so strongSwan defaults IDi to the local IP (today's
+    /// behaviour). `#[serde(default)]` keeps replayed connect args from
+    /// before this field existed deserialising cleanly.
+    #[serde(default)]
+    pub local_id: String,
 }
 
 fn default_full_tunnel() -> bool {
@@ -507,15 +513,52 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
     // (it sent its server cert/PSK auth and started the EAP exchange).
     // With `local-1.auth = psk + local-2.auth = eap`, FortiGate stopped
     // responding entirely.
+    //
+    // Optional IKE identity (IDi): when Local ID is set we pin `local.id`
+    // so a gateway can route us to the right dial-up tunnel by peer-ID
+    // BEFORE auth (FortiGate multi-dial-up on one public IP). Empty → omit
+    // the line so strongSwan defaults IDi to the local IP (prior behaviour).
+    // Quoted + escaped so an arbitrary identity (FQDN, user@domain, keyid)
+    // parses; strongSwan auto-detects the ID type regardless of quoting.
+    let local_id_line = {
+        let trimmed = args.local_id.trim();
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("\n            id = \"{}\"", escape_swanctl(trimmed))
+        }
+    };
+    // Dead Peer Detection is what turns "firewall rebooted mid-tunnel" from a
+    // permanent brick into a self-heal. Without dpd_delay, charon never
+    // notices a peer that vanished without a clean IKE DELETE: the IKE_SA
+    // stays ESTABLISHED forever, the full-tunnel 0/1+128/1 routes stay pinned
+    // to a dead utun and black-hole all IPv4+DNS, and that phantom SA defeats
+    // every recovery layer (the orphan reaper trusts utun_has_live_owner;
+    // auto_reconnect trusts sw_connected). dpd_delay makes charon probe
+    // liveness after 10s idle; on timeout the child's dpd_action=restart drops
+    // the dead SA (routes go, egress fails open) and re-negotiates when the
+    // peer returns. Detection is ~100s: dpd_delay plus charon's DEFAULT
+    // retransmit schedule. Do NOT try to shorten that with per-connection
+    // retransmit_timeout/base/tries — those are NOT swanctl.conf connection
+    // options (they live under `charon` in strongswan.conf, daemon-wide);
+    // strongSwan 6.x rejects them with "unknown option" and discards the
+    // ENTIRE connection, so the tunnel fails to load at all. Keep this note in
+    // Rust source, NOT as a `#` line in the emitted config below — a config
+    // comment mentioning "retransmit" would both bloat every render and trip
+    // the guard test that asserts no retransmit_ token reaches swanctl.
     format!(
         r#"connections {{
     {id} {{
         version = 2
         remote_addrs = {host}
         vips = 0.0.0.0
+        # Dead Peer Detection: notice a vanished peer (e.g. firewall reboot)
+        # and self-heal instead of black-holing. Full rationale lives in
+        # build_swanctl_conf in the Rust source.
+        dpd_delay = 10s
         local {{
             auth = eap-mschapv2
-            eap_id = {username}
+            eap_id = {username}{local_id_line}
         }}
         remote {{
             auth = psk
@@ -525,6 +568,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
             {id} {{
                 local_ts = {local_ts}
                 remote_ts = {remote_ts}
+                dpd_action = restart
                 start_action = none
                 close_action = none
             }}
@@ -535,6 +579,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         id = id,
         host = args.host,
         username = args.username,
+        local_id_line = local_id_line,
         local_ts = local_ts,
         remote_ts = remote_ts,
     )
@@ -706,18 +751,36 @@ pub(crate) fn full_tunnel_routes_present() -> bool {
 /// stripping a tunnel that auto_reconnect (or always-on) re-established before
 /// a wake sweep ran, and to protect one IKEv2 profile while another disconnects.
 pub(crate) fn has_established_strongswan_sa() -> bool {
-    let Some(swanctl) = BREW_PATHS
+    // BOUNDED. A wedged charon can make `swanctl --list-sas` hang FOREVER; this
+    // is called from the RPC dispatch / cleanup paths, and an unbounded hang here
+    // blocks a tokio worker -> the helper stops answering RPCs -> the app's
+    // (blocking) socket reads pile up and freeze the whole UI. Cap it at 3s.
+    // Timeout / error => false (the prior fail direction: cleanup treats "can't
+    // confirm a live SA" as safe-to-clean). The route reaper uses the fail-SAFE
+    // variant below instead.
+    matches!(swanctl_list_sas_established(), Some(true))
+}
+
+/// Run `swanctl --list-sas` bounded by a 3s timeout, off the caller's thread (a
+/// worker thread + recv_timeout, since some callers run on a non-tokio std
+/// thread). `Some(true)` = an SA is ESTABLISHED, `Some(false)` = the probe ran
+/// cleanly with none, `None` = the probe could not complete (missing binary,
+/// spawn error, or a wedged charon that timed out).
+fn swanctl_list_sas_established() -> Option<bool> {
+    let swanctl = BREW_PATHS
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))
-        .find(|p| p.exists())
-    else {
-        return false;
-    };
-    std::process::Command::new(&swanctl)
-        .arg("--list-sas")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
-        .unwrap_or(false)
+        .find(|p| p.exists())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&swanctl).arg("--list-sas").output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(o)) if o.status.success() => {
+            Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
+        }
+        _ => None, // spawn error / non-zero exit / 3s timeout
+    }
 }
 
 /// FAIL-SAFE liveness probe for the orphan-route reaper. Returns `true` if an IKE
@@ -729,25 +792,10 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
 /// the tunnel is genuinely gone. Bounded with a 3s timeout (a non-tokio std
 /// thread, so we use a worker thread + recv_timeout).
 pub(crate) fn ikev2_sa_present_or_unknown() -> bool {
-    let Some(swanctl) = BREW_PATHS
-        .iter()
-        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
-        .find(|p| p.exists())
-    else {
-        return true; // can't probe → a tunnel may be live → keep
-    };
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(std::process::Command::new(&swanctl).arg("--list-sas").output());
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-        // Only a CLEAN run with no ESTABLISHED is a confident "gone".
-        Ok(Ok(o)) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED")
-        }
-        // non-zero exit, spawn error, or 3s timeout → uncertain → keep.
-        _ => true,
-    }
+    // Fail-SAFE: only a CLEAN "no SA" (Some(false)) lets the reaper reap; a
+    // missing binary / error / 3s timeout (None) resolves to KEEP so a transient
+    // swanctl hiccup can never unmask a live IKEv2 tunnel's route.
+    swanctl_list_sas_established() != Some(false)
 }
 
 /// Delete one split-default route unless it belongs to a live tunnel.
@@ -1054,6 +1102,7 @@ mod tests {
             shared_secret: psk.to_owned(),
             full_tunnel: true,
             routes: Vec::new(),
+            local_id: String::new(),
         }
     }
 
@@ -1085,6 +1134,66 @@ mod tests {
         // to look up; %any matched too loosely on macOS strongSwan 6.x.
         let conf = build_swanctl_conf(&args("vpn.example.com", "u", "p", "s"));
         assert!(conf.contains("id = vpn.example.com"));
+    }
+
+    #[test]
+    fn conf_sets_local_id_when_present_and_omits_when_blank() {
+        // Local ID lets a gateway route us to the right dial-up tunnel by
+        // peer-ID before auth. When set it must land as `local.id`; when
+        // blank it must be omitted entirely so strongSwan keeps defaulting
+        // IDi to the local IP (today's behaviour).
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.local_id = "  sybr-porsgrunn  ".to_owned(); // leading/trailing ws trimmed
+        let conf = build_swanctl_conf(&a);
+        // Prove NESTING, not mere presence: the quoted id must sit inside the
+        // `local { }` block — after `local {` and before `remote {` opens.
+        // A substring-anywhere check (the weaker version this replaces) would
+        // also pass if the id were mis-nested into remote{}, which charon
+        // would treat as remote.id (the peer's identity), NOT our IDi — the
+        // exact regression class this feature must prevent.
+        let local_at = conf.find("local {").expect("local block present");
+        let remote_at = conf.find("remote {").expect("remote block present");
+        let id_at = conf
+            .find("id = \"sybr-porsgrunn\"")
+            .expect("local.id must carry the trimmed identity");
+        assert!(
+            local_at < id_at && id_at < remote_at,
+            "local.id must be nested inside the local{{}} block, before remote{{}}:\n{conf}"
+        );
+
+        let blank = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
+        assert!(
+            !blank.contains("id = \""),
+            "blank Local ID must emit no quoted local.id line:\n{blank}"
+        );
+    }
+
+    #[test]
+    fn conf_enables_dead_peer_detection_with_restart() {
+        // Regression for the "restart a firewall and the VPN client wedges"
+        // brick: without DPD, charon never notices a vanished peer, the
+        // phantom-ESTABLISHED SA pins the full-tunnel routes to a dead utun,
+        // and every recovery layer (orphan reaper, auto_reconnect) trusts the
+        // stale SA state and does nothing. DPD + dpd_action=restart is the
+        // only thing that detects the dead peer and fails open. Pin all three
+        // so nobody strips them thinking they're noise.
+        let conf = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
+        assert!(
+            conf.contains("dpd_delay"),
+            "DPD must be enabled or a dead peer is never detected:\n{conf}"
+        );
+        assert!(
+            conf.contains("dpd_action = restart"),
+            "a detected-dead peer must tear down + rebuild, not linger:\n{conf}"
+        );
+        // retransmit_* are NOT valid swanctl.conf connection options in
+        // strongSwan 6.x. Emitting one makes charon discard the WHOLE
+        // connection ("unknown option: retransmit_timeout"), so the tunnel
+        // never loads. Guard against a well-meaning re-add to speed up DPD.
+        assert!(
+            !conf.contains("retransmit_"),
+            "retransmit_* are invalid swanctl.conf conn options and break load:\n{conf}"
+        );
     }
 
     #[test]
