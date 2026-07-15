@@ -22,13 +22,29 @@ struct VpnDetailView: View {
     /// Shown as a small caption below the status pill so the user knows
     /// WHY the connection is retrying without having to open the log viewer.
     @State private var reconnectReason: String? = nil
-    // Live tunnel metadata, populated from `ovpn_status` /
-    // `wg_status` once the tunnel is up. Empty when nothing's
-    // connected so the "Live tunnel" section can hide itself.
-    @State private var liveInterface: String = ""
-    @State private var liveVirtualIp: String = ""
-    @State private var liveVirtualGateway: String = ""
-    @State private var liveActiveRoutes: [String] = []
+    /// What the tunnel looks like right now, as the helper reports it. Empty
+    /// when nothing's connected, so the "Live tunnel" section hides itself.
+    ///
+    /// One struct rather than four loose `@State`s so that switching profiles
+    /// drops all of it in a single assignment. As four fields they had to be
+    /// listed by hand in `.task(id: profileId)`'s reset, and they never were:
+    /// select a connected Azure profile, then click an IKEv2 one, and Azure's
+    /// interface, assigned IP and pushed routes were still on screen —
+    /// attributed to a profile that doesn't even report them.
+    struct LiveTunnel: Equatable {
+        var interface = ""
+        var virtualIp = ""
+        var virtualGateway = ""
+        var routes: [String] = []
+
+        /// Nothing measured. Also the test for whether the section renders at
+        /// all — an empty tunnel has nothing to say.
+        var isEmpty: Bool {
+            interface.isEmpty && virtualIp.isEmpty && routes.isEmpty
+        }
+    }
+
+    @State private var live = LiveTunnel()
     @State private var helperReachable: Bool = false
     @State private var pollTask: Task<Void, Never>?
 
@@ -111,9 +127,16 @@ struct VpnDetailView: View {
             // selection instead of flashing "disconnected" until the
             // local poll catches up (or never, if its Task has died).
             vpnState = appState.vpnConnectionStates[profileId] ?? "disconnected"
+            // Everything below describes the profile we just navigated AWAY
+            // from. None of it survives the switch — the poll for the new
+            // profile refills what applies to it, and a backend that doesn't
+            // report a given field leaves it empty rather than inheriting the
+            // last profile's answer.
             stateDetail = ""
             actionError = nil
             strongswanMissing = false
+            reconnectReason = nil
+            live = LiveTunnel()
             await load()
         }
         .onAppear { startPolling() }
@@ -807,7 +830,7 @@ struct VpnDetailView: View {
         appState.vpnByteCounters[profileId] != nil
             || appState.vpnLastHandshakeUnix[profileId] != nil
             || appState.vpnPeerEndpoints[profileId] != nil
-            || !liveInterface.isEmpty
+            || !live.isEmpty
     }
 
     /// A profile's static configuration, per backend, as definition rows.
@@ -902,26 +925,23 @@ struct VpnDetailView: View {
 
     /// Render the live-tunnel block (interface, virtual IP,
     /// gateway, pushed routes). Hides itself when nothing's
-    /// connected — `liveInterface` empty implies the helper
+    /// connected — an empty `live` implies the helper
     /// hasn't reported any tunnel metadata yet.
     @ViewBuilder
     private func liveTunnelRows() -> some View {
-        if !liveInterface.isEmpty
-            || !liveVirtualIp.isEmpty
-            || !liveActiveRoutes.isEmpty
-        {
+        if !live.isEmpty {
             Divider().padding(.vertical, 4)
             Text("LIVE TUNNEL")
                 .font(.caption.smallCaps())
                 .foregroundStyle(.secondary)
                 .padding(.bottom, 2)
-            if !liveInterface.isEmpty {
-                row("Interface", liveInterface)
+            if !live.interface.isEmpty {
+                row("Interface", live.interface)
             }
-            if !liveVirtualIp.isEmpty {
-                let assigned = liveVirtualGateway.isEmpty
-                    ? liveVirtualIp
-                    : "\(liveVirtualIp) → \(liveVirtualGateway)"
+            if !live.virtualIp.isEmpty {
+                let assigned = live.virtualGateway.isEmpty
+                    ? live.virtualIp
+                    : "\(live.virtualIp) → \(live.virtualGateway)"
                 row("Assigned IP", assigned)
             }
             // Connection-uptime row, ticking every second via
@@ -939,13 +959,13 @@ struct VpnDetailView: View {
             // for every backend, including Azure now that the
             // helper returns `rx_bytes`/`tx_bytes` from netstat.
             // Don't duplicate it here.
-            if !liveActiveRoutes.isEmpty {
+            if !live.routes.isEmpty {
                 HStack(alignment: .firstTextBaseline) {
                     Text("Pushed routes")
                         .foregroundStyle(.secondary)
                         .frame(width: 120, alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(liveActiveRoutes, id: \.self) { cidr in
+                        ForEach(live.routes, id: \.self) { cidr in
                             Text(cidr)
                                 .font(.callout.monospaced())
                                 .textSelection(.enabled)
@@ -1277,16 +1297,15 @@ struct VpnDetailView: View {
     /// "Live tunnel" section disappears cleanly.
     private func applyLiveTunnelMetadata(from result: [String: Any], connected: Bool) {
         guard connected else {
-            liveInterface = ""
-            liveVirtualIp = ""
-            liveVirtualGateway = ""
-            liveActiveRoutes = []
+            live = LiveTunnel()
             return
         }
-        liveInterface = (result["interface"] as? String) ?? ""
-        liveVirtualIp = (result["virtual_ip"] as? String) ?? ""
-        liveVirtualGateway = (result["virtual_gateway"] as? String) ?? ""
-        liveActiveRoutes = (result["active_routes"] as? [String]) ?? []
+        live = LiveTunnel(
+            interface: (result["interface"] as? String) ?? "",
+            virtualIp: (result["virtual_ip"] as? String) ?? "",
+            virtualGateway: (result["virtual_gateway"] as? String) ?? "",
+            routes: (result["active_routes"] as? [String]) ?? []
+        )
     }
 
     // MARK: - Actions
