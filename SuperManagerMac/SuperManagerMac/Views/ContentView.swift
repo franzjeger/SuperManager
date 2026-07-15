@@ -112,106 +112,29 @@ struct ContentView: View {
                     GlobalCustomerPicker()
                 }
             }
-            // GLOBAL "Add device" menu — visible from every
-            // section, not just SSH. Discoverability fix: the
-            // old `+` only showed up on the SSH page, so a user
-            // looking at Recon / Compliance / etc. had no
-            // obvious way to add a device. This menu collects
-            // every device-add path the app supports.
+            // ONE "+", every section, same place, same meaning: make a new one
+            // of whatever you're looking at. Click adds the obvious thing;
+            // hold for the alternatives.
+            //
+            // This spot used to carry TWO plus buttons side by side — a global
+            // "Add device" menu (plus.circle.fill) and a section "+" (plus) —
+            // and in SSH they were the same action twice: the menu's first item
+            // and the button both opened Add Host. Meanwhile Provisioning and
+            // Security kept their create button in a footer, so the top-right
+            // "+" was present but wrong there: it added a *device*, never a
+            // customer or an engagement.
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button {
-                        showingAddHost = true
-                    } label: {
-                        Label("Type details manually…", systemImage: "keyboard")
-                    }
-                    .help("Open the standard 'Add SSH Host' form.")
-
-                    Button {
-                        appState.pendingWebCapture = WebCapture(
-                            hostname: "",
-                            label: "",
-                            deviceType: .linux,
-                            username: "root"
-                        )
-                    } label: {
-                        Label(
-                            "Paste from web or clipboard…",
-                            systemImage: "globe.americas.fill"
-                        )
-                    }
-                    .help(
-                        "Opens the Web Capture sheet. Auto-pulls "
-                        + "from clipboard, parses IPs / URLs / banners, "
-                        + "and lets you add as SSH host, append to "
-                        + "engagement scope, or kick off a network scan."
-                    )
-
-                    Button {
-                        appState.selectedSection = .recon
-                    } label: {
-                        Label(
-                            "Scan network for devices…",
-                            systemImage: "network"
-                        )
-                    }
-                    .help(
-                        "Opens the Recon section. The Network Scan tile "
-                        + "discovers hosts + open ports in a CIDR range."
-                    )
-
-                    Divider()
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            SuperManagerApp.webCaptureBookmarklet,
-                            forType: .string
-                        )
-                    } label: {
-                        Label(
-                            "Copy browser bookmarklet",
-                            systemImage: "bookmark.fill"
-                        )
-                    }
-                    .help(
-                        "Copies a JavaScript bookmarklet to the clipboard. "
-                        + "Paste it as the URL of a new bookmark in your "
-                        + "browser; clicking that bookmark on any vendor "
-                        + "admin page captures the device in one click."
-                    )
+                    sectionAddMenuItems
                 } label: {
-                    Label("Add device", systemImage: "plus.circle.fill")
+                    Image(systemName: "plus")
+                } primaryAction: {
+                    sectionPrimaryAdd()
                 }
                 .menuStyle(.borderlessButton)
-                .help("Add a device — type manually, paste, or scan.")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                if appState.selectedSection == .ssh {
-                    Button(action: {
-                        if sshTab == .keys { showingGenerateKey = true }
-                        else { showingAddHost = true }
-                    }) {
-                        Image(systemName: "plus")
-                    }
-                    .help(sshTab == .hosts ? "Add SSH host" : "Generate SSH key")
-                    .accessibilityLabel(sshTab == .hosts ? "Add SSH host" : "Generate SSH key")
-                    .keyboardShortcut("n", modifiers: .command)
-                } else if appState.selectedSection == .vpn {
-                    // Two ways to make a profile: hand-fill the IKEv2
-                    // form, or import a `.conf` / `.ovpn` from disk.
-                    // A pull-down menu keeps the toolbar compact while
-                    // making both paths discoverable.
-                    Menu {
-                        Button("New IKEv2 profile…") { showingAddVpn = true }
-                        Divider()
-                        Button("Import from file…") { showingImportVpn = true }
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("Add or import a VPN profile")
-                }
+                .help(sectionAddLabel)
+                .accessibilityLabel(sectionAddLabel)
+                .keyboardShortcut("n", modifiers: .command)
             }
             // "Disconnect all" — only renders when at least one
             // profile is currently flagged as up. Confirmation
@@ -337,6 +260,131 @@ struct ContentView: View {
         // Lock-state branching is handled at the root in `RootView` —
         // ContentView is only built when the app is unlocked, so we
         // don't need to think about the lock state in here.
+    }
+
+    // MARK: - Section add menu
+
+    /// What a plain click on "+" (and Cmd-N) creates. Every section has one
+    /// obvious answer — the menu carries the rest.
+    private func sectionPrimaryAdd() {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys: showingGenerateKey = true
+        case .vpn:                       showingAddVpn = true
+        case .provisioning:              appState.showingAddCustomer = true
+        case .security:                  appState.showingAddEngagement = true
+        default:                         showingAddHost = true
+        }
+    }
+
+    /// Names the primary action, so the tooltip and the VoiceOver label say
+    /// what the click will actually do rather than a generic "Add".
+    private var sectionAddLabel: String {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys: return "Generate SSH key"
+        case .vpn:                       return "Add VPN profile"
+        case .provisioning:              return "Add customer"
+        case .security:                  return "New engagement"
+        default:                         return "Add host"
+        }
+    }
+
+    @ViewBuilder
+    private var sectionAddMenuItems: some View {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys:
+            Button("Generate SSH key…") { showingGenerateKey = true }
+            Divider()
+            addDeviceMenu
+        case .vpn:
+            Button("New IKEv2 profile…") { showingAddVpn = true }
+            Button("Import from file…") { showingImportVpn = true }
+            Divider()
+            addDeviceMenu
+        case .provisioning:
+            Button("Add customer…") { appState.showingAddCustomer = true }
+            Divider()
+            addDeviceMenu
+        case .security:
+            Button("New engagement…") { appState.showingAddEngagement = true }
+            Divider()
+            addDeviceMenu
+        default:
+            // Fleet, SSH hosts, Compliance, Recon, Tailscale: the thing this
+            // section creates IS a device, so the paths sit at the top level
+            // rather than a level down under their own name.
+            addDeviceItems
+        }
+    }
+
+    /// Nested under its own name in sections that create something other than
+    /// a device, so capture-a-device stays reachable from everywhere. That
+    /// reach was the whole point of the old global menu and it survives here.
+    private var addDeviceMenu: some View {
+        Menu {
+            addDeviceItems
+        } label: {
+            Label("Add device", systemImage: "desktopcomputer")
+        }
+    }
+
+    /// The three ways a device gets into the app, plus the bookmarklet feeding
+    /// the second one.
+    @ViewBuilder
+    private var addDeviceItems: some View {
+        Button {
+            showingAddHost = true
+        } label: {
+            Label("Type details manually…", systemImage: "keyboard")
+        }
+        .help("Open the standard 'Add SSH Host' form.")
+
+        Button {
+            appState.pendingWebCapture = WebCapture(
+                hostname: "",
+                label: "",
+                deviceType: .linux,
+                username: "root"
+            )
+        } label: {
+            Label(
+                "Paste from web or clipboard…",
+                systemImage: "globe.americas.fill"
+            )
+        }
+        .help(
+            "Opens the Web Capture sheet. Auto-pulls "
+            + "from clipboard, parses IPs / URLs / banners, "
+            + "and lets you add as SSH host, append to "
+            + "engagement scope, or kick off a network scan."
+        )
+
+        Button {
+            appState.selectedSection = .recon
+        } label: {
+            Label("Scan network for devices…", systemImage: "network")
+        }
+        .help(
+            "Opens the Recon section. The Network Scan tile "
+            + "discovers hosts + open ports in a CIDR range."
+        )
+
+        Divider()
+
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                SuperManagerApp.webCaptureBookmarklet,
+                forType: .string
+            )
+        } label: {
+            Label("Copy browser bookmarklet", systemImage: "bookmark.fill")
+        }
+        .help(
+            "Copies a JavaScript bookmarklet to the clipboard. "
+            + "Paste it as the URL of a new bookmark in your "
+            + "browser; clicking that bookmark on any vendor "
+            + "admin page captures the device in one click."
+        )
     }
 
     // MARK: - Column 1: Section Sidebar

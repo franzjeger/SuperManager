@@ -85,6 +85,16 @@ class AppState {
     /// nil when the sheet dismisses.
     var pendingWebCapture: WebCapture?
 
+    /// "Add customer" / "New engagement" sheet triggers.
+    ///
+    /// These live here rather than in the list columns that present them
+    /// because two views now raise them: the column's own empty-state CTA, and
+    /// the toolbar "+" over in ContentView. Same reason `pendingWebCapture` is
+    /// here — a sheet asked for from one view and presented by another needs
+    /// state both can see. The columns still own the `.sheet` modifiers.
+    var showingAddCustomer = false
+    var showingAddEngagement = false
+
     /// Pre-seeded targets for the Recon → Network scan sheet.
     /// The WebCapture sheet's "Run network scan now" action
     /// sets this, then switches the section to `.recon`, so the

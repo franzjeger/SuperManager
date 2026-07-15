@@ -5,28 +5,31 @@ import SwiftUI
 /// open the render view in the detail column. Click a customer
 /// (no site selected) to see the customer-edit affordances.
 ///
-/// New-customer button at the bottom — keeping creation always
-/// reachable instead of stuffed in a toolbar menu, since the
-/// empty state needs an obvious next-action and the populated
-/// state benefits from quick-create.
+/// Creating a customer lives on the toolbar "+" with every other
+/// section's create action. This column used to keep its own button
+/// in a footer for the good reason that creation should always be
+/// reachable — but the toolbar "+" was already reachable and already
+/// there, doing something else, so the two together taught the
+/// operator that "+" means different things in different sections.
+/// The empty state keeps its own prominent CTA; that one earns its
+/// place by disappearing.
 struct ProvisioningListColumn: View {
     @Environment(AppState.self) private var appState
 
-    @State private var showingAddCustomer = false
     @State private var customerToEdit: Customer?
     @State private var showingDeleteConfirm = false
     @State private var customerPendingDelete: Customer?
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var appState = appState
+        return VStack(spacing: 0) {
             if appState.customers.isEmpty {
                 emptyState
             } else {
                 customerList
             }
-            footer
         }
-        .sheet(isPresented: $showingAddCustomer) {
+        .sheet(isPresented: $appState.showingAddCustomer) {
             CustomerEditSheet(customer: nil)
         }
         .sheet(item: $customerToEdit) { customer in
@@ -64,7 +67,7 @@ struct ProvisioningListColumn: View {
             Text("Customers group sites and supply the variables your provisioning templates reference (VLAN map, WAN type, contact info).")
         } actions: {
             Button {
-                showingAddCustomer = true
+                appState.showingAddCustomer = true
             } label: {
                 Label("Add customer…", systemImage: "plus")
             }
@@ -162,19 +165,4 @@ struct ProvisioningListColumn: View {
         .listStyle(.sidebar)
     }
 
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack {
-            Button {
-                showingAddCustomer = true
-            } label: {
-                Label("Add customer", systemImage: "plus")
-            }
-            .controlSize(.small)
-            Spacer()
-        }
-        .padding(8)
-        .background(.background.secondary)
-    }
 }
