@@ -421,28 +421,31 @@ struct ContentView: View {
                 HostDetailView(hostId: hostId)
             } else if let keyId = appState.selectedKeyId, sshTab == .keys {
                 KeyDetailView(keyId: keyId)
+            } else if sshTab == .keys {
+                // Distinct copy per tab: the old shared "Select a host or key"
+                // described the UI rather than the job, and said the same thing
+                // whichever tab you were on.
+                EmptyStateView(
+                    systemImage: "key",
+                    title: "Select a key",
+                    hint: "Manage the SSH keys used across the fleet and see which hosts trust each one."
+                )
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a host or key")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "terminal",
+                    title: "Select a host",
+                    hint: "Pick a host to open a session, review its details, or run a compliance scan."
+                )
             }
         case .vpn:
             if let profileId = appState.selectedProfileId {
                 VpnDetailView(profileId: profileId)
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "lock.shield")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a VPN profile")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "lock.shield",
+                    title: "Select a VPN profile",
+                    hint: "Pick a tunnel from the list to view its status, routing and credentials."
+                )
             }
         case .tailscale:
             // Detail view needs both the peer and the magic suffix
@@ -454,14 +457,11 @@ struct ContentView: View {
                 TailscaleDetailView(peer: peer,
                                     magicSuffix: status.magicDNSSuffix ?? "")
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "network")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a Tailnet peer")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "globe",
+                    title: "Select a Tailnet peer",
+                    hint: "Choose a machine on the tailnet to see its address, route it, or open a session."
+                )
             }
         case .compliance:
             // Gate on the SAME allowlist the list column uses
@@ -478,14 +478,15 @@ struct ContentView: View {
                }) {
                 ComplianceHostView(hostId: hostId)
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "checkmark.shield")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a compliance-capable host to view compliance")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The old single line tried to carry both the instruction and
+                // the caveat ("compliance-capable") and did neither well. The
+                // hint now explains WHY a host might not be listed, which is
+                // the actual question when your host isn't there.
+                EmptyStateView(
+                    systemImage: "checkmark.shield",
+                    title: "Select a host to scan",
+                    hint: "Pick a host from the list to run a CIS baseline and review its findings. Only FortiGate and Linux hosts can be scanned."
+                )
             }
         case .provisioning:
             ProvisioningView()

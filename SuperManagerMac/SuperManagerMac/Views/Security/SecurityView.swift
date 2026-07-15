@@ -32,14 +32,11 @@ struct SecurityView: View {
     }
 
     private var selectPrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select an engagement to begin")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "shield.lefthalf.filled.badge.checkmark",
+            title: "Select an engagement to begin",
+            hint: "An engagement scopes a customer's findings and holds the evidence from any scans you run against it."
+        )
     }
 
     @ViewBuilder

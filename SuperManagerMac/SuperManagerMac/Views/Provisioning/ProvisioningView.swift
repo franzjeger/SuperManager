@@ -139,25 +139,19 @@ struct ProvisioningView: View {
     // MARK: - Empty states
 
     private var selectCustomerPrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select a customer to begin")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "wand.and.stars",
+            title: "Select a customer to begin",
+            hint: "Expand a customer to see its sites, then pick a site to configure its VLANs and network layout."
+        )
     }
 
     private var selectSitePrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "mappin.and.ellipse")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select a site under \(customer?.displayName ?? "this customer")")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "mappin.and.ellipse",
+            title: "Select a site under \(customer?.displayName ?? "this customer")",
+            hint: "Each site holds its own VLANs and network layout. Pick one to review or push its configuration."
+        )
     }
 
     // MARK: - Header
