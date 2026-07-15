@@ -41,12 +41,37 @@ struct TailscaleHeaderView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
-                statePill
-                identityBlock
-                Spacer()
-                actionButtons
+            // The old header packed pill + tailnet + device + buttons into ONE
+            // HStack inside a ~210pt column, so everything truncated at once:
+            // "Connected" hyphen-wrapped to "Con-nected", the tailnet rendered
+            // as "fran....com" and Disconnect as "Dis...". Nothing here is
+            // long — the row was just asked to hold four things side by side in
+            // a sidebar. Each element now gets its own line and the full column
+            // width, and the primary action is a full-width button at the foot.
+            HStack(spacing: 8) {
+                statusPill
+                Spacer(minLength: 0)
+                logoutMenu
             }
+            Text(tailnetLabel)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(tailnetLabel)
+            Text(deviceLabel)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(deviceLabel)
+            Text(peerSummary)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            primaryAction
             if let err = appState.tailscaleActionError {
                 Text(err)
                     .font(.caption)
@@ -96,51 +121,50 @@ struct TailscaleHeaderView: View {
 
     // MARK: - Sub-views
 
-    /// Coloured pill showing BackendState. Tailscale's strings are
-    /// already user-readable so we render them verbatim instead of
-    /// translating into our own vocabulary — keeps us aligned with
-    /// what the Tailscale docs / admin console say.
-    private var statePill: some View {
+    /// BackendState rendered through the app-wide status vocabulary.
+    ///
+    /// Tailscale's own strings ("Running", "NeedsLogin") are user-readable, so
+    /// we keep them as the LABEL and map only the state/colour onto
+    /// `StatusStyle` — the operator still reads what the Tailscale docs and
+    /// admin console say, but the dot colour now means the same thing here as
+    /// it does on a VPN tunnel or an SSH host.
+    private var statusPill: some View {
         let state = appState.tailscaleStatus?.backendState ?? "NoState"
-        let (label, color) = pillStyle(for: state)
-        return Text(label)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(color.opacity(0.18), in: Capsule())
-            .foregroundStyle(color)
+        let (style, label) = statusStyle(for: state)
+        return StatusPill(status: style, label: label)
     }
 
-    private var identityBlock: some View {
-        // Tooltip on hover surfaces the full tailnet + device
-        // strings — the visible labels truncate (`franzje…ail.com`)
-        // because the column is narrow, so without this the
-        // operator can't tell which account is signed in.
-        VStack(alignment: .leading, spacing: 2) {
-            Text(tailnetLabel)
-                .font(.callout.weight(.semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Text(deviceLabel)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
+    /// How much of the tailnet is actually reachable.
+    ///
+    /// A peer's `online` flag is only meaningful while the tailnet is up: with
+    /// the daemon stopped every peer reads offline, and printing "0 of 8 peers
+    /// online" would claim we measured them when we didn't.
+    private var peerSummary: String {
+        guard let s = appState.tailscaleStatus, s.backendState == "Running" else {
+            return "Tailnet offline"
         }
-        .help("\(tailnetLabel)\n\(deviceLabel)")
+        let total = s.peers.count
+        let online = s.peers.filter(\.online).count
+        return "\(online) of \(total) peers online"
     }
 
-    /// Right-side buttons. The exact set depends on whether the
-    /// daemon is even installed/running, then on BackendState.
+    /// The one primary action for the current state, full-width at the foot of
+    /// the card. The exact action depends on whether the daemon is even
+    /// installed/running, then on BackendState.
+    ///
+    /// The kebab used to be rendered here beside the button and was therefore
+    /// missing in the states that had no button (NeedsLogin, NoState) — you
+    /// could not reach Settings while signed out. It now lives on the card's
+    /// top line, always available.
     @ViewBuilder
-    private var actionButtons: some View {
+    private var primaryAction: some View {
         let state = appState.tailscaleStatus?.backendState ?? "NoState"
         let daemonRunning = appState.tailscaledRunning ?? false
         let daemonInstalled = appState.tailscaledInstalled ?? false
         if working {
-            ProgressView().controlSize(.small)
+            ProgressView()
+                .controlSize(.small)
+                .frame(maxWidth: .infinity)
         } else if !daemonRunning && appState.tailscaleIsBundled {
             // Daemon missing or stopped. We bundled tailscaled, so
             // we can install/start it ourselves rather than tossing
@@ -150,12 +174,12 @@ struct TailscaleHeaderView: View {
             } label: {
                 Label(daemonInstalled ? "Start daemon" : "Install daemon",
                       systemImage: "arrow.down.app")
+                    .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .help(daemonInstalled
                   ? "Restart the bundled tailscaled LaunchDaemon."
                   : "Install the bundled tailscaled as a system LaunchDaemon. Requires admin privileges.")
-            logoutMenu
         } else {
             switch state {
             case "NeedsLogin":
@@ -163,6 +187,7 @@ struct TailscaleHeaderView: View {
                     runAction { await appState.tailscaleLogin() }
                 } label: {
                     Label("Sign in", systemImage: "person.crop.circle.badge.checkmark")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .help("Open the Tailscale login page in your browser to authenticate this Mac.")
@@ -171,19 +196,19 @@ struct TailscaleHeaderView: View {
                     runAction { await appState.tailscaleUp() }
                 } label: {
                     Label("Connect", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                logoutMenu
             case "Running", "Starting":
                 Button {
                     runAction { await appState.tailscaleDown() }
                 } label: {
                     Label("Disconnect", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
-                logoutMenu
             default:
-                // NoState / unknown — no buttons. The polling loop
+                // NoState / unknown — no action. The polling loop
                 // will resolve this within a couple of seconds; if
                 // it doesn't, the empty-state in TailscaleListView
                 // takes over.
@@ -464,14 +489,20 @@ struct TailscaleHeaderView: View {
         return "\(host) · \(ip)"
     }
 
-    private func pillStyle(for state: String) -> (String, Color) {
+    /// Map tailscaled's BackendState onto the shared status vocabulary, keeping
+    /// Tailscale's own wording as the label.
+    ///
+    /// `NeedsLogin` is `.warn`, not `.error`: nothing is broken, the tailnet is
+    /// simply waiting for you. `NoState` is `.unknown` — we haven't heard from
+    /// the daemon yet, which is not the same as "down".
+    private func statusStyle(for state: String) -> (StatusStyle, String) {
         switch state {
-        case "Running":    return ("Connected", .green)
-        case "Starting":   return ("Starting…", .blue)
-        case "Stopped":    return ("Disconnected", .gray)
-        case "NeedsLogin": return ("Sign-in required", .orange)
-        case "NoState":    return ("Loading…", .secondary)
-        default:           return (state, .secondary)
+        case "Running":    return (.online, "Connected")
+        case "Starting":   return (.pending, "Starting…")
+        case "Stopped":    return (.offline, "Disconnected")
+        case "NeedsLogin": return (.warn, "Sign-in required")
+        case "NoState":    return (.unknown, "Loading…")
+        default:           return (.unknown, state)
         }
     }
 
