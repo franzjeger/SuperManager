@@ -533,7 +533,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     match sw.connect(&args).await {
                         Ok(s) => {
                             let _ = auto_reconnect::refresh_args(
-                                &pid, "ikev2".to_string(), raw_args).await;
+                                &pid, "ikev2".to_string(), raw_args.clone()).await;
+                            // A manual full-tunnel connect enrols the profile for
+                            // route-only healing (no-op if it's already Always-on).
+                            // Split tunnels install no 0/1, so nothing to guard.
+                            if args.full_tunnel {
+                                let _ = auto_reconnect::guard_routes(
+                                    pid.clone(), "ikev2".to_string(), raw_args).await;
+                            }
                             Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                         }
                         Err(e) => Response::err(id, -32000, format!("connect failed: {e:#}")),
@@ -545,9 +552,15 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "vpn_disconnect" => match serde_json::from_value::<strongswan::DisconnectArgs>(req.params) {
             Ok(args) => {
+                let pid = args.profile_id.clone();
                 let mut sw = strongswan.lock().await;
                 match sw.disconnect(&args).await {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Ok(s) => {
+                        // A deliberate disconnect ends any route-guard intent for
+                        // this profile (leaves an explicit Always-on entry alone).
+                        let _ = auto_reconnect::unguard_routes(&pid).await;
+                        Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                    }
                     Err(e) => Response::err(id, -32000, format!("disconnect failed: {e:#}")),
                 }
             }
