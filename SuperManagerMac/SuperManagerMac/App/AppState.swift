@@ -319,6 +319,13 @@ class AppState {
         // of app start, not after the first 4 s sleep.
         Task { @MainActor in await pollAllVpnStates() }
         vpnStatusPollTask = Task { @MainActor in
+            // Tailscale rides this loop on its own slower cadence. It used to be
+            // polled only by TailscaleListView's `.task`, which SwiftUI cancels
+            // the moment you leave the tab — so the toolbar's Tailscale pill,
+            // which is global, had no data anywhere else and reported a tailnet
+            // that was plainly up as unknown. Polling here makes the one place
+            // that owns the state also own the refresh.
+            var lastTailscalePoll = Date.distantPast
             while !Task.isCancelled {
                 // Adaptive cadence: 4 s normally, 500 ms while a
                 // user action is "still settling" (the helper just
@@ -333,6 +340,13 @@ class AppState {
                         : .seconds(4)
                 try? await Task.sleep(for: interval)
                 await pollAllVpnStates()
+                // Every ~5s regardless of the VPN loop's adaptive rate: a
+                // 500ms fast-poll window is for a tunnel mid-transition and
+                // shouldn't drag `tailscale status --json` along with it.
+                if Date().timeIntervalSince(lastTailscalePoll) >= 5 {
+                    lastTailscalePoll = Date()
+                    await refreshTailscale()
+                }
                 // Surface helper-side events (auto-reconnect
                 // succeeded, panic_reset escalation) as user
                 // notifications. Cheap tail-of-log read.

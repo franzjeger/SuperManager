@@ -95,11 +95,12 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.15), value: vpnImportTargeted)
         .toolbar {
-            // "Connected" / "Daemon offline" pill — leading so it sits
-            // next to the sidebar, not lost in the trailing toolbar
-            // soup of action buttons.
+            // One pill per system (Tailscale, VPN), leading so they sit next to
+            // the sidebar rather than lost in the trailing soup of actions.
+            // Each is clickable for a popover with the detail + the one action
+            // you'd otherwise switch tabs for.
             ToolbarItem(placement: .navigation) {
-                connectionStatePill
+                ToolbarStatusPills()
             }
             // Global customer-context picker — sits next to the
             // connection pill so the operator always sees which
@@ -812,81 +813,6 @@ struct ContentView: View {
         }
     }
 
-    /// Aggregate connection-state pill in the toolbar. Replaces
-    /// the old binary "Connected/Daemon offline" with a richer
-    /// summary showing how many VPNs are up + Tailscale state +
-    /// daemon health, color-coded.
-    @ViewBuilder
-    private var connectionStatePill: some View {
-        let summary = connectionSummary
-        HStack(spacing: 6) {
-            Circle()
-                .fill(summary.color)
-                .frame(width: 7, height: 7)
-            Text(summary.text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .help(summary.help)
-    }
-
-    /// Computed summary of all live connections. Used by the
-    /// toolbar pill. Priority: daemon offline > anything red >
-    /// anything yellow > "everything quiet" green.
-    private var connectionSummary: (text: String, color: Color, help: String) {
-        guard appState.daemonAvailable else {
-            return (
-                "Daemon offline",
-                .red,
-                "Can't reach the SuperManager daemon at its socket. Try Cmd-R to refresh."
-            )
-        }
-        // Per-VPN states
-        let vpnUp = appState.vpnConnectionStates.values.filter { $0 == "connected" }.count
-        let vpnConnecting = appState.vpnConnectionStates.values.filter { $0 == "connecting" }.count
-        // Tailscale
-        let tsState = appState.tailscaleStatus?.backendState
-        let tsRunning = tsState == "Running"
-        let tsExitNode = appState.tailscalePrefs?.hasExitNode ?? false
-
-        // Build text
-        var pieces: [String] = []
-        if tsRunning {
-            pieces.append(tsExitNode ? "Tailscale (exit)" : "Tailscale")
-        }
-        if vpnUp > 0 {
-            pieces.append("\(vpnUp) VPN\(vpnUp == 1 ? "" : "s")")
-        }
-        if vpnConnecting > 0 {
-            pieces.append("\(vpnConnecting) connecting…")
-        }
-        let text = pieces.isEmpty ? "Connected" : pieces.joined(separator: " · ")
-
-        // Color: orange if anything is connecting, green if any
-        // tunnel is up, blue if just daemon-only, .secondary fallback.
-        let color: Color
-        if vpnConnecting > 0 {
-            color = .orange
-        } else if vpnUp > 0 || tsRunning {
-            color = .green
-        } else {
-            color = .secondary
-        }
-
-        // Help text — verbose breakdown for users who hover.
-        var help = "Daemon connected.\n"
-        help += "Tailscale: \(tsState ?? "n/a")\n"
-        help += "VPN tunnels up: \(vpnUp)\n"
-        if vpnConnecting > 0 { help += "Connecting: \(vpnConnecting)\n" }
-        if tsExitNode {
-            let exitName = appState.tailscalePrefs?
-                .currentExitNode(in: appState.tailscaleStatus?.peers ?? [])?
-                .hostName ?? "?"
-            help += "Exit node: \(exitName)"
-        }
-        return (text, color, help)
-    }
 
     /// Right-click "Open in Terminal" on a sidebar SSH host.
     /// Re-uses the same `ssh://` URL handler that the host
