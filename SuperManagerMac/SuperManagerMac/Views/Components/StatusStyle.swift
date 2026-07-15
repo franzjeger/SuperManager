@@ -75,6 +75,40 @@ extension StatusStyle {
     }
 }
 
+extension StatusStyle {
+    /// An engagement's state.
+    ///
+    /// Expired is `.error`, not `.offline`. An engagement is the record of a
+    /// customer's authorization to run offensive tests against them, so an
+    /// expired one doesn't mean "idle" — it means every scan under it is now
+    /// unauthorized. That's worth red.
+    ///
+    /// The two views that show this disagreed: the list column painted expired
+    /// `.secondary` grey while the detail header painted it red. Same
+    /// engagement, two verdicts, depending which pane you looked at.
+    static func engagement(_ e: Engagement) -> StatusStyle {
+        guard e.isActive else { return .error }
+        // A week's warning before authorization lapses — enough time to get it
+        // renewed before scans start failing the scope check.
+        return e.expiresAt.timeIntervalSinceNow / 86400 < 7 ? .warn : .online
+    }
+}
+
+extension Engagement {
+    /// "today" / "tomorrow" / "in 12 days".
+    ///
+    /// Never "in 0 days", which is what the detail header said for anything
+    /// inside 24 hours — it truncated the interval to an Int and printed it.
+    /// The list column already phrased this correctly; now both read the same
+    /// sentence from the same place.
+    var expiryPhrase: String {
+        let days = Int(expiresAt.timeIntervalSinceNow / 86400)
+        if days < 1 { return "today" }
+        if days == 1 { return "tomorrow" }
+        return "in \(days) days"
+    }
+}
+
 /// 8pt dot for list rows — the compact rendering of `StatusStyle`.
 struct StatusDot: View {
     let status: StatusStyle

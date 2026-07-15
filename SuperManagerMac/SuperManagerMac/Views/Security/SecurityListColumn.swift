@@ -112,7 +112,7 @@ struct SecurityListColumn: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             if e.isActive {
-                Text("Expires \(relativeDays(e.expiresAt))")
+                Text("Expires \(e.expiryPhrase)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -129,20 +129,10 @@ struct SecurityListColumn: View {
     }
 
     private func statusPill(for e: Engagement) -> some View {
-        let color: Color = {
-            if !e.isActive { return .secondary }
-            let daysLeft = e.expiresAt.timeIntervalSinceNow / 86400
-            if daysLeft < 7 { return .orange }
-            return .green
-        }()
-        let label: String = e.isActive ? "Active" : "Expired"
-        return Text(label)
-            .font(.caption2)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.15))
-            .foregroundStyle(color)
-            .clipShape(Capsule())
+        StatusPill(
+            status: .engagement(e),
+            label: e.isActive ? "Active" : "Expired"
+        )
     }
 
     private func customerLabel(for e: Engagement) -> String {
@@ -153,13 +143,6 @@ struct SecurityListColumn: View {
             return c.displayName
         }
         return e.customerSlug
-    }
-
-    private func relativeDays(_ date: Date) -> String {
-        let days = Int(date.timeIntervalSinceNow / 86400)
-        if days < 1 { return "today" }
-        if days == 1 { return "tomorrow" }
-        return "in \(days) days"
     }
 
 }

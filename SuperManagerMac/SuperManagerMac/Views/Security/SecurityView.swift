@@ -60,22 +60,12 @@ struct SecurityView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 6) {
-                    if e.isActive {
-                        let daysLeft = Int(e.expiresAt.timeIntervalSinceNow / 86400)
-                        Label("Active · expires in \(daysLeft) days", systemImage: "checkmark.seal.fill")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background((daysLeft < 7 ? Color.orange : Color.green).opacity(0.15))
-                            .foregroundStyle(daysLeft < 7 ? Color.orange : Color.green)
-                            .clipShape(Capsule())
-                    } else {
-                        Label("Expired", systemImage: "exclamationmark.triangle.fill")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(.red.opacity(0.15))
-                            .foregroundStyle(.red)
-                            .clipShape(Capsule())
-                    }
+                    StatusPill(
+                        status: .engagement(e),
+                        label: e.isActive
+                            ? "Active · expires \(e.expiryPhrase)"
+                            : "Expired"
+                    )
                     if let s = e.schedule {
                         let isPast = s.nextScanAt <= Date()
                         // Past nextScanAt happens when the scheduler
