@@ -8,11 +8,16 @@ struct DefinitionRow: Identifiable {
     /// IPs, IDs, fingerprints and subnets are monospaced so digits align and
     /// stay scannable; prose values ("Full tunnel", an OS name) are not.
     let mono: Bool
+    /// Present-but-rarely-needed values — a profile UUID you only reach for
+    /// when something is wrong. Rendered tertiary so it stays available
+    /// without competing with the address and username above it.
+    let deemphasized: Bool
 
-    init(_ key: String, _ value: String, mono: Bool = true) {
+    init(_ key: String, _ value: String, mono: Bool = true, deemphasized: Bool = false) {
         self.key = key
         self.value = value
         self.mono = mono
+        self.deemphasized = deemphasized
     }
 }
 
@@ -32,17 +37,29 @@ struct DefinitionList: View {
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(row.key)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.secondary)
-                        .frame(width: keyWidth, alignment: .leading)
-                    Text(row.value)
-                        .font(row.mono
-                              ? .system(size: 13, design: .monospaced)
-                              : .system(size: 13))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                // Side-by-side when the value fits, stacked when it doesn't.
+                //
+                // These lists live in ~340pt grid cells, so after the key column
+                // a value gets ~190pt — enough for an IP or a username, not for
+                // a 36-character UUID (~280pt in 13pt mono) or a long
+                // split-route list. Those used to wrap mid-string into a ragged
+                // two-line block. Now they drop below the key and take the full
+                // cell width instead. `.fixedSize()` on the first branch's value
+                // is what makes this work: without it Text reports that it
+                // "fits" at any width by wrapping, and the fallback never fires.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        keyText(row)
+                            .frame(width: keyWidth, alignment: .leading)
+                        valueText(row)
+                            .fixedSize()
+                        Spacer(minLength: 0)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        keyText(row)
+                        valueText(row)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
                 .padding(.vertical, 7)
 
@@ -51,6 +68,21 @@ struct DefinitionList: View {
                 }
             }
         }
+    }
+
+    private func keyText(_ row: DefinitionRow) -> some View {
+        Text(row.key)
+            .font(.system(size: 13))
+            .foregroundStyle(.secondary)
+    }
+
+    private func valueText(_ row: DefinitionRow) -> some View {
+        Text(row.value)
+            .font(row.mono
+                  ? .system(size: 13, design: .monospaced)
+                  : .system(size: 13))
+            .foregroundStyle(row.deemphasized ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.primary))
+            .textSelection(.enabled)
     }
 }
 

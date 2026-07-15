@@ -209,37 +209,34 @@ struct VpnDetailView: View {
     /// for users who don't care about history. Empty state
     /// hides the entire section.
     @ViewBuilder
+    /// The last few connect/disconnect events for this profile. Capped at 10:
+    /// this is a glance, not a log viewer.
+    private var activityEvents: [ActivityLog.Event] {
+        Array(ActivityLog.shared.events(for: profileId).prefix(10))
+    }
+
+    /// Activity rows, no DisclosureGroup wrapper.
+    ///
+    /// `DetailSection` now supplies the heading, so the group's own "Recent
+    /// activity" label would just repeat it — and inside a grid cell that sizes
+    /// to its content there's nothing worth collapsing. The caller renders the
+    /// whole section only when `activityEvents` is non-empty, so this never
+    /// leaves a bare heading behind.
     private var activitySection: some View {
-        let events = Array(ActivityLog.shared.events(for: profileId).prefix(10))
-        if !events.isEmpty {
-            DisclosureGroup {
-                VStack(alignment: .leading, spacing: 4) {
-                    ForEach(events) { ev in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Image(systemName: ev.kind.symbol)
-                                .font(.caption)
-                                .foregroundStyle(activityIconColor(for: ev.kind))
-                                .frame(width: 16)
-                            Text(ev.message)
-                                .font(.caption)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                            Spacer()
-                            Text(ev.timestamp, format: .relative(presentation: .numeric))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-                .padding(.top, 4)
-            } label: {
-                HStack {
-                    Text("Recent activity")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(events.count) events")
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(activityEvents) { ev in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: ev.kind.symbol)
                         .font(.caption)
+                        .foregroundStyle(activityIconColor(for: ev.kind))
+                        .frame(width: 16)
+                    Text(ev.message)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
+                    Text(ev.timestamp, format: .relative(presentation: .numeric))
+                        .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
             }
@@ -689,193 +686,210 @@ struct VpnDetailView: View {
     }
 
     private func details(_ profile: VpnProfile) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            row("Profile ID", profile.id)
-            // Tunnel mode: showing the value as a row + an "Edit"
-            // affordance keeps the details list consistent while
-            // making the toggle two clicks away (button → sheet
-            // → save). Routing changes are non-trivial (require
-            // reconnect), and a sheet is the right commit boundary.
-            //
-            // Edit button is hidden for backends whose routing the
-            // daemon's `vpn_set_routing` doesn't accept (OpenVPN —
-            // routing is encoded inside the imported `.ovpn` file).
-            // Showing a button that opens a sheet that immediately
-            // says "you can't change this" is bad UX; better to
-            // not offer the action at all.
-            HStack(alignment: .firstTextBaseline) {
-                Text("Tunnel mode").foregroundStyle(.secondary)
-                    .frame(width: 120, alignment: .leading)
-                Text(profile.fullTunnel ? "Full tunnel" : "Split tunnel")
-                    .textSelection(.enabled)
-                Spacer()
-                if backendSupportsRoutingToggle(profile.config) {
-                    Button {
-                        editingRouting = true
-                    } label: {
-                        Label("Edit", systemImage: "arrow.triangle.branch")
+        // The detail pane is ~1000pt wide at full screen and this content used
+        // to hug the left ~300pt of it in one tall column. DetailColumns fits as
+        // many ~340pt sections side by side as the width allows and reflows to a
+        // single column when narrow, so a wide window is actually used.
+        DetailColumns {
+            DetailSection(title: "Configuration") {
+                VStack(alignment: .leading, spacing: 10) {
+                    DefinitionList(rows: configRows(profile))
+
+                    // OpenVPN creds live in the login Keychain, not the
+                    // daemon-side config, so they get their own editor.
+                    if case .openvpn = profile.config {
+                        Button {
+                            editingOvpnCreds = true
+                        } label: {
+                            Label("Edit credentials", systemImage: "key.horizontal")
+                        }
+                        .controlSize(.small)
                     }
-                    .controlSize(.small)
+                    if case .azure = profile.config {
+                        Text("Authenticates via Entra ID (device-code flow) at connect.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
-            .font(.callout)
 
-            // Kill switch: when enabled, connect installs pf
-            // rules that block all egress except via the tunnel
-            // iface + LAN. Reconnect required to take effect on
-            // an already-up tunnel; toggling OFF tears the rules
-            // down immediately.
-            HStack(alignment: .firstTextBaseline) {
-                Text("Kill switch").foregroundStyle(.secondary)
-                    .frame(width: 120, alignment: .leading)
-                Toggle("", isOn: killSwitchBinding)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                Spacer()
-                Text(profile.killSwitch
-                     ? "blocks egress except via tunnel"
-                     : "no leak protection")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .font(.callout)
+            DetailSection(title: "Routing & protection") {
+                VStack(alignment: .leading, spacing: 10) {
+                    ToggleGroup {
+                        // Kill switch: connect installs pf rules blocking all
+                        // egress except via the tunnel iface + LAN. Reconnect
+                        // required to take effect on an already-up tunnel;
+                        // toggling OFF tears the rules down immediately.
+                        ToggleRow(
+                            title: "Kill switch",
+                            help: "Block all traffic if the tunnel drops.",
+                            isOn: killSwitchBinding
+                        )
+                        Divider()
+                        // Helper-side watchdog reconnects this profile every 30s
+                        // if it drops, surviving the GUI being closed (the helper
+                        // is a LaunchDaemon). It replays args from the most recent
+                        // successful connect — so for IKEv2 you must connect once
+                        // manually after enabling it (WireGuard reads the daemon's
+                        // secret store, so it works on first toggle).
+                        ToggleRow(
+                            title: "Always on",
+                            help: appState.autoReconnectEnabled.contains(profileId)
+                                ? "Reconnecting automatically every 30s."
+                                : "Reconnect automatically if the tunnel drops.",
+                            isOn: alwaysOnBinding
+                        )
+                    }
 
-            // Throughput counters: WireGuard kernel module exposes
-            // rx/tx bytes via `wg show`. AppState polls these every
-            // few seconds into `vpnByteCounters`. Other backends
-            // (OpenVPN, IKEv2) don't expose counters cheaply — the
-            // row simply hides when no data is available.
-            if let counters = appState.vpnByteCounters[profileId] {
-                bandwidthRow(
-                    rx: counters.rx,
-                    tx: counters.tx,
-                    rate: appState.vpnByteRates[profileId]
-                )
-            }
-
-            // Live handshake age (WG-only). TimelineView ticks
-            // every second so the "12s ago" updates without us
-            // forcing a redraw. Hidden for non-WG and for any
-            // tunnel that hasn't completed an initial handshake yet.
-            if let unix = appState.vpnLastHandshakeUnix[profileId] {
-                handshakeRow(handshakeUnix: unix)
-            }
-
-            // Active peer endpoint (the address we're actually
-            // talking to right now). Useful when a profile has
-            // multiple peers and you need to confirm which one
-            // is carrying traffic.
-            if let endpoint = appState.vpnPeerEndpoints[profileId] {
-                row("Active peer", endpoint)
+                    // Routing changes need a reconnect, so they commit through a
+                    // sheet rather than a live toggle. Hidden for backends whose
+                    // routing `vpn_set_routing` doesn't accept (OpenVPN — routing
+                    // is encoded inside the imported `.ovpn`): a button opening a
+                    // sheet that immediately says "you can't change this" is worse
+                    // than no button.
+                    if backendSupportsRoutingToggle(profile.config) {
+                        Button {
+                            editingRouting = true
+                        } label: {
+                            Label("Edit routing…", systemImage: "arrow.triangle.branch")
+                        }
+                        .controlSize(.small)
+                    }
+                }
             }
 
-            // Recent activity — last few connect/disconnect events
-            // for this profile. Pulled from ActivityLog (persists
-            // across app launches). Capped to 10 to keep the
-            // detail view from sprawling.
-            activitySection
-
-            // Always-on: helper-side watchdog reconnects this
-            // profile every 30s if it goes down, surviving the
-            // GUI being closed (helper is a LaunchDaemon).
-            // Captures connect args from the most-recent
-            // successful connect — so the user must connect at
-            // least once manually after enabling this for IKEv2
-            // (WireGuard reads from daemon's secret store, so
-            // it works on first toggle).
-            HStack(alignment: .firstTextBaseline) {
-                Text("Always on").foregroundStyle(.secondary)
-                    .frame(width: 120, alignment: .leading)
-                Toggle("", isOn: alwaysOnBinding)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
-                Spacer()
-                Text(appState.autoReconnectEnabled.contains(profileId)
-                     ? "auto-reconnect every 30s"
-                     : "manual connect only")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            if hasSessionDetail {
+                DetailSection(title: "Session") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // WireGuard's kernel module exposes rx/tx via `wg show`;
+                        // OpenVPN and IKEv2 don't expose counters cheaply, so
+                        // this simply hides when there's no data.
+                        if let counters = appState.vpnByteCounters[profileId] {
+                            bandwidthRow(
+                                rx: counters.rx,
+                                tx: counters.tx,
+                                rate: appState.vpnByteRates[profileId]
+                            )
+                        }
+                        // Live handshake age (WG-only). TimelineView ticks every
+                        // second so "12s ago" updates without forcing a redraw.
+                        if let unix = appState.vpnLastHandshakeUnix[profileId] {
+                            handshakeRow(handshakeUnix: unix)
+                        }
+                        // The address we're actually talking to right now —
+                        // useful when a profile has several peers and you need to
+                        // know which one is carrying traffic.
+                        if let endpoint = appState.vpnPeerEndpoints[profileId] {
+                            row("Active peer", endpoint)
+                        }
+                        // Gateway-pushed interface / IP / routes. Not present in
+                        // the static profile, so it's shown separately: this is
+                        // what the session is actually carrying. Self-hides when
+                        // the helper has reported no tunnel metadata.
+                        liveTunnelRows()
+                    }
+                }
             }
-            .font(.callout)
 
-            switch profile.config {
-            case .ikev2(let cfg):
-                row("Server", cfg.host)
-                row("Username", cfg.username)
-                if !cfg.dnsServers.isEmpty {
-                    row("DNS", cfg.dnsServers.joined(separator: ", "))
+            // Only when there's something to show — an empty grid cell would
+            // otherwise render as a bare "RECENT ACTIVITY" heading over nothing.
+            if !activityEvents.isEmpty {
+                DetailSection(title: "Recent activity") {
+                    activitySection
                 }
-                if !cfg.routes.isEmpty {
-                    row("Split routes", cfg.routes.joined(separator: ", "))
-                }
-
-            case .wireguard(let wg):
-                if !wg.addresses.isEmpty {
-                    row("Addresses", wg.addresses.joined(separator: ", "))
-                }
-                if !wg.dns.isEmpty {
-                    row("DNS", wg.dns.joined(separator: ", "))
-                }
-                row("Peers", String(wg.peerCount))
-                if let endpoint = wg.firstPeerEndpoint {
-                    row("Endpoint", endpoint)
-                }
-                if !wg.splitRoutes.isEmpty {
-                    row("Split routes", wg.splitRoutes.joined(separator: ", "))
-                }
-
-            case .azure(let az):
-                // Azure-specific fields. Tenant + gateway FQDN are
-                // the unique-identifier pair; client ID is the
-                // OAuth2 audience the daemon uses when acquiring
-                // an Entra-ID token at connect time.
-                row("Gateway", az.gatewayFqdn)
-                row("Tenant ID", az.tenantId)
-                row("Client ID", az.clientId)
-                if !az.dnsServers.isEmpty {
-                    row("DNS", az.dnsServers.joined(separator: ", "))
-                }
-                if !az.routes.isEmpty {
-                    row("Split routes", az.routes.joined(separator: ", "))
-                }
-                // Live tunnel state — only renders when ovpncli /
-                // openvpn 2.x is up and reporting routes/IP. The
-                // gateway pushes these at connect; they're not
-                // present in the static profile so we surface them
-                // separately so the operator can see what their
-                // session is actually carrying.
-                liveTunnelRows()
-                Text("Authenticates via Entra ID (device-code flow) at connect.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
-
-            case .openvpn(let cfg):
-                // Show just the filename — the full path is long and
-                // includes our own data-dir, which isn't useful at a
-                // glance.
-                row("Config file", URL(fileURLWithPath: cfg.configFile).lastPathComponent)
-                // Surface the username from the keychain (the daemon-
-                // side `OpenVpnConfig.username` field is empty on
-                // import; creds live in DPK). Reading is cheap.
-                let storedUser = (try? VPNKeychain.getString(
-                    account: "vpn/\(profile.id)/ovpn-username"
-                )) ?? ""
-                if !storedUser.isEmpty {
-                    row("Username", storedUser)
-                }
-                Button {
-                    editingOvpnCreds = true
-                } label: {
-                    Label("Edit credentials", systemImage: "key.horizontal")
-                }
-                .controlSize(.small)
-                .padding(.top, 4)
-
-            case .unsupported(let backend):
-                row("Backend", backend)
             }
         }
+    }
+
+    /// True when there is anything live worth showing, so the Session section is
+    /// omitted rather than rendered as an empty box.
+    private var hasSessionDetail: Bool {
+        appState.vpnByteCounters[profileId] != nil
+            || appState.vpnLastHandshakeUnix[profileId] != nil
+            || appState.vpnPeerEndpoints[profileId] != nil
+            || !liveInterface.isEmpty
+    }
+
+    /// A profile's static configuration, per backend, as definition rows.
+    ///
+    /// Tunnel mode and Profile ID close every backend's list so the shape stays
+    /// predictable no matter which one you're looking at.
+    private func configRows(_ profile: VpnProfile) -> [DefinitionRow] {
+        var rows: [DefinitionRow] = []
+        switch profile.config {
+        case .ikev2(let cfg):
+            rows.append(DefinitionRow("Server", cfg.host))
+            rows.append(DefinitionRow("Username", cfg.username))
+            // Only when set: a blank Local ID means strongSwan defaults IDi to
+            // the connection IP, which is a non-fact not worth a row.
+            if !cfg.localId.isEmpty {
+                rows.append(DefinitionRow("Local ID", cfg.localId))
+            }
+            if !cfg.dnsServers.isEmpty {
+                rows.append(DefinitionRow("DNS", cfg.dnsServers.joined(separator: ", ")))
+            }
+            if !cfg.routes.isEmpty {
+                rows.append(DefinitionRow("Split routes", cfg.routes.joined(separator: ", ")))
+            }
+
+        case .wireguard(let wg):
+            if !wg.addresses.isEmpty {
+                rows.append(DefinitionRow("Addresses", wg.addresses.joined(separator: ", ")))
+            }
+            if !wg.dns.isEmpty {
+                rows.append(DefinitionRow("DNS", wg.dns.joined(separator: ", ")))
+            }
+            rows.append(DefinitionRow("Peers", String(wg.peerCount), mono: false))
+            if let endpoint = wg.firstPeerEndpoint {
+                rows.append(DefinitionRow("Endpoint", endpoint))
+            }
+            if !wg.splitRoutes.isEmpty {
+                rows.append(DefinitionRow("Split routes", wg.splitRoutes.joined(separator: ", ")))
+            }
+
+        case .azure(let az):
+            // Tenant + gateway FQDN are the unique-identifier pair; client ID is
+            // the OAuth2 audience the daemon uses when acquiring an Entra-ID
+            // token at connect time.
+            rows.append(DefinitionRow("Gateway", az.gatewayFqdn))
+            rows.append(DefinitionRow("Tenant ID", az.tenantId))
+            rows.append(DefinitionRow("Client ID", az.clientId))
+            if !az.dnsServers.isEmpty {
+                rows.append(DefinitionRow("DNS", az.dnsServers.joined(separator: ", ")))
+            }
+            if !az.routes.isEmpty {
+                rows.append(DefinitionRow("Split routes", az.routes.joined(separator: ", ")))
+            }
+
+        case .openvpn(let cfg):
+            // Filename only — the full path is long and includes our own
+            // data-dir, which isn't useful at a glance.
+            rows.append(DefinitionRow(
+                "Config file",
+                URL(fileURLWithPath: cfg.configFile).lastPathComponent
+            ))
+            // The daemon-side `OpenVpnConfig.username` is empty on import; the
+            // creds live in the login Keychain. Reading is cheap.
+            let storedUser = (try? VPNKeychain.getString(
+                account: "vpn/\(profile.id)/ovpn-username"
+            )) ?? ""
+            if !storedUser.isEmpty {
+                rows.append(DefinitionRow("Username", storedUser))
+            }
+
+        case .unsupported(let backend):
+            rows.append(DefinitionRow("Backend", backend, mono: false))
+        }
+
+        rows.append(DefinitionRow(
+            "Tunnel mode",
+            profile.fullTunnel ? "Full tunnel" : "Split tunnel",
+            mono: false
+        ))
+        // Greyed: you only reach for the UUID when something is wrong, so it
+        // shouldn't compete with the server and username above it.
+        rows.append(DefinitionRow("Profile ID", profile.id, deemphasized: true))
+        return rows
     }
 
     private func row(_ label: String, _ value: String) -> some View {
