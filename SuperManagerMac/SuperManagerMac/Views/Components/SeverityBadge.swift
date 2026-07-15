@@ -50,6 +50,38 @@ struct SeverityBadge: View {
     }
 }
 
+/// How many findings sit at one severity: "3", tinted red for critical.
+///
+/// Separate type from `SeverityBadge` because it says a different thing — the
+/// badge names a severity, this counts findings at one. Used where several sit
+/// in a row (Fleet's customer cards) and spelling out every name would crowd
+/// the row out; the colour carries the severity for sighted readers and the
+/// accessibility label spells it out for everyone else, since a bare "3" is
+/// meaningless read aloud.
+///
+/// Takes its colour from `SeverityBadge.color(for:)` rather than a parameter.
+/// Fleet hand-rolled this pill with the palette repeated at the call site and
+/// it had already drifted — a tint of 0.18 against the badge's 0.15 — which is
+/// exactly the split this file exists to prevent.
+struct SeverityCountBadge: View {
+    let count: Int
+    let severity: FindingSeverity
+
+    var body: some View {
+        Text("\(count)")
+            .font(.caption2.weight(.semibold))
+            // Counts change on every poll; unequal digit widths make the row
+            // twitch as they do.
+            .monospacedDigit()
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(SeverityBadge.color(for: severity).opacity(0.15))
+            .foregroundStyle(SeverityBadge.color(for: severity))
+            .clipShape(Capsule())
+            .accessibilityLabel("\(count) \(severity.rawValue)")
+    }
+}
+
 #if DEBUG
 #Preview("Severity badges") {
     VStack(alignment: .leading, spacing: 8) {
@@ -60,7 +92,16 @@ struct SeverityBadge: View {
             HStack {
                 SeverityBadge(severity: sev, size: .compact)
                 SeverityBadge(severity: sev, size: .regular)
+                SeverityCountBadge(count: 3, severity: sev)
             }
+        }
+        Divider()
+        // The row as Fleet builds it.
+        HStack(spacing: 4) {
+            SeverityCountBadge(count: 2, severity: .critical)
+            SeverityCountBadge(count: 11, severity: .high)
+            SeverityCountBadge(count: 4, severity: .medium)
+            SeverityCountBadge(count: 7, severity: .low)
         }
     }
     .padding()

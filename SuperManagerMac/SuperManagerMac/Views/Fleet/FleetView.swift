@@ -396,11 +396,14 @@ struct FleetView: View {
         let med = Int(summary?.medium ?? 0)
         let low = Int(summary?.low ?? 0)
         HStack(spacing: 4) {
-            if crit > 0 { sevPill("\(crit)", color: .red) }
-            if high > 0 { sevPill("\(high)", color: .orange) }
-            if med > 0 { sevPill("\(med)", color: .yellow) }
-            if low > 0 { sevPill("\(low)", color: .blue) }
+            if crit > 0 { SeverityCountBadge(count: crit, severity: .critical) }
+            if high > 0 { SeverityCountBadge(count: high, severity: .high) }
+            if med > 0 { SeverityCountBadge(count: med, severity: .medium) }
+            if low > 0 { SeverityCountBadge(count: low, severity: .low) }
             if crit == 0 && high == 0 && med == 0 && low == 0 {
+                // "clean" is a verdict, not a count — no findings at any
+                // severity. "—" is the absence of a verdict: never scanned, so
+                // nothing is claimed either way.
                 Text(summary == nil ? "—" : "clean")
                     .font(.caption2)
                     .foregroundStyle(.green)
@@ -409,15 +412,6 @@ struct FleetView: View {
                     .clipShape(Capsule())
             }
         }
-    }
-
-    private func sevPill(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.18))
-            .foregroundStyle(color)
-            .clipShape(Capsule())
     }
 
     private func reload() async {
