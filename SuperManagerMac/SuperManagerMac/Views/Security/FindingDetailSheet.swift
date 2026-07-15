@@ -395,13 +395,7 @@ struct FindingDetailSheet: View {
     }
 
     private var severityColor: Color {
-        switch finding.finding.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .gray
-        }
+        SeverityBadge.color(for: finding.finding.severity)
     }
 
     private func save() async {

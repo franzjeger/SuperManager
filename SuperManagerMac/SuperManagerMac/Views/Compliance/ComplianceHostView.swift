@@ -592,13 +592,7 @@ struct ComplianceHostView: View {
     }
 
     private func severityColor(_ severity: AppState.ComplianceSeverity) -> Color {
-        switch severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .secondary
-        }
+        SeverityBadge.color(for: severity.asFindingSeverity)
     }
 
     // MARK: - Export
@@ -1076,13 +1070,7 @@ private struct CheckRow: View {
     }
 
     private var severityColor: Color {
-        switch check.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .secondary
-        }
+        SeverityBadge.color(for: check.severity.asFindingSeverity)
     }
 
     private var rowBackground: AnyShapeStyle {

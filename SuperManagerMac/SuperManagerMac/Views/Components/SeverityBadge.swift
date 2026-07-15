@@ -50,6 +50,27 @@ struct SeverityBadge: View {
     }
 }
 
+extension AppState.ComplianceSeverity {
+    /// Render a compliance severity through the finding palette.
+    ///
+    /// The two enums exist because compliance checks and security findings
+    /// arrive from different engine endpoints, not because a critical check
+    /// means something different from a critical finding. They graded
+    /// identically apart from `.info`, where compliance had drifted to
+    /// `.secondary` against the badge's `.gray` — and `.secondary` is a
+    /// foreground hierarchy style, not a fill, so it was the odd one out as
+    /// well as the minority. One palette, one meaning.
+    var asFindingSeverity: FindingSeverity {
+        switch self {
+        case .critical: return .critical
+        case .high:     return .high
+        case .medium:   return .medium
+        case .low:      return .low
+        case .info:     return .info
+        }
+    }
+}
+
 /// How many findings sit at one severity: "3", tinted red for critical.
 ///
 /// Separate type from `SeverityBadge` because it says a different thing — the

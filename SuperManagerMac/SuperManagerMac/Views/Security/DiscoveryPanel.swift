@@ -661,13 +661,7 @@ struct DiscoveryPanel: View {
     }
 
     private func severityColor(_ s: FindingSeverity) -> Color {
-        switch s {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .gray
-        }
+        SeverityBadge.color(for: s)
     }
 
     private func sevRank(_ s: FindingSeverity) -> Int {
@@ -1198,13 +1192,7 @@ private struct FindingRow: View {
     }
 
     private var severityColor: Color {
-        switch finding.finding.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .gray
-        }
+        SeverityBadge.color(for: finding.finding.severity)
     }
 
     private var dispositionColor: Color {
