@@ -155,6 +155,17 @@ pub struct FortiGateConfig {
     /// Empty means only the VPN-assigned subnet is reachable via the tunnel.
     #[serde(default)]
     pub routes: Vec<IpNet>,
+
+    /// Optional IKE identity the client sends as IDi (`local.id` in
+    /// strongSwan, `leftid` in ipsec.conf). Some gateways route an
+    /// incoming connection to the correct dial-up tunnel by this identity
+    /// BEFORE authentication (FortiGate "peer ID" with several tunnels on
+    /// one public IP). Empty means "don't set it" — strongSwan then
+    /// defaults IDi to the connection's local IP, which is today's
+    /// behaviour. `#[serde(default)]` keeps profiles saved before this
+    /// field existed loading unchanged.
+    #[serde(default)]
+    pub local_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -945,6 +956,7 @@ mod tests {
             psk: SecretRef::new("psk"),
             dns_servers: vec![],
             routes: vec![],
+            local_id: String::new(),
         });
         assert_eq!(fg.backend_name(), "FortiGate (IPsec/IKEv2)");
 

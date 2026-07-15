@@ -65,6 +65,14 @@ impl EngineServer {
         let kill_switch = params.get("kill_switch").and_then(|v| v.as_bool()).unwrap_or(false);
         let dns_servers = parse_ip_list(params.get("dns_servers"));
         let routes = parse_ipnet_list(params.get("routes"));
+        // Optional IKE identity (IDi). Trim only — strongSwan auto-detects
+        // the ID type; empty means "don't set it".
+        let local_id = params
+            .get("local_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
 
         let new_id = uuid::Uuid::new_v4();
         let cfg = FortiGateConfig {
@@ -74,6 +82,7 @@ impl EngineServer {
             psk: SecretRef::new(format!("vpn/{new_id}/psk")),
             dns_servers,
             routes,
+            local_id,
         };
         let profile = Profile {
             id: new_id,
@@ -128,6 +137,11 @@ impl EngineServer {
         }
         if params.get("routes").is_some() {
             cfg.routes = parse_ipnet_list(params.get("routes"));
+        }
+        // Local ID (IKE identity). Present-but-empty is a real edit meaning
+        // "clear it", so key on presence, not truthiness. Trim only.
+        if let Some(lid) = params.get("local_id").and_then(|v| v.as_str()) {
+            cfg.local_id = lid.trim().to_owned();
         }
         let full_tunnel = params
             .get("full_tunnel")

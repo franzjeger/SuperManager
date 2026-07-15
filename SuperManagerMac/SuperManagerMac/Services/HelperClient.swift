@@ -72,7 +72,8 @@ final class HelperClient {
         password: String,
         sharedSecret: String,
         fullTunnel: Bool,
-        routes: [String] = []
+        routes: [String] = [],
+        localId: String = ""
     ) async throws -> [String: Any] {
         try await call("vpn_connect", params: [
             "profile_id": profileId,
@@ -83,6 +84,7 @@ final class HelperClient {
             "shared_secret": sharedSecret,
             "full_tunnel": fullTunnel,
             "routes": routes,
+            "local_id": localId,
         ])
     }
 
