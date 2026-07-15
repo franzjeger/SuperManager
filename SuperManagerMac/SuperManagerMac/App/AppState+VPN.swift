@@ -55,7 +55,20 @@ extension AppState {
             }
             for await sample in group {
                 let id = sample.profileId
-                vpnConnectionStates[id] = sample.state
+                // Anti-flicker debounce: a single slow/failed poll must not flip
+                // a live tunnel's dot. `stabilizedVpnState` rides out one bad
+                // sample and only commits a transition on a sustained run. All
+                // downstream state decisions below use `next`, not the raw
+                // sample, so byte counters + handshake don't get dropped while
+                // we're holding "connected" through a hiccup.
+                var streak = vpnStatusMissStreak[id] ?? 0
+                let next = Self.stabilizedVpnState(
+                    previous: vpnConnectionStates[id] ?? "disconnected",
+                    sample: sample.state,
+                    missStreak: &streak
+                )
+                vpnStatusMissStreak[id] = streak
+                vpnConnectionStates[id] = next
                 if let (rx, tx) = sample.bytes {
                     vpnByteCounters[id] = (rx: rx, tx: tx)
                     // Derive bytes/sec from the delta against the
@@ -77,7 +90,7 @@ extension AppState {
                         }
                     }
                     vpnLastByteSample[id] = (rx: rx, tx: tx, at: pollStart)
-                } else if sample.state != "connected" {
+                } else if next != "connected" {
                     // Drop counters + rate + history once tunnel
                     // goes down so the detail view doesn't show
                     // stale numbers.
@@ -89,7 +102,7 @@ extension AppState {
                 // Same drop-on-disconnect logic as the byte counters
                 // — the detail view should never show a "12s ago"
                 // for a tunnel that's been down for an hour.
-                if sample.state == "connected" {
+                if next == "connected" {
                     if let hs = sample.lastHandshakeUnix {
                         vpnLastHandshakeUnix[id] = hs
                     }
@@ -104,6 +117,48 @@ extension AppState {
         }
         let connectedCount = vpnConnectionStates.values.filter { $0 == "connected" }.count
         DebugLog.write("[AppState] pollAllVpnStates: \(vpnConnectionStates.count) profiles polled, \(connectedCount) connected, full map=\(vpnConnectionStates)")
+    }
+
+    /// Anti-flicker hysteresis for one profile's displayed state.
+    ///
+    /// The raw per-poll sample is noisy: a socket hiccup or a slow
+    /// `swanctl --list-sas` (charon busy, rekey, pollers contending on the
+    /// strongSwan lock) makes a single poll report `unknown`/`connecting`/
+    /// `disconnected` for a tunnel that is plainly up. Writing that straight to
+    /// the dot produced the constant blink the user reported. Rules:
+    ///
+    /// - `connected` sample → `connected`, streak reset. (Truth wins instantly.)
+    /// - Non-connected sample while we're SHOWING `connected`: hold `connected`
+    ///   for the first miss (ride out one bad poll), then on the 2nd consecutive
+    ///   miss commit the transition — to `disconnected` only if the helper
+    ///   DEFINITIVELY reported the SA gone, otherwise to `problem` (it was up and
+    ///   we can no longer confirm it: timeout / RPC threw / stuck "connecting").
+    /// - Not currently `connected`: an `unknown` sample carries no information,
+    ///   so keep the previous state; any other sample is followed directly
+    ///   (e.g. the honest `connecting → connected` path of a fresh connect, or a
+    ///   clean `problem → disconnected` once the SA is really gone).
+    static func stabilizedVpnState(
+        previous: String,
+        sample: String,
+        missStreak: inout Int
+    ) -> String {
+        if sample == "connected" {
+            missStreak = 0
+            return "connected"
+        }
+        if previous == "connected" {
+            missStreak += 1
+            if missStreak < 2 {
+                return "connected" // ride out a single hiccup
+            }
+            missStreak = 0
+            return sample == "disconnected" ? "disconnected" : "problem"
+        }
+        if sample == "unknown" {
+            return previous // no information — don't invent a transition
+        }
+        missStreak = 0
+        return sample
     }
 
     /// Static so it can run concurrently inside `withTaskGroup`
@@ -171,9 +226,19 @@ extension AppState {
             }
             if backend.contains("fortigate") || backend.contains("forti_gate") || backend.contains("ikev2") || backend.contains("ipsec") {
                 let r = try await HelperClient.shared.vpnStatus(profileId: summary.id)
+                var state = (r["state"] as? String) ?? "disconnected"
+                // The helper reports "connecting" both for a genuine handshake
+                // AND for a 5s `swanctl --list-sas` timeout (charon busy). The
+                // timeout is not a real state change — map it to "unknown" so
+                // the debounce holds the last state instead of blinking a live
+                // tunnel to "Connecting…".
+                let detail = (r["detail"] as? String) ?? ""
+                if state == "connecting" && detail.contains("timed out") {
+                    state = "unknown"
+                }
                 return VpnPollSample(
                     profileId: summary.id,
-                    state: (r["state"] as? String) ?? "disconnected",
+                    state: state,
                     bytes: nil,
                     lastHandshakeUnix: nil,
                     peerEndpoint: nil
@@ -183,7 +248,16 @@ extension AppState {
             return VpnPollSample.disconnected(profileId: summary.id)
         } catch {
             DebugLog.write("fetchProfileStatus: \(summary.backend) \(summary.id) threw \(error)")
-            return VpnPollSample.disconnected(profileId: summary.id)
+            // The status RPC threw (socket hiccup, helper mid bootout/bootstrap).
+            // That is "unknown", NOT a real disconnect — return the sentinel so
+            // the debounce holds the last state rather than flipping the dot.
+            return VpnPollSample(
+                profileId: summary.id,
+                state: "unknown",
+                bytes: nil,
+                lastHandshakeUnix: nil,
+                peerEndpoint: nil
+            )
         }
     }
 

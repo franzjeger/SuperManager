@@ -32,6 +32,21 @@ struct VpnDetailView: View {
     @State private var helperReachable: Bool = false
     @State private var pollTask: Task<Void, Never>?
 
+    /// The two "helper isn't up yet" banners surfaced during a boot race
+    /// (the app probed the socket before launchd finished spawning the
+    /// daemon). Hoisted to constants so `refreshHelperState()` can clear
+    /// exactly these once the socket comes up, and never a genuine connect
+    /// error. Setting them inline and clearing by loose string match would
+    /// silently drift apart.
+    static let helperSocketPendingMessage =
+        "Helper installed but socket isn't up yet. " +
+        "Check System Settings → General → Login Items if a " +
+        "background-item approval prompt was shown."
+    static let helperNotRunningMessage =
+        "Helper isn't running yet. Approve the " +
+        "background daemon prompt in System Settings → " +
+        "General → Login Items, then click Connect again."
+
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
     @State private var showingLog = false
@@ -45,6 +60,10 @@ struct VpnDetailView: View {
     /// Routing editor state. Sheet trigger in the detail row; the
     /// sheet calls `vpn_set_routing` on save (`EditRoutingSheet`).
     @State private var editingRouting = false
+    /// Full IKEv2 profile editor (name / server / username / credentials /
+    /// routing). Sheet trigger in the kebab menu; saves via
+    /// `vpn_update_ikev2_profile` (`EditVpnProfileSheet`).
+    @State private var editingProfile = false
     @State private var showingAzureSignIn = false
     @State private var azureSummaryForSignIn: AzureVpnSummary?
     /// Inline-rename UI. Click the title in the header to enter
@@ -129,6 +148,17 @@ struct VpnDetailView: View {
                     // Routing is on the daemon-stored profile, not in
                     // local state, so a fresh `load()` picks up the
                     // new full_tunnel + routes for display.
+                    Task { await load() }
+                }
+            }
+        }
+        .sheet(isPresented: $editingProfile) {
+            // Full IKEv2 editor. Same guard as the routing sheet: only
+            // present with a loaded profile so the pre-fill has data.
+            // A fresh `load()` after save picks up the new host /
+            // username / routing from the daemon store.
+            if let profile {
+                EditVpnProfileSheet(profile: profile) {
                     Task { await load() }
                 }
             }
@@ -561,6 +591,14 @@ struct VpnDetailView: View {
                 // local UI state. Safe to spam — disconnect is
                 // idempotent on every backend.
                 Menu {
+                    // Full profile editor — only IKEv2 profiles have a
+                    // backend update RPC (`vpn_update_ikev2_profile`); the
+                    // other backends edit through their own dedicated
+                    // sheets (routing / OpenVPN creds) or re-import.
+                    if case .ikev2 = profile.config {
+                        Button("Edit profile…") { editingProfile = true }
+                        Divider()
+                    }
                     Button("Force Disconnect", role: .destructive) {
                         Task {
                             await appState.forceDisconnect(profileId: profileId)
@@ -1047,6 +1085,11 @@ struct VpnDetailView: View {
         case "connected":    return "Connected"
         case "connecting":   return "Connecting…"
         case "reconnecting": return "Reconnecting…"
+        // Was connected, but the helper can no longer confirm the tunnel
+        // (repeated status timeouts / RPC failures). Distinct from a clean
+        // "Disconnected" so the user knows something is wrong, not that they
+        // deliberately hung up.
+        case "problem":      return "Disconnected (problem)"
         case "disconnected":
             return helperReachable ? "Disconnected" : "Helper not installed"
         default: return state.capitalized
@@ -1058,6 +1101,7 @@ struct VpnDetailView: View {
         case "connected":    return .green
         case "connecting":   return .yellow    // initial handshake in progress
         case "reconnecting": return .orange    // session dropped, retrying — warmer than yellow
+        case "problem":      return .red        // was up, now unconfirmable
         default:             return .gray.opacity(0.5)
         }
     }
@@ -1132,81 +1176,81 @@ struct VpnDetailView: View {
         // making the UI flicker.
         if busy { return }
         helperReachable = await HelperClient.shared.isReachable()
+        // Boot-race recovery: the daemon's Unix socket appears a few
+        // seconds after login, but the app may probe (and latch a scary
+        // "helper isn't up" banner) before launchd finishes spawning it.
+        // Once the socket is actually live, drop that stale banner so a
+        // reboot doesn't leave the profile looking permanently broken.
+        // Only the two helper-availability messages are cleared — a real
+        // connect error, set while the helper was already reachable, is
+        // never one of these and so is left untouched.
+        if helperReachable,
+           actionError == Self.helperSocketPendingMessage
+            || actionError == Self.helperNotRunningMessage {
+            actionError = nil
+        }
         guard helperReachable, let profile = profile else {
-            if !helperReachable { vpnState = "disconnected" }
+            // Helper briefly unreachable (mid bootout/bootstrap, or a socket
+            // hiccup). HOLD the last state — do NOT flip to "disconnected", that
+            // was a flicker source. The global poller owns the state and leaves
+            // it alone too when the helper is unreachable.
             return
         }
-        // Pick the right helper RPC based on the profile's backend.
-        // Each backend has its own status shape — we extract the
-        // common `state` string and surface a backend-appropriate
-        // `detail` line so the UI is uniform from the user's side.
+        // SINGLE SOURCE OF TRUTH: `vpnState` is driven ONLY by the global
+        // debounced poller via `onChange(of: vpnConnectionStates[profileId])`.
+        // This local poll no longer writes `vpnState` or
+        // `vpnConnectionStates` — it used to write a RAW, un-debounced per-poll
+        // status straight into the shared map, which bypassed the debounce and
+        // was the primary cause of the constant connected/connecting blink.
+        // It now only fetches backend-specific ENRICHMENT (the detail line,
+        // strongSwan-missing flag, reconnect reason, live-tunnel metadata),
+        // gated on the raw connected-ness of THIS poll (fine for descriptive
+        // text; it never touches the dot).
         do {
             switch profile.config {
             case .ikev2:
                 let result = try await HelperClient.shared.vpnStatus(profileId: profileId)
-                vpnState = result["state"] as? String ?? "disconnected"
                 stateDetail = result["detail"] as? String ?? ""
-                // The helper reports "strongSwan not installed" via
-                // the status detail when its binary probe fails.
-                // Surfacing that in `actionError` would drown the
-                // user in noise; flip the dedicated flag and the
-                // detail view renders a setup banner instead.
                 strongswanMissing = stateDetail.contains("strongSwan not installed")
             case .wireguard:
                 let result = try await HelperClient.shared.wgStatus(profileId: profileId)
-                vpnState = result["state"] as? String ?? "disconnected"
+                let rawConnected = (result["state"] as? String) == "connected"
                 if let rx = result["rx_bytes"] as? Int,
                    let tx = result["tx_bytes"] as? Int,
-                   vpnState == "connected" {
+                   rawConnected {
                     stateDetail = "rx \(rx) bytes · tx \(tx) bytes"
                 } else {
                     stateDetail = ""
                 }
             case .openvpn:
                 let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
-                vpnState = result["state"] as? String ?? "disconnected"
+                let rawConnected = (result["state"] as? String) == "connected"
                 reconnectReason = result["error_reason"] as? String
-                if let pid = result["pid"] as? Int, vpnState == "connected" {
+                if let pid = result["pid"] as? Int, rawConnected {
                     stateDetail = "openvpn pid \(pid)"
                 } else {
                     stateDetail = ""
                 }
-                applyLiveTunnelMetadata(from: result, connected: vpnState == "connected")
+                applyLiveTunnelMetadata(from: result, connected: rawConnected)
             case .azure:
                 // Azure → OpenVPN tunnel (helper spawns ovpncli /
                 // openvpn 2.x via the same `ovpnConnect` RPC the
                 // OpenVPN backend uses), so status flows through
                 // the same `ovpn_status` endpoint.
                 let result = try await HelperClient.shared.ovpnStatus(profileId: profileId)
-                vpnState = result["state"] as? String ?? "disconnected"
+                let rawConnected = (result["state"] as? String) == "connected"
                 // Surface the last transport error so the user knows
                 // why the connection is in a retry loop.
                 reconnectReason = result["error_reason"] as? String
-                if let pid = result["pid"] as? Int, vpnState == "connected" {
+                if let pid = result["pid"] as? Int, rawConnected {
                     stateDetail = "openvpn pid \(pid)"
                 } else {
                     stateDetail = ""
                 }
-                applyLiveTunnelMetadata(from: result, connected: vpnState == "connected")
+                applyLiveTunnelMetadata(from: result, connected: rawConnected)
             case .unsupported:
-                vpnState = "disconnected"
                 stateDetail = ""
             }
-
-            // ── State write-back (P3 — single source of truth) ──────────
-            // The detail view and the sidebar/header use independent 3 s / 4 s
-            // polls and can diverge: sidebar shows green while detail shows
-            // "Reconnecting…", or vice versa. Writing the freshly-learned
-            // state back to AppState keeps both in sync without requiring an
-            // architectural merge of the two polling loops.
-            appState.vpnConnectionStates[profileId] = vpnState
-            if vpnState != "connected" {
-                // Drop stale throughput counters so the sidebar + header
-                // never show bytes-per-second for a tunnel that isn't up.
-                appState.vpnByteCounters.removeValue(forKey: profileId)
-                appState.vpnByteRates.removeValue(forKey: profileId)
-            }
-
         } catch {
             // Don't surface poll errors — they spam the UI. Log to console.
             print("vpn status poll error: \(error)")
@@ -1239,13 +1283,24 @@ struct VpnDetailView: View {
         defer { busy = false }
         do {
             try await HelperInstaller.install()
-            // Give launchd a moment to spawn the daemon, then re-check.
-            try? await Task.sleep(for: .milliseconds(700))
-            await refreshHelperState()
-            if !helperReachable {
-                actionError = "Helper installed but socket isn't up yet. " +
-                    "Check System Settings → General → Login Items if a " +
-                    "background-item approval prompt was shown."
+            // launchd spawns the daemon and it binds its Unix socket a
+            // beat later. Poll the socket DIRECTLY here — refreshHelperState()
+            // is suppressed while `busy`, so calling it would no-op and
+            // leave `helperReachable` stale, latching the banner even when
+            // the socket came up fine. Give it a few seconds before giving
+            // up so a normal cold start doesn't flash a "socket isn't up"
+            // banner the instant the click lands.
+            var reachable = false
+            for _ in 0..<12 {                       // ~6 s: 12 × 500 ms
+                if await HelperClient.shared.isReachable() {
+                    reachable = true
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            helperReachable = reachable
+            if !reachable {
+                actionError = Self.helperSocketPendingMessage
             }
         } catch {
             actionError = error.localizedDescription
@@ -1278,9 +1333,7 @@ struct VpnDetailView: View {
                 try? await Task.sleep(for: .milliseconds(700))
                 helperReachable = await HelperClient.shared.isReachable()
                 if !helperReachable {
-                    actionError = "Helper isn't running yet. Approve the " +
-                        "background daemon prompt in System Settings → " +
-                        "General → Login Items, then click Connect again."
+                    actionError = Self.helperNotRunningMessage
                     return
                 }
             }
@@ -1302,7 +1355,8 @@ struct VpnDetailView: View {
                 password: password,
                 sharedSecret: psk,
                 fullTunnel: profile.fullTunnel,
-                routes: cfg.routes
+                routes: cfg.routes,
+                localId: cfg.localId
             )
             if let ok = result["ok"] as? Bool, !ok {
                 actionError = (result["message"] as? String) ?? "Connect failed"

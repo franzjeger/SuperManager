@@ -30,6 +30,7 @@ struct VpnStatusDot: View {
         case "reconnecting":  return .orange   // session dropped, retrying automatically
         case "disconnecting": return .orange
         case "disconnected":  return .secondary
+        case "problem":       return .red      // was up, helper can no longer confirm it
         case .some(let s) where s.contains("error"):
             return .red
         default:              return .secondary

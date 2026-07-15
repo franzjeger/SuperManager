@@ -37,9 +37,16 @@ class AppState {
     /// by the global VPN poller (`startVpnStatusPolling`). Drives
     /// the green-dot indicators in the VPN list — without this, you
     /// can't tell at a glance which profile is currently active.
-    /// "connected" / "connecting" / "disconnected" / `nil` (not yet
-    /// polled).
+    /// "connected" / "connecting" / "disconnected" / "problem" / `nil`
+    /// (not yet polled). Debounced by `pollAllVpnStates` so a single bad
+    /// sample can't flip a live tunnel — see `stabilizedVpnState`.
     var vpnConnectionStates: [String: String] = [:]
+
+    /// Per-profile count of consecutive non-"connected" samples seen while the
+    /// displayed state is still "connected". Drives the anti-flicker debounce:
+    /// one bad poll (socket hiccup / slow swanctl) is ridden out; a sustained
+    /// run commits the transition. Not user-visible.
+    var vpnStatusMissStreak: [String: Int] = [:]
 
     // MARK: - Tailscale
 
