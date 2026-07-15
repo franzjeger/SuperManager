@@ -52,15 +52,35 @@ struct ContentView: View {
         // "select a thing" placeholders. The previous HSplitView produced
         // the half-finished look the user called out (sidebar items
         // clustered mid-column, dead vertical space everywhere).
-        NavigationSplitView {
-            sectionSidebar
-                .navigationSplitViewColumnWidth(min: 140, ideal: 170, max: 220)
-        } content: {
-            listColumn
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
-        } detail: {
-            detailColumn
-                .navigationSplitViewColumnWidth(min: 480, ideal: 720)
+        Group {
+            if sectionHasListColumn {
+                NavigationSplitView {
+                    sidebarColumn
+                } content: {
+                    listColumn
+                        // ideal == max on purpose. Switching to Fleet or Recon
+                        // and back rebuilds this split view, and a fresh build
+                        // settles the column at max while a rebuild settles it
+                        // at ideal — so with the two apart (280/380) the list
+                        // was 380pt wide if you came here directly and 280pt if
+                        // you came via Fleet. Same section, same window, two
+                        // widths. Equal values make every path agree; the 240
+                        // floor keeps the divider draggable.
+                        .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
+                } detail: {
+                    detailColumn
+                        .navigationSplitViewColumnWidth(min: 480, ideal: 720)
+                }
+            } else {
+                // Two columns, because these sections have two things to show.
+                // See `sectionHasListColumn` for why the third can't just be
+                // left empty.
+                NavigationSplitView {
+                    sidebarColumn
+                } detail: {
+                    detailColumn
+                }
+            }
         }
         .navigationTitle("SuperManager")
         // Drag-and-drop VPN config import from anywhere in the
@@ -389,6 +409,13 @@ struct ContentView: View {
 
     // MARK: - Column 1: Section Sidebar
 
+    /// Shared by both split-view shapes so the sidebar keeps the same width
+    /// when the section switches between them.
+    private var sidebarColumn: some View {
+        sectionSidebar
+            .navigationSplitViewColumnWidth(min: 140, ideal: 170, max: 220)
+    }
+
     private var sectionSidebar: some View {
         // Bind List(selection:) directly to AppState. SwiftUI then handles
         // selection highlighting, keyboard nav, and uses macOS's native
@@ -409,13 +436,29 @@ struct ContentView: View {
 
     // MARK: - Column 2: List
 
+    /// Fleet and Recon are single full-width surfaces — a dashboard and a tool
+    /// launcher. Neither has anything to navigate, so neither gets a middle
+    /// column, and the split view is built with two columns instead of three.
+    ///
+    /// Both previously returned `EmptyView()` from `listColumn`, which does not
+    /// remove the column — NavigationSplitView reserves it regardless of what
+    /// renders into it, so each showed a band of blank white between the
+    /// sidebar and its content. Measured at 720pt on an 1800pt window: wider
+    /// than the sidebar and the blank column's own declared 380pt maximum,
+    /// because with nothing to size to it just takes a share of the slack.
+    /// Pinning the width to zero doesn't help either — the constraint is
+    /// ignored, which is how it got to 720 in the first place.
+    private var sectionHasListColumn: Bool {
+        switch appState.selectedSection {
+        case .fleet, .recon: return false
+        default:             return true
+        }
+    }
+
     @ViewBuilder
     private var listColumn: some View {
         switch appState.selectedSection {
         case .fleet:
-            // Fleet has no list column — it's a single full-width
-            // dashboard. Show a thin "All customers" placeholder so
-            // the three-column shape is preserved.
             EmptyView()
         case .ssh:
             sshListColumn
@@ -430,8 +473,6 @@ struct ContentView: View {
         case .security:
             SecurityListColumn()
         case .recon:
-            // Recon is a single full-width tool launcher — no list
-            // column, same shape as Fleet.
             EmptyView()
         }
     }
