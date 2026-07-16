@@ -231,11 +231,6 @@ struct VpnDetailView: View {
         }
     }
 
-    /// Compact recent-activity list for this profile. Renders
-    /// as a disclosure section so it doesn't add visual weight
-    /// for users who don't care about history. Empty state
-    /// hides the entire section.
-    @ViewBuilder
     /// The last few connect/disconnect events for this profile. Capped at 10:
     /// this is a glance, not a log viewer.
     private var activityEvents: [ActivityLog.Event] {
