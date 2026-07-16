@@ -24,49 +24,25 @@ struct KeyDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if key.deployedCount > 0 {
-                            Text("Deployed to \(key.deployedCount) host\(key.deployedCount == 1 ? "" : "s")")
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(.blue.opacity(0.1))
-                                .clipShape(Capsule())
-                        }
                     }
 
                     Divider()
 
-                    // Fingerprint
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Fingerprint")
-                            .font(.headline)
-                        HStack {
-                            Text(key.fingerprint)
-                                .font(.system(.body, design: .monospaced))
-                                .textSelection(.enabled)
-                            Button(action: {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(key.fingerprint, forType: .string)
-                            }) {
-                                Image(systemName: "doc.on.doc")
-                            }
-                            .buttonStyle(.borderless)
-                            .accessibilityLabel("Copy fingerprint")
-                        }
-                    }
-
-                    // Tags
-                    if !key.tags.isEmpty {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Tags")
-                                .font(.headline)
-                            HStack {
-                                ForEach(key.tags, id: \.self) { tag in
-                                    Text(tag)
-                                        .font(.caption)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 4)
-                                        .background(.quaternary)
-                                        .clipShape(Capsule())
+                    // The detail grammar: one Key section, definition rows.
+                    // The fingerprint used to be its own headed block with a
+                    // copy button; DefinitionList values are selectable, and
+                    // the explicit copy moved to the action row so it's still
+                    // one click.
+                    DetailColumns {
+                        DetailSection(title: "Key") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                DefinitionList(rows: keyRows(key))
+                                if !key.tags.isEmpty {
+                                    HStack(spacing: 6) {
+                                        ForEach(key.tags, id: \.self) { tag in
+                                            Badge(text: tag)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -78,6 +54,11 @@ struct KeyDetailView: View {
                     HStack(spacing: 12) {
                         Button("Push to Hosts...") {
                             showingPushSheet = true
+                        }
+
+                        Button("Copy Fingerprint") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(key.fingerprint, forType: .string)
                         }
 
                         Button("Copy Public Key") {
@@ -119,6 +100,23 @@ struct KeyDetailView: View {
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    /// The Key section's rows. "Not deployed" is de-emphasized the same way
+    /// "Ungrouped" is on a host — the absence of an answer, not an answer.
+    private func keyRows(_ key: SshKeySummary) -> [DefinitionRow] {
+        [
+            DefinitionRow("Type", key.keyType.displayName, mono: false),
+            DefinitionRow("Fingerprint", key.fingerprint),
+            DefinitionRow(
+                "Deployed to",
+                key.deployedCount > 0
+                    ? "\(key.deployedCount) host\(key.deployedCount == 1 ? "" : "s")"
+                    : "Not deployed",
+                mono: false,
+                deemphasized: key.deployedCount == 0
+            ),
+        ]
     }
 }
 

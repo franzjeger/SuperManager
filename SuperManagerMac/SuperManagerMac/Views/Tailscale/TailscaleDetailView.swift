@@ -57,15 +57,14 @@ struct TailscaleDetailView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 6) {
-                    Circle()
-                        .fill(peer.online ? .green : .gray.opacity(0.5))
-                        .frame(width: 8, height: 8)
-                    Text(peer.online ? "Online" : "Offline")
-                        .font(.callout)
+                    // The shared vocabulary, not a hand-rolled dot — a peer's
+                    // state renders the same way a tunnel's does.
+                    StatusPill(
+                        status: peer.online ? .online : .offline,
+                        label: peer.online ? "Online" : "Offline"
+                    )
                     if peer.exitNode {
-                        Text("· Exit node")
-                            .font(.callout)
-                            .foregroundStyle(.blue)
+                        Badge(text: "Exit node", kind: .ikev2)
                     }
                 }
             }
@@ -206,27 +205,34 @@ struct TailscaleDetailView: View {
     // MARK: - Detail grid
 
     private var detailGrid: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("DNS name", peer.dnsName.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
-            row("IPv4", peer.primaryIP ?? "—")
-            if let ipv6 = peer.tailscaleIPs.first(where: { $0.contains(":") }) {
-                row("IPv6", ipv6)
+        // The detail grammar: a Machine section in the shared definition-list
+        // shape, same as VPN's Configuration and SSH's Connection. The
+        // hand-rolled `row()` predated the primitives and had its own key
+        // width (130 vs the shared 140), so this view's keys sat 10pt off
+        // from every other section's.
+        DetailColumns {
+            DetailSection(title: "Machine") {
+                DefinitionList(rows: machineRows)
             }
-            row("Operating system", peer.os)
-            row("Sent / Received",
-                "\(byteCount(peer.txBytes)) ↑ · \(byteCount(peer.rxBytes)) ↓")
-            row("Tailscale ID", peer.id)
         }
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .leading)
-            Text(value)
-                .textSelection(.enabled)
-                .font(.callout)
+    private var machineRows: [DefinitionRow] {
+        var rows: [DefinitionRow] = [
+            DefinitionRow("DNS name", peer.dnsName.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
+            DefinitionRow("IPv4", peer.primaryIP ?? "—"),
+        ]
+        if let ipv6 = peer.tailscaleIPs.first(where: { $0.contains(":") }) {
+            rows.append(DefinitionRow("IPv6", ipv6))
         }
+        rows.append(DefinitionRow("Operating system", peer.os, mono: false))
+        rows.append(DefinitionRow(
+            "Sent / Received",
+            "\(byteCount(peer.txBytes)) ↑ · \(byteCount(peer.rxBytes)) ↓",
+            mono: false
+        ))
+        rows.append(DefinitionRow("Tailscale ID", peer.id, deemphasized: true))
+        return rows
     }
 
     // MARK: - Actions
