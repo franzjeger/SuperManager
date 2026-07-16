@@ -1046,13 +1046,34 @@ struct ContentView: View {
         }
     }
 
+    /// Which section a host files under, by precedence: the customer the
+    /// HostIndex resolver links it to (the spec's grouping), else the manual
+    /// group field, else "Ungrouped". Customer wins because it's the grouping
+    /// the rest of the app thinks in — the same resolver drives the global
+    /// customer filter — and falls through gracefully for lab hosts nobody
+    /// has linked.
+    private func hostSectionTitle(for host: SshHostSummary) -> String {
+        if let slug = appState.hostIndex.customerSlug(forHost: host),
+           !slug.isEmpty,
+           let customer = appState.customers.first(where: { $0.slug == slug }) {
+            return customer.displayName
+        }
+        return host.group.isEmpty ? "Ungrouped" : host.group
+    }
+
     private var hostListContent: some View {
         List {
-            let grouped = Dictionary(grouping: filteredHosts) { $0.group }
-            let sortedGroups = grouped.keys.sorted()
+            let grouped = Dictionary(grouping: filteredHosts) { hostSectionTitle(for: $0) }
+            // Alphabetical, except Ungrouped sinks to the bottom — named
+            // groups are the signal, the catch-all is the noise.
+            let sortedGroups = grouped.keys.sorted {
+                if $0 == "Ungrouped" { return false }
+                if $1 == "Ungrouped" { return true }
+                return $0 < $1
+            }
 
             ForEach(sortedGroups, id: \.self) { group in
-                Section(group.isEmpty ? "Ungrouped" : group) {
+                Section(group) {
                     ForEach(grouped[group] ?? []) { host in
                         Button(action: { appState.selectedHostId = host.id }) {
                             HStack {
@@ -1062,16 +1083,23 @@ struct ContentView: View {
                                         .font(.caption2)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(host.label)
-                                        .fontWeight(host.pinned ? .semibold : .regular)
+                                    HStack(spacing: 5) {
+                                        Text(host.label)
+                                            .fontWeight(host.pinned ? .semibold : .regular)
+                                        // The density fix: two rows that both
+                                        // read ubnt@192.168.2.x now differ at
+                                        // a glance by what the box IS.
+                                        Badge(text: host.deviceType.displayName)
+                                    }
                                     Text("\(host.username)@\(host.hostname)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Circle()
-                                    .fill(healthColor(for: host.id))
-                                    .frame(width: 8, height: 8)
+                                // The shared vocabulary: unmeasured is blue
+                                // unknown (same as "Never scanned"), not a
+                                // gray that claims a reading of down.
+                                StatusDot(status: hostHealthStatus(for: host.id))
                             }
                             .contentShape(Rectangle())
                         }
@@ -1104,9 +1132,9 @@ struct ContentView: View {
         .listStyle(.sidebar)
     }
 
-    private func healthColor(for hostId: String) -> Color {
-        guard let healthy = appState.hostHealth[hostId] else { return .gray }
-        return healthy ? .green : .red
+    private func hostHealthStatus(for hostId: String) -> StatusStyle {
+        guard let healthy = appState.hostHealth[hostId] else { return .unknown }
+        return healthy ? .online : .error
     }
 
     // MARK: - Key List
