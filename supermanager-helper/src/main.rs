@@ -53,9 +53,15 @@ mod connectivity_watchdog;
 mod dns_health_watchdog;
 mod kill_switch;
 mod openvpn;
+// `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
+// links IOKit + CoreFoundation, and a cargo linker-signed ad-hoc signature on
+// a framework-linking root daemon is rejected by AMFI (OS_REASON_CODESIGNING).
+// Re-enable in the Developer-ID-signed release flow only. See build.rs.
+// mod power;
 mod route_guardian;
 mod strongswan;
 mod tailscale;
+mod tailscale_state;
 mod traffic_capture;
 mod wireguard;
 
@@ -168,6 +174,55 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = dns_health_watchdog::spawn_watchdog() {
         tracing::warn!("could not spawn dns health watchdog: {e:#}");
     }
+
+    // (IOKit power monitor disabled in dev/ad-hoc builds — see `mod power`
+    // note above. The wall-clock wake detector below covers the GUI-closed
+    // POST-wake case without linking any framework.)
+
+    // Helper-side wake detector — covers the GUI-CLOSED wake case (post-wake
+    // cleanup even when the app is closed) without linking any framework.
+    //
+    // The Swift app fires system_sleep / system_wake from NSWorkspace, but
+    // when the app is closed the helper (a LaunchDaemon) gets no such signal.
+    // A tunnel left up across sleep then leaves stale full-tunnel routes
+    // black-holing traffic on wake, with nothing to clean them.
+    //
+    // We can't observe *will-sleep* without IOKit, but we can detect that a
+    // sleep HAPPENED: tokio's timer runs on the monotonic clock, which does
+    // NOT advance while the machine is suspended, whereas the wall clock does.
+    // So a `sleep(TICK)` that comes back with a wall-clock delta far exceeding
+    // TICK means the machine was suspended in between. On detection we run the
+    // same post-wake cleanup as the system_wake RPC — snapshot reset plus the
+    // race-guarded stale-config/route sweep (which no-ops if a tunnel
+    // auto-reconnected). Pre-sleep teardown for the GUI-closed case still
+    // wants IOKit IORegisterForSystemPower; tracked as a follow-up.
+    tokio::spawn(async {
+        use std::time::{Duration, SystemTime};
+        const TICK: Duration = Duration::from_secs(30);
+        const SLEEP_THRESHOLD: Duration = Duration::from_secs(60);
+        let mut last = SystemTime::now();
+        loop {
+            tokio::time::sleep(TICK).await;
+            let now = SystemTime::now();
+            let elapsed = now.duration_since(last).unwrap_or(TICK);
+            if elapsed > TICK + SLEEP_THRESHOLD {
+                info!(
+                    "wake detector: {}s wall-clock jump across a {}s tick — \
+                     machine slept; running post-wake cleanup",
+                    elapsed.as_secs(),
+                    TICK.as_secs()
+                );
+                // Suspend watchdog escalation for the fragile post-wake settle
+                // window (interface reconfig + tailscaled re-handshake + the
+                // reconciler's re-install) so accumulated probe misses can't
+                // fire panic_reset before the exit node is re-established.
+                connectivity_watchdog::pause_for(45);
+                route_guardian::reset_snapshot();
+                strongswan::sweep_stale_configs().await;
+            }
+            last = now;
+        }
+    });
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("bind {}", socket_path.display()))?;
@@ -358,6 +413,8 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 "kill_switch_enable",
                 "kill_switch_disable",
                 "traffic_capture",
+                "system_sleep",
+                "system_wake",
             ];
             Response::ok(id, serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
@@ -476,7 +533,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     match sw.connect(&args).await {
                         Ok(s) => {
                             let _ = auto_reconnect::refresh_args(
-                                &pid, "ikev2".to_string(), raw_args).await;
+                                &pid, "ikev2".to_string(), raw_args.clone()).await;
+                            // A manual full-tunnel connect enrols the profile for
+                            // route-only healing (no-op if it's already Always-on).
+                            // Split tunnels install no 0/1, so nothing to guard.
+                            if args.full_tunnel {
+                                let _ = auto_reconnect::guard_routes(
+                                    pid.clone(), "ikev2".to_string(), raw_args).await;
+                            }
                             Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                         }
                         Err(e) => Response::err(id, -32000, format!("connect failed: {e:#}")),
@@ -488,9 +552,15 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "vpn_disconnect" => match serde_json::from_value::<strongswan::DisconnectArgs>(req.params) {
             Ok(args) => {
+                let pid = args.profile_id.clone();
                 let mut sw = strongswan.lock().await;
                 match sw.disconnect(&args).await {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Ok(s) => {
+                        // A deliberate disconnect ends any route-guard intent for
+                        // this profile (leaves an explicit Always-on entry alone).
+                        let _ = auto_reconnect::unguard_routes(&pid).await;
+                        Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                    }
                     Err(e) => Response::err(id, -32000, format!("disconnect failed: {e:#}")),
                 }
             }
@@ -680,7 +750,13 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // we can auto-revert if traffic dies.
         "tailscale_install_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
             Ok(args) => match tailscale::install_exit_routes(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                Ok(s) => {
+                    // Routes are up — record the user's intent so the reconciler
+                    // can re-establish them after sleep/wake or a blip.
+                    let (node_id, node_ip) = tailscale::current_exit_node();
+                    tailscale_state::set_desired(&node_id, &node_ip);
+                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                }
                 Err(e) => Response::err(id, -32000, format!("install_exit_routes failed: {e:#}")),
             },
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
@@ -688,7 +764,15 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscale_remove_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
             Ok(args) => match tailscale::remove_exit_routes(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                Ok(s) => {
+                    // This RPC is the INTENTIONAL clear (user cleared the exit
+                    // node) — stop self-heal. The watchdog's blip recovery goes
+                    // through panic_reset (clear_pref=false), which does NOT
+                    // touch the desired-state, so a transient drop never wipes
+                    // intent.
+                    tailscale_state::clear_desired();
+                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                }
                 Err(e) => Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}")),
             },
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
@@ -853,6 +937,65 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
             }
+        }
+
+        // ── System sleep / wake ──────────────────────────────────────────
+        //
+        // The Swift app fires these when it receives NSWorkspace
+        // willSleepNotification / didWakeNotification.  We use them to:
+        //   sleep  — terminate all active IKEv2 SAs + kill ovpncli
+        //   wake   — reset route guardian snapshot + sweep stale configs
+        //
+        // This handles the "lid close / open" failure modes where VPN
+        // state becomes stale after sleep and the route guardian's
+        // pre-sleep snapshot points at the wrong gateway.
+        "system_sleep" => {
+            info!("system_sleep: running pre-sleep VPN teardown");
+            // Terminate all managed IKEv2 SAs and sweep leftover configs.
+            // Belt-and-braces: the Swift layer has already disconnected
+            // individual profiles, but this catches anything that slipped
+            // through (GUI not open, connect happened from auto-reconnect,
+            // etc.). terminate_and_sweep is idempotent — no-op if nothing
+            // is active.
+            strongswan::terminate_and_sweep().await;
+
+            // SIGTERM any live OpenVPN tunnels we manage. If one outlived a
+            // helper restart or the Swift disconnect path didn't fire, it
+            // would hold the tunnel open across sleep, leaving macOS with no
+            // useful VPN (the physical connection is gone but the process
+            // thinks it's still alive). The old `pkill -f ovpncli` was dead
+            // code — the spawned binary is `openvpn3`/`openvpn`, never named
+            // "ovpncli" — so we kill by tracked pid instead.
+            let killed = openvpn::terminate_all().await;
+            if killed > 0 {
+                info!("system_sleep: terminated {killed} OpenVPN process(es)");
+            }
+
+            info!("system_sleep: done");
+            Response::ok(id, serde_json::json!({"ok": true}))
+        }
+
+        "system_wake" => {
+            info!("system_wake: running post-wake cleanup");
+            // Suspend watchdog escalation for the post-wake settle window so it
+            // can't panic_reset a still-handshaking exit node before the
+            // reconciler re-establishes it (same as the helper wake detector).
+            connectivity_watchdog::pause_for(45);
+            // Clear the route guardian's pre-sleep snapshot. After sleep
+            // the machine may be on a completely different network; the
+            // old gateway address is likely unreachable. Clearing lets the
+            // guardian re-snapshot from the freshly-configured network
+            // rather than flooding the routing table with restore attempts.
+            route_guardian::reset_snapshot();
+
+            // Sweep any configs charon left behind. This also deletes
+            // stale kernel host routes, which prevents "unable to
+            // determine source address" errors on the first post-wake
+            // connect attempt.
+            strongswan::sweep_stale_configs().await;
+
+            info!("system_wake: done");
+            Response::ok(id, serde_json::json!({"ok": true}))
         }
 
         other => Response::err(id, -32601, format!("unknown method: {other}")),

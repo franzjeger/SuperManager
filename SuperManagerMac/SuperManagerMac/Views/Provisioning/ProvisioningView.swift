@@ -101,7 +101,12 @@ struct ProvisioningView: View {
                     hostLabel: host.label,
                     templateId: templateId,
                     customerSlug: customer.slug,
-                    siteId: site.id
+                    siteId: site.id,
+                    // Carry the same one-off render variables the operator
+                    // entered on the form, so the diff + deploy use the exact
+                    // config they rendered and reviewed — not one rendered
+                    // with empty extras.
+                    extras: Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
                 )
             }
         }
@@ -111,30 +116,42 @@ struct ProvisioningView: View {
                 await appState.loadProvisioningTemplates()
             }
         }
+        // Render output + form inputs are view-local @State on this
+        // persistent view. Without resetting them when the operator
+        // switches site or customer, the header would show the new
+        // selection while Copy / Save / Deploy still acted on the
+        // PREVIOUS site's rendered config — worst case deploying site
+        // A's config to site B. Clear the stale state on every switch.
+        .onChange(of: appState.selectedSiteId) { _, _ in resetRenderState() }
+        .onChange(of: appState.selectedCustomerSlug) { _, _ in resetRenderState() }
+    }
+
+    /// Wipe everything derived from the previously-selected site so a
+    /// fresh selection starts clean. Called on site/customer switch.
+    private func resetRenderState() {
+        selectedTemplateId = nil
+        extras = []
+        rendered = nil
+        renderError = nil
+        rendering = false
     }
 
     // MARK: - Empty states
 
     private var selectCustomerPrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "wand.and.stars")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select a customer to begin")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "wand.and.stars",
+            title: "Select a customer to begin",
+            hint: "Expand a customer to see its sites, then pick a site to configure its VLANs and network layout."
+        )
     }
 
     private var selectSitePrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "mappin.and.ellipse")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select a site under \(customer?.displayName ?? "this customer")")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "mappin.and.ellipse",
+            title: "Select a site under \(customer?.displayName ?? "this customer")",
+            hint: "Each site holds its own VLANs and network layout. Pick one to review or push its configuration."
+        )
     }
 
     // MARK: - Header
@@ -345,9 +362,13 @@ struct ProvisioningView: View {
     /// Diff/deploy needs an actual device target — without one,
     /// the buttons stay disabled.
     private func pickFortigateHostId(customer: Customer, site: Site) -> String? {
-        // Prefer site-attached hosts.
-        for hostId in site.hostIds {
-            if let host = appState.sshHosts.first(where: { $0.id == hostId }),
+        // Prefer site-attached hosts. Resolve each Site.hostIds token through
+        // the HostIndex: the token is usually an IP (what the discovery/
+        // autodetect writers store), not a record id, so a raw `$0.id ==
+        // hostId` match never resolved an auto-discovered FortiGate — which
+        // is what kept Preview-diff/deploy permanently disabled for them.
+        for token in site.hostIds {
+            if let host = appState.hostIndex.host(forToken: token),
                host.deviceType == .fortigate {
                 return host.id
             }
@@ -357,8 +378,8 @@ struct ProvisioningView: View {
         // multiple sites (uncommon but happens with shared HQ
         // gateways) deploy without explicit attachment.
         for s in customer.sites {
-            for hostId in s.hostIds {
-                if let host = appState.sshHosts.first(where: { $0.id == hostId }),
+            for token in s.hostIds {
+                if let host = appState.hostIndex.host(forToken: token),
                    host.deviceType == .fortigate {
                     return host.id
                 }
@@ -370,8 +391,8 @@ struct ProvisioningView: View {
     private func hasFortigateHost(in customer: Customer) -> Bool {
         customer.sites
             .flatMap(\.hostIds)
-            .contains { id in
-                appState.sshHosts.contains { $0.id == id && $0.deviceType == .fortigate }
+            .contains { token in
+                appState.hostIndex.host(forToken: token)?.deviceType == .fortigate
             }
     }
 

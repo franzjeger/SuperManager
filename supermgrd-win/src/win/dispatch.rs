@@ -525,6 +525,7 @@ async fn handle_import_fortigate(state: &Arc<DaemonState>, args: &Value) -> Resu
         psk: SecretRef::new(psk_label),
         dns_servers: Vec::new(),
         routes: Vec::new(),
+        local_id: String::new(),
     };
     let profile = Profile {
         id: profile_id,

@@ -138,13 +138,7 @@ private struct CheckLibraryRow: View {
     @State private var expanded = false
 
     private var severityColor: Color {
-        switch check.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .secondary
-        }
+        SeverityBadge.color(for: check.severity.asFindingSeverity)
     }
 
     var body: some View {

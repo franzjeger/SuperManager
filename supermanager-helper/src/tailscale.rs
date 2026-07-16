@@ -355,6 +355,63 @@ fn read_exemption_state() -> Vec<String> {
 /// follow installation with an internet probe. If the probe fails,
 /// call `remove_exit_routes` plus `tailscale set --exit-node=`
 /// before the user is stranded.
+///
+/// Returns the interface name if the IPv4 split-default `0.0.0.0/1` is currently
+/// owned by a LIVE foreign full tunnel (Azure/OpenVPN, WireGuard, or strongSwan
+/// IKEv2) on a utun OTHER than `ts_utun`. The exit-node machinery must never
+/// delete/steal `0/1` from such a tunnel — it installs the exact same
+/// `0/1`+`128/1` split-default pair, and stealing it black-holes that VPN's
+/// entire traffic (and all DNS), freezing the Mac.
+/// True if `iface` (a utun) is currently owned by a LIVE VPN backend: the
+/// tailscale exit node, a live WireGuard/OpenVPN tunnel, an OpenVPN/Azure
+/// session mid-connect, or a live strongSwan IKEv2 SA. The connectivity
+/// watchdog's orphaned-route reaper uses this to tell a working full tunnel's
+/// `0/1` (keep) from a DEAD tunnel's orphaned `0/1` that black-holed the machine
+/// (reap). Conservative on the ambiguous cases — it would rather keep a live
+/// tunnel's route than risk dropping a working VPN.
+pub(crate) fn utun_has_live_owner(iface: &str) -> bool {
+    if !iface.starts_with("utun") {
+        return false;
+    }
+    // tailscale exit node (the 100.64/10 utun) — only if an exit node is wanted
+    if crate::tailscale_state::load().desired && detect_tailscale_utun().as_deref() == Some(iface) {
+        return true;
+    }
+    // a live WireGuard / OpenVPN tunnel bound to this exact utun
+    if crate::strongswan::foreign_tunnel_ifaces().contains(iface) {
+        return true;
+    }
+    // OpenVPN/Azure mid-connect (utun not yet in the CONNECTED-parsed set) or any
+    // live strongSwan IKEv2 SA — process→utun isn't always mappable, so keep
+    // while any such backend is alive rather than risk reaping a working tunnel.
+    // The IKEv2 probe is the FAIL-SAFE variant: a transient swanctl hiccup
+    // resolves to "keep", so the reaper never leaks a live tunnel; it reaps an
+    // IKEv2 utun's 0/1 only when swanctl cleanly confirms no SA remains.
+    if crate::openvpn::has_live_tunnel() || crate::strongswan::ikev2_sa_present_or_unknown() {
+        return true;
+    }
+    false
+}
+
+fn foreign_full_tunnel_owns_default(ts_utun: &str) -> Option<String> {
+    let iface = crate::strongswan::route_iface_family("0.0.0.0/1", "-inet")?;
+    if iface == ts_utun || !iface.starts_with("utun") {
+        return None; // ours, or not a tunnel at all
+    }
+    // A non-tailscale utun holds 0/1. Confirm a live foreign backend owns it:
+    // WG/OpenVPN already in the protected set, OR a live OpenVPN pid (catches
+    // Azure/OpenVPN during its connect window before the CONNECTED log line),
+    // OR a live strongSwan SA.
+    let foreign = crate::strongswan::foreign_tunnel_ifaces();
+    if foreign.contains(&iface)
+        || crate::openvpn::has_live_tunnel()
+        || crate::strongswan::has_established_strongswan_sa()
+    {
+        return Some(iface);
+    }
+    None
+}
+
 pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     tracing::info!("install_exit_routes: starting");
     let utun = detect_tailscale_utun()
@@ -414,6 +471,25 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
         }
     }
     write_exemption_state(&installed_exemptions);
+
+    // 2.5 OWNERSHIP GATE — never steal the shared split-default from a live
+    // FOREIGN full tunnel. Azure VPN (rendered as an OpenVPN redirect-gateway
+    // full tunnel), WireGuard, and strongSwan all install the EXACT same
+    // 0/1+128/1 pair. If one currently owns 0/1 and we blindly `route delete` it
+    // (step 3) to point the pair at the tailscale utun, that VPN's entire
+    // traffic — and on macOS all DNS with it — black-holes, and the machine
+    // appears frozen. The user explicitly brought that tunnel up; the exit node
+    // must stand down. (This is the bug that bricked the Mac when connecting the
+    // Azure VPN while a tailscale exit node was active: reconcile_exit_node kept
+    // calling this every 30s and stealing 0/1 from Azure.)
+    if let Some(owner) = foreign_full_tunnel_owns_default(&utun) {
+        rollback_exemptions(&installed_exemptions);
+        bail!(
+            "refusing to install exit-node routes: 0.0.0.0/1 is owned by a live \
+             foreign full tunnel ({owner}). Disconnect that VPN before using a \
+             tailscale exit node."
+        );
+    }
 
     // 3. Idempotent: nuke any existing split routes before adding.
     let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
@@ -745,15 +821,50 @@ pub struct TestExitResult {
     pub message: String,
 }
 
+/// Delete one split-default route unless a live WireGuard/OpenVPN full tunnel
+/// currently owns it. `family` is `-inet` or `-inet6`; `net` is both the
+/// `route get` target and the `route delete` prefix. Idempotent: a missing
+/// route is a no-op.
+fn delete_split_default_if_unowned(
+    family: &str,
+    net: &str,
+    foreign: &std::collections::HashSet<String>,
+) {
+    if let Some(iface) = crate::strongswan::route_iface_family(net, family) {
+        if foreign.contains(&iface) {
+            tracing::info!("exit_routes: keeping {net} — owned by live tunnel {iface}");
+            return;
+        }
+    }
+    let mut args: Vec<&str> = vec!["delete"];
+    if family == "-inet6" {
+        args.push("-inet6");
+    }
+    args.push("-net");
+    args.push(net);
+    let _ = Command::new("/sbin/route").args(&args).output();
+}
+
 /// Remove the split-default exit-node routes. Always succeeds —
 /// missing routes are a no-op. Called when the user clears the
 /// exit node, when auto-revert kicks in, and from `panic_reset`.
 pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
-    // 1. Drop the /1 split routes.
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "128.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "::/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "8000::/1"]).output();
+    // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
+    //
+    // This runs from panic_reset (fired by the connectivity watchdog on a
+    // ~6s internet blip) and from auto-revert. The `0/1` + `128/1` (+ v6)
+    // split-defaults are a SHARED kernel resource: WireGuard and OpenVPN
+    // full tunnels install the exact same pair. A blind delete here would
+    // rip a live WG/OpenVPN tunnel's default routes out from under it on any
+    // transient outage, silently leaking all traffic in cleartext via en0.
+    // So we skip any /1 route currently owned by a live foreign tunnel;
+    // tailscale's own exit-node routes point at the tailscale utun (not a
+    // WG/OpenVPN interface) and are still removed.
+    let foreign = crate::strongswan::foreign_tunnel_ifaces();
+    delete_split_default_if_unowned("-inet", "0.0.0.0/1", &foreign);
+    delete_split_default_if_unowned("-inet", "128.0.0.0/1", &foreign);
+    delete_split_default_if_unowned("-inet6", "::/1", &foreign);
+    delete_split_default_if_unowned("-inet6", "8000::/1", &foreign);
 
     // 2. Drop the per-underlay-IP exemption host routes we
     // installed alongside. Without this, those /32 entries would
@@ -896,57 +1007,50 @@ pub struct MagicdnsResolverArgs {
 /// drop the user's authenticated session. Just clearing the
 /// exit-node pref is enough on the daemon side; the route fix is
 /// `ipconfig set en0 DHCP` which is fast (< 1 s) and idempotent.
-pub fn panic_reset(_: PanicResetArgs) -> Result<InstallResult> {
+pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // 0. Wipe the split-default exit-node routes FIRST. If the
     // user got here by selecting an exit-node that broke
     // routing, those /1 routes are why their internet is dead.
     // Removing them lets the existing local default route work
     // again immediately — ipconfig DHCP renew below is belt-
-    // and-braces.
+    // and-braces. Removing routes is always FAIL OPEN (egress
+    // falls back to the local uplink); it can never black-hole.
     let _ = remove_exit_routes(ExitRoutesArgs {});
 
-    // 1. Tell the daemon to drop exit-node + accept-routes. We
-    // shell out to the bundled tailscale CLI by looking it up
-    // relative to our own binary path. Tailscaled lives at
-    // /usr/local/sbin/supermanager-tailscaled and the CLI is
-    // bundled in the .app — we find it by the user-supplied path
-    // argument when it exists, but for the panic case we rely on
-    // a fixed install location plus a fallback to homebrew.
-    let cli_candidates = [
-        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/usr/local/bin/tailscale",
-    ];
+    // 1. Optionally tell the daemon to drop exit-node + accept-routes.
+    //
+    // FAIL-OPEN vs HARD-CLEAR: the connectivity watchdog fires this
+    // automatically on a transient blip (clear_pref = false). In that
+    // case we must NOT clear the tailscaled pref or the persisted
+    // desired-state — doing so destroys the only record of "the user
+    // wants this exit node", which is exactly what left the machine
+    // wedged (egress already failed open above; the reconciler will
+    // re-establish the routes once the peer is reachable again). Only a
+    // user-initiated hard reset (clear_pref = true, the in-app "Panic
+    // reset" menu) actually clears intent.
     let mut last_err = String::new();
-    let mut cleared = false;
-    for cli in cli_candidates {
-        if !Path::new(cli).exists() {
-            continue;
-        }
-        let out = Command::new(cli)
-            .args([
-                "--socket=/var/run/tailscaled.socket",
-                "set",
-                "--exit-node=",
-                "--accept-routes=false",
-            ])
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                cleared = true;
-                break;
-            }
-            Ok(o) => {
-                last_err = String::from_utf8_lossy(&o.stderr).to_string();
-            }
-            Err(e) => {
-                last_err = e.to_string();
+    if args.clear_pref {
+        crate::tailscale_state::clear_desired();
+        let mut cleared = false;
+        if let Some(cli) = tailscale_cli() {
+            let out = Command::new(cli)
+                .args([
+                    "--socket=/var/run/tailscaled.socket",
+                    "set",
+                    "--exit-node=",
+                    "--accept-routes=false",
+                ])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => cleared = true,
+                Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).to_string(),
+                Err(e) => last_err = e.to_string(),
             }
         }
-    }
-    if !cleared {
-        // Don't bail — we still want to try the DHCP renew. The
-        // exit-node clear is best-effort.
+        if !cleared {
+            // Don't bail — we still want to try the DHCP renew. The
+            // exit-node clear is best-effort.
+        }
     }
 
     // 2. Find the active network interface (usually en0 for WiFi
@@ -988,8 +1092,251 @@ pub fn panic_reset(_: PanicResetArgs) -> Result<InstallResult> {
     })
 }
 
-#[derive(Deserialize, Debug)]
-pub struct PanicResetArgs {}
+#[derive(Deserialize, Debug, Default)]
+pub struct PanicResetArgs {
+    /// `true` (the user-initiated "Panic reset" menu) → hard reset: also clear
+    /// the tailscaled exit-node pref and the persisted desired-state.
+    /// `false` (the connectivity watchdog's automatic blip recovery, the serde
+    /// default) → fail open only: remove routes + DHCP renew, but KEEP intent
+    /// so the reconciler can re-establish the exit node when the peer returns.
+    #[serde(default)]
+    pub clear_pref: bool,
+}
+
+/// Locate the bundled/installed tailscale CLI (same candidates the panic path
+/// uses). Returns the first existing path.
+fn tailscale_cli() -> Option<&'static str> {
+    const CANDIDATES: [&str; 3] = [
+        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+    ];
+    CANDIDATES.into_iter().find(|p| Path::new(p).exists())
+}
+
+/// Read the currently-selected exit node `(id, ip)` from tailscaled's prefs.
+/// Best-effort: returns `("", "")` when there is no exit node or the CLI is
+/// unavailable. Used only to record intent — never changes any state.
+///
+/// tailscaled's prefs frequently expose `ExitNodeID` (the stable node ID) with
+/// an EMPTY `ExitNodeIP` (the IP is resolved from the netmap at runtime). The
+/// reconciler can only re-assert the pref with an IP/hostname, not the stable
+/// ID — so when the IP is blank we resolve it from `status --json`. Without this
+/// the persisted intent carried an empty IP, the reconciler's re-assert never
+/// fired, and a daemon that had lost its pref stayed wedged (the reported bug).
+pub fn current_exit_node() -> (String, String) {
+    let Some(cli) = tailscale_cli() else {
+        return (String::new(), String::new());
+    };
+    let out = Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "debug", "prefs"])
+        .output();
+    let Ok(o) = out else {
+        return (String::new(), String::new());
+    };
+    let v: serde_json::Value =
+        serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null);
+    let id = v.get("ExitNodeID").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let mut ip = v.get("ExitNodeIP").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if ip.is_empty() && !id.is_empty() {
+        ip = resolve_exit_node_ip(&id).unwrap_or_default();
+    }
+    (id, ip)
+}
+
+/// Resolve an exit node's current Tailscale IP from its stable node ID by
+/// parsing `tailscale status --json` (the `Peer` map). Prefers the IPv4
+/// (100.x) address. Returns `None` if the CLI is unavailable, the peer is not
+/// in the current netmap, or it has no addresses. Read-only — never changes
+/// any state.
+fn resolve_exit_node_ip(id: &str) -> Option<String> {
+    if id.is_empty() {
+        return None;
+    }
+    let cli = tailscale_cli()?;
+    let out = Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "status", "--json"])
+        .output()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let peers = v.get("Peer")?.as_object()?;
+    for (_k, p) in peers {
+        if p.get("ID").and_then(|x| x.as_str()) != Some(id) {
+            continue;
+        }
+        let ips = p.get("TailscaleIPs")?.as_array()?;
+        let mut v4 = None;
+        let mut v6 = None;
+        for ip in ips {
+            if let Some(s) = ip.as_str() {
+                if s.contains('.') {
+                    v4.get_or_insert_with(|| s.to_string());
+                } else {
+                    v6.get_or_insert_with(|| s.to_string());
+                }
+            }
+        }
+        return v4.or(v6);
+    }
+    None
+}
+
+/// True if the PHYSICAL local uplink is up — carrier/association present AND an
+/// assigned IPv4 on the hardware interface backing the default route. The
+/// connectivity watchdog uses this to tell apart two outages that look identical
+/// from a 1.1.1.1 probe but need OPPOSITE handling when a tailscale exit node is
+/// active:
+///
+/// - **uplink DOWN** → OUR link blipped (sleep/roam/WiFi drop). Do NOTHING:
+///   tearing the exit node down here is the flap the user reported ("bugs on any
+///   idle"). tailscale recovers when the link returns; routes stay valid (or the
+///   reconciler reinstalls if the utun renumbered across sleep).
+/// - **uplink UP but egress still dead after a sustained window** → the exit
+///   PEER is genuinely dead while our own link is fine → fail open (panic_reset
+///   removes the routes, egress drops to the local uplink, reconciler
+///   re-establishes when the peer returns).
+///
+/// CRITICAL: this is a LINK-STATE check, deliberately NOT an ICMP ping of the
+/// gateway. An earlier ping-based version false-read "down" on any gateway that
+/// filters ICMP (corporate / hardened / hotspot / CGN gateways) — which would
+/// suppress the fail-open forever and leave a genuinely dead exit peer
+/// black-holing the machine with no recovery. Carrier + IPv4 state has no such
+/// blind spot. Biased toward "down" only when the link is genuinely unusable.
+pub(crate) fn local_uplink_up() -> bool {
+    let Some(iface) = physical_uplink_iface() else {
+        return false; // no hardware uplink at all — treat as a blip, don't tear down
+    };
+    let Ok(out) = Command::new("/sbin/ifconfig").arg(&iface).output() else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let admin_up = s.lines().next().map(|l| l.contains("UP")).unwrap_or(false);
+    // macOS prints `status: active` when a link/association is present,
+    // `status: inactive` when not. Treat an explicit "inactive" as down; if the
+    // field is absent (rare for hardware) fall back to admin-up + IPv4.
+    let carrier_down = s.contains("status: inactive");
+    // A routable IPv4 (skip APIPA link-local 169.254/16 and the v6-only case).
+    let has_v4 = s.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("inet ") && !l.starts_with("inet 169.254")
+    });
+    admin_up && has_v4 && !carrier_down
+}
+
+/// The hardware interface backing the physical default route (`en0`, `en6`…).
+/// The exit node installs more-specific `0/1`+`128/1`, so the `0/0` default
+/// stays on the real uplink; we read its interface from there. If the `0/0`
+/// default itself points at a utun (some tailscaled builds install one), fall
+/// back to the OS's primary hardware service.
+fn physical_uplink_iface() -> Option<String> {
+    if let Ok(out) = Command::new("/sbin/route").args(["-n", "get", "default"]).output() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        for line in s.lines() {
+            if let Some(rest) = line.trim().strip_prefix("interface:") {
+                let i = rest.trim();
+                if i.starts_with("en") {
+                    return Some(i.to_string());
+                }
+            }
+        }
+    }
+    detect_active_interface()
+}
+
+/// Self-heal the tailscale exit node — the core of the no-brick design.
+///
+/// Called every `auto_reconnect` tick (always-on, GUI-closed-safe LaunchDaemon).
+/// If the user wants an exit node (persisted intent in `tailscale_state`) but
+/// its `0/1` split-default is NOT on the CURRENT tailscale utun — because sleep
+/// renumbered the utun or a connectivity blip tore the route down — it
+/// re-establishes the routes, but ONLY after a real reachability probe confirms
+/// the peer forwards traffic. If the peer is not reachable, it does nothing
+/// this tick and the machine stays on the local uplink (fail open).
+///
+/// NO-BRICK: `install_exit_routes` runs exclusively behind
+/// `test_exit_reachability` (a self-cleaning /32 probe through the peer) — the
+/// exact gate the safe user flow uses. It can never install `0/1` into a dead
+/// tunnel, and it never removes a working local default.
+pub fn reconcile_exit_node() {
+    let desired = crate::tailscale_state::load();
+    if !desired.desired {
+        return; // no exit node wanted — nothing to heal
+    }
+    // Re-detect the tailscale utun (it is renumbered across sleep/wake).
+    let Some(ts_utun) = detect_tailscale_utun() else {
+        return; // tailscaled not up yet (mid-wake handshake) — retry next tick
+    };
+    // Healthy if 0/1 already points at the CURRENT tailscale utun.
+    if crate::strongswan::route_iface_family("0.0.0.0/1", "-inet").as_deref()
+        == Some(ts_utun.as_str())
+    {
+        return;
+    }
+    // STAND DOWN if a live FOREIGN full tunnel (Azure/OpenVPN, WireGuard,
+    // strongSwan) currently owns 0/1. The user explicitly brought that tunnel
+    // up; re-asserting the exit-node routes would `route delete` 0/1 out from
+    // under it and black-hole the whole machine. (This is the Azure-VPN brick:
+    // without this gate the reconciler stole 0/1 from Azure every 30s.)
+    if let Some(owner) = foreign_full_tunnel_owns_default(&ts_utun) {
+        tracing::warn!(
+            iface = %owner,
+            "reconcile: 0/1 owned by a live foreign full tunnel — standing down (not stealing exit-node routes)"
+        );
+        return;
+    }
+    tracing::info!(utun = %ts_utun, "reconcile: exit node desired but routes absent — checking reachability");
+
+    // Belt-and-braces: re-assert the exit-node pref in tailscaled. panic_reset
+    // with clear_pref=false keeps it, but a hard-cleared or freshly-restarted
+    // daemon may have lost it; without it test_exit_reachability would probe a
+    // tunnel with no exit and fail forever. We need the peer's IP to re-assert —
+    // resolve it from the stable ID when intent recorded only the ID (the common
+    // case: tailscaled prefs expose ExitNodeID with a blank ExitNodeIP).
+    let eff_ip = if !desired.exit_node_ip.is_empty() {
+        Some(desired.exit_node_ip.clone())
+    } else {
+        resolve_exit_node_ip(&desired.exit_node_id)
+    };
+    if let Some(ip) = eff_ip.as_deref() {
+        if let Some(cli) = tailscale_cli() {
+            let _ = Command::new(cli)
+                .args([
+                    "--socket=/var/run/tailscaled.socket",
+                    "set",
+                    &format!("--exit-node={ip}"),
+                ])
+                .output();
+        }
+        // Persist the resolved IP so subsequent ticks skip the status lookup
+        // and so the intent file is self-describing.
+        if desired.exit_node_ip.is_empty() {
+            crate::tailscale_state::set_desired(&desired.exit_node_id, ip);
+        }
+    }
+
+    // GATE: a real /32 probe through the peer (self-cleaning, never persists a
+    // route). Only a 2xx/3xx response — i.e. the peer actually forwards — lets
+    // us re-install the split-defaults.
+    match test_exit_reachability(TestExitArgs {}) {
+        Ok(r) if r.success => {
+            // Pause the connectivity watchdog so the reinstall's brief
+            // disruption can't itself trip panic_reset.
+            crate::connectivity_watchdog::pause_for(20);
+            match install_exit_routes(ExitRoutesArgs {}) {
+                Ok(_) => tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established"),
+                Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
+            }
+        }
+        Ok(r) => tracing::debug!(
+            code = %r.response_code,
+            "reconcile: exit node not reachable yet — staying on local uplink"
+        ),
+        Err(e) => tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink"),
+    }
+}
 
 /// Best-effort detection of the active "primary" network interface.
 /// Reads `networksetup -listnetworkserviceorder` which lists

@@ -19,6 +19,12 @@ struct DiffPreviewSheet: View {
     let templateId: String
     let customerSlug: String
     let siteId: String
+    /// One-off render variables (PPPoE creds, S2S peer IP, etc.) the
+    /// operator filled in on the Provisioning form. These MUST flow
+    /// into both the diff and the deploy — otherwise we'd preview and
+    /// push a config rendered without them, i.e. review one config and
+    /// deploy a different one. Defaults to empty for callers with no extras.
+    var extras: [String: String] = [:]
 
     @State private var loading = true
     @State private var preview: AppState.DiffPreviewResult?
@@ -434,7 +440,8 @@ struct DiffPreviewSheet: View {
             hostId: hostId,
             templateId: templateId,
             customerSlug: customerSlug,
-            siteId: siteId
+            siteId: siteId,
+            extras: extras
         )
         if let result {
             preview = result
@@ -453,7 +460,8 @@ struct DiffPreviewSheet: View {
             hostId: hostId,
             templateId: templateId,
             customerSlug: customerSlug,
-            siteId: siteId
+            siteId: siteId,
+            extras: extras
         )
         if let result {
             deployResult = result

@@ -65,6 +65,14 @@ impl EngineServer {
         let kill_switch = params.get("kill_switch").and_then(|v| v.as_bool()).unwrap_or(false);
         let dns_servers = parse_ip_list(params.get("dns_servers"));
         let routes = parse_ipnet_list(params.get("routes"));
+        // Optional IKE identity (IDi). Trim only — strongSwan auto-detects
+        // the ID type; empty means "don't set it".
+        let local_id = params
+            .get("local_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
 
         let new_id = uuid::Uuid::new_v4();
         let cfg = FortiGateConfig {
@@ -74,6 +82,7 @@ impl EngineServer {
             psk: SecretRef::new(format!("vpn/{new_id}/psk")),
             dns_servers,
             routes,
+            local_id,
         };
         let profile = Profile {
             id: new_id,
@@ -128,6 +137,11 @@ impl EngineServer {
         }
         if params.get("routes").is_some() {
             cfg.routes = parse_ipnet_list(params.get("routes"));
+        }
+        // Local ID (IKE identity). Present-but-empty is a real edit meaning
+        // "clear it", so key on presence, not truthiness. Trim only.
+        if let Some(lid) = params.get("local_id").and_then(|v| v.as_str()) {
+            cfg.local_id = lid.trim().to_owned();
         }
         let full_tunnel = params
             .get("full_tunnel")
@@ -548,7 +562,12 @@ impl EngineServer {
                 }
                 let mut path = dir;
                 path.push(format!("{}.ovpn", profile.id));
-                let body = crate::azure_vpn::render_azure_ovpn(&cfg, profile.full_tunnel);
+                // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
+        // the VNet routes at connect, and forcing redirect-gateway on an
+        // internal-only gateway black-holes all public internet + DNS (froze the
+        // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
+        // internal access while public traffic stays on the local uplink.
+        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
                 if let Err(e) = std::fs::write(&path, body.as_bytes()) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("write ovpn: {e}"));
                 }
@@ -621,7 +640,12 @@ impl EngineServer {
             }
         };
 
-        let body = crate::azure_vpn::render_azure_ovpn(&cfg, profile.full_tunnel);
+        // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
+        // the VNet routes at connect, and forcing redirect-gateway on an
+        // internal-only gateway black-holes all public internet + DNS (froze the
+        // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
+        // internal access while public traffic stays on the local uplink.
+        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
         tracing::info!(
             "vpn_render_azure_ovpn: profile={} body={} bytes ca_pem={} bytes secret_hex={} chars routes={} dns={} full_tunnel={}",
             profile.id,
@@ -670,6 +694,15 @@ impl EngineServer {
         };
         drop(state);
 
+        // Whether this profile routes ALL traffic through the tunnel. Captured
+        // before `profile.config` is moved below. Used to gate the `DNS =` line:
+        // wg-quick on macOS applies `DNS =` by hijacking the ENTIRE system
+        // resolver via networksetup — correct for a full tunnel (avoids DNS
+        // leak), but wrong for a split tunnel (esp. a VPN on the same subnet),
+        // where it breaks local name resolution. So we only emit DNS for full
+        // tunnels.
+        let full_tunnel = profile.full_tunnel;
+
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
                 id,
@@ -714,13 +747,25 @@ impl EngineServer {
             let _ = writeln!(out, "Address = {addrs}");
         }
         if !wg.dns.is_empty() {
-            let dns = wg
-                .dns
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(out, "DNS = {dns}");
+            if full_tunnel {
+                let dns = wg
+                    .dns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "DNS = {dns}");
+            } else {
+                // Split tunnel: deliberately OMIT the DNS line. wg-quick would
+                // otherwise point the whole system resolver at the tunnel's DNS
+                // via networksetup, hijacking local name resolution (the
+                // reported "connects to a same-subnet VPN and it sets static
+                // DNS" bug). Split tunnels keep the existing system DNS.
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: split tunnel — omitting DNS line (no system resolver hijack)"
+                );
+            }
         }
         if let Some(mtu) = wg.mtu {
             let _ = writeln!(out, "MTU = {mtu}");

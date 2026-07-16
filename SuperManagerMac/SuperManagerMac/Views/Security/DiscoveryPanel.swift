@@ -661,13 +661,7 @@ struct DiscoveryPanel: View {
     }
 
     private func severityColor(_ s: FindingSeverity) -> Color {
-        switch s {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .gray
-        }
+        SeverityBadge.color(for: s)
     }
 
     private func sevRank(_ s: FindingSeverity) -> Int {
@@ -909,6 +903,13 @@ private struct ActiveHostCard: View {
     }
 
     private func addAsSshHost(port: UInt16) async {
+        // Dedupe on IP: a weekly re-scan surfaces the same host again, and
+        // the IP is the natural key for a discovered host. Without this guard
+        // each scan would add another SSH record for the same box.
+        if appState.sshHosts.contains(where: { $0.hostname == host.ip }) {
+            addedToSsh = true
+            return
+        }
         // Best-effort: pick a sensible default username + auth.
         // The user can edit afterwards via the SSH section.
         let defaultUser = "admin"
@@ -921,12 +922,20 @@ private struct ActiveHostCard: View {
             if v.contains("synology") { return .linux }
             return .custom
         }()
+        // Group with the engagement's customer when known. This is the one
+        // moment we have full context (engagement → customer → IP → device),
+        // so write the real slug instead of the orphaning "Discovered"
+        // sentinel — then the host lands under its customer everywhere the
+        // HostIndex resolves (Compliance, SSH sidebar, Provisioning) with no
+        // separate link step. Falls back to "Discovered" for ad-hoc
+        // engagements that carry no customer.
+        let group = customerSlug.flatMap { $0.isEmpty ? nil : $0 } ?? "Discovered"
         await appState.addHost(
             label: label,
             hostname: host.ip,
             port: port,
             username: defaultUser,
-            group: "Discovered",
+            group: group,
             deviceType: device,
             authMethod: .password
         )
@@ -1183,13 +1192,7 @@ private struct FindingRow: View {
     }
 
     private var severityColor: Color {
-        switch finding.finding.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .gray
-        }
+        SeverityBadge.color(for: finding.finding.severity)
     }
 
     private var dispositionColor: Color {

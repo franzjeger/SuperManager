@@ -120,11 +120,31 @@ struct IKEv2Config: Decodable, Hashable {
     let psk: String
     let dnsServers: [String]
     let routes: [String]
+    /// IKE identity (IDi) the client sends. Empty means "not set" — the
+    /// daemon then lets strongSwan default IDi to the connection IP.
+    let localId: String
 
     enum CodingKeys: String, CodingKey {
         case host, username, password, psk
         case dnsServers = "dns_servers"
         case routes
+        case localId = "local_id"
+    }
+
+    // Hand-rolled so `local_id` is migration-safe: a daemon (or persisted
+    // response) predating the field simply omits it, and we default to
+    // empty instead of failing the whole profile decode. dns_servers /
+    // routes get the same treatment since the daemon marks them
+    // `#[serde(default)]` too.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        host = try c.decode(String.self, forKey: .host)
+        username = try c.decode(String.self, forKey: .username)
+        password = try c.decode(String.self, forKey: .password)
+        psk = try c.decode(String.self, forKey: .psk)
+        dnsServers = try c.decodeIfPresent([String].self, forKey: .dnsServers) ?? []
+        routes = try c.decodeIfPresent([String].self, forKey: .routes) ?? []
+        localId = try c.decodeIfPresent(String.self, forKey: .localId) ?? ""
     }
 }
 

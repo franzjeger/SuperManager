@@ -28,7 +28,29 @@ use tokio::process::Command;
 /// left behind by a previous helper crash. Called once on helper startup.
 /// Failures are silent — if strongSwan isn't installed, there's nothing
 /// to sweep, and if a directory is missing the glob just yields nothing.
+///
+/// Also sweeps stale kernel host routes for any VPN server address found
+/// in the leftover config files. When charon is killed without a clean
+/// disconnect it leaves a host route like:
+///
+///   193.213.13.22  192.168.200.1  UGHS  en0
+///
+/// pointing at the old gateway. A fresh connect attempt fails with
+/// "unable to determine source address" because charon tries to reach
+/// the server via the stale route (wrong gateway, wrong network).
 pub async fn sweep_stale_configs() {
+    // Wake-sweep race guard. This runs at startup AND on system_wake. If a
+    // strongSwan tunnel is ESTABLISHED right now, this is almost certainly a
+    // post-wake sweep racing auto_reconnect's replay: the tunnel was just
+    // re-established and its conf + 0/1+128/1 routes are legitimate. Deleting
+    // them here would strip a live tunnel's default routes (a cleartext leak)
+    // and remove the conf charon is actively using. Skip the whole sweep — at
+    // startup (the other caller) charon isn't running yet, so no SA is
+    // ESTABLISHED and the sweep runs normally to clean genuine leftovers.
+    if has_established_strongswan_sa() {
+        tracing::info!("sweep_stale_configs: live strongSwan SA present — skipping sweep to avoid racing auto_reconnect");
+        return;
+    }
     for prefix in BREW_PATHS {
         for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
             let dir = std::path::Path::new(prefix).join(subdir);
@@ -38,12 +60,21 @@ pub async fn sweep_stale_configs() {
                     continue;
                 };
                 if name.starts_with("supermanager-") {
+                    // Extract server host before deleting the file so we
+                    // can also sweep the kernel host route.
+                    if let Ok(host) = extract_remote_addr(entry.path()).await {
+                        delete_server_host_route(&host);
+                    }
                     let _ = tokio::fs::remove_file(entry.path()).await;
                     tracing::debug!(path = %entry.path().display(), "swept stale config");
                 }
             }
         }
     }
+    // On wake (the primary caller of this function) any full-tunnel routes
+    // from a pre-sleep session may have survived. Remove them so the first
+    // post-wake ping doesn't black-hole into a dead tunnel.
+    delete_full_tunnel_routes();
 }
 
 /// Where brew puts the strongSwan install root on Apple Silicon Macs.
@@ -84,6 +115,12 @@ pub struct ConnectArgs {
     /// selector in the strongSwan child config.
     #[serde(default)]
     pub routes: Vec<String>,
+    /// Optional IKE identity to send as IDi (`local.id`). Empty means
+    /// omit it so strongSwan defaults IDi to the local IP (today's
+    /// behaviour). `#[serde(default)]` keeps replayed connect args from
+    /// before this field existed deserialising cleanly.
+    #[serde(default)]
+    pub local_id: String,
 }
 
 fn default_full_tunnel() -> bool {
@@ -112,12 +149,48 @@ pub struct DisconnectResult {
     pub message: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct StatusResult {
     /// "connected", "connecting", or "disconnected".
     pub state: String,
     /// Optional human-readable detail (e.g. ESP rekey time).
     pub detail: String,
+    /// The utun carrying this tunnel. Field names match `ovpn_status`'s so the
+    /// GUI's live-tunnel section reads every backend the same way.
+    ///
+    /// strongSwan on macOS runs kernel-libipsec, so a tunnel really does own a
+    /// utun; swanctl just never mentions it, and we resolve it from the virtual
+    /// IP instead.
+    #[serde(default)]
+    pub interface: String,
+    /// The address the gateway handed us, from the IKE SA's `local` line.
+    #[serde(default)]
+    pub virtual_ip: String,
+    /// The far end of the point-to-point utun.
+    #[serde(default)]
+    pub virtual_gateway: String,
+    /// What the gateway agreed to carry: every child SA's remote traffic
+    /// selector.
+    ///
+    /// The IKEv2 analogue of OpenVPN's pushed routes, arrived at differently —
+    /// OpenVPN is told its routes in a PUSH_REPLY, IKEv2 negotiates them as
+    /// traffic selectors per child SA. Same question answered ("what goes
+    /// through this tunnel"), so it lands in the same field.
+    #[serde(default)]
+    pub active_routes: Vec<String>,
+    /// Do the kernel routes for `active_routes` actually point at `interface`?
+    ///
+    /// ESTABLISHED means the gateway will accept traffic. It says nothing
+    /// about whether this Mac is sending any: the routes are installed
+    /// separately from the SA, and a capture from this machine had a full
+    /// tunnel ESTABLISHED with the /1 pair absent — "connected" while every
+    /// packet still left via en0. Agreed and happening are different claims,
+    /// so they're different fields.
+    ///
+    /// `None` = couldn't determine (nothing negotiated, or no interface to
+    /// check against) — the GUI stays silent rather than guessing.
+    #[serde(default)]
+    pub routes_installed: Option<bool>,
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -285,6 +358,19 @@ impl Strongswan {
 
         // swanctl prints "initiate completed successfully" on the happy path.
         let ok = out.contains("completed successfully") || out.contains("CHILD_SA");
+
+        // IPv6 leak protection. Our full-tunnel config is IPv4-only
+        // (vips = 0.0.0.0, remote_ts = 0.0.0.0/0) — charon installs the
+        // 0/1 + 128/1 split-defaults for IPv4 but nothing for IPv6, so
+        // every IPv6 packet keeps routing out the physical `default
+        // ...%en0` gateway in cleartext while the user believes ALL their
+        // traffic is tunnelled. Since the FortiGate side doesn't carry v6,
+        // we fail closed: blackhole all IPv6 for the duration of the
+        // tunnel. Torn down by delete_full_tunnel_routes() on disconnect.
+        if ok && args.full_tunnel {
+            install_ipv6_leak_block();
+        }
+
         Ok(ConnectResult {
             ok,
             message: out.lines().last().unwrap_or("").to_owned(),
@@ -304,9 +390,32 @@ impl Strongswan {
         let etc = self.etc.as_ref().unwrap().clone();
         let conf_path = etc.join(format!("swanctl/conf.d/supermanager-{}.conf", args.profile_id));
         let secrets_path = etc.join(format!("swanctl/conf.d/supermanager-{}-secrets.conf", args.profile_id));
+
+        // Extract the server host BEFORE removing the config file — we need
+        // it to clean up the kernel host route that charon installed.
+        // IKEv2 full-tunnel adds: `<server_ip>  <original_gw>  UGHS  en0`
+        // so that control traffic bypasses the tunnel. After disconnect the
+        // route must be removed; if the user changes networks before the
+        // next connect, the stale route points at the old gateway and charon
+        // can't determine a source address → "unable to determine source
+        // address, faking NAT situation" → every packet fails with EADDRNOTAVAIL.
+        let server_host = extract_remote_addr(&conf_path).await.ok();
+
         tokio::fs::remove_file(&conf_path).await.ok();
         tokio::fs::remove_file(&secrets_path).await.ok();
         let _ = run(swanctl, &["--load-all"]).await;
+
+        if let Some(host) = server_host {
+            delete_server_host_route(&host);
+        }
+        // Belt-and-braces: charon removes the full-tunnel split-default routes
+        // (0/1 + 128/1) when it terminates the SA cleanly. But if the SA was
+        // already gone before --terminate ran (server timeout, network change,
+        // unexpected drop), charon has nothing to clean up and the routes stay
+        // in the kernel — routing ALL subsequent traffic into a dead tunnel and
+        // breaking internet access until the next VPN connect or reboot.
+        // Deleting them here is idempotent: `route delete` ignores missing routes.
+        delete_full_tunnel_routes();
 
         Ok(DisconnectResult { ok: true, message: out.lines().last().unwrap_or("").to_owned() })
     }
@@ -319,17 +428,42 @@ impl Strongswan {
             return Ok(StatusResult {
                 state: "disconnected".to_owned(),
                 detail: "strongSwan not installed".to_owned(),
+                ..Default::default()
             });
         }
         let swanctl = self.swanctl.as_ref().expect("just resolved");
-        let out = run(swanctl, &["--list-sas"]).await.unwrap_or_default();
-        let block_marker = format!("{}: ", args.profile_id);
-        let block = out
-            .lines()
-            .skip_while(|l| !l.starts_with(&block_marker))
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Bound the swanctl call. Without a timeout a wedged charon (vici
+        // socket unresponsive) makes `--list-sas` hang FOREVER — and because
+        // status() holds the strongSwan controller lock, that wedges EVERY
+        // VPN operation (connect, disconnect, and all subsequent status
+        // polls), freezing the GUI on "Connecting…" for a tunnel that is
+        // actually up. On timeout we report the interim "connecting" state
+        // and return, releasing the lock so the next poll retries and other
+        // RPCs proceed.
+        // Distinguish a genuine TIMEOUT (charon's vici wedged → report the
+        // interim "connecting" so the lock releases) from swanctl simply
+        // exiting non-zero (e.g. charon not running → no SA → that's just
+        // "disconnected", the original behaviour). Conflating the two would
+        // wrongly show "Connecting…" for a tunnel that is plainly down.
+        let out = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(swanctl, &["--list-sas"]),
+        )
+        .await
+        {
+            // swanctl finished in time: use its output, or empty on a
+            // non-zero exit (no charon / no SAs) → resolves to "disconnected".
+            Ok(result) => result.unwrap_or_default(),
+            // genuinely hung past the deadline.
+            Err(_) => {
+                return Ok(StatusResult {
+                    state: "connecting".to_owned(),
+                    detail: "status query timed out (charon busy)".to_owned(),
+                    ..Default::default()
+                });
+            }
+        };
+        let block = extract_sa_block(&out, &args.profile_id);
         let state = if block.is_empty() {
             "disconnected"
         } else if block.contains("ESTABLISHED") {
@@ -337,8 +471,199 @@ impl Strongswan {
         } else {
             "connecting"
         };
-        Ok(StatusResult { state: state.to_owned(), detail: block })
+        if state != "connected" {
+            // Half-built or gone: report the state and nothing about a tunnel
+            // that isn't carrying anything. An empty live-tunnel section beats
+            // one describing an SA mid-negotiation.
+            return Ok(StatusResult {
+                state: state.to_owned(),
+                detail: sa_summary_line(&block),
+                ..Default::default()
+            });
+        }
+        let virtual_ip = parse_virtual_ip(&block).unwrap_or_default();
+        // swanctl doesn't name the utun, but the virtual IP is assigned to it,
+        // so ifconfig can point back. Resolving via the IP rather than "the
+        // newest utun" keeps it right when several tunnels are up at once.
+        let (interface, virtual_gateway) = if virtual_ip.is_empty() {
+            (String::new(), String::new())
+        } else {
+            utun_for_address(&virtual_ip).unwrap_or_default()
+        };
+        let active_routes = parse_child_remote_ts(&block);
+        let routes_installed = routes_installed_verdict(&interface, &active_routes, |dest| {
+            route_iface_family(dest, "-inet")
+        });
+        Ok(StatusResult {
+            state: state.to_owned(),
+            detail: sa_summary_line(&block),
+            interface,
+            virtual_ip,
+            virtual_gateway,
+            active_routes,
+            routes_installed,
+        })
     }
+}
+
+/// Does every negotiated selector have a kernel route pointing at this
+/// tunnel's utun?
+///
+/// `lookup` answers "which interface would carry a packet to this
+/// destination" (production: `route -n get`). If the specific route is
+/// missing, the kernel falls through to the physical default and the lookup
+/// returns en0 — which is exactly the failure being detected, so no separate
+/// "route absent" case is needed.
+///
+/// The v4 catch-all is checked as the two /1 halves: that's how a full tunnel
+/// is actually installed, because a literal 0.0.0.0/0 would tie with the
+/// physical default route instead of beating it. v6 selectors are skipped —
+/// full-tunnel v6 is deliberately a blackhole pair on lo0 (the IPv6-leak fix),
+/// so "not on the utun" is its correct, healthy state.
+fn routes_installed_verdict(
+    iface: &str,
+    routes: &[String],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<bool> {
+    if iface.is_empty() || routes.is_empty() {
+        return None;
+    }
+    let mut checked_any = false;
+    for ts in routes {
+        if ts.contains(':') {
+            continue; // v6: blackholed on lo0 by design, not utun-routed
+        }
+        let targets: Vec<&str> = if ts == "0.0.0.0/0" {
+            vec!["0.0.0.0/1", "128.0.0.0/1"]
+        } else {
+            vec![ts.as_str()]
+        };
+        for t in targets {
+            checked_any = true;
+            if lookup(t).as_deref() != Some(iface) {
+                return Some(false);
+            }
+        }
+    }
+    checked_any.then_some(true)
+}
+
+/// Pull one connection's block out of `swanctl --list-sas`.
+///
+/// The block is the line starting `<profile_id>: `, then every indented line
+/// under it — which is where the child SAs and their traffic selectors live.
+/// This used to `.take(8)`, and a real block is eleven lines: the cut landed
+/// between the byte counters and the `local`/`remote` selectors, so the two
+/// lines saying what the tunnel actually carries were the ones being thrown
+/// away.
+fn extract_sa_block(list_sas: &str, profile_id: &str) -> String {
+    let marker = format!("{}: ", profile_id);
+    let mut lines = list_sas.lines().skip_while(|l| !l.starts_with(&marker));
+    let Some(head) = lines.next() else {
+        return String::new();
+    };
+    // A following unindented line starts the next connection's block. The child
+    // SA repeats the profile id but indented, so it stays with us.
+    let rest = lines.take_while(|l| l.starts_with(char::is_whitespace));
+    std::iter::once(head).chain(rest).collect::<Vec<_>>().join("\n")
+}
+
+/// The "established 8s ago, rekeying in 14105s" line, as the detail string.
+///
+/// `detail` used to be the raw eight-line block, rendered under the status pill
+/// as a monospaced blob. It was standing in for structure we didn't extract;
+/// now that we do, it goes back to being one line a human reads.
+fn sa_summary_line(block: &str) -> String {
+    block
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("established "))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The virtual IP from the IKE SA's `local` line:
+///
+/// ```text
+///   local  '192.168.200.136' @ 192.168.200.136[4500] [192.168.250.1]
+/// ```
+///
+/// Both bracket groups have to be considered: the first is the UDP port. Take
+/// the last, and only if it looks like an address — with no virtual IP assigned
+/// the line ends at `[4500]` and returning "4500" as an address would be worse
+/// than returning nothing.
+fn parse_virtual_ip(block: &str) -> Option<String> {
+    let line = block
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("local ") && l.contains('@'))?;
+    let inner = line.rsplit_once('[')?.1.strip_suffix(']')?;
+    // An address, not a port. IPv6 virtual IPs contain ':'.
+    if inner.contains('.') || inner.contains(':') {
+        Some(inner.to_string())
+    } else {
+        None
+    }
+}
+
+/// Every child SA's remote traffic selector — what the gateway agreed to carry.
+///
+/// Must not pick up the IKE SA's own `remote '193.214.73.114' @ ...` line,
+/// which names the peer rather than a route. The identity is quoted and a
+/// selector never is, so the quote is the discriminator; indent depth would
+/// also work but is the kind of thing a swanctl release can restyle.
+///
+/// One child SA can list several selectors, space-separated.
+fn parse_child_remote_ts(block: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in block.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("remote ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.starts_with('\'') {
+            continue; // IKE peer identity, not a selector
+        }
+        for ts in rest.split_whitespace() {
+            if !out.iter().any(|e| e == ts) {
+                out.push(ts.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `(interface, peer)` for whichever utun carries `addr`.
+///
+/// ```text
+/// utun11: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1400
+///         inet 192.168.250.1 --> 192.168.250.1 netmask 0xffffffff
+/// ```
+fn utun_for_address(addr: &str) -> Option<(String, String)> {
+    let out = std::process::Command::new("/sbin/ifconfig").output().ok()?;
+    let body = String::from_utf8_lossy(&out.stdout);
+    let mut current: Option<&str> = None;
+    for line in body.lines() {
+        if let Some(name) = line.split(':').next().filter(|_| !line.starts_with(char::is_whitespace)) {
+            current = if name.starts_with("utun") { Some(name) } else { None };
+            continue;
+        }
+        let Some(iface) = current else { continue };
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("inet") {
+            continue;
+        }
+        if fields.next() != Some(addr) {
+            continue;
+        }
+        // "--> <peer>" is present on point-to-point utuns, absent otherwise.
+        let peer = match (fields.next(), fields.next()) {
+            (Some("-->"), Some(p)) => p.to_string(),
+            _ => String::new(),
+        };
+        return Some((iface.to_string(), peer));
+    }
+    None
 }
 
 use std::os::unix::fs::PermissionsExt;
@@ -411,15 +736,52 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
     // (it sent its server cert/PSK auth and started the EAP exchange).
     // With `local-1.auth = psk + local-2.auth = eap`, FortiGate stopped
     // responding entirely.
+    //
+    // Optional IKE identity (IDi): when Local ID is set we pin `local.id`
+    // so a gateway can route us to the right dial-up tunnel by peer-ID
+    // BEFORE auth (FortiGate multi-dial-up on one public IP). Empty → omit
+    // the line so strongSwan defaults IDi to the local IP (prior behaviour).
+    // Quoted + escaped so an arbitrary identity (FQDN, user@domain, keyid)
+    // parses; strongSwan auto-detects the ID type regardless of quoting.
+    let local_id_line = {
+        let trimmed = args.local_id.trim();
+        if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!("\n            id = \"{}\"", escape_swanctl(trimmed))
+        }
+    };
+    // Dead Peer Detection is what turns "firewall rebooted mid-tunnel" from a
+    // permanent brick into a self-heal. Without dpd_delay, charon never
+    // notices a peer that vanished without a clean IKE DELETE: the IKE_SA
+    // stays ESTABLISHED forever, the full-tunnel 0/1+128/1 routes stay pinned
+    // to a dead utun and black-hole all IPv4+DNS, and that phantom SA defeats
+    // every recovery layer (the orphan reaper trusts utun_has_live_owner;
+    // auto_reconnect trusts sw_connected). dpd_delay makes charon probe
+    // liveness after 10s idle; on timeout the child's dpd_action=restart drops
+    // the dead SA (routes go, egress fails open) and re-negotiates when the
+    // peer returns. Detection is ~100s: dpd_delay plus charon's DEFAULT
+    // retransmit schedule. Do NOT try to shorten that with per-connection
+    // retransmit_timeout/base/tries — those are NOT swanctl.conf connection
+    // options (they live under `charon` in strongswan.conf, daemon-wide);
+    // strongSwan 6.x rejects them with "unknown option" and discards the
+    // ENTIRE connection, so the tunnel fails to load at all. Keep this note in
+    // Rust source, NOT as a `#` line in the emitted config below — a config
+    // comment mentioning "retransmit" would both bloat every render and trip
+    // the guard test that asserts no retransmit_ token reaches swanctl.
     format!(
         r#"connections {{
     {id} {{
         version = 2
         remote_addrs = {host}
         vips = 0.0.0.0
+        # Dead Peer Detection: notice a vanished peer (e.g. firewall reboot)
+        # and self-heal instead of black-holing. Full rationale lives in
+        # build_swanctl_conf in the Rust source.
+        dpd_delay = 10s
         local {{
             auth = eap-mschapv2
-            eap_id = {username}
+            eap_id = {username}{local_id_line}
         }}
         remote {{
             auth = psk
@@ -429,6 +791,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
             {id} {{
                 local_ts = {local_ts}
                 remote_ts = {remote_ts}
+                dpd_action = restart
                 start_action = none
                 close_action = none
             }}
@@ -439,6 +802,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         id = id,
         host = args.host,
         username = args.username,
+        local_id_line = local_id_line,
         local_ts = local_ts,
         remote_ts = remote_ts,
     )
@@ -496,6 +860,444 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     s
 }
 
+/// Delete the VPN-server host route that charon installs during an
+/// IKEv2 full-tunnel connect.
+///
+/// When charon brings up a full tunnel it adds a host route so that
+/// IKE keep-alives and rekeying reach the peer directly instead of
+/// looping back through the tunnel:
+///
+///   `<server>  <original-gw>  UGHS  en0`
+///
+/// On a clean disconnect charon removes this route. When charon is
+/// killed (helper crash, SIGKILL, machine sleep mid-connect), the
+/// route persists. On the next connect attempt — especially after a
+/// network change — charon can't determine a source address because
+/// the route still points at the old gateway on the old network →
+/// "unable to determine source address, faking NAT situation" →
+/// every IKE_SA_INIT packet fails with EADDRNOTAVAIL.
+///
+/// This function is called from `disconnect()` (before cleaning up
+/// the config file) and from `sweep_stale_configs()` (at startup).
+/// Safe to call unconditionally — `route delete` is a no-op if the
+/// route doesn't exist.
+fn delete_server_host_route(host: &str) {
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-q", "delete", host])
+        .output();
+    match out {
+        Ok(o) if o.status.success() =>
+            tracing::info!("route_cleanup: deleted host route for {host}"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            // "not in table" is expected when the route was already gone.
+            if !msg.contains("not in table") && !msg.contains("No such process") {
+                tracing::debug!("route_cleanup: route delete {host}: {msg}");
+            }
+        }
+        Err(e) => tracing::warn!("route_cleanup: route delete {host}: {e}"),
+    }
+}
+
+/// Remove the split-default routes that strongSwan installs for full-tunnel
+/// IKEv2 connections. These two routes redirect ALL IPv4 traffic through the
+/// VPN tunnel — if they linger after a disconnect (e.g., because the SA was
+/// already gone when `swanctl --terminate` ran), the entire machine loses
+/// internet access until a reboot or another VPN connect.
+///
+/// CRITICAL: `0/1` + `128.0/1` are a SHARED kernel resource. WireGuard
+/// (wg-quick) and OpenVPN (`redirect-gateway def1`) install the exact same
+/// pair for their own full tunnels. `route delete -net 0/1` matches purely on
+/// destination, so a blind delete would strip a live WireGuard/OpenVPN
+/// tunnel's routes and silently leak all traffic in cleartext via en0 while
+/// the GUI still shows "Connected".
+///
+/// We therefore gate the deletion on OWNERSHIP: look up the interface backing
+/// each route and skip the delete when that interface belongs to a live
+/// non-strongSwan tunnel. We only delete routes that point at a dead/charon
+/// interface — exactly the stale-route case this function exists to fix.
+///
+/// Safe to call unconditionally: `/sbin/route delete` returns "not in table"
+/// if the route doesn't exist, which we treat as success.
+fn delete_full_tunnel_routes() {
+    // Interfaces owned by a live WireGuard or OpenVPN tunnel. Never delete a
+    // split-default that points at one of these.
+    let mut foreign = foreign_tunnel_ifaces();
+    // ALSO protect a live tailscale exit node's utun. tailscale uses the same
+    // 0/1+128/1 pair; this sweep fires on every wake, and without protecting
+    // the tailscale utun it would silently wipe a live exit node's routes and
+    // drop egress to the local uplink. Unlike foreign_tunnel_ifaces (which
+    // remove_exit_routes uses and must be able to delete tailscale routes from),
+    // this protection is local to the sweep only.
+    if let Some(ts) = tailscale_tunnel_iface() {
+        foreign.insert(ts);
+    }
+    // Is a strongSwan tunnel ESTABLISHED right now? If so, a utun-backed /1
+    // route belongs to it (e.g. auto_reconnect re-established the tunnel after
+    // wake, or another IKEv2 profile is up while this one disconnects). We must
+    // not delete a live IKEv2 tunnel's default routes.
+    let live_sa = has_established_strongswan_sa();
+
+    // IPv4 split-defaults charon installs for a full tunnel. (get-spec,
+    // delete-spec, family-flag): `route get` wants a full address, `route
+    // delete` accepts the short CIDR form charon/wg-quick install.
+    let v4 = [("0.0.0.0/1", "0/1"), ("128.0.0.0/1", "128.0/1")];
+    for (get_spec, del_spec) in &v4 {
+        delete_split_default(get_spec, del_spec, "-inet", &foreign, live_sa);
+    }
+    // IPv6 split-defaults: charon never installs these (our conf is v4-only),
+    // but install_ipv6_leak_block() does — as blackhole routes via lo0 — to
+    // stop v6 leaking past the tunnel. wg-quick installs the same ::/1 +
+    // 8000::/1 pair for its own v6 full tunnel, so the ownership gate
+    // (skip if backed by a live foreign utun) protects those too; our
+    // blackhole routes resolve to lo0, which is never foreign, so they delete.
+    let v6 = [("::/1", "::/1"), ("8000::/1", "8000::/1")];
+    for (get_spec, del_spec) in &v6 {
+        delete_split_default(get_spec, del_spec, "-inet6", &foreign, live_sa);
+    }
+}
+
+/// True if the IPv4 full-tunnel split-default (`0/1`) is currently installed
+/// on a utun interface — i.e. a full tunnel's routes are actually present, not
+/// merely its SA. auto_reconnect uses this to detect an ESTABLISHED-but-
+/// routeless tunnel (e.g. the split-defaults were externally flushed) so it
+/// can replay the connect and re-install them instead of reporting "connected"
+/// for a tunnel that is silently leaking.
+pub(crate) fn full_tunnel_routes_present() -> bool {
+    route_iface_family("0.0.0.0/1", "-inet")
+        .map(|i| i.starts_with("utun"))
+        .unwrap_or(false)
+}
+
+/// True if `swanctl --list-sas` shows any ESTABLISHED IKE SA — i.e. a live
+/// strongSwan tunnel exists right now. Used to keep route/config cleanup from
+/// stripping a tunnel that auto_reconnect (or always-on) re-established before
+/// a wake sweep ran, and to protect one IKEv2 profile while another disconnects.
+pub(crate) fn has_established_strongswan_sa() -> bool {
+    // BOUNDED. A wedged charon can make `swanctl --list-sas` hang FOREVER; this
+    // is called from the RPC dispatch / cleanup paths, and an unbounded hang here
+    // blocks a tokio worker -> the helper stops answering RPCs -> the app's
+    // (blocking) socket reads pile up and freeze the whole UI. Cap it at 3s.
+    // Timeout / error => false (the prior fail direction: cleanup treats "can't
+    // confirm a live SA" as safe-to-clean). The route reaper uses the fail-SAFE
+    // variant below instead.
+    matches!(swanctl_list_sas_established(), Some(true))
+}
+
+/// Run `swanctl --list-sas` bounded by a 3s timeout, off the caller's thread (a
+/// worker thread + recv_timeout, since some callers run on a non-tokio std
+/// thread). `Some(true)` = an SA is ESTABLISHED, `Some(false)` = the probe ran
+/// cleanly with none, `None` = the probe could not complete (missing binary,
+/// spawn error, or a wedged charon that timed out).
+fn swanctl_list_sas_established() -> Option<bool> {
+    let swanctl = BREW_PATHS
+        .iter()
+        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
+        .find(|p| p.exists())?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::process::Command::new(&swanctl).arg("--list-sas").output());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(o)) if o.status.success() => {
+            Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
+        }
+        _ => None, // spawn error / non-zero exit / 3s timeout
+    }
+}
+
+/// FAIL-SAFE liveness probe for the orphan-route reaper. Returns `true` if an IKE
+/// SA is ESTABLISHED, OR if the probe could not be completed (swanctl missing,
+/// spawn error, or a wedged charon making `--list-sas` hang). The reaper must
+/// NEVER rip a LIVE IKEv2 tunnel's split-default on a transient swanctl hiccup —
+/// that silently leaks all traffic cleartext — so "uncertain" resolves to KEEP.
+/// Returns `false` ONLY when swanctl succeeds and shows no established SA, i.e.
+/// the tunnel is genuinely gone. Bounded with a 3s timeout (a non-tokio std
+/// thread, so we use a worker thread + recv_timeout).
+pub(crate) fn ikev2_sa_present_or_unknown() -> bool {
+    // Fail-SAFE: only a CLEAN "no SA" (Some(false)) lets the reaper reap; a
+    // missing binary / error / 3s timeout (None) resolves to KEEP so a transient
+    // swanctl hiccup can never unmask a live IKEv2 tunnel's route.
+    swanctl_list_sas_established() != Some(false)
+}
+
+/// Delete one split-default route unless it belongs to a live tunnel.
+/// `family` is `-inet` or `-inet6`. Skips the delete when the route is owned by
+/// a live WireGuard/OpenVPN interface (`foreign`) or, when `live_sa` is set, by
+/// any utun (a live strongSwan tunnel's route). Idempotent: a missing route is
+/// success. Our own IPv6 blackhole routes resolve to lo0, not a utun, so the
+/// `live_sa` guard never blocks their cleanup.
+fn delete_split_default(
+    get_spec: &str,
+    del_spec: &str,
+    family: &str,
+    foreign: &std::collections::HashSet<String>,
+    live_sa: bool,
+) {
+    if let Some(iface) = route_iface_family(get_spec, family) {
+        if foreign.contains(&iface) {
+            tracing::info!("route_cleanup: keeping {del_spec} — owned by live tunnel {iface}");
+            return;
+        }
+        if live_sa && iface.starts_with("utun") {
+            tracing::info!("route_cleanup: keeping {del_spec} — live strongSwan SA on {iface}");
+            return;
+        }
+    }
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-q", "delete", family, "-net", del_spec])
+        .output();
+    match out {
+        Ok(o) if o.status.success() =>
+            tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stderr);
+            if !msg.contains("not in table") && !msg.contains("No such process") {
+                tracing::debug!("route_cleanup: route delete {del_spec}: {msg}");
+            }
+        }
+        Err(e) => tracing::warn!("route_cleanup: route delete {del_spec}: {e}"),
+    }
+}
+
+/// Install IPv6 leak protection for an IPv4-only full tunnel: blackhole the
+/// two IPv6 split-defaults (`::/1` + `8000::/1`) so they take precedence over
+/// the physical `::/0` default and the kernel silently drops all IPv6. Routed
+/// via `::1`/lo0 with `-blackhole` (RTF_BLACKHOLE). Idempotent: we delete any
+/// prior copy first so a reconnect doesn't error on "route already in table".
+fn install_ipv6_leak_block() {
+    for net in &["::/1", "8000::/1"] {
+        // Don't clobber a real v6 tunnel route if one somehow points here.
+        // Protect WG/OpenVPN AND a live tailscale exit node here: tailscale's
+        // ::/1 routes v6 through the exit peer (encrypted), so leaving it is not
+        // a leak — clobbering it with a lo0 blackhole would just break a working
+        // exit node's v6. (remove_exit_routes still deletes tailscale's routes;
+        // only THIS install path skips them.)
+        if let Some(iface) = route_iface_family(net, "-inet6") {
+            if iface != "lo0" && iface.starts_with("utun") {
+                let mut foreign = foreign_tunnel_ifaces();
+                if let Some(ts) = tailscale_tunnel_iface() {
+                    foreign.insert(ts);
+                }
+                if foreign.contains(&iface) {
+                    tracing::warn!(
+                        "ipv6_leak_block: {net} already owned by live tunnel {iface}, skipping"
+                    );
+                    continue;
+                }
+            }
+        }
+        let _ = std::process::Command::new("/sbin/route")
+            .args(["-q", "delete", "-inet6", "-net", net])
+            .output();
+        let out = std::process::Command::new("/sbin/route")
+            .args(["-q", "add", "-inet6", "-net", net, "::1", "-blackhole"])
+            .output();
+        match out {
+            Ok(o) if o.status.success() =>
+                tracing::info!("ipv6_leak_block: blackholed {net}"),
+            Ok(o) => tracing::warn!(
+                "ipv6_leak_block: add {net} failed: {}",
+                String::from_utf8_lossy(&o.stderr)
+            ),
+            Err(e) => tracing::warn!("ipv6_leak_block: add {net}: {e}"),
+        }
+    }
+}
+
+/// Resolve the kernel interface that a packet to `dest` would use, by parsing
+/// `route -n get <family> <dest>` (family = `-inet` or `-inet6`). Returns
+/// `None` if the lookup fails or prints no `interface:` line. Used to identify
+/// which backend owns a full-tunnel split-default route before we delete it.
+pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
+    let out = std::process::Command::new("/sbin/route")
+        .args(["-n", "get", family, dest])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    for line in body.lines() {
+        if let Some(rest) = line.trim().strip_prefix("interface:") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Set of kernel interfaces currently owned by a live non-strongSwan VPN
+/// tunnel — WireGuard (`wg show interfaces`) and OpenVPN
+/// (`openvpn::live_tunnel_interfaces`). The strongSwan route cleanup must
+/// never delete a split-default route pointing at one of these.
+///
+/// NOTE: this set deliberately does NOT include the tailscale utun. The
+/// tailscale exit node ALSO installs `0/1`+`128/1` via its own utun, but
+/// `tailscale::remove_exit_routes` (panic_reset / auto-revert) calls this to
+/// decide what to skip and MUST be able to delete tailscale's own routes —
+/// that is the fail-open path. The strongSwan post-wake sweep needs the
+/// opposite (keep a live exit node's routes), so it protects the tailscale
+/// utun separately via `tailscale_tunnel_iface()` in `delete_full_tunnel_routes`.
+/// (An earlier version folded the tailscale utun in here and silently broke
+/// panic_reset's fail-open — it KEPT the routes it was meant to drop.)
+pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    // WireGuard: `wg show interfaces` prints a space-separated list of the
+    // utun devices wireguard-go currently owns.
+    for prefix in BREW_PATHS {
+        let wg = std::path::Path::new(prefix).join("bin/wg");
+        if !wg.exists() {
+            continue;
+        }
+        if let Ok(out) = std::process::Command::new(&wg)
+            .args(["show", "interfaces"])
+            .output()
+        {
+            if out.status.success() {
+                for name in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+        break;
+    }
+    // OpenVPN: live tunnels expose their utun via the helper's log parse.
+    for iface in crate::openvpn::live_tunnel_interfaces() {
+        set.insert(iface);
+    }
+    set
+}
+
+/// The kernel interface tailscaled owns, if the daemon is up. Detected from the
+/// `100.64/10` (CGNAT) route tailscaled installs for the tailnet — present as
+/// long as the daemon runs, independent of any active exit node OR a momentary
+/// connectivity blip (unlike a `route get 100.100.100.100`, which goes dark
+/// mid-blip). The strongSwan post-wake sweep uses this to avoid wiping a live
+/// exit node's `0/1` split-defaults.
+pub(crate) fn tailscale_tunnel_iface() -> Option<String> {
+    let out = std::process::Command::new("/usr/sbin/netstat")
+        .args(["-rn", "-f", "inet"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= 4 && fields[0] == "100.64/10" && fields[3].starts_with("utun") {
+            return Some(fields[3].to_string());
+        }
+    }
+    None
+}
+
+/// Extract the `remote_addrs` value from a swanctl conf file.
+///
+/// Config format:
+/// ```
+/// connections {
+///     <id> {
+///         remote_addrs = 79.161.11.170
+///         ...
+///     }
+/// }
+/// ```
+///
+/// Returns the first `remote_addrs` value found, trimmed. Returns
+/// `Err` if the file can't be read or the key is absent (e.g.
+/// secrets-only file).
+async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Result<String> {
+    let content = tokio::fs::read_to_string(path.as_ref()).await?;
+    for line in content.lines() {
+        if let Some(rest) = line.trim().strip_prefix("remote_addrs") {
+            // Matches both `remote_addrs = host` and `remote_addrs=host`
+            let host = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+            if !host.is_empty() {
+                return Ok(host.to_string());
+            }
+        }
+    }
+    anyhow::bail!("remote_addrs not found in {}", path.as_ref().display())
+}
+
+/// Terminate all active supermanager IKE SAs and sweep their config files.
+///
+/// Called on system-sleep notification (belt-and-braces after the Swift
+/// layer has already fired per-profile disconnect RPCs) and can also be
+/// called stand-alone. Safe to call when no VPNs are active — every
+/// underlying command is idempotent.
+///
+/// Steps:
+///   1. For each `supermanager-<id>.conf` in swanctl's conf.d:
+///      a. Run `swanctl --terminate --ike <id>` (best-effort).
+///      b. Extract `remote_addrs` and delete the kernel host route.
+///      c. Remove the conf file.
+///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
+///   3. Run `swanctl --load-all` so charon sees the empty namespace.
+pub async fn terminate_and_sweep() {
+    // Find the first working swanctl binary. Return early if strongSwan
+    // isn't installed — nothing to clean up.
+    let swanctl_path = BREW_PATHS
+        .iter()
+        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
+        .find(|p| p.exists());
+    let Some(swanctl) = swanctl_path else {
+        tracing::debug!("terminate_and_sweep: swanctl not found, skipping");
+        return;
+    };
+
+    for prefix in BREW_PATHS {
+        let conf_dir = std::path::Path::new(prefix).join("etc/swanctl/conf.d");
+        let Ok(mut entries) = tokio::fs::read_dir(&conf_dir).await else {
+            continue;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let fname = match entry.file_name().into_string() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // Only touch our namespace; leave other strongSwan configs alone.
+            if !fname.starts_with("supermanager-") || !fname.ends_with(".conf") {
+                continue;
+            }
+            // Secrets files (supermanager-<id>-secrets.conf) — remove but
+            // don't try to terminate an IKE SA named "<id>-secrets".
+            if fname.ends_with("-secrets.conf") {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+                tracing::debug!(file = %fname, "terminate_and_sweep: removed secrets file");
+                continue;
+            }
+            // Derive the connection name: `supermanager-<id>.conf` → `<id>`
+            let conn_name = fname
+                .strip_prefix("supermanager-")
+                .and_then(|s| s.strip_suffix(".conf"))
+                .unwrap_or("");
+            if conn_name.is_empty() {
+                continue;
+            }
+            // Terminate the IKE SA (best-effort — it may already be gone).
+            let _ = run(&swanctl, &["--terminate", "--ike", conn_name]).await;
+            tracing::info!(conn = %conn_name, "terminate_and_sweep: terminated IKE SA");
+
+            // Sweep the kernel host route charon installed.
+            if let Ok(host) = extract_remote_addr(entry.path()).await {
+                delete_server_host_route(&host);
+            }
+            // Remove the config file.
+            let _ = tokio::fs::remove_file(entry.path()).await;
+            tracing::debug!(file = %fname, "terminate_and_sweep: removed conf");
+        }
+        // Reload so charon sees the now-empty supermanager namespace.
+        let _ = run(&swanctl, &["--load-all"]).await;
+        // Explicitly remove full-tunnel split-default routes. charon removes
+        // these when --terminate succeeds, but if a SA was already gone they
+        // linger in the kernel and black-hole all internet traffic.
+        delete_full_tunnel_routes();
+        break; // Found a valid brew prefix; done.
+    }
+}
+
 /// swanctl uses double-quoted strings; we need to escape `"` and `\`.
 /// Newlines aren't valid inside a swanctl secret so we drop them defensively.
 fn escape_swanctl(s: &str) -> String {
@@ -523,7 +1325,176 @@ mod tests {
             shared_secret: psk.to_owned(),
             full_tunnel: true,
             routes: Vec::new(),
+            local_id: String::new(),
         }
+    }
+
+    /// Verbatim `swanctl --list-sas` from strongSwan 6.0.6, captured from a
+    /// live full-tunnel IKEv2 connection to a FortiGate. Not reconstructed: an
+    /// earlier change in this file shipped a swanctl option that looked right
+    /// and wasn't, and strongSwan silently discarded the whole config. Parsers
+    /// get written against output someone actually saw.
+    const REAL_LIST_SAS_FULL_TUNNEL: &str = "\
+4a08fdd4-1818-4826-aedc-f1466c96d113: #1, ESTABLISHED, IKEv2, 9f2c31ad4a19aa57_i* 8b0e9e4c7ae0fa98_r
+  local  '192.168.200.136' @ 192.168.200.136[4500] [192.168.250.1]
+  remote '193.214.73.114' @ 193.214.73.114[4500]
+  AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_384
+  established 8s ago, rekeying in 14105s
+  4a08fdd4-1818-4826-aedc-f1466c96d113: #1, reqid 1, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-128/HMAC_SHA1_96
+    installed 8s ago, rekeying in 3336s, expires in 3952s
+    in  cb9ab05e,  42670 bytes,   116 packets,     0s ago
+    out 42ee1011,  67088 bytes,   163 packets,     0s ago
+    local  192.168.250.1/32
+    remote 0.0.0.0/0
+";
+
+    const PROFILE: &str = "4a08fdd4-1818-4826-aedc-f1466c96d113";
+
+    #[test]
+    fn block_extends_past_the_byte_counters_to_the_selectors() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, PROFILE);
+        // The old `.take(8)` stopped at the `in`/`out` counters. These two lines
+        // are the whole point of reading the block.
+        assert!(block.contains("local  192.168.250.1/32"));
+        assert!(block.contains("remote 0.0.0.0/0"));
+        assert!(block.contains("ESTABLISHED"));
+    }
+
+    #[test]
+    fn block_stops_at_the_next_connection() {
+        let two = format!(
+            "{}other-profile-id: #2, ESTABLISHED, IKEv2, aaaa_i* bbbb_r\n  local  'x' @ 10.0.0.1[4500] [10.9.9.9]\n",
+            REAL_LIST_SAS_FULL_TUNNEL
+        );
+        let block = extract_sa_block(&two, PROFILE);
+        assert!(!block.contains("other-profile-id"));
+        assert!(!block.contains("10.9.9.9"), "must not inherit the next SA's virtual IP");
+        assert_eq!(parse_virtual_ip(&block).as_deref(), Some("192.168.250.1"));
+    }
+
+    #[test]
+    fn virtual_ip_is_the_bracket_after_the_port_not_the_port() {
+        assert_eq!(
+            parse_virtual_ip(REAL_LIST_SAS_FULL_TUNNEL).as_deref(),
+            Some("192.168.250.1")
+        );
+    }
+
+    #[test]
+    fn virtual_ip_absent_yields_none_never_the_port() {
+        let no_vip = "conn: #1, ESTABLISHED, IKEv2, a_i* b_r\n  local  'me' @ 192.168.1.5[4500]\n  remote 'gw' @ 1.2.3.4[4500]\n";
+        assert_eq!(parse_virtual_ip(no_vip), None, "[4500] is a port, not an address");
+    }
+
+    #[test]
+    fn routes_are_child_selectors_not_the_peer_identity() {
+        let routes = parse_child_remote_ts(REAL_LIST_SAS_FULL_TUNNEL);
+        // `remote '193.214.73.114' @ ...` names the gateway. It is not a route.
+        assert_eq!(routes, vec!["0.0.0.0/0"]);
+    }
+
+    #[test]
+    fn routes_collect_every_child_sa_and_dedupe() {
+        // A split tunnel opens one child SA per subnet. Shape taken from this
+        // machine's charon log: `TS 10.0.60.100/32 === 10.0.10.0/24` etc.
+        let split = "\
+conn: #1, ESTABLISHED, IKEv2, a_i* b_r
+  local  'me' @ 10.0.0.5[4500] [10.0.60.100]
+  remote 'gw' @ 1.2.3.4[4500]
+  established 3s ago, rekeying in 14000s
+  conn: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_GCM_16-256
+    local  10.0.60.100/32
+    remote 10.0.10.0/24
+  conn: #2, reqid 2, INSTALLED, TUNNEL, ESP:AES_GCM_16-256
+    local  10.0.60.100/32
+    remote 10.99.0.0/24 10.0.10.0/24
+";
+        let routes = parse_child_remote_ts(split);
+        assert_eq!(routes, vec!["10.0.10.0/24", "10.99.0.0/24"],
+                   "every child SA, space-separated selectors split, first-seen order, no repeats");
+    }
+
+    #[test]
+    fn detail_is_one_readable_line_not_the_raw_block() {
+        assert_eq!(
+            sa_summary_line(REAL_LIST_SAS_FULL_TUNNEL),
+            "established 8s ago, rekeying in 14105s"
+        );
+    }
+
+    #[test]
+    fn missing_profile_yields_empty_block_and_no_metadata() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, "not-a-real-profile");
+        assert!(block.is_empty());
+        assert_eq!(parse_virtual_ip(&block), None);
+        assert!(parse_child_remote_ts(&block).is_empty());
+    }
+
+    #[test]
+    fn verdict_false_is_exactly_the_captured_failure() {
+        // The live capture: full tunnel ESTABLISHED on utun11, virtual IP
+        // assigned, and neither /1 half installed — packets to 0.0.0.0/1
+        // fell through to the physical default on en0.
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("en0".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false), "ESTABLISHED but routeless must read as not installed");
+    }
+
+    #[test]
+    fn verdict_full_tunnel_checks_both_halves() {
+        // 0/1 present, 128/1 flushed: half the internet bypasses the tunnel.
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" => Some("utun11".into()),
+                "128.0.0.0/1" => Some("en0".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false));
+        let ok = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("utun11".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(ok, Some(true));
+    }
+
+    #[test]
+    fn verdict_split_tunnel_checks_each_selector() {
+        let routes = vec!["10.0.10.0/24".to_string(), "10.99.0.0/24".to_string()];
+        let v = routes_installed_verdict("utun7", &routes, |d| {
+            match d {
+                "10.0.10.0/24" => Some("utun7".into()),
+                "10.99.0.0/24" => Some("en0".into()), // missing -> default wins
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false));
+    }
+
+    #[test]
+    fn verdict_skips_v6_and_stays_silent_with_nothing_checkable() {
+        // Full-tunnel v6 is a blackhole pair on lo0 by design (the IPv6-leak
+        // fix): off-utun is its healthy state, so it must not fail the verdict.
+        let v = routes_installed_verdict(
+            "utun7",
+            &["::/0".to_string(), "0.0.0.0/0".to_string()],
+            |d| match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("utun7".into()),
+                _ => None,
+            },
+        );
+        assert_eq!(v, Some(true), "v6 selector must not drag the verdict down");
+        // Only v6 negotiated -> nothing we can check -> no claim either way.
+        let none = routes_installed_verdict("utun7", &["::/0".to_string()], |_| None);
+        assert_eq!(none, None);
+        // No interface resolved -> no claim.
+        assert_eq!(routes_installed_verdict("", &["0.0.0.0/0".into()], |_| None), None);
     }
 
     #[test]
@@ -554,6 +1525,66 @@ mod tests {
         // to look up; %any matched too loosely on macOS strongSwan 6.x.
         let conf = build_swanctl_conf(&args("vpn.example.com", "u", "p", "s"));
         assert!(conf.contains("id = vpn.example.com"));
+    }
+
+    #[test]
+    fn conf_sets_local_id_when_present_and_omits_when_blank() {
+        // Local ID lets a gateway route us to the right dial-up tunnel by
+        // peer-ID before auth. When set it must land as `local.id`; when
+        // blank it must be omitted entirely so strongSwan keeps defaulting
+        // IDi to the local IP (today's behaviour).
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.local_id = "  sybr-porsgrunn  ".to_owned(); // leading/trailing ws trimmed
+        let conf = build_swanctl_conf(&a);
+        // Prove NESTING, not mere presence: the quoted id must sit inside the
+        // `local { }` block — after `local {` and before `remote {` opens.
+        // A substring-anywhere check (the weaker version this replaces) would
+        // also pass if the id were mis-nested into remote{}, which charon
+        // would treat as remote.id (the peer's identity), NOT our IDi — the
+        // exact regression class this feature must prevent.
+        let local_at = conf.find("local {").expect("local block present");
+        let remote_at = conf.find("remote {").expect("remote block present");
+        let id_at = conf
+            .find("id = \"sybr-porsgrunn\"")
+            .expect("local.id must carry the trimmed identity");
+        assert!(
+            local_at < id_at && id_at < remote_at,
+            "local.id must be nested inside the local{{}} block, before remote{{}}:\n{conf}"
+        );
+
+        let blank = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
+        assert!(
+            !blank.contains("id = \""),
+            "blank Local ID must emit no quoted local.id line:\n{blank}"
+        );
+    }
+
+    #[test]
+    fn conf_enables_dead_peer_detection_with_restart() {
+        // Regression for the "restart a firewall and the VPN client wedges"
+        // brick: without DPD, charon never notices a vanished peer, the
+        // phantom-ESTABLISHED SA pins the full-tunnel routes to a dead utun,
+        // and every recovery layer (orphan reaper, auto_reconnect) trusts the
+        // stale SA state and does nothing. DPD + dpd_action=restart is the
+        // only thing that detects the dead peer and fails open. Pin all three
+        // so nobody strips them thinking they're noise.
+        let conf = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
+        assert!(
+            conf.contains("dpd_delay"),
+            "DPD must be enabled or a dead peer is never detected:\n{conf}"
+        );
+        assert!(
+            conf.contains("dpd_action = restart"),
+            "a detected-dead peer must tear down + rebuild, not linger:\n{conf}"
+        );
+        // retransmit_* are NOT valid swanctl.conf connection options in
+        // strongSwan 6.x. Emitting one makes charon discard the WHOLE
+        // connection ("unknown option: retransmit_timeout"), so the tunnel
+        // never loads. Guard against a well-meaning re-add to speed up DPD.
+        assert!(
+            !conf.contains("retransmit_"),
+            "retransmit_* are invalid swanctl.conf conn options and break load:\n{conf}"
+        );
     }
 
     #[test]

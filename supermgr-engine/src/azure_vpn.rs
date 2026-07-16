@@ -553,9 +553,17 @@ pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
     // `<user>\n<token>\n` — see supermanager-helper/src/openvpn.rs.
     out.push_str("auth-user-pass\n");
 
-    // Routing: full-tunnel pushes a `redirect-gateway def1`. Split
-    // tunnel emits one `route` per CIDR; we don't add a redirect.
-    if full_tunnel || cfg.routes.is_empty() {
+    // Routing. ONLY full-tunnel emits `redirect-gateway def1`. For split tunnel
+    // we emit explicit `route` lines if the config carries CIDRs, otherwise
+    // NOTHING — and rely on the routes the Azure point-to-site gateway PUSHES at
+    // connect (the VNet subnets). This is the correct default for Azure P2S:
+    // forcing redirect-gateway on an internal-only gateway (no internet egress)
+    // black-holes ALL public traffic + DNS and freezes the Mac, while the
+    // pushed VNet routes already give access to everything internal. (Earlier
+    // `full_tunnel || cfg.routes.is_empty()` forced full tunnel whenever the
+    // imported config listed no routes — which is the normal Azure case, since
+    // routes are pushed at runtime — and broke internet for every Azure VPN.)
+    if full_tunnel {
         out.push_str("redirect-gateway def1\n");
     } else {
         for net in &cfg.routes {
@@ -808,6 +816,18 @@ mod tests {
         let cfg = parse_azure_vpn_config(xml).expect("should parse");
         assert!(cfg.routes.is_empty(), "no routes element → empty routes");
         assert!(cfg.dns_servers.is_empty());
+
+        // REGRESSION (the Autostrada brick): with no config routes, split tunnel
+        // must NOT emit redirect-gateway — Azure P2S pushes the VNet routes at
+        // connect, and forcing full tunnel on an internal-only gateway
+        // black-holes all public internet + DNS. Only explicit full_tunnel=true
+        // may redirect.
+        let split = render_azure_ovpn(&cfg, false);
+        assert!(!split.contains("redirect-gateway"),
+            "split tunnel with no config routes must rely on pushed routes, not redirect-gateway");
+        let full = render_azure_ovpn(&cfg, true);
+        assert!(full.contains("redirect-gateway def1"),
+            "explicit full_tunnel must still redirect");
     }
 
     #[test]

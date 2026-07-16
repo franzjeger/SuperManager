@@ -32,14 +32,11 @@ struct SecurityView: View {
     }
 
     private var selectPrompt: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "shield.lefthalf.filled.badge.checkmark")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select an engagement to begin")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        EmptyStateView(
+            systemImage: "shield.lefthalf.filled.badge.checkmark",
+            title: "Select an engagement to begin",
+            hint: "An engagement scopes a customer's findings and holds the evidence from any scans you run against it."
+        )
     }
 
     @ViewBuilder
@@ -63,22 +60,12 @@ struct SecurityView: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 6) {
-                    if e.isActive {
-                        let daysLeft = Int(e.expiresAt.timeIntervalSinceNow / 86400)
-                        Label("Active · expires in \(daysLeft) days", systemImage: "checkmark.seal.fill")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background((daysLeft < 7 ? Color.orange : Color.green).opacity(0.15))
-                            .foregroundStyle(daysLeft < 7 ? Color.orange : Color.green)
-                            .clipShape(Capsule())
-                    } else {
-                        Label("Expired", systemImage: "exclamationmark.triangle.fill")
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(.red.opacity(0.15))
-                            .foregroundStyle(.red)
-                            .clipShape(Capsule())
-                    }
+                    StatusPill(
+                        status: .engagement(e),
+                        label: e.isActive
+                            ? "Active · expires \(e.expiryPhrase)"
+                            : "Expired"
+                    )
                     if let s = e.schedule {
                         let isPast = s.nextScanAt <= Date()
                         // Past nextScanAt happens when the scheduler

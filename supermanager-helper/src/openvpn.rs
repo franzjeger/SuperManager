@@ -128,22 +128,32 @@ pub struct OvpnStatusResult {
     pub rx_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_bytes: Option<u64>,
+    /// Last error extracted from the VPN log when state is
+    /// `reconnecting` or `disconnected`. e.g.
+    /// `"TRANSPORT_ERROR: NETWORK_EOF_ERROR"` or `"AUTH_FAILED"`.
+    /// Absent when connected or no diagnostic is available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum OvpnState {
-    /// Tunnel is up — the openvpn daemon has logged
-    /// `Initialization Sequence Completed`, meaning routes /
-    /// IP / DNS are all set up. Safe to declare success.
+    /// Tunnel is up and the log confirms the VPN session is
+    /// established (`EVENT: CONNECTED` or `Initialization Sequence
+    /// Completed`). Safe to pass traffic.
     Connected,
-    /// Daemon is running but `Initialization Sequence Completed`
-    /// hasn't appeared in the log yet. Either still negotiating
-    /// (TLS handshake, auth, push directives) or recovering from
-    /// a transient TCP reset via the retry loop. The GUI's status
-    /// poller should keep waiting; only after a generous timeout
-    /// does it count as a failed connect.
+    /// Process is alive but the tunnel has not negotiated yet —
+    /// initial connect in progress (TLS handshake, auth, push
+    /// directives). Different from `Reconnecting` because we have
+    /// never been connected in this process lifetime.
     Connecting,
+    /// Process is alive but the last log event was
+    /// `TRANSPORT_ERROR` or `RECONNECTING`: a previously working
+    /// session dropped and the client is retrying. The GUI should
+    /// show a warning state (amber dot) rather than "Connected",
+    /// and surface the last error so the user knows why.
+    Reconnecting,
     Disconnected,
 }
 
@@ -164,6 +174,14 @@ impl OpenVpn {
             args.config_file,
             openvpn.display()
         );
+
+        // Suppress the connectivity watchdog during the connect/handshake window.
+        // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
+        // no working egress while TLS/auth/route-push complete; without this the
+        // watchdog would count that as an outage and fire panic_reset, ripping
+        // the just-installed split-defaults out from under the connecting tunnel.
+        // The reconciler arms the same pause around its own route work.
+        crate::connectivity_watchdog::pause_for(45);
 
         // Pre-flight: refuse to launch if the .ovpn doesn't exist.
         // Otherwise the failure surfaces only via the log file the
@@ -604,42 +622,48 @@ impl OpenVpn {
                 active_routes: Vec::new(),
                 rx_bytes: None,
                 tx_bytes: None,
+                error_reason: None,
             });
         };
 
-        // Process is up. Now verify the tunnel actually negotiated.
-        // openvpn 2.x writes `Initialization Sequence Completed`
-        // exactly once when the tunnel is fully up. ovpncli (the
-        // OpenVPN 3 test client) doesn't emit that string — it
-        // writes `EVENT: CONNECTED` instead. We accept either so
-        // status reports correctly regardless of which binary the
-        // helper picked. Reading the file is cheap (kernel page
-        // cache after the first poll).
+        // Process is alive. Determine the REAL tunnel state by
+        // scanning the log for the LAST status event.
+        //
+        // Previous approach — body.contains("EVENT: CONNECTED") —
+        // was wrong: it returned Connected even after the client
+        // appended TRANSPORT_ERROR / RECONNECTING lines during
+        // an automatic retry loop, so the UI showed green "Connected"
+        // while the tunnel was stuck cycling through transport errors.
+        //
+        // last_event_from_log() scans every line and returns the
+        // state implied by the FINAL status-bearing event plus a
+        // short diagnostic string extracted from that line.
         let body = std::fs::read_to_string(&log_path).unwrap_or_default();
-        let init_done = body.contains("Initialization Sequence Completed")
-            || body.contains("EVENT: CONNECTED");
+        let (tunnel_state, error_reason) = last_event_from_log(&body);
+        let connected = tunnel_state == OvpnState::Connected;
 
         let (interface, virtual_ip, virtual_gateway) = parse_tunnel_metadata(&body);
         let active_routes = parse_active_routes(&body);
 
-        // Byte counters (only meaningful once the tunnel is up
-        // AND we know the interface name). Cheap shell-out;
-        // netstat is the single-call equivalent of reading
-        // `if_data.ifi_ibytes` / `ifi_obytes` via the Mach API.
-        let (rx_bytes, tx_bytes) = match (init_done, interface.as_deref()) {
+        // Byte counters and tunnel metadata are only meaningful when
+        // the session is actually up. Clear them for reconnecting /
+        // connecting states so the GUI never shows stale counters
+        // from a previous session while the tunnel is broken.
+        let (rx_bytes, tx_bytes) = match (connected, interface.as_deref()) {
             (true, Some(iface)) => read_iface_byte_counts(iface).await,
             _ => (None, None),
         };
 
         Ok(OvpnStatusResult {
-            state: if init_done { OvpnState::Connected } else { OvpnState::Connecting },
+            state: tunnel_state,
             pid: Some(pid),
-            interface,
-            virtual_ip,
-            virtual_gateway,
-            active_routes,
+            interface:        if connected { interface        } else { None },
+            virtual_ip:       if connected { virtual_ip       } else { None },
+            virtual_gateway:  if connected { virtual_gateway  } else { None },
+            active_routes:    if connected { active_routes    } else { Vec::new() },
             rx_bytes,
             tx_bytes,
+            error_reason,
         })
     }
 }
@@ -686,6 +710,117 @@ fn openpty() -> std::io::Result<(libc::c_int, libc::c_int)> {
         Ok((master, slave))
     }
 }
+
+// ── Log-state scanner ─────────────────────────────────────────────────────
+
+/// Scan the VPN log from top to bottom and return the state
+/// implied by the **last** status-bearing event, plus a short
+/// diagnostic string taken from that line.
+///
+/// ## Why last-event matters
+///
+/// ovpncli appends to the log during automatic reconnect attempts.
+/// A log that starts with `EVENT: CONNECTED` (initial session) but
+/// then has `EVENT: TRANSPORT_ERROR` / `EVENT: RECONNECTING` lines
+/// is **not** in a connected state — it's in a retry loop. Scanning
+/// only for presence of `EVENT: CONNECTED` anywhere in the file
+/// ("contains") was wrong; it returned Connected while the client
+/// cycled through transport errors for hours.
+///
+/// ## State machine
+///
+/// ```text
+/// initial (process alive, empty log) → Connecting
+/// EVENT: CONNECTING / RESOLVE / WAIT  → Connecting  (or Reconnecting
+///                                        if was_ever_connected)
+/// EVENT: CONNECTED / "Initialization Sequence Completed"
+///                                     → Connected
+/// EVENT: TRANSPORT_ERROR              → Reconnecting
+/// EVENT: RECONNECTING                 → Reconnecting
+/// EVENT: AUTH_FAILED / "AUTH_FAILED"  → Disconnected  (permanent)
+/// EVENT: DISCONNECTED                 → Disconnected
+/// ```
+///
+/// `Reconnecting` is only possible when the process is alive;
+/// callers already handle the dead-process → Disconnected path
+/// before calling this function.
+fn last_event_from_log(log: &str) -> (OvpnState, Option<String>) {
+    let mut state = OvpnState::Connecting; // alive + no events = initial connect
+    let mut reason: Option<String> = None;
+    let mut was_ever_connected = false;
+
+    for line in log.lines() {
+        // ── ovpncli (OpenVPN 3.x) EVENT: lines ──────────────────
+        if line.contains("EVENT: CONNECTED") {
+            state = OvpnState::Connected;
+            was_ever_connected = true;
+            reason = None;
+        } else if line.contains("EVENT: AUTH_FAILED") {
+            state = OvpnState::Disconnected;
+            reason = event_detail(line, "AUTH_FAILED");
+        } else if line.contains("EVENT: DISCONNECTED") {
+            state = OvpnState::Disconnected;
+            reason = event_detail(line, "DISCONNECTED");
+        } else if line.contains("EVENT: TRANSPORT_ERROR")
+            || line.contains("EVENT: RECONNECTING")
+        {
+            state = OvpnState::Reconnecting;
+            reason = event_detail(line, "EVENT:");
+        } else if line.contains("EVENT: CONNECTING")
+            || line.contains("EVENT: RESOLVE")
+            || line.contains("EVENT: WAIT")
+        {
+            // Mid-sequence events: if we were previously connected
+            // this is a reconnect attempt, not an initial connect.
+            if was_ever_connected {
+                state = OvpnState::Reconnecting;
+                // Keep previous error reason — the TRANSPORT_ERROR
+                // that caused the reconnect is still the relevant
+                // diagnostic.
+            } else {
+                state = OvpnState::Connecting;
+                reason = None;
+            }
+        }
+        // ── openvpn 2.x ─────────────────────────────────────────
+        else if line.contains("Initialization Sequence Completed") {
+            state = OvpnState::Connected;
+            was_ever_connected = true;
+            reason = None;
+        } else if line.contains("AUTH_FAILED") {
+            // Matches "AUTH: Received control message: AUTH_FAILED"
+            state = OvpnState::Disconnected;
+            reason = Some("Authentication failed".to_string());
+        }
+    }
+    (state, reason)
+}
+
+/// Extract a clean diagnostic string from a VPN log line.
+///
+/// Input (example):
+/// `"Wed May 27 12:32:11.085 2026 EVENT: TRANSPORT_ERROR … NETWORK_EOF_ERROR [ERR]"`
+///
+/// Output: `Some("EVENT: TRANSPORT_ERROR … NETWORK_EOF_ERROR")`
+///
+/// We find `marker` in the line, take everything from there, strip
+/// the trailing `[ERR]` tag (it's redundant noise), and cap at 120
+/// characters so the GUI tooltip stays readable.
+fn event_detail(line: &str, marker: &str) -> Option<String> {
+    let idx = line.find(marker)?;
+    let raw = line[idx..]
+        .trim_end_matches("[ERR]")
+        .trim_end_matches("[INFO]")
+        .trim()
+        .to_string();
+    Some(if raw.len() > 120 {
+        format!("{}…", &raw[..120])
+    } else {
+        raw
+    })
+}
+
+// ── Byte-counter helper ────────────────────────────────────────────────────
 
 /// Pull `(ibytes, obytes)` for `iface` out of `netstat -ibn -I
 /// <iface>`. macOS's netstat outputs two rows per interface
@@ -926,6 +1061,110 @@ fn sanitize_id(id: &str) -> String {
 
 fn pid_path_for(safe: &str) -> PathBuf {
     Path::new(PID_DIR).join(format!("supermgr-ovpn-{safe}.pid"))
+}
+
+/// SIGTERM every live OpenVPN tunnel the helper manages and clean up its
+/// pidfiles. Used by the system-sleep teardown — a global, profile-agnostic
+/// "kill all our tunnels" that doesn't need the per-profile id.
+///
+/// Replaces the old `pkill -f ovpncli`, which never matched anything: the
+/// binary we actually spawn is `openvpn3` / `openvpn-patched` / `openvpn`
+/// (the comments call it "ovpncli" after the upstream client name, but no
+/// process is named that). We instead SIGTERM by tracked pid — exactly what
+/// `disconnect()` does per profile.
+///
+/// Returns the number of processes signalled.
+pub async fn terminate_all() -> usize {
+    let mut killed = 0usize;
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return 0 };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        let Some(safe) = fname
+            .strip_prefix("supermgr-ovpn-")
+            .and_then(|s| s.strip_suffix(".pid"))
+        else {
+            continue;
+        };
+        if let Some(pid) = read_pid_file(&entry.path()) {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                // SIGTERM lets openvpn flush its log and run its down script.
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                killed += 1;
+            }
+        }
+        // Belt-and-braces: ps-scan for stragglers carrying this profile's
+        // daemon-name fingerprint (catches a tunnel whose pidfile was lost).
+        for pid in collect_openvpn_pids_for(safe).await {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                killed += 1;
+            }
+        }
+        let _ = std::fs::remove_file(entry.path());
+        let _ = std::fs::remove_file(log_path_for(safe));
+    }
+    killed
+}
+
+/// Kernel interfaces (`utunN`) of every OpenVPN tunnel that is currently
+/// alive. Cheap, no `&mut self`: scans the helper's pidfiles in `/var/run`,
+/// checks liveness with `kill(pid, 0)`, and parses the bound interface from
+/// each session's log.
+///
+/// Used by the strongSwan teardown path so it never deletes the shared
+/// full-tunnel split-default routes (`0/1` + `128.0/1`) out from under a
+/// live OpenVPN session — those routes belong to whatever backend installed
+/// them, and OpenVPN's `redirect-gateway def1` uses the exact same pair.
+pub fn live_tunnel_interfaces() -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return out };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        let Some(safe) = fname
+            .strip_prefix("supermgr-ovpn-")
+            .and_then(|s| s.strip_suffix(".pid"))
+        else {
+            continue;
+        };
+        let Some(pid) = read_pid_file(&entry.path()) else { continue };
+        // Skip dead/stale pidfiles — a stale full-tunnel route from a dead
+        // OpenVPN session SHOULD be swept, so we only protect live ones.
+        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+            continue;
+        }
+        let body = std::fs::read_to_string(log_path_for(safe)).unwrap_or_default();
+        if let (Some(iface), _, _) = parse_tunnel_metadata(&body) {
+            out.push(iface);
+        }
+    }
+    out
+}
+
+/// True if ANY supermgr OpenVPN tunnel process is alive, REGARDLESS of whether
+/// it has reached `EVENT: CONNECTED` yet. `live_tunnel_interfaces()` only
+/// reports a tunnel once its log shows CONNECTED (so it can name the utun); but
+/// the exit-node ownership gate needs to recognize an Azure/OpenVPN full tunnel
+/// during its entire connect/handshake window — the moment `redirect-gateway`
+/// installs the shared `0/1`+`128/1` pair, before the CONNECTED line is
+/// parseable. This is the cheap liveness-only scan: a live pidfile is enough to
+/// say "a foreign full tunnel may own the split-default; do not steal it".
+pub fn has_live_tunnel() -> bool {
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return false };
+    for entry in entries.flatten() {
+        let fname = entry.file_name();
+        let Some(fname) = fname.to_str() else { continue };
+        if fname.strip_prefix("supermgr-ovpn-").and_then(|s| s.strip_suffix(".pid")).is_none() {
+            continue;
+        }
+        if let Some(pid) = read_pid_file(&entry.path()) {
+            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn log_path_for(safe: &str) -> PathBuf {

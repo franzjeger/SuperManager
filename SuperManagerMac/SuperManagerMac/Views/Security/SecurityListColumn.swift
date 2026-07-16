@@ -5,12 +5,14 @@ import SwiftUI
 /// at a glance which customer-authorisation is currently
 /// active for offensive testing.
 ///
-/// "+ New engagement" lives in the footer for discoverability;
-/// edit/delete are in the row context menu.
+/// "New engagement" lives on the toolbar "+" with every other
+/// section's create action — it used to sit in a footer here, which
+/// was reachable but taught the operator that "+" means one thing in
+/// SSH and something else here. Edit/delete are in the row context
+/// menu.
 struct SecurityListColumn: View {
     @Environment(AppState.self) private var appState
 
-    @State private var showingAdd = false
     @State private var engagementToEdit: Engagement?
     @State private var pendingDelete: Engagement?
 
@@ -27,19 +29,15 @@ struct SecurityListColumn: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var appState = appState
+        return VStack(spacing: 0) {
             if filtered.isEmpty {
-                // No footer when the empty state already shows its
-                // own primary `+ New engagement…` CTA — otherwise
-                // the column has two side-by-side buttons asking
-                // the same thing.
                 emptyState
             } else {
                 list
-                footer
             }
         }
-        .sheet(isPresented: $showingAdd) {
+        .sheet(isPresented: $appState.showingAddEngagement) {
             EngagementEditSheet(engagement: nil)
         }
         .sheet(item: $engagementToEdit) { e in
@@ -69,7 +67,7 @@ struct SecurityListColumn: View {
             Text("Engagements pin a scope + authorization period to security testing actions. Without one, scans run unscoped.")
         } actions: {
             Button {
-                showingAdd = true
+                appState.showingAddEngagement = true
             } label: {
                 Label("New engagement…", systemImage: "plus")
             }
@@ -114,7 +112,7 @@ struct SecurityListColumn: View {
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             if e.isActive {
-                Text("Expires \(relativeDays(e.expiresAt))")
+                Text("Expires \(e.expiryPhrase)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else {
@@ -131,20 +129,10 @@ struct SecurityListColumn: View {
     }
 
     private func statusPill(for e: Engagement) -> some View {
-        let color: Color = {
-            if !e.isActive { return .secondary }
-            let daysLeft = e.expiresAt.timeIntervalSinceNow / 86400
-            if daysLeft < 7 { return .orange }
-            return .green
-        }()
-        let label: String = e.isActive ? "Active" : "Expired"
-        return Text(label)
-            .font(.caption2)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.15))
-            .foregroundStyle(color)
-            .clipShape(Capsule())
+        StatusPill(
+            status: .engagement(e),
+            label: e.isActive ? "Active" : "Expired"
+        )
     }
 
     private func customerLabel(for e: Engagement) -> String {
@@ -157,24 +145,4 @@ struct SecurityListColumn: View {
         return e.customerSlug
     }
 
-    private func relativeDays(_ date: Date) -> String {
-        let days = Int(date.timeIntervalSinceNow / 86400)
-        if days < 1 { return "today" }
-        if days == 1 { return "tomorrow" }
-        return "in \(days) days"
-    }
-
-    private var footer: some View {
-        HStack {
-            Button {
-                showingAdd = true
-            } label: {
-                Label("New engagement", systemImage: "plus")
-            }
-            .controlSize(.small)
-            Spacer()
-        }
-        .padding(8)
-        .background(.background.secondary)
-    }
 }

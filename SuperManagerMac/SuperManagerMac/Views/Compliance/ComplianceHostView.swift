@@ -444,28 +444,11 @@ struct ComplianceHostView: View {
     /// requires two runs to compare. Replaced by `driftSection`
     /// on the second scan onward.
     private var baselineEstablishedCard: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "flag.checkered.circle.fill")
-                .foregroundStyle(.tint)
-                .font(.title3)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Baseline established")
-                    .font(.subheadline.weight(.semibold))
-                Text("This is the first compliance run for this host. Drift detection compares future runs against this one — re-scan to see what changes.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.tint.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(.tint.opacity(0.25), lineWidth: 0.5)
+        NoticeCard(
+            kind: .info,
+            systemImage: "flag.checkered.circle.fill",
+            title: "Baseline established",
+            message: "This is the first compliance run for this host. Drift detection compares future runs against this one — re-scan to see what changes."
         )
     }
 
@@ -592,13 +575,7 @@ struct ComplianceHostView: View {
     }
 
     private func severityColor(_ severity: AppState.ComplianceSeverity) -> Color {
-        switch severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .secondary
-        }
+        SeverityBadge.color(for: severity.asFindingSeverity)
     }
 
     // MARK: - Export
@@ -804,28 +781,20 @@ struct ComplianceHostView: View {
     // MARK: - States
 
     private var notConfiguredCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("API token required", systemImage: "lock.shield")
-                .font(.headline)
-            Text("Compliance scans use the FortiGate REST API to read configuration values without an interactive shell session. Generate a token under the host's Detail page in the SSH section.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        NoticeCard(
+            kind: .warning,
+            systemImage: "lock.shield",
+            title: "API token required",
+            message: "Compliance scans use the FortiGate REST API to read configuration values without an interactive shell session. Generate a token under the host's Detail page in the SSH section."
+        ) {
             Button {
                 appState.selectedSection = .ssh
             } label: {
                 Label("Open host detail in SSH", systemImage: "arrow.right.circle")
             }
             .buttonStyle(.borderedProminent)
+            .controlSize(.small)
         }
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.orange.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(.orange.opacity(0.3), lineWidth: 0.5)
-        )
     }
 
     /// "No scans yet" state with baseline-specific copy. FortiGate
@@ -873,28 +842,20 @@ struct ComplianceHostView: View {
     /// No "Run scan" button is rendered; the card is informational
     /// only.
     private func notApplicableCard(for deviceType: DeviceType) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("Compliance not available for this device type", systemImage: "questionmark.app.dashed")
-                .font(.headline)
-            Text(notApplicableCopy(for: deviceType))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+        NoticeCard(
+            kind: .neutral,
+            systemImage: "questionmark.app.dashed",
+            title: "Compliance not available for this device type",
+            message: notApplicableCopy(for: deviceType)
+        ) {
             Button {
                 appState.selectedSection = .ssh
             } label: {
                 Label("Open host detail in SSH", systemImage: "arrow.right.circle")
             }
             .buttonStyle(.bordered)
+            .controlSize(.small)
         }
-        .padding(20)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.secondary.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(.separator, lineWidth: 0.5)
-        )
     }
 
     /// Copy variants for `notApplicableCard`. The "reclassify in SSH"
@@ -1076,13 +1037,7 @@ private struct CheckRow: View {
     }
 
     private var severityColor: Color {
-        switch check.severity {
-        case .critical: return .red
-        case .high:     return .orange
-        case .medium:   return .yellow
-        case .low:      return .blue
-        case .info:     return .secondary
-        }
+        SeverityBadge.color(for: check.severity.asFindingSeverity)
     }
 
     private var rowBackground: AnyShapeStyle {

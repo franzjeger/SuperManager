@@ -860,6 +860,7 @@ impl DaemonService {
             psk: SecretRef::new(psk_label),
             dns_servers,
             routes: Vec::new(),
+            local_id: String::new(),
         };
 
         let profile = Profile {

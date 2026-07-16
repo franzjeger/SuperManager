@@ -6,6 +6,7 @@ extension AppState {
     func refreshCustomers() async {
         do {
             customers = try await client.call("customer_list")
+            rebuildHostIndex()
         } catch {
             handleError(error)
         }

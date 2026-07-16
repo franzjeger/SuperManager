@@ -9,6 +9,11 @@ struct ContentView: View {
     @State private var showingAddVpn = false
     @State private var showingImportVpn = false
     @State private var showingDisconnectAllConfirm = false
+    /// Profile the operator asked to delete, awaiting confirmation.
+    /// Deleting a VPN profile irreversibly wipes the tunnel and every
+    /// stored credential, so we gate it behind an alert rather than
+    /// firing on the bare context-menu click.
+    @State private var vpnProfilePendingDelete: VpnProfileSummary?
     /// Drives the visual drop-zone overlay during a drag-and-drop
     /// VPN import. Bound to `.onDrop(isTargeted:)`.
     @State private var vpnImportTargeted = false
@@ -47,15 +52,35 @@ struct ContentView: View {
         // "select a thing" placeholders. The previous HSplitView produced
         // the half-finished look the user called out (sidebar items
         // clustered mid-column, dead vertical space everywhere).
-        NavigationSplitView {
-            sectionSidebar
-                .navigationSplitViewColumnWidth(min: 140, ideal: 170, max: 220)
-        } content: {
-            listColumn
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
-        } detail: {
-            detailColumn
-                .navigationSplitViewColumnWidth(min: 480, ideal: 720)
+        Group {
+            if sectionHasListColumn {
+                NavigationSplitView {
+                    sidebarColumn
+                } content: {
+                    listColumn
+                        // ideal == max on purpose. Switching to Fleet or Recon
+                        // and back rebuilds this split view, and a fresh build
+                        // settles the column at max while a rebuild settles it
+                        // at ideal — so with the two apart (280/380) the list
+                        // was 380pt wide if you came here directly and 280pt if
+                        // you came via Fleet. Same section, same window, two
+                        // widths. Equal values make every path agree; the 240
+                        // floor keeps the divider draggable.
+                        .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
+                } detail: {
+                    detailColumn
+                        .navigationSplitViewColumnWidth(min: 480, ideal: 720)
+                }
+            } else {
+                // Two columns, because these sections have two things to show.
+                // See `sectionHasListColumn` for why the third can't just be
+                // left empty.
+                NavigationSplitView {
+                    sidebarColumn
+                } detail: {
+                    detailColumn
+                }
+            }
         }
         .navigationTitle("SuperManager")
         // Drag-and-drop VPN config import from anywhere in the
@@ -90,11 +115,12 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.15), value: vpnImportTargeted)
         .toolbar {
-            // "Connected" / "Daemon offline" pill — leading so it sits
-            // next to the sidebar, not lost in the trailing toolbar
-            // soup of action buttons.
+            // One pill per system (Tailscale, VPN), leading so they sit next to
+            // the sidebar rather than lost in the trailing soup of actions.
+            // Each is clickable for a popover with the detail + the one action
+            // you'd otherwise switch tabs for.
             ToolbarItem(placement: .navigation) {
-                connectionStatePill
+                ToolbarStatusPills()
             }
             // Global customer-context picker — sits next to the
             // connection pill so the operator always sees which
@@ -106,106 +132,29 @@ struct ContentView: View {
                     GlobalCustomerPicker()
                 }
             }
-            // GLOBAL "Add device" menu — visible from every
-            // section, not just SSH. Discoverability fix: the
-            // old `+` only showed up on the SSH page, so a user
-            // looking at Recon / Compliance / etc. had no
-            // obvious way to add a device. This menu collects
-            // every device-add path the app supports.
+            // ONE "+", every section, same place, same meaning: make a new one
+            // of whatever you're looking at. Click adds the obvious thing;
+            // hold for the alternatives.
+            //
+            // This spot used to carry TWO plus buttons side by side — a global
+            // "Add device" menu (plus.circle.fill) and a section "+" (plus) —
+            // and in SSH they were the same action twice: the menu's first item
+            // and the button both opened Add Host. Meanwhile Provisioning and
+            // Security kept their create button in a footer, so the top-right
+            // "+" was present but wrong there: it added a *device*, never a
+            // customer or an engagement.
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button {
-                        showingAddHost = true
-                    } label: {
-                        Label("Type details manually…", systemImage: "keyboard")
-                    }
-                    .help("Open the standard 'Add SSH Host' form.")
-
-                    Button {
-                        appState.pendingWebCapture = WebCapture(
-                            hostname: "",
-                            label: "",
-                            deviceType: .linux,
-                            username: "root"
-                        )
-                    } label: {
-                        Label(
-                            "Paste from web or clipboard…",
-                            systemImage: "globe.americas.fill"
-                        )
-                    }
-                    .help(
-                        "Opens the Web Capture sheet. Auto-pulls "
-                        + "from clipboard, parses IPs / URLs / banners, "
-                        + "and lets you add as SSH host, append to "
-                        + "engagement scope, or kick off a network scan."
-                    )
-
-                    Button {
-                        appState.selectedSection = .recon
-                    } label: {
-                        Label(
-                            "Scan network for devices…",
-                            systemImage: "network"
-                        )
-                    }
-                    .help(
-                        "Opens the Recon section. The Network Scan tile "
-                        + "discovers hosts + open ports in a CIDR range."
-                    )
-
-                    Divider()
-
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(
-                            SuperManagerApp.webCaptureBookmarklet,
-                            forType: .string
-                        )
-                    } label: {
-                        Label(
-                            "Copy browser bookmarklet",
-                            systemImage: "bookmark.fill"
-                        )
-                    }
-                    .help(
-                        "Copies a JavaScript bookmarklet to the clipboard. "
-                        + "Paste it as the URL of a new bookmark in your "
-                        + "browser; clicking that bookmark on any vendor "
-                        + "admin page captures the device in one click."
-                    )
+                    sectionAddMenuItems
                 } label: {
-                    Label("Add device", systemImage: "plus.circle.fill")
+                    Image(systemName: "plus")
+                } primaryAction: {
+                    sectionPrimaryAdd()
                 }
                 .menuStyle(.borderlessButton)
-                .help("Add a device — type manually, paste, or scan.")
-            }
-            ToolbarItem(placement: .primaryAction) {
-                if appState.selectedSection == .ssh {
-                    Button(action: {
-                        if sshTab == .keys { showingGenerateKey = true }
-                        else { showingAddHost = true }
-                    }) {
-                        Image(systemName: "plus")
-                    }
-                    .help(sshTab == .hosts ? "Add SSH host" : "Generate SSH key")
-                    .accessibilityLabel(sshTab == .hosts ? "Add SSH host" : "Generate SSH key")
-                    .keyboardShortcut("n", modifiers: .command)
-                } else if appState.selectedSection == .vpn {
-                    // Two ways to make a profile: hand-fill the IKEv2
-                    // form, or import a `.conf` / `.ovpn` from disk.
-                    // A pull-down menu keeps the toolbar compact while
-                    // making both paths discoverable.
-                    Menu {
-                        Button("New IKEv2 profile…") { showingAddVpn = true }
-                        Divider()
-                        Button("Import from file…") { showingImportVpn = true }
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("Add or import a VPN profile")
-                }
+                .help(sectionAddLabel)
+                .accessibilityLabel(sectionAddLabel)
+                .keyboardShortcut("n", modifiers: .command)
             }
             // "Disconnect all" — only renders when at least one
             // profile is currently flagged as up. Confirmation
@@ -312,12 +261,160 @@ struct ContentView: View {
         } message: {
             Text("This tears down every active VPN tunnel — IKEv2, WireGuard, and OpenVPN. Reconnect manually afterwards.")
         }
+        .alert(
+            "Delete this VPN profile?",
+            isPresented: Binding(
+                get: { vpnProfilePendingDelete != nil },
+                set: { if !$0 { vpnProfilePendingDelete = nil } }
+            ),
+            presenting: vpnProfilePendingDelete
+        ) { profile in
+            Button("Cancel", role: .cancel) { vpnProfilePendingDelete = nil }
+            Button("Delete", role: .destructive) {
+                Task { await appState.deleteVpnProfile(profile.id, profileName: profile.name) }
+                vpnProfilePendingDelete = nil
+            }
+        } message: { profile in
+            Text("This permanently removes \"\(profile.name)\" and every stored credential for it. This cannot be undone.")
+        }
         // Lock-state branching is handled at the root in `RootView` —
         // ContentView is only built when the app is unlocked, so we
         // don't need to think about the lock state in here.
     }
 
+    // MARK: - Section add menu
+
+    /// What a plain click on "+" (and Cmd-N) creates. Every section has one
+    /// obvious answer — the menu carries the rest.
+    private func sectionPrimaryAdd() {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys: showingGenerateKey = true
+        case .vpn:                       showingAddVpn = true
+        case .provisioning:              appState.showingAddCustomer = true
+        case .security:                  appState.showingAddEngagement = true
+        default:                         showingAddHost = true
+        }
+    }
+
+    /// Names the primary action, so the tooltip and the VoiceOver label say
+    /// what the click will actually do rather than a generic "Add".
+    private var sectionAddLabel: String {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys: return "Generate SSH key"
+        case .vpn:                       return "Add VPN profile"
+        case .provisioning:              return "Add customer"
+        case .security:                  return "New engagement"
+        default:                         return "Add host"
+        }
+    }
+
+    @ViewBuilder
+    private var sectionAddMenuItems: some View {
+        switch appState.selectedSection {
+        case .ssh where sshTab == .keys:
+            Button("Generate SSH key…") { showingGenerateKey = true }
+            Divider()
+            addDeviceMenu
+        case .vpn:
+            Button("New IKEv2 profile…") { showingAddVpn = true }
+            Button("Import from file…") { showingImportVpn = true }
+            Divider()
+            addDeviceMenu
+        case .provisioning:
+            Button("Add customer…") { appState.showingAddCustomer = true }
+            Divider()
+            addDeviceMenu
+        case .security:
+            Button("New engagement…") { appState.showingAddEngagement = true }
+            Divider()
+            addDeviceMenu
+        default:
+            // Fleet, SSH hosts, Compliance, Recon, Tailscale: the thing this
+            // section creates IS a device, so the paths sit at the top level
+            // rather than a level down under their own name.
+            addDeviceItems
+        }
+    }
+
+    /// Nested under its own name in sections that create something other than
+    /// a device, so capture-a-device stays reachable from everywhere. That
+    /// reach was the whole point of the old global menu and it survives here.
+    private var addDeviceMenu: some View {
+        Menu {
+            addDeviceItems
+        } label: {
+            Label("Add device", systemImage: "desktopcomputer")
+        }
+    }
+
+    /// The three ways a device gets into the app, plus the bookmarklet feeding
+    /// the second one.
+    @ViewBuilder
+    private var addDeviceItems: some View {
+        Button {
+            showingAddHost = true
+        } label: {
+            Label("Type details manually…", systemImage: "keyboard")
+        }
+        .help("Open the standard 'Add SSH Host' form.")
+
+        Button {
+            appState.pendingWebCapture = WebCapture(
+                hostname: "",
+                label: "",
+                deviceType: .linux,
+                username: "root"
+            )
+        } label: {
+            Label(
+                "Paste from web or clipboard…",
+                systemImage: "globe.americas.fill"
+            )
+        }
+        .help(
+            "Opens the Web Capture sheet. Auto-pulls "
+            + "from clipboard, parses IPs / URLs / banners, "
+            + "and lets you add as SSH host, append to "
+            + "engagement scope, or kick off a network scan."
+        )
+
+        Button {
+            appState.selectedSection = .recon
+        } label: {
+            Label("Scan network for devices…", systemImage: "network")
+        }
+        .help(
+            "Opens the Recon section. The Network Scan tile "
+            + "discovers hosts + open ports in a CIDR range."
+        )
+
+        Divider()
+
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                SuperManagerApp.webCaptureBookmarklet,
+                forType: .string
+            )
+        } label: {
+            Label("Copy browser bookmarklet", systemImage: "bookmark.fill")
+        }
+        .help(
+            "Copies a JavaScript bookmarklet to the clipboard. "
+            + "Paste it as the URL of a new bookmark in your "
+            + "browser; clicking that bookmark on any vendor "
+            + "admin page captures the device in one click."
+        )
+    }
+
     // MARK: - Column 1: Section Sidebar
+
+    /// Shared by both split-view shapes so the sidebar keeps the same width
+    /// when the section switches between them.
+    private var sidebarColumn: some View {
+        sectionSidebar
+            .navigationSplitViewColumnWidth(min: 140, ideal: 170, max: 220)
+    }
 
     private var sectionSidebar: some View {
         // Bind List(selection:) directly to AppState. SwiftUI then handles
@@ -339,13 +436,29 @@ struct ContentView: View {
 
     // MARK: - Column 2: List
 
+    /// Fleet and Recon are single full-width surfaces — a dashboard and a tool
+    /// launcher. Neither has anything to navigate, so neither gets a middle
+    /// column, and the split view is built with two columns instead of three.
+    ///
+    /// Both previously returned `EmptyView()` from `listColumn`, which does not
+    /// remove the column — NavigationSplitView reserves it regardless of what
+    /// renders into it, so each showed a band of blank white between the
+    /// sidebar and its content. Measured at 720pt on an 1800pt window: wider
+    /// than the sidebar and the blank column's own declared 380pt maximum,
+    /// because with nothing to size to it just takes a share of the slack.
+    /// Pinning the width to zero doesn't help either — the constraint is
+    /// ignored, which is how it got to 720 in the first place.
+    private var sectionHasListColumn: Bool {
+        switch appState.selectedSection {
+        case .fleet, .recon: return false
+        default:             return true
+        }
+    }
+
     @ViewBuilder
     private var listColumn: some View {
         switch appState.selectedSection {
         case .fleet:
-            // Fleet has no list column — it's a single full-width
-            // dashboard. Show a thin "All customers" placeholder so
-            // the three-column shape is preserved.
             EmptyView()
         case .ssh:
             sshListColumn
@@ -360,8 +473,6 @@ struct ContentView: View {
         case .security:
             SecurityListColumn()
         case .recon:
-            // Recon is a single full-width tool launcher — no list
-            // column, same shape as Fleet.
             EmptyView()
         }
     }
@@ -400,28 +511,31 @@ struct ContentView: View {
                 HostDetailView(hostId: hostId)
             } else if let keyId = appState.selectedKeyId, sshTab == .keys {
                 KeyDetailView(keyId: keyId)
+            } else if sshTab == .keys {
+                // Distinct copy per tab: the old shared "Select a host or key"
+                // described the UI rather than the job, and said the same thing
+                // whichever tab you were on.
+                EmptyStateView(
+                    systemImage: "key",
+                    title: "Select a key",
+                    hint: "Manage the SSH keys used across the fleet and see which hosts trust each one."
+                )
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a host or key")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "terminal",
+                    title: "Select a host",
+                    hint: "Pick a host to open a session, review its details, or run a compliance scan."
+                )
             }
         case .vpn:
             if let profileId = appState.selectedProfileId {
                 VpnDetailView(profileId: profileId)
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "lock.shield")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a VPN profile")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "lock.shield",
+                    title: "Select a VPN profile",
+                    hint: "Pick a tunnel from the list to view its status, routing and credentials."
+                )
             }
         case .tailscale:
             // Detail view needs both the peer and the magic suffix
@@ -433,28 +547,36 @@ struct ContentView: View {
                 TailscaleDetailView(peer: peer,
                                     magicSuffix: status.magicDNSSuffix ?? "")
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "network")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a Tailnet peer")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyStateView(
+                    systemImage: "globe",
+                    title: "Select a Tailnet peer",
+                    hint: "Choose a machine on the tailnet to see its address, route it, or open a session."
+                )
             }
         case .compliance:
+            // Gate on the SAME allowlist the list column uses
+            // (`complianceDispatch != .notApplicable`), not on
+            // `deviceType == .fortigate`. The list deliberately includes
+            // Linux hosts and tells operators to add them; pinning the
+            // detail gate to FortiGate dead-ended every Linux row on
+            // "Select a FortiGate host" and made the whole Linux CIS scan
+            // path unreachable. ComplianceHostView already branches on
+            // complianceDispatch, so it renders Linux hosts correctly.
             if let hostId = appState.selectedHostId,
-               appState.sshHosts.contains(where: { $0.id == hostId && $0.deviceType == .fortigate }) {
+               appState.sshHosts.contains(where: {
+                   $0.id == hostId && $0.deviceType.complianceDispatch != .notApplicable
+               }) {
                 ComplianceHostView(hostId: hostId)
             } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "checkmark.shield")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a FortiGate host to view compliance")
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The old single line tried to carry both the instruction and
+                // the caveat ("compliance-capable") and did neither well. The
+                // hint now explains WHY a host might not be listed, which is
+                // the actual question when your host isn't there.
+                EmptyStateView(
+                    systemImage: "checkmark.shield",
+                    title: "Select a host to scan",
+                    hint: "Pick a host from the list to run a CIS baseline and review its findings. Only FortiGate and Linux hosts can be scanned."
+                )
             }
         case .provisioning:
             ProvisioningView()
@@ -698,7 +820,7 @@ struct ContentView: View {
             }
             Divider()
             Button("Delete", role: .destructive) {
-                Task { await appState.deleteVpnProfile(profile.id, profileName: profile.name) }
+                vpnProfilePendingDelete = profile
             }
         }
     }
@@ -780,81 +902,6 @@ struct ContentView: View {
         }
     }
 
-    /// Aggregate connection-state pill in the toolbar. Replaces
-    /// the old binary "Connected/Daemon offline" with a richer
-    /// summary showing how many VPNs are up + Tailscale state +
-    /// daemon health, color-coded.
-    @ViewBuilder
-    private var connectionStatePill: some View {
-        let summary = connectionSummary
-        HStack(spacing: 6) {
-            Circle()
-                .fill(summary.color)
-                .frame(width: 7, height: 7)
-            Text(summary.text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-        .help(summary.help)
-    }
-
-    /// Computed summary of all live connections. Used by the
-    /// toolbar pill. Priority: daemon offline > anything red >
-    /// anything yellow > "everything quiet" green.
-    private var connectionSummary: (text: String, color: Color, help: String) {
-        guard appState.daemonAvailable else {
-            return (
-                "Daemon offline",
-                .red,
-                "Can't reach the SuperManager daemon at its socket. Try Cmd-R to refresh."
-            )
-        }
-        // Per-VPN states
-        let vpnUp = appState.vpnConnectionStates.values.filter { $0 == "connected" }.count
-        let vpnConnecting = appState.vpnConnectionStates.values.filter { $0 == "connecting" }.count
-        // Tailscale
-        let tsState = appState.tailscaleStatus?.backendState
-        let tsRunning = tsState == "Running"
-        let tsExitNode = appState.tailscalePrefs?.hasExitNode ?? false
-
-        // Build text
-        var pieces: [String] = []
-        if tsRunning {
-            pieces.append(tsExitNode ? "Tailscale (exit)" : "Tailscale")
-        }
-        if vpnUp > 0 {
-            pieces.append("\(vpnUp) VPN\(vpnUp == 1 ? "" : "s")")
-        }
-        if vpnConnecting > 0 {
-            pieces.append("\(vpnConnecting) connecting…")
-        }
-        let text = pieces.isEmpty ? "Connected" : pieces.joined(separator: " · ")
-
-        // Color: orange if anything is connecting, green if any
-        // tunnel is up, blue if just daemon-only, .secondary fallback.
-        let color: Color
-        if vpnConnecting > 0 {
-            color = .orange
-        } else if vpnUp > 0 || tsRunning {
-            color = .green
-        } else {
-            color = .secondary
-        }
-
-        // Help text — verbose breakdown for users who hover.
-        var help = "Daemon connected.\n"
-        help += "Tailscale: \(tsState ?? "n/a")\n"
-        help += "VPN tunnels up: \(vpnUp)\n"
-        if vpnConnecting > 0 { help += "Connecting: \(vpnConnecting)\n" }
-        if tsExitNode {
-            let exitName = appState.tailscalePrefs?
-                .currentExitNode(in: appState.tailscaleStatus?.peers ?? [])?
-                .hostName ?? "?"
-            help += "Exit node: \(exitName)"
-        }
-        return (text, color, help)
-    }
 
     /// Right-click "Open in Terminal" on a sidebar SSH host.
     /// Re-uses the same `ssh://` URL handler that the host
@@ -892,7 +939,11 @@ struct ContentView: View {
     private var filteredHosts: [SshHostSummary] {
         let global = appState.globalCustomerSlug
         let hosts = appState.sshHosts
-            .filter { global.isEmpty || $0.group == global }
+            // Resolve customer membership through the HostIndex, not a raw
+            // `group == slug` match, so a host linked to its customer only by
+            // IP in Site.hostIds (or carrying group:"Discovered") still shows
+            // when that customer is selected.
+            .filter { global.isEmpty || appState.hostIndex.customerSlug(forHost: $0) == global }
             .sorted { a, b in
                 if a.pinned != b.pinned { return a.pinned }
                 if a.group != b.group { return a.group < b.group }

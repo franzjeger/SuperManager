@@ -250,7 +250,7 @@ struct FleetView: View {
         let high = rows.reduce(0) { $0 + Int($1.summary?.high ?? 0) }
         let med = rows.reduce(0) { $0 + Int($1.summary?.medium ?? 0) }
         let accepted = rows.reduce(0) { $0 + Int($1.summary?.acceptedRisk ?? 0) }
-        let neverScanned = rows.filter { $0.summary?.lastScanAt == nil }.count
+        let neverScanned = rows.filter { lastScan(for: $0) == nil }.count
         return HStack(spacing: 10) {
             kpi("Critical open", "\(crit)", color: .red, icon: "exclamationmark.octagon.fill")
             kpi("High open", "\(high)", color: .orange, icon: "exclamationmark.triangle.fill")
@@ -280,6 +280,24 @@ struct FleetView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
+    /// Most recent scan across BOTH stores for a customer: the security
+    /// findings summary AND compliance runs for the customer's hosts (resolved
+    /// via the HostIndex). Fleet previously read only the security store, so a
+    /// customer onboarded purely for nightly FortiGate compliance read "never
+    /// scanned" in alarm-orange forever even with fresh compliance runs.
+    ///
+    /// Compliance recency is folded in where `complianceHistory` is loaded
+    /// (it hydrates per-host on demand); a customer never opened in Compliance
+    /// still falls back to the security store until then.
+    private func lastScan(for row: Row) -> Date? {
+        let security = row.summary?.lastScanAt
+        let compliance = appState.hostIndex
+            .recordIds(forCustomer: row.customer.slug)
+            .compactMap { appState.complianceHistory[$0]?.map(\.startedAt).max() }
+            .max()
+        return [security, compliance].compactMap { $0 }.max()
+    }
+
     @ViewBuilder
     private func customerCard(_ row: Row) -> some View {
         Button {
@@ -306,7 +324,7 @@ struct FleetView: View {
                         Text(row.customer.slug)
                             .font(.caption2.monospaced())
                             .foregroundStyle(.tertiary)
-                        if let last = row.summary?.lastScanAt {
+                        if let last = lastScan(for: row) {
                             Text("· last scan \(last.formatted(.relative(presentation: .named)))")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
@@ -378,11 +396,14 @@ struct FleetView: View {
         let med = Int(summary?.medium ?? 0)
         let low = Int(summary?.low ?? 0)
         HStack(spacing: 4) {
-            if crit > 0 { sevPill("\(crit)", color: .red) }
-            if high > 0 { sevPill("\(high)", color: .orange) }
-            if med > 0 { sevPill("\(med)", color: .yellow) }
-            if low > 0 { sevPill("\(low)", color: .blue) }
+            if crit > 0 { SeverityCountBadge(count: crit, severity: .critical) }
+            if high > 0 { SeverityCountBadge(count: high, severity: .high) }
+            if med > 0 { SeverityCountBadge(count: med, severity: .medium) }
+            if low > 0 { SeverityCountBadge(count: low, severity: .low) }
             if crit == 0 && high == 0 && med == 0 && low == 0 {
+                // "clean" is a verdict, not a count — no findings at any
+                // severity. "—" is the absence of a verdict: never scanned, so
+                // nothing is claimed either way.
                 Text(summary == nil ? "—" : "clean")
                     .font(.caption2)
                     .foregroundStyle(.green)
@@ -391,15 +412,6 @@ struct FleetView: View {
                     .clipShape(Capsule())
             }
         }
-    }
-
-    private func sevPill(_ text: String, color: Color) -> some View {
-        Text(text)
-            .font(.caption2.weight(.semibold))
-            .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(color.opacity(0.18))
-            .foregroundStyle(color)
-            .clipShape(Capsule())
     }
 
     private func reload() async {

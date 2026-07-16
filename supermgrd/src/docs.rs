@@ -234,6 +234,7 @@ mod tests {
                 psk: SecretRef::new("k"),
                 dns_servers: Vec::<IpAddr>::new(),
                 routes: Vec::new(),
+                local_id: String::new(),
             }),
             updated_at: Utc::now(),
         }

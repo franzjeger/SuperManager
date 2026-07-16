@@ -21,6 +21,8 @@ struct EditHostSheet: View {
     @State private var authMethod: AuthMethod = .key
     @State private var selectedKeyId: String?
     @State private var password: String = ""
+    @State private var showingNewCustomer = false
+    @State private var slugsBeforeAdd: Set<String> = []
     @FocusState private var firstFieldFocused: Bool
 
     var body: some View {
@@ -34,7 +36,12 @@ struct EditHostSheet: View {
                 TextField("Hostname / IP", text: $hostname)
                 TextField("Port", value: $port, format: .number)
                 TextField("Username", text: $username)
-                TextField("Group", text: $group)
+                // Group is a customer-association key (group == customer slug)
+                // that the HostIndex and every customer filter rely on. A bare
+                // free-text field let an operator silently type a non-slug and
+                // sever the host from its customer; use the same slug-bound
+                // picker as AddHostSheet instead.
+                groupPicker
 
                 Picker("Device Type", selection: $deviceType) {
                     ForEach(DeviceType.allCases, id: \.self) { type in
@@ -110,6 +117,50 @@ struct EditHostSheet: View {
         .task {
             try? await Task.sleep(for: .milliseconds(100))
             firstFieldFocused = true
+        }
+    }
+
+    /// Slug-bound customer picker (mirrors AddHostSheet.groupPicker). Offers
+    /// "Ungrouped", every customer slug, and a `(custom)` fallback tag so a
+    /// host whose existing group is a non-slug value stays selectable on edit
+    /// without being able to type a fresh arbitrary string. `+` creates a new
+    /// customer inline and selects it.
+    @ViewBuilder
+    private var groupPicker: some View {
+        HStack {
+            Picker("Group", selection: $group) {
+                Text("Ungrouped").tag("")
+                ForEach(appState.customers) { c in
+                    Text("\(c.displayName) (\(c.slug))").tag(c.slug)
+                }
+                if !group.isEmpty
+                    && !appState.customers.contains(where: { $0.slug == group })
+                {
+                    Text("\(group) (custom)").tag(group)
+                }
+            }
+            .help("Group hosts by customer for cross-section linkage. Pick a customer or stay ungrouped.")
+            Button {
+                slugsBeforeAdd = Set(appState.customers.map(\.slug))
+                showingNewCustomer = true
+            } label: {
+                Image(systemName: "plus.circle")
+            }
+            .buttonStyle(.borderless)
+            .help("Create a new customer.")
+            .accessibilityLabel("Add new customer")
+        }
+        .sheet(isPresented: $showingNewCustomer, onDismiss: {
+            Task {
+                await appState.refreshCustomers()
+                if let added = appState.customers
+                    .first(where: { !slugsBeforeAdd.contains($0.slug) })
+                {
+                    group = added.slug
+                }
+            }
+        }) {
+            CustomerEditSheet(customer: nil)
         }
     }
 }

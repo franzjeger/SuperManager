@@ -17,6 +17,19 @@ class AppState {
     var sshKeys: [SshKeySummary] = []
     var hostHealth: [String: Bool] = [:]
 
+    /// Unified Customer→Site→Host resolver, derived from `sshHosts` +
+    /// `customers`. Rebuilt at the tail of `refreshHosts()` /
+    /// `refreshCustomers()` so it is always current. Lets the customer-scoped
+    /// surfaces (Compliance, SSH sidebar, Provisioning, Fleet) agree on which
+    /// host belongs to which customer despite the four legacy identity schemes.
+    /// See `HostIndex` for the full rationale.
+    var hostIndex = HostIndex(hosts: [], customers: [])
+
+    /// Recompute `hostIndex` from the current stores. Cheap (O(hosts + sites)).
+    func rebuildHostIndex() {
+        hostIndex = HostIndex(hosts: sshHosts, customers: customers)
+    }
+
     // VPN
     var vpnProfiles: [VpnProfileSummary] = []
     var vpnState: VpnConnectionState = .disconnected
@@ -24,9 +37,16 @@ class AppState {
     /// by the global VPN poller (`startVpnStatusPolling`). Drives
     /// the green-dot indicators in the VPN list — without this, you
     /// can't tell at a glance which profile is currently active.
-    /// "connected" / "connecting" / "disconnected" / `nil` (not yet
-    /// polled).
+    /// "connected" / "connecting" / "disconnected" / "problem" / `nil`
+    /// (not yet polled). Debounced by `pollAllVpnStates` so a single bad
+    /// sample can't flip a live tunnel — see `stabilizedVpnState`.
     var vpnConnectionStates: [String: String] = [:]
+
+    /// Per-profile count of consecutive non-"connected" samples seen while the
+    /// displayed state is still "connected". Drives the anti-flicker debounce:
+    /// one bad poll (socket hiccup / slow swanctl) is ridden out; a sustained
+    /// run commits the transition. Not user-visible.
+    var vpnStatusMissStreak: [String: Int] = [:]
 
     // MARK: - Tailscale
 
@@ -64,6 +84,16 @@ class AppState {
     /// observes this and presents `WebCaptureSheet`. Reset to
     /// nil when the sheet dismisses.
     var pendingWebCapture: WebCapture?
+
+    /// "Add customer" / "New engagement" sheet triggers.
+    ///
+    /// These live here rather than in the list columns that present them
+    /// because two views now raise them: the column's own empty-state CTA, and
+    /// the toolbar "+" over in ContentView. Same reason `pendingWebCapture` is
+    /// here — a sheet asked for from one view and presented by another needs
+    /// state both can see. The columns still own the `.sheet` modifiers.
+    var showingAddCustomer = false
+    var showingAddEngagement = false
 
     /// Pre-seeded targets for the Recon → Network scan sheet.
     /// The WebCapture sheet's "Run network scan now" action
@@ -299,6 +329,13 @@ class AppState {
         // of app start, not after the first 4 s sleep.
         Task { @MainActor in await pollAllVpnStates() }
         vpnStatusPollTask = Task { @MainActor in
+            // Tailscale rides this loop on its own slower cadence. It used to be
+            // polled only by TailscaleListView's `.task`, which SwiftUI cancels
+            // the moment you leave the tab — so the toolbar's Tailscale pill,
+            // which is global, had no data anywhere else and reported a tailnet
+            // that was plainly up as unknown. Polling here makes the one place
+            // that owns the state also own the refresh.
+            var lastTailscalePoll = Date.distantPast
             while !Task.isCancelled {
                 // Adaptive cadence: 4 s normally, 500 ms while a
                 // user action is "still settling" (the helper just
@@ -313,6 +350,13 @@ class AppState {
                         : .seconds(4)
                 try? await Task.sleep(for: interval)
                 await pollAllVpnStates()
+                // Every ~5s regardless of the VPN loop's adaptive rate: a
+                // 500ms fast-poll window is for a tunnel mid-transition and
+                // shouldn't drag `tailscale status --json` along with it.
+                if Date().timeIntervalSince(lastTailscalePoll) >= 5 {
+                    lastTailscalePoll = Date()
+                    await refreshTailscale()
+                }
                 // Surface helper-side events (auto-reconnect
                 // succeeded, panic_reset escalation) as user
                 // notifications. Cheap tail-of-log read.

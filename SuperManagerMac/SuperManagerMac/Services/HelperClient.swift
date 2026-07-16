@@ -72,7 +72,8 @@ final class HelperClient {
         password: String,
         sharedSecret: String,
         fullTunnel: Bool,
-        routes: [String] = []
+        routes: [String] = [],
+        localId: String = ""
     ) async throws -> [String: Any] {
         try await call("vpn_connect", params: [
             "profile_id": profileId,
@@ -83,6 +84,7 @@ final class HelperClient {
             "shared_secret": sharedSecret,
             "full_tunnel": fullTunnel,
             "routes": routes,
+            "local_id": localId,
         ])
     }
 
@@ -378,7 +380,12 @@ final class HelperClient {
     /// bailing — the user is in trouble and any progress helps.
     @discardableResult
     func tailscalePanicReset() async throws -> [String: Any] {
-        try await call("tailscale_panic_reset", params: [:])
+        // This is the user-initiated hard reset (the "Panic reset" menu), so
+        // clear_pref=true: the helper also clears the tailscaled exit-node pref
+        // and the persisted desired-state. The connectivity watchdog's
+        // automatic blip recovery calls panic_reset in-process with
+        // clear_pref=false (fail open, keep intent for self-heal).
+        try await call("tailscale_panic_reset", params: ["clear_pref": true])
     }
 
     /// Tail the helper's log file. Returns the trailing `bytes` of
@@ -389,6 +396,28 @@ final class HelperClient {
     func tailLog(bytes: Int = 8 * 1024) async throws -> String {
         let result = try await call("tail_log", params: ["bytes": bytes])
         return result["log"] as? String ?? ""
+    }
+
+    // MARK: - System sleep / wake
+
+    /// Notify the helper that the system is about to sleep.
+    /// Belt-and-braces cleanup after the Swift layer has already
+    /// fired individual disconnect RPCs: terminates any lingering
+    /// IKEv2 SAs and kills orphaned ovpncli processes so they
+    /// don't hold stale tunnel state across the sleep boundary.
+    @discardableResult
+    func systemSleep() async throws -> [String: Any] {
+        try await call("system_sleep", params: [:])
+    }
+
+    /// Notify the helper that the system just woke from sleep.
+    /// Clears the route guardian's pre-sleep snapshot (stale
+    /// gateway from the old network) and sweeps leftover strongSwan
+    /// configs + kernel host routes so the first post-wake connect
+    /// attempt starts from a clean slate.
+    @discardableResult
+    func systemWake() async throws -> [String: Any] {
+        try await call("system_wake", params: [:])
     }
 
     // MARK: - Wire protocol

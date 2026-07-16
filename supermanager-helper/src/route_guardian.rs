@@ -128,6 +128,30 @@ pub fn current_snapshot() -> Option<(String, String)> {
         .map(|s| (s.gateway, s.interface))
 }
 
+/// Clear both v4 and v6 snapshots.
+///
+/// Call this on system wake. Before sleep the guardian snapshotted the
+/// gateway for whatever network was active (e.g. `192.168.1.1 via en0`).
+/// After wake the machine may be on a completely different network
+/// (different gateway, different subnet). If we don't clear the snapshot
+/// the guardian sees "default missing, restore from snapshot" and re-adds
+/// the *old* gateway — which is now unreachable. The next tick after the
+/// new network comes up will snapshot the correct gateway; clearing the
+/// stale one bridges that gap cleanly.
+pub fn reset_snapshot() {
+    if let Some(m) = SNAPSHOT_V4.get() {
+        if let Ok(mut s) = m.lock() {
+            *s = None;
+        }
+    }
+    if let Some(m) = SNAPSHOT_V6.get() {
+        if let Ok(mut s) = m.lock() {
+            *s = None;
+        }
+    }
+    tracing::info!("route guardian: snapshots cleared on system wake");
+}
+
 /// Out-of-band restore — called by the connectivity watchdog
 /// when the regular 500ms polling hasn't caught up yet but
 /// internet is already failing. Synchronous; runs the route-add
@@ -214,6 +238,24 @@ fn tick_one(af: Af, missing: &mut u32) {
             }
         }
         None => {
+            // `read_default_route` filters out utun-bound defaults.
+            // Before treating the route as "missing", check whether a
+            // VPN tunnel has legitimately replaced the default via a
+            // utun interface (strongSwan full tunnel, WireGuard, etc.).
+            // If so, the route is not missing — the VPN owns it.
+            // Restoring the physical-interface default would fight the
+            // tunnel: charon reinstalls 0.0.0.0/0 via utun, the guardian
+            // removes it again, repeat every 500 ms. Symptom: 90-second
+            // connectivity outage in the helper log with ~100 "restored
+            // from snapshot" messages, followed by the VPN silently dying.
+            if read_default_route_raw(af).map_or(false, |s| s.interface.starts_with("utun")) {
+                // VPN tunnel owns the default route. Reset the miss
+                // counter so we don't act on accumulated misses when
+                // the tunnel eventually tears down.
+                *missing = 0;
+                return;
+            }
+
             *missing += 1;
             // Debounce: act on second consecutive miss (1 s gap).
             if *missing < 2 {
@@ -290,6 +332,38 @@ fn read_default_route(af: Af) -> Option<RouteSnapshot> {
         return None;
     }
     Some(snap)
+}
+
+/// Like `read_default_route` but WITHOUT filtering utun interfaces.
+///
+/// Used only by `tick_one` to detect whether a VPN tunnel has
+/// legitimately taken over the default route. Not used for
+/// snapshotting — we never want to snapshot a utun default as
+/// "the user's gateway" (we'd restore a utun route that no
+/// longer exists after the tunnel tears down).
+fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
+    let out = Command::new("/sbin/route")
+        .args(af.route_get_args())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut gateway = None;
+    let mut iface = None;
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("gateway:") {
+            gateway = Some(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("interface:") {
+            iface = Some(rest.trim().to_string());
+        }
+    }
+    Some(RouteSnapshot {
+        gateway: gateway?,
+        interface: iface?,
+    })
 }
 
 /// Re-add the default route via `route -q add [-inet6] default <gw>`.

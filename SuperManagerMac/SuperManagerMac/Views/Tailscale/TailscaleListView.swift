@@ -120,16 +120,16 @@ struct TailscaleListView: View {
         }
     }
 
-    /// 5-second polling loop, gated to this view's lifetime via
-    /// `.task`. SwiftUI cancels the task when the view goes off
-    /// screen, so we don't burn CPU re-running the CLI when the
-    /// user is in the SSH or VPN tab.
+    /// One immediate refresh on appear, so switching to this tab shows current
+    /// state without waiting for the next global tick.
+    ///
+    /// The 5-second loop that used to live here moved to AppState: being gated
+    /// to this view's lifetime meant Tailscale state went stale the moment you
+    /// left the tab, which was fine while only this tab read it and wrong as
+    /// soon as the toolbar grew a global Tailscale pill. AppState now polls on
+    /// the same 5s cadence for everyone; this just removes the wait.
     private func pollLoop() async {
         await appState.refreshTailscale()
-        while !Task.isCancelled {
-            try? await Task.sleep(for: .seconds(5))
-            await appState.refreshTailscale()
-        }
     }
 
     /// Tap-target selection bound back to AppState.
