@@ -3,19 +3,47 @@ import SwiftUI
 /// One titled block in a detail pane — "Configuration", "Routing & protection",
 /// "Live tunnel". Sections are the grid items of `DetailColumns`, so on a wide
 /// window they sit side by side instead of stacking down the left edge.
-struct DetailSection<Content: View>: View {
+///
+/// `accessory` is the optional control on the heading line — the spec's
+/// "VLANs section with a right-aligned Add VLAN button". It lives here rather
+/// than in each caller so a section-level action always sits in the same spot
+/// with the same alignment, instead of every view hand-building the heading
+/// row and drifting.
+struct DetailSection<Content: View, Accessory: View>: View {
     let title: String
-    @ViewBuilder var content: Content
+    private let accessory: Accessory
+    private let content: Content
+
+    init(
+        title: String,
+        @ViewBuilder accessory: () -> Accessory,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.accessory = accessory()
+        self.content = content()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased())
-                .font(.system(size: 11, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title.uppercased())
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                accessory
+            }
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+extension DetailSection where Accessory == EmptyView {
+    /// The common case: a heading and its content, no control on the line.
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.init(title: title, accessory: { EmptyView() }, content: content)
     }
 }
 
