@@ -178,6 +178,19 @@ pub struct StatusResult {
     /// through this tunnel"), so it lands in the same field.
     #[serde(default)]
     pub active_routes: Vec<String>,
+    /// Do the kernel routes for `active_routes` actually point at `interface`?
+    ///
+    /// ESTABLISHED means the gateway will accept traffic. It says nothing
+    /// about whether this Mac is sending any: the routes are installed
+    /// separately from the SA, and a capture from this machine had a full
+    /// tunnel ESTABLISHED with the /1 pair absent — "connected" while every
+    /// packet still left via en0. Agreed and happening are different claims,
+    /// so they're different fields.
+    ///
+    /// `None` = couldn't determine (nothing negotiated, or no interface to
+    /// check against) — the GUI stays silent rather than guessing.
+    #[serde(default)]
+    pub routes_installed: Option<bool>,
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -477,15 +490,62 @@ impl Strongswan {
         } else {
             utun_for_address(&virtual_ip).unwrap_or_default()
         };
+        let active_routes = parse_child_remote_ts(&block);
+        let routes_installed = routes_installed_verdict(&interface, &active_routes, |dest| {
+            route_iface_family(dest, "-inet")
+        });
         Ok(StatusResult {
             state: state.to_owned(),
             detail: sa_summary_line(&block),
             interface,
             virtual_ip,
             virtual_gateway,
-            active_routes: parse_child_remote_ts(&block),
+            active_routes,
+            routes_installed,
         })
     }
+}
+
+/// Does every negotiated selector have a kernel route pointing at this
+/// tunnel's utun?
+///
+/// `lookup` answers "which interface would carry a packet to this
+/// destination" (production: `route -n get`). If the specific route is
+/// missing, the kernel falls through to the physical default and the lookup
+/// returns en0 — which is exactly the failure being detected, so no separate
+/// "route absent" case is needed.
+///
+/// The v4 catch-all is checked as the two /1 halves: that's how a full tunnel
+/// is actually installed, because a literal 0.0.0.0/0 would tie with the
+/// physical default route instead of beating it. v6 selectors are skipped —
+/// full-tunnel v6 is deliberately a blackhole pair on lo0 (the IPv6-leak fix),
+/// so "not on the utun" is its correct, healthy state.
+fn routes_installed_verdict(
+    iface: &str,
+    routes: &[String],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<bool> {
+    if iface.is_empty() || routes.is_empty() {
+        return None;
+    }
+    let mut checked_any = false;
+    for ts in routes {
+        if ts.contains(':') {
+            continue; // v6: blackholed on lo0 by design, not utun-routed
+        }
+        let targets: Vec<&str> = if ts == "0.0.0.0/0" {
+            vec!["0.0.0.0/1", "128.0.0.0/1"]
+        } else {
+            vec![ts.as_str()]
+        };
+        for t in targets {
+            checked_any = true;
+            if lookup(t).as_deref() != Some(iface) {
+                return Some(false);
+            }
+        }
+    }
+    checked_any.then_some(true)
 }
 
 /// Pull one connection's block out of `swanctl --list-sas`.
@@ -1368,6 +1428,73 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(block.is_empty());
         assert_eq!(parse_virtual_ip(&block), None);
         assert!(parse_child_remote_ts(&block).is_empty());
+    }
+
+    #[test]
+    fn verdict_false_is_exactly_the_captured_failure() {
+        // The live capture: full tunnel ESTABLISHED on utun11, virtual IP
+        // assigned, and neither /1 half installed — packets to 0.0.0.0/1
+        // fell through to the physical default on en0.
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("en0".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false), "ESTABLISHED but routeless must read as not installed");
+    }
+
+    #[test]
+    fn verdict_full_tunnel_checks_both_halves() {
+        // 0/1 present, 128/1 flushed: half the internet bypasses the tunnel.
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" => Some("utun11".into()),
+                "128.0.0.0/1" => Some("en0".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false));
+        let ok = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
+            match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("utun11".into()),
+                _ => None,
+            }
+        });
+        assert_eq!(ok, Some(true));
+    }
+
+    #[test]
+    fn verdict_split_tunnel_checks_each_selector() {
+        let routes = vec!["10.0.10.0/24".to_string(), "10.99.0.0/24".to_string()];
+        let v = routes_installed_verdict("utun7", &routes, |d| {
+            match d {
+                "10.0.10.0/24" => Some("utun7".into()),
+                "10.99.0.0/24" => Some("en0".into()), // missing -> default wins
+                _ => None,
+            }
+        });
+        assert_eq!(v, Some(false));
+    }
+
+    #[test]
+    fn verdict_skips_v6_and_stays_silent_with_nothing_checkable() {
+        // Full-tunnel v6 is a blackhole pair on lo0 by design (the IPv6-leak
+        // fix): off-utun is its healthy state, so it must not fail the verdict.
+        let v = routes_installed_verdict(
+            "utun7",
+            &["::/0".to_string(), "0.0.0.0/0".to_string()],
+            |d| match d {
+                "0.0.0.0/1" | "128.0.0.0/1" => Some("utun7".into()),
+                _ => None,
+            },
+        );
+        assert_eq!(v, Some(true), "v6 selector must not drag the verdict down");
+        // Only v6 negotiated -> nothing we can check -> no claim either way.
+        let none = routes_installed_verdict("utun7", &["::/0".to_string()], |_| None);
+        assert_eq!(none, None);
+        // No interface resolved -> no claim.
+        assert_eq!(routes_installed_verdict("", &["0.0.0.0/0".into()], |_| None), None);
     }
 
     #[test]

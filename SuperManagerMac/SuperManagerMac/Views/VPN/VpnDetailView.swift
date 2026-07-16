@@ -36,6 +36,10 @@ struct VpnDetailView: View {
         var virtualIp = ""
         var virtualGateway = ""
         var routes: [String] = []
+        /// Helper's verdict on whether the kernel routes for `routes` actually
+        /// point at `interface`. nil = helper couldn't determine (or an older
+        /// helper that doesn't report it) — say nothing rather than guess.
+        var routesInstalled: Bool?
 
         /// Nothing measured. Also the test for whether the section renders at
         /// all — an empty tunnel has nothing to say.
@@ -979,6 +983,21 @@ struct VpnDetailView: View {
                     }
                 }
                 .font(.callout)
+                // Negotiated and installed are different claims. The SA above
+                // says the gateway will carry these; this says whether the
+                // kernel is actually sending them there. A capture from this
+                // machine had a full tunnel ESTABLISHED with no /1 routes —
+                // "connected" while every packet bypassed it. That state must
+                // be loud, because everything else on screen calls it healthy.
+                if live.routesInstalled == false {
+                    Label(
+                        "Negotiated, but not installed — traffic is bypassing this tunnel",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .padding(.top, 2)
+                }
             }
         }
     }
@@ -1316,7 +1335,8 @@ struct VpnDetailView: View {
             interface: (result["interface"] as? String) ?? "",
             virtualIp: (result["virtual_ip"] as? String) ?? "",
             virtualGateway: (result["virtual_gateway"] as? String) ?? "",
-            routes: (result["active_routes"] as? [String]) ?? []
+            routes: (result["active_routes"] as? [String]) ?? [],
+            routesInstalled: result["routes_installed"] as? Bool
         )
     }
 
