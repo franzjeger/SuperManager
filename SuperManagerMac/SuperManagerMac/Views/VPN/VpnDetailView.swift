@@ -474,20 +474,17 @@ struct VpnDetailView: View {
         // Conflating "not installed" with "disconnected" was misleading; the
         // first is "the app needs setup", the second is "everything is fine,
         // just not active." Different colors, different next-actions.
-        let dotColor: Color = !helperReachable ? .yellow : statusColor(vpnState)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                // Status pill: filled when connected (impossible to
-                // miss — green capsule with white "Connected" inside),
-                // outlined dot when otherwise. Mid-screen feedback was
-                // too easy to overlook, especially when the action
-                // button switched from "Connect" to "Disconnect" with
-                // no other visual confirmation.
-                statusPill(dotColor)
-                    .font(.callout.weight(.medium))
-
-                Spacer()
-
+            // The grammar's connection card: state, one line of context, and
+            // the action that changes it, in one block at the top of the pane.
+            // Replaces the old pill-plus-buttons row; the per-backend button
+            // switch is unchanged and is the card's trailing action.
+            ConnectionCard(
+                status: cardStatus,
+                title: cardTitle,
+                meta: cardMeta(profile),
+                busy: busy || vpnState == "connecting"
+            ) {
                 switch profile.config {
                 case .ikev2:
                     if !helperReachable {
@@ -661,14 +658,6 @@ struct VpnDetailView: View {
                 }
                 .padding(8)
                 .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-            }
-
-            if !stateDetail.isEmpty {
-                Text(stateDetail)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
             }
 
             // Reconnect diagnostic — shown when the helper reports
@@ -1061,6 +1050,60 @@ struct VpnDetailView: View {
     /// has fired since, which would mean the session ended. Returns
     /// `nil` when we can't tell (no events recorded yet, or the
     /// last event isn't a connect).
+    /// The card's state, in the shared vocabulary. Helper-unreachable wins:
+    /// "the app needs setup" and "everything is fine, just not active" are
+    /// different colours because they are different next-actions.
+    private var cardStatus: StatusStyle {
+        if !helperReachable { return .warn }
+        return .vpn(vpnState)
+    }
+
+    private var cardTitle: String {
+        if !helperReachable { return "Helper not running" }
+        switch vpnState {
+        case "connected":     return "Connected"
+        case "connecting":    return "Connecting…"
+        case "reconnecting":  return "Reconnecting…"
+        case "disconnecting": return "Disconnecting…"
+        case "problem":       return "Problem"
+        default:              return "Disconnected"
+        }
+    }
+
+    /// One line under the state. Connected → the helper's summary
+    /// ("established 26s ago…"); disconnected → when it was last up plus the
+    /// tunnel mode, because "Disconnected" alone doesn't say whether that has
+    /// been true for a minute or a month.
+    private func cardMeta(_ profile: VpnProfile) -> String {
+        if !helperReachable {
+            return "Approve or install the background daemon to control this tunnel."
+        }
+        let mode = profile.fullTunnel ? "Full tunnel" : "Split tunnel"
+        switch vpnState {
+        case "connected":
+            return stateDetail.isEmpty ? mode : stateDetail
+        case "disconnected":
+            if let last = lastConnectedAt {
+                return "Last connected \(last.formatted(.relative(presentation: .named))) · \(mode)"
+            }
+            return mode
+        default:
+            // Mid-transition the helper's detail line is the most honest thing
+            // we have (e.g. "status query timed out (charon busy)").
+            return stateDetail
+        }
+    }
+
+    /// The most recent successful connect, whether or not that session has
+    /// since ended — the "Last connected yesterday" line on a disconnected
+    /// card. Distinct from `latestConnectTime` below, which answers "when did
+    /// the CURRENT session start" and is deliberately nil after a disconnect.
+    private var lastConnectedAt: Date? {
+        ActivityLog.shared.events(for: profileId)
+            .first(where: { $0.kind == .connectSucceeded })?
+            .timestamp
+    }
+
     private var latestConnectTime: Date? {
         let events = ActivityLog.shared.events(for: profileId)  // newest first
         for ev in events {
@@ -1147,45 +1190,6 @@ struct VpnDetailView: View {
         case "disconnected":
             return helperReachable ? "Disconnected" : "Helper not installed"
         default: return state.capitalized
-        }
-    }
-
-    private func statusColor(_ state: String) -> Color {
-        switch state {
-        case "connected":    return .green
-        case "connecting":   return .yellow    // initial handshake in progress
-        case "reconnecting": return .orange    // session dropped, retrying — warmer than yellow
-        case "problem":      return .red        // was up, now unconfirmable
-        default:             return .gray.opacity(0.5)
-        }
-    }
-
-    /// Status pill — filled-and-prominent when connected (the state
-    /// that needs the strongest visual confirmation; users care most
-    /// about "is the tunnel actually up"), outlined-with-dot for
-    /// other states. Replaces the tiny dot+caption combo, which was
-    /// easy to miss when the user's eye was on the action button.
-    @ViewBuilder
-    private func statusPill(_ color: Color) -> some View {
-        let label = displayState(vpnState)
-        if vpnState == "connected" && helperReachable {
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.shield.fill")
-                Text(label.uppercased())
-            }
-            .font(.callout.weight(.bold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(color, in: Capsule())
-        } else {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 10, height: 10)
-                Text(label)
-                    .foregroundStyle(.primary)
-            }
         }
     }
 

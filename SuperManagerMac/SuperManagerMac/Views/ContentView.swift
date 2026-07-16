@@ -3,6 +3,11 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @State private var sshTab: SSHTab = .hosts
+    /// The design's sun/moon toolbar toggle, persisted. "system" (default)
+    /// follows macOS; "light"/"dark" override just this app. Stored as a
+    /// string rather than ColorScheme because @AppStorage can't hold an
+    /// optional enum and "follow the OS" needs to be representable.
+    @AppStorage("appearanceOverride") private var appearanceOverride = "system"
     @State private var searchText = ""
     @State private var showingAddHost = false
     @State private var showingGenerateKey = false
@@ -69,6 +74,12 @@ struct ContentView: View {
                         .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
                 } detail: {
                     detailColumn
+                        // Title on the DETAIL column, not the split view. Set
+                        // globally, macOS floats it after the toolbar items
+                        // with no relationship to the column edges, and with a
+                        // wide list column it straddled the divider hairline.
+                        // Anchored here it starts where the detail pane does.
+                        .navigationTitle("SuperManager")
                         .navigationSplitViewColumnWidth(min: 480, ideal: 720)
                 }
             } else {
@@ -79,10 +90,17 @@ struct ContentView: View {
                     sidebarColumn
                 } detail: {
                     detailColumn
+                        .navigationTitle("SuperManager")
                 }
             }
         }
-        .navigationTitle("SuperManager")
+        // nil = follow macOS. The override applies to this window and every
+        // sheet and popover presented from it.
+        .preferredColorScheme(
+            appearanceOverride == "light" ? .light
+                : appearanceOverride == "dark" ? .dark
+                : nil
+        )
         // Drag-and-drop VPN config import from anywhere in the
         // window. Works for `.conf` (WireGuard) and `.ovpn`
         // (OpenVPN). Auto-routes by extension, prompts the
@@ -131,6 +149,37 @@ struct ContentView: View {
                 if appState.selectedSection != .tailscale {
                     GlobalCustomerPicker()
                 }
+            }
+            // Flexible space. The toolbar title used to be what separated the
+            // leading group from the trailing one; with it hidden (it floated
+            // across the column divider), macOS packs every item leading. A
+            // Spacer as a toolbar item maps to NSToolbar's flexible space and
+            // restores the split: pills and picker left, actions right.
+            ToolbarItem(placement: .primaryAction) {
+                Spacer()
+            }
+            // The design's appearance toggle: system → dark → light → system.
+            // Cycling three states rather than flipping two because "follow
+            // macOS" is the right default and must stay reachable — a
+            // two-state flip would trap the app in an override forever.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    switch appearanceOverride {
+                    case "system": appearanceOverride = "dark"
+                    case "dark":   appearanceOverride = "light"
+                    default:       appearanceOverride = "system"
+                    }
+                } label: {
+                    Image(systemName: appearanceOverride == "dark" ? "moon.fill"
+                            : appearanceOverride == "light" ? "sun.max.fill"
+                            : "circle.lefthalf.filled")
+                }
+                .help(appearanceOverride == "system"
+                        ? "Appearance: following macOS. Click for dark."
+                        : appearanceOverride == "dark"
+                        ? "Appearance: dark. Click for light."
+                        : "Appearance: light. Click to follow macOS.")
+                .accessibilityLabel("Appearance")
             }
             // ONE "+", every section, same place, same meaning: make a new one
             // of whatever you're looking at. Click adds the obvious thing;
@@ -997,13 +1046,34 @@ struct ContentView: View {
         }
     }
 
+    /// Which section a host files under, by precedence: the customer the
+    /// HostIndex resolver links it to (the spec's grouping), else the manual
+    /// group field, else "Ungrouped". Customer wins because it's the grouping
+    /// the rest of the app thinks in — the same resolver drives the global
+    /// customer filter — and falls through gracefully for lab hosts nobody
+    /// has linked.
+    private func hostSectionTitle(for host: SshHostSummary) -> String {
+        if let slug = appState.hostIndex.customerSlug(forHost: host),
+           !slug.isEmpty,
+           let customer = appState.customers.first(where: { $0.slug == slug }) {
+            return customer.displayName
+        }
+        return host.group.isEmpty ? "Ungrouped" : host.group
+    }
+
     private var hostListContent: some View {
         List {
-            let grouped = Dictionary(grouping: filteredHosts) { $0.group }
-            let sortedGroups = grouped.keys.sorted()
+            let grouped = Dictionary(grouping: filteredHosts) { hostSectionTitle(for: $0) }
+            // Alphabetical, except Ungrouped sinks to the bottom — named
+            // groups are the signal, the catch-all is the noise.
+            let sortedGroups = grouped.keys.sorted {
+                if $0 == "Ungrouped" { return false }
+                if $1 == "Ungrouped" { return true }
+                return $0 < $1
+            }
 
             ForEach(sortedGroups, id: \.self) { group in
-                Section(group.isEmpty ? "Ungrouped" : group) {
+                Section(group) {
                     ForEach(grouped[group] ?? []) { host in
                         Button(action: { appState.selectedHostId = host.id }) {
                             HStack {
@@ -1013,16 +1083,23 @@ struct ContentView: View {
                                         .font(.caption2)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(host.label)
-                                        .fontWeight(host.pinned ? .semibold : .regular)
+                                    HStack(spacing: 5) {
+                                        Text(host.label)
+                                            .fontWeight(host.pinned ? .semibold : .regular)
+                                        // The density fix: two rows that both
+                                        // read ubnt@192.168.2.x now differ at
+                                        // a glance by what the box IS.
+                                        Badge(text: host.deviceType.displayName)
+                                    }
                                     Text("\(host.username)@\(host.hostname)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Circle()
-                                    .fill(healthColor(for: host.id))
-                                    .frame(width: 8, height: 8)
+                                // The shared vocabulary: unmeasured is blue
+                                // unknown (same as "Never scanned"), not a
+                                // gray that claims a reading of down.
+                                StatusDot(status: hostHealthStatus(for: host.id))
                             }
                             .contentShape(Rectangle())
                         }
@@ -1055,9 +1132,9 @@ struct ContentView: View {
         .listStyle(.sidebar)
     }
 
-    private func healthColor(for hostId: String) -> Color {
-        guard let healthy = appState.hostHealth[hostId] else { return .gray }
-        return healthy ? .green : .red
+    private func hostHealthStatus(for hostId: String) -> StatusStyle {
+        guard let healthy = appState.hostHealth[hostId] else { return .unknown }
+        return healthy ? .online : .error
     }
 
     // MARK: - Key List

@@ -107,15 +107,12 @@ struct ReconView: View {
     }
 
     private var engagementSelector: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Engagement", systemImage: "doc.text.fill")
-                    .font(.headline)
-                Spacer()
-                Text("Scopes findings + evidence storage for tools that need it")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
+        DetailSection(title: "Engagement") {
+            Text("Scopes findings + evidence storage for tools that need it")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        } content: {
+            VStack(alignment: .leading, spacing: 8) {
             if activeEngagements.isEmpty {
                 emptyEngagementBanner
             } else {
@@ -127,14 +124,15 @@ struct ReconView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
             }
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 10).fill(.background.secondary)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10).stroke(.separator, lineWidth: 0.5)
+            )
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10).fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10).stroke(.separator, lineWidth: 0.5)
-        )
     }
 
     private var emptyEngagementBanner: some View {

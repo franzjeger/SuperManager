@@ -34,6 +34,16 @@ struct TailscaleDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 Divider()
+                // The grammar's connection card. The header used to carry an
+                // Online/Offline pill; the card says the same thing with room
+                // for the line that actually matters — when an offline peer
+                // was last seen, which is the difference between "rebooting"
+                // and "gone for two months".
+                ConnectionCard(
+                    status: peer.online ? .online : .offline,
+                    title: peer.online ? "Online" : "Offline",
+                    meta: peerCardMeta
+                )
                 actionRow
                 Divider()
                 detailGrid
@@ -56,17 +66,8 @@ struct TailscaleDetailView: View {
                 Text(peer.shortDnsName(stripping: magicSuffix))
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(peer.online ? .green : .gray.opacity(0.5))
-                        .frame(width: 8, height: 8)
-                    Text(peer.online ? "Online" : "Offline")
-                        .font(.callout)
-                    if peer.exitNode {
-                        Text("· Exit node")
-                            .font(.callout)
-                            .foregroundStyle(.blue)
-                    }
+                if peer.exitNode {
+                    Badge(text: "Exit node", kind: .ikev2)
                 }
             }
         }
@@ -203,30 +204,50 @@ struct TailscaleDetailView: View {
         .frame(width: 380)
     }
 
+    /// One line under the peer's state. Online → the tailnet address it
+    /// answers on; offline → last seen, because that's the question an
+    /// offline peer raises.
+    private var peerCardMeta: String {
+        if peer.online {
+            return peer.primaryIP.map { "Reachable at \($0)" } ?? ""
+        }
+        if let seen = peer.lastSeen {
+            return "Last seen \(seen.formatted(.relative(presentation: .named)))"
+        }
+        return "Never seen online by this tailnet."
+    }
+
     // MARK: - Detail grid
 
     private var detailGrid: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            row("DNS name", peer.dnsName.trimmingCharacters(in: CharacterSet(charactersIn: ".")))
-            row("IPv4", peer.primaryIP ?? "—")
-            if let ipv6 = peer.tailscaleIPs.first(where: { $0.contains(":") }) {
-                row("IPv6", ipv6)
+        // The detail grammar: a Machine section in the shared definition-list
+        // shape, same as VPN's Configuration and SSH's Connection. The
+        // hand-rolled `row()` predated the primitives and had its own key
+        // width (130 vs the shared 140), so this view's keys sat 10pt off
+        // from every other section's.
+        DetailColumns {
+            DetailSection(title: "Machine") {
+                DefinitionList(rows: machineRows)
             }
-            row("Operating system", peer.os)
-            row("Sent / Received",
-                "\(byteCount(peer.txBytes)) ↑ · \(byteCount(peer.rxBytes)) ↓")
-            row("Tailscale ID", peer.id)
         }
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .leading)
-            Text(value)
-                .textSelection(.enabled)
-                .font(.callout)
+    private var machineRows: [DefinitionRow] {
+        var rows: [DefinitionRow] = [
+            DefinitionRow("DNS name", peer.dnsName.trimmingCharacters(in: CharacterSet(charactersIn: "."))),
+            DefinitionRow("IPv4", peer.primaryIP ?? "—"),
+        ]
+        if let ipv6 = peer.tailscaleIPs.first(where: { $0.contains(":") }) {
+            rows.append(DefinitionRow("IPv6", ipv6))
         }
+        rows.append(DefinitionRow("Operating system", peer.os, mono: false))
+        rows.append(DefinitionRow(
+            "Sent / Received",
+            "\(byteCount(peer.txBytes)) ↑ · \(byteCount(peer.rxBytes)) ↓",
+            mono: false
+        ))
+        rows.append(DefinitionRow("Tailscale ID", peer.id, deemphasized: true))
+        return rows
     }
 
     // MARK: - Actions

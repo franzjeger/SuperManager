@@ -51,6 +51,11 @@ struct ProvisioningView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if let customer, let site {
                     headerCard(customer: customer, site: site)
+                    // The site's network layout, front and centre. The header
+                    // counted the VLANs ("VLANs: 3") while the VLANs
+                    // themselves were only visible inside the edit sheet —
+                    // the one thing a site detail is FOR was a number.
+                    vlanSection(customer: customer, site: site)
                     templateForm(customer: customer)
                     if rendering {
                         renderingCard
@@ -213,6 +218,94 @@ struct ProvisioningView: View {
                 .font(.callout.weight(.medium))
                 .monospacedDigit()
         }
+    }
+
+    // MARK: - VLANs
+
+    /// The spec's site table: ID · Name · Subnet · Purpose, a caption header
+    /// row and hairline separators. Purpose is the one column the prototype
+    /// didn't have — the real model carries it, and "Klienter" vs "Kamera"
+    /// is exactly what you want visible when eyeballing a site.
+    ///
+    /// Add VLAN opens the customer editor, because that's where VLAN editing
+    /// actually lives — an inline table editor here would duplicate a whole
+    /// CRUD surface for one shortcut.
+    private func vlanSection(customer: Customer, site: Site) -> some View {
+        DetailSection(title: "VLANs") {
+            Button {
+                customerToEdit = customer
+            } label: {
+                Label("Add VLAN", systemImage: "plus")
+            }
+            .controlSize(.small)
+            .help("Opens the customer editor, where this site's VLAN table is edited.")
+        } content: {
+            if site.vlans.isEmpty {
+                Text("No VLANs configured for this site yet.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                VStack(spacing: 0) {
+                    vlanRow(
+                        id: "ID", name: "NAME", subnet: "SUBNET", purpose: "PURPOSE",
+                        isHeader: true
+                    )
+                    .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+                    ForEach(site.vlans.sorted(by: { $0.id < $1.id })) { vlan in
+                        Divider()
+                        vlanRow(
+                            id: "\(vlan.id)",
+                            name: vlan.name,
+                            subnet: vlan.subnet.isEmpty ? "—" : vlan.subnet,
+                            purpose: vlan.purpose,
+                            isHeader: false
+                        )
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+
+    private func vlanRow(
+        id: String, name: String, subnet: String, purpose: String, isHeader: Bool
+    ) -> some View {
+        HStack(spacing: 12) {
+            Text(id)
+                .font(isHeader
+                        ? .system(size: 10, weight: .semibold)
+                        : .system(size: 12.5, design: .monospaced))
+                .frame(width: 44, alignment: .leading)
+            Text(name)
+                .font(isHeader
+                        ? .system(size: 10, weight: .semibold)
+                        : .system(size: 12.5, weight: .medium))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(subnet)
+                .font(isHeader
+                        ? .system(size: 10, weight: .semibold)
+                        : .system(size: 12.5, design: .monospaced))
+                .frame(width: 150, alignment: .leading)
+            Text(purpose)
+                .font(isHeader
+                        ? .system(size: 10, weight: .semibold)
+                        : .system(size: 12.5))
+                .foregroundStyle(isHeader ? .secondary : .secondary)
+                .frame(width: 130, alignment: .leading)
+        }
+        .foregroundStyle(isHeader ? .secondary : .primary)
+        .textSelection(.enabled)
+        .padding(.horizontal, 12)
+        .padding(.vertical, isHeader ? 6 : 8)
     }
 
     // MARK: - Template form

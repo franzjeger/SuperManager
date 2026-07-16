@@ -318,21 +318,21 @@ struct ComplianceHostView: View {
             statusRank(a.status, severity: a.severity) <
                 statusRank(b.status, severity: b.severity)
         }
-        return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Findings")
-                    .font(.headline)
-                Spacer()
-                Text("\(run.checks.count) checks")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        // The shared section heading, count as its accessory — same shape as
+        // "VLANs / Add VLAN" and every detail section since.
+        return DetailSection(title: "Findings") {
+            Text("\(run.checks.count) checks")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } content: {
+            VStack(alignment: .leading, spacing: 12) {
             ForEach(sorted) { check in
                 CheckRow(check: check, library: appState.complianceCheckLibrary)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
+            }
+            .animation(.easeOut(duration: 0.18), value: run.checks.count)
         }
-        .animation(.easeOut(duration: 0.18), value: run.checks.count)
     }
 
     private func statusRank(_ status: AppState.ComplianceStatus, severity: AppState.ComplianceSeverity) -> Int {
@@ -457,12 +457,8 @@ struct ComplianceHostView: View {
     /// and persistent failures (still need work). Score delta is
     /// rendered with an arrow + ± number.
     private func driftSection(drift: AppState.DriftReport) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Since last scan")
-                    .font(.headline)
-                Spacer()
-                if let prev = drift.previousScore {
+        DetailSection(title: "Since last scan") {
+            if let prev = drift.previousScore {
                     let arrow: String = {
                         if drift.scoreDelta > 0 { return "arrow.up" }
                         if drift.scoreDelta < 0 { return "arrow.down" }
@@ -489,7 +485,8 @@ struct ComplianceHostView: View {
                             .foregroundStyle(color)
                     }
                 }
-            }
+        } content: {
+            VStack(alignment: .leading, spacing: 10) {
             if drift.newlyFailing.isEmpty && drift.newlyPassing.isEmpty && drift.errored.isEmpty {
                 Text("No status changes since the previous scan.")
                     .font(.callout)
@@ -521,16 +518,17 @@ struct ComplianceHostView: View {
                     )
                 }
             }
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.background.secondary)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(.separator, lineWidth: 0.5)
+            )
         }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(.background.secondary)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(.separator, lineWidth: 0.5)
-        )
     }
 
     @ViewBuilder
