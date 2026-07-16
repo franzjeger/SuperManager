@@ -90,7 +90,17 @@ struct SuperManagerApp: App {
                 }
             }
         }
-        .windowStyle(.titleBar)
+        // Hidden title BAR, not hidden title: the window keeps its name
+        // (Mission Control, the Window menu and cmd-` cycling all read it)
+        // but the toolbar stops drawing the text. Drawn there, macOS floats
+        // it after the leading toolbar items with no relationship to the
+        // column edges, so with a wide list column "SuperManager" straddled
+        // the list/detail divider hairline. Anchoring the title on the
+        // detail column doesn't help (title layout ignores column
+        // ownership), and .unified(showsTitle: false) collapses the flexible
+        // space so the trailing actions left-pack. This keeps both: no
+        // floating text, trailing items still trailing.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 700)
         .commands {
             // Keep the standard `File → New Window` (⌘N) — without it,

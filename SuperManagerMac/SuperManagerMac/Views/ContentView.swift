@@ -74,6 +74,12 @@ struct ContentView: View {
                         .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
                 } detail: {
                     detailColumn
+                        // Title on the DETAIL column, not the split view. Set
+                        // globally, macOS floats it after the toolbar items
+                        // with no relationship to the column edges, and with a
+                        // wide list column it straddled the divider hairline.
+                        // Anchored here it starts where the detail pane does.
+                        .navigationTitle("SuperManager")
                         .navigationSplitViewColumnWidth(min: 480, ideal: 720)
                 }
             } else {
@@ -84,10 +90,10 @@ struct ContentView: View {
                     sidebarColumn
                 } detail: {
                     detailColumn
+                        .navigationTitle("SuperManager")
                 }
             }
         }
-        .navigationTitle("SuperManager")
         // nil = follow macOS. The override applies to this window and every
         // sheet and popover presented from it.
         .preferredColorScheme(
@@ -143,6 +149,14 @@ struct ContentView: View {
                 if appState.selectedSection != .tailscale {
                     GlobalCustomerPicker()
                 }
+            }
+            // Flexible space. The toolbar title used to be what separated the
+            // leading group from the trailing one; with it hidden (it floated
+            // across the column divider), macOS packs every item leading. A
+            // Spacer as a toolbar item maps to NSToolbar's flexible space and
+            // restores the split: pills and picker left, actions right.
+            ToolbarItem(placement: .primaryAction) {
+                Spacer()
             }
             // The design's appearance toggle: system → dark → light → system.
             // Cycling three states rather than flipping two because "follow
