@@ -565,6 +565,15 @@ impl OpenVpn {
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(log_path_for(&safe));
 
+        // Restore DNS. Both openvpn 2.x (via --up/--down scripts that
+        // call networksetup) and ovpncli (via its platform DNS abstraction)
+        // modify the system resolver on connect. SIGTERM should trigger
+        // the --down script, but if openvpn exits uncleanly (SIGKILL,
+        // crash, ovpncli receiving SIGTERM before its cleanup hook runs),
+        // DNS changes are left behind. clear_vpn_dns is the guaranteed
+        // cleanup that runs regardless of how the process exited.
+        crate::dns::clear_vpn_dns();
+
         Ok(OvpnDisconnectResult {
             success: true,
             message: if killed.is_empty() {

@@ -609,34 +609,7 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
 }
 
 fn scutil_find_service_uuid() -> Option<String> {
-    let mut child = std::process::Command::new("/usr/sbin/scutil")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take()?;
-        let _ = stdin.write_all(b"list Setup:/Network/Service/[^/]+/DNS\nquit\n");
-    }
-    let out = child.wait_with_output().ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for line in stdout.lines() {
-        // Lines look like:
-        //   subKey [0] = Setup:/Network/Service/67C7F8A5-...-727B82/DNS
-        if let Some(idx) = line.find("Setup:/Network/Service/") {
-            let rest = &line[idx + "Setup:/Network/Service/".len()..];
-            if let Some(end) = rest.find('/') {
-                let uuid = &rest[..end];
-                // Heuristic: UUID is 36 chars
-                if uuid.len() == 36 {
-                    return Some(uuid.to_string());
-                }
-            }
-        }
-    }
-    None
+    crate::dns::find_service_uuid()
 }
 
 /// Override the system DNS servers on the active network service
@@ -688,21 +661,7 @@ pub struct SetDnsArgs {
 /// interface. Returns `Some("Wi-Fi")` typically; falls back to
 /// `None` if we can't tell so the caller can default.
 fn detect_active_network_service() -> Option<String> {
-    let out = Command::new("/usr/sbin/networksetup")
-        .arg("-listallnetworkservices")
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for line in stdout.lines() {
-        let s = line.trim();
-        if s.starts_with('*') || s.contains("informational") || s.is_empty() {
-            continue;
-        }
-        if s == "Wi-Fi" {
-            return Some(s.to_string());
-        }
-    }
-    None
+    crate::dns::detect_active_network_service()
 }
 
 /// Pre-flight test: does the configured exit node actually forward

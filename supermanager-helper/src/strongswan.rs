@@ -416,6 +416,16 @@ impl Strongswan {
         // breaking internet access until the next VPN connect or reboot.
         // Deleting them here is idempotent: `route delete` ignores missing routes.
         delete_full_tunnel_routes();
+        // Restore DNS. strongSwan's charon daemon can push DNS servers
+        // via IKEv2 Mode Config (gateway sends INTERNAL_IP4_DNS
+        // attributes); charon applies them to the system resolver but
+        // does not reliably clean them up when killed. Calling
+        // clear_vpn_dns here guarantees the Setup and State stores are
+        // both cleared regardless of how charon exited.
+        //
+        // Routes first, then DNS: with the split-defaults gone the resolver
+        // list is the last thing still pointing into the dead tunnel.
+        crate::dns::clear_vpn_dns();
 
         Ok(DisconnectResult { ok: true, message: out.lines().last().unwrap_or("").to_owned() })
     }

@@ -325,6 +325,15 @@ impl WireGuard {
         //    disk is worse than a dangling interface.
         let _ = std::fs::remove_file(conf_path_for(&name));
 
+        // 6. Always restore DNS — unconditionally, regardless of
+        //    whether wg-quick down succeeded or the fallback ran.
+        //    wg-quick sets DNS via `networksetup` (Setup store) when
+        //    it brings the tunnel up; its `down` path clears it, but
+        //    the `ifconfig destroy` fallback above does not. Calling
+        //    `clear_vpn_dns` here covers both paths and also removes
+        //    any State-store entries, matching macOS best-practice.
+        crate::dns::clear_vpn_dns();
+
         // Final verdict: success iff the interface is gone now.
         let final_alive = utun_name_before
             .as_deref()

@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  no.sybr.supermanager.vpn-dns-cleanup.plist
+  ──────────────────────────────────────────
+  Boot-time DNS teardown guard (P4 — transactional safety).
+
+  Problem: if the machine is hard-powered-off while a VPN session is
+  active, the VPN process never runs its disconnect path, so DNS servers
+  set via "networksetup -setdnsservers" (Setup store) survive the reboot.
+  The user comes up pointing at a VPN gateway that no longer exists.
+
+  Solution: this LaunchDaemon runs once at boot (RunAtLoad, no KeepAlive)
+  before the network stack is fully active (OrderPreference "None" so it
+  runs early) and sweeps both the Setup store and the State store for any
+  lingering VPN DNS entries, then flushes mDNSResponder.
+
+  Install path:  /Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist
+  Owner:         root:wheel, mode 644
+  Load:          sudo launchctl load -w /Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist
+  Unload:        sudo launchctl unload -w /Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist
+
+  The helper binary at HelperPath is the supermanager-helper executable
+  installed by the main app. It accepts the "vpn-dns-cleanup" subcommand
+  which maps to dns::clear_vpn_dns().
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>no.sybr.supermanager.vpn-dns-cleanup</string>
+
+    <!-- Run once at load/boot, do not restart. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+
+    <!--
+      Run the DNS cleanup via the privileged helper binary.
+      The helper already runs as root (XPC privileged helper), so
+      LaunchDaemon also runs as root — no suid needed.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/no.sybr.supermanager.helper</string>
+        <string>vpn-dns-cleanup</string>
+    </array>
+
+    <!--
+      Redirect stdout/stderr to a rotating log so we can diagnose
+      boot-time cleanup without interfering with the main helper log.
+    -->
+    <key>StandardOutPath</key>
+    <string>/var/log/supermgr-dns-cleanup.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/supermgr-dns-cleanup.log</string>
+
+    <!--
+      Give the boot cleanup a chance to finish before configd
+      processes DHCP responses (OrderPreference has no official SDK
+      key but the name is conventional).
+    -->
+    <key>OrderPreference</key>
+    <string>None</string>
+</dict>
+</plist>

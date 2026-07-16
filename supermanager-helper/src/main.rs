@@ -50,6 +50,7 @@ use tracing::{debug, error, info, warn};
 
 mod auto_reconnect;
 mod connectivity_watchdog;
+mod dns;
 mod dns_health_watchdog;
 mod kill_switch;
 mod openvpn;
@@ -129,6 +130,24 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // Boot-time DNS cleanup subcommand.
+    //
+    // The LaunchDaemon `no.sybr.supermanager.vpn-dns-cleanup` runs this
+    // binary at boot with `vpn-dns-cleanup` as the first argument. We
+    // perform the cleanup and exit immediately — we do NOT start the
+    // full daemon socket loop. This is intentional: the plist has
+    // `KeepAlive false`, so launchd expects a short-lived process.
+    if std::env::args().nth(1).as_deref() == Some("vpn-dns-cleanup") {
+        info!("vpn-dns-cleanup: boot-time DNS teardown guard starting");
+        let uid = unsafe { libc::geteuid() };
+        if uid != 0 {
+            anyhow::bail!("vpn-dns-cleanup must run as root (got uid={uid})");
+        }
+        dns::clear_vpn_dns();
+        info!("vpn-dns-cleanup: done");
+        return Ok(());
+    }
 
     info!("SuperManager helper starting");
 
