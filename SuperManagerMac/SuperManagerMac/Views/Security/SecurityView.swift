@@ -139,9 +139,8 @@ struct SecurityView: View {
     @ViewBuilder
     private func auditLogCard(_ e: Engagement) -> some View {
         if !e.log.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Audit log")
-                    .font(.headline)
+            DetailSection(title: "Audit log") {
+                VStack(alignment: .leading, spacing: 8) {
                 ForEach(e.log.suffix(20).reversed()) { event in
                     HStack(alignment: .top, spacing: 8) {
                         Text(event.at.formatted(date: .abbreviated, time: .shortened))
@@ -160,12 +159,13 @@ struct SecurityView: View {
                         }
                     }
                 }
+                }
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(.background.secondary)
+                )
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.background.secondary)
-            )
         }
     }
 }
