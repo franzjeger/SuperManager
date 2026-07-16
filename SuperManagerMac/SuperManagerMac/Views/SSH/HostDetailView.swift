@@ -46,57 +46,10 @@ struct HostDetailView: View {
                             // method moved into the Connection list below —
                             // it's configuration, not identity.
                             Badge(text: host.deviceType.displayName)
-                        }
-                    }
 
-                    Divider()
-
-                    // Actions
-                    HStack(spacing: 12) {
-                        Button(action: { openTerminal(host: host) }) {
-                            Label("Connect", systemImage: "terminal")
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button("Test Connection") {
-                            Task {
-                                connectionStatus = "Testing…"
-                                // The daemon now reports structured kinds —
-                                // map each to a clear UI string + icon so
-                                // the operator can act:
-                                //   .authFailed     → "Auth failed" (red, key icon)
-                                //   .networkFailed  → "Unreachable" (orange,
-                                //                     wifi-slash icon — hints
-                                //                     at "connect VPN first")
-                                //   .otherFailure   → "Failed: <msg>" (red)
-                                switch await appState.testConnection(hostId: hostId) {
-                                case .ok:
-                                    connectionStatus = "ok"
-                                case .authFailed(let msg):
-                                    connectionStatus = "auth: \(msg)"
-                                case .networkFailed(let msg):
-                                    connectionStatus = "network: \(msg)"
-                                case .otherFailure(let msg):
-                                    connectionStatus = msg
-                                }
+                            Button("Edit") {
+                                showingEditSheet = true
                             }
-                        }
-
-                        if let status = connectionStatus {
-                            HStack(spacing: 4) {
-                                Image(systemName: connectionStatusIcon(status))
-                                    .foregroundStyle(connectionStatusColor(status))
-                                Text(status)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                        }
-
-                        Spacer()
-
-                        Button("Edit") {
-                            showingEditSheet = true
-                        }
 
                         // Secondary actions live in the kebab, same as the VPN
                         // detail — the row keeps the two things you do
@@ -130,6 +83,48 @@ struct HostDetailView: View {
                         .menuStyle(.borderlessButton)
                         .frame(width: 30)
                         .help("More actions")
+                        }
+                    }
+
+                    // The grammar's connection card: the host's reachability
+                    // as measured, one line of why, and the two actions that
+                    // act on it. The old row mixed these with Edit and the
+                    // kebab; those are identity/configuration actions and
+                    // moved to the header, same split as the VPN detail.
+                    ConnectionCard(
+                        status: hostCardStatus,
+                        title: hostCardTitle,
+                        meta: hostCardMeta,
+                        busy: connectionStatus == "Testing…"
+                    ) {
+                        HStack(spacing: 10) {
+                            Button(action: { openTerminal(host: host) }) {
+                                Label("Connect", systemImage: "terminal")
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            Button("Test Connection") {
+                                Task {
+                                    connectionStatus = "Testing…"
+                                    // Structured kinds from the daemon; the
+                                    // card maps each to state + explanation:
+                                    //   .authFailed    → error, message
+                                    //   .networkFailed → offline, "is the
+                                    //                    right VPN up?" hint
+                                    //   .otherFailure  → error, message
+                                    switch await appState.testConnection(hostId: hostId) {
+                                    case .ok:
+                                        connectionStatus = "ok"
+                                    case .authFailed(let msg):
+                                        connectionStatus = "auth: \(msg)"
+                                    case .networkFailed(let msg):
+                                        connectionStatus = "network: \(msg)"
+                                    case .otherFailure(let msg):
+                                        connectionStatus = msg
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // FortiGate REST API panel — only renders for
@@ -242,6 +237,52 @@ struct HostDetailView: View {
         return rows
     }
 
+    /// The card's reading of `connectionStatus` — a manual, per-session probe,
+    /// so "no reading yet" is `.unknown` and never a claim either way.
+    ///
+    /// A network failure maps to `.offline`, not `.error`: the host isn't
+    /// broken, the path from HERE is — usually a VPN that isn't up — and the
+    /// meta line says so. Auth failure is `.error`: the host answered and
+    /// rejected us, which is a fact about configuration someone must fix.
+    private var hostCardStatus: StatusStyle {
+        switch connectionStatus {
+        case nil:                                    return .unknown
+        case "Testing…":                             return .pending
+        case "ok":                                   return .online
+        case .some(let s) where s.hasPrefix("auth"): return .error
+        case .some(let s) where s.hasPrefix("network"): return .offline
+        default:                                     return .error
+        }
+    }
+
+    private var hostCardTitle: String {
+        switch connectionStatus {
+        case nil:                                    return "Not tested"
+        case "Testing…":                             return "Testing…"
+        case "ok":                                   return "Reachable"
+        case .some(let s) where s.hasPrefix("auth"): return "Auth failed"
+        case .some(let s) where s.hasPrefix("network"): return "Unreachable"
+        default:                                     return "Failed"
+        }
+    }
+
+    private var hostCardMeta: String {
+        switch connectionStatus {
+        case nil:
+            return "Test the connection to verify reachability and credentials."
+        case "Testing…":
+            return ""
+        case "ok":
+            return "SSH connection and authentication verified."
+        case .some(let s) where s.hasPrefix("auth: "):
+            return String(s.dropFirst(6))
+        case .some(let s) where s.hasPrefix("network: "):
+            return String(s.dropFirst(9)) + " — check that the right VPN tunnel is up."
+        case .some(let s):
+            return s
+        }
+    }
+
     private func openTerminal(host: SshHostSummary) {
         // Prefer the ssh:// URL scheme — Terminal.app registers for it out of the box
         // and iTerm2 will claim it if installed, so the user's default terminal wins.
@@ -338,18 +379,4 @@ struct HostDetailView: View {
     /// ("auth:", "network:", "ok") rather than parsing the human
     /// message — same idea as the daemon-side EngineError.kind
     /// design, applied to the view-state string.
-    private func connectionStatusIcon(_ status: String) -> String {
-        if status == "ok" { return "checkmark.circle.fill" }
-        if status.hasPrefix("Testing") { return "ellipsis.circle" }
-        if status.hasPrefix("auth:") { return "key.fill" }
-        if status.hasPrefix("network:") { return "wifi.exclamationmark" }
-        return "xmark.circle.fill"
-    }
-
-    private func connectionStatusColor(_ status: String) -> Color {
-        if status == "ok" { return .green }
-        if status.hasPrefix("Testing") { return .secondary }
-        if status.hasPrefix("network:") { return .orange }
-        return .red
-    }
 }

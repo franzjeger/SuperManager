@@ -68,6 +68,15 @@ struct ConnectionCard<Action: View>: View {
     }
 }
 
+extension ConnectionCard where Action == EmptyView {
+    /// A card with no trailing action — the state IS the content. Tailscale
+    /// peers use this: their actions (SSH, ping, exit node) live in the action
+    /// row below, and duplicating one into the card would just crowd it.
+    init(status: StatusStyle, title: String, meta: String, busy: Bool = false) {
+        self.init(status: status, title: title, meta: meta, busy: busy, action: { EmptyView() })
+    }
+}
+
 #if DEBUG
 #Preview("Connection cards") {
     VStack(spacing: 12) {

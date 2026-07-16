@@ -34,6 +34,16 @@ struct TailscaleDetailView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 Divider()
+                // The grammar's connection card. The header used to carry an
+                // Online/Offline pill; the card says the same thing with room
+                // for the line that actually matters — when an offline peer
+                // was last seen, which is the difference between "rebooting"
+                // and "gone for two months".
+                ConnectionCard(
+                    status: peer.online ? .online : .offline,
+                    title: peer.online ? "Online" : "Offline",
+                    meta: peerCardMeta
+                )
                 actionRow
                 Divider()
                 detailGrid
@@ -56,16 +66,8 @@ struct TailscaleDetailView: View {
                 Text(peer.shortDnsName(stripping: magicSuffix))
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                HStack(spacing: 6) {
-                    // The shared vocabulary, not a hand-rolled dot — a peer's
-                    // state renders the same way a tunnel's does.
-                    StatusPill(
-                        status: peer.online ? .online : .offline,
-                        label: peer.online ? "Online" : "Offline"
-                    )
-                    if peer.exitNode {
-                        Badge(text: "Exit node", kind: .ikev2)
-                    }
+                if peer.exitNode {
+                    Badge(text: "Exit node", kind: .ikev2)
                 }
             }
         }
@@ -200,6 +202,19 @@ struct TailscaleDetailView: View {
         }
         .padding()
         .frame(width: 380)
+    }
+
+    /// One line under the peer's state. Online → the tailnet address it
+    /// answers on; offline → last seen, because that's the question an
+    /// offline peer raises.
+    private var peerCardMeta: String {
+        if peer.online {
+            return peer.primaryIP.map { "Reachable at \($0)" } ?? ""
+        }
+        if let seen = peer.lastSeen {
+            return "Last seen \(seen.formatted(.relative(presentation: .named)))"
+        }
+        return "Never seen online by this tailnet."
     }
 
     // MARK: - Detail grid
