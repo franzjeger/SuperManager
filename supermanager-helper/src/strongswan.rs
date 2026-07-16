@@ -149,12 +149,35 @@ pub struct DisconnectResult {
     pub message: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Default)]
 pub struct StatusResult {
     /// "connected", "connecting", or "disconnected".
     pub state: String,
     /// Optional human-readable detail (e.g. ESP rekey time).
     pub detail: String,
+    /// The utun carrying this tunnel. Field names match `ovpn_status`'s so the
+    /// GUI's live-tunnel section reads every backend the same way.
+    ///
+    /// strongSwan on macOS runs kernel-libipsec, so a tunnel really does own a
+    /// utun; swanctl just never mentions it, and we resolve it from the virtual
+    /// IP instead.
+    #[serde(default)]
+    pub interface: String,
+    /// The address the gateway handed us, from the IKE SA's `local` line.
+    #[serde(default)]
+    pub virtual_ip: String,
+    /// The far end of the point-to-point utun.
+    #[serde(default)]
+    pub virtual_gateway: String,
+    /// What the gateway agreed to carry: every child SA's remote traffic
+    /// selector.
+    ///
+    /// The IKEv2 analogue of OpenVPN's pushed routes, arrived at differently —
+    /// OpenVPN is told its routes in a PUSH_REPLY, IKEv2 negotiates them as
+    /// traffic selectors per child SA. Same question answered ("what goes
+    /// through this tunnel"), so it lands in the same field.
+    #[serde(default)]
+    pub active_routes: Vec<String>,
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -392,6 +415,7 @@ impl Strongswan {
             return Ok(StatusResult {
                 state: "disconnected".to_owned(),
                 detail: "strongSwan not installed".to_owned(),
+                ..Default::default()
             });
         }
         let swanctl = self.swanctl.as_ref().expect("just resolved");
@@ -422,16 +446,11 @@ impl Strongswan {
                 return Ok(StatusResult {
                     state: "connecting".to_owned(),
                     detail: "status query timed out (charon busy)".to_owned(),
+                    ..Default::default()
                 });
             }
         };
-        let block_marker = format!("{}: ", args.profile_id);
-        let block = out
-            .lines()
-            .skip_while(|l| !l.starts_with(&block_marker))
-            .take(8)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let block = extract_sa_block(&out, &args.profile_id);
         let state = if block.is_empty() {
             "disconnected"
         } else if block.contains("ESTABLISHED") {
@@ -439,8 +458,152 @@ impl Strongswan {
         } else {
             "connecting"
         };
-        Ok(StatusResult { state: state.to_owned(), detail: block })
+        if state != "connected" {
+            // Half-built or gone: report the state and nothing about a tunnel
+            // that isn't carrying anything. An empty live-tunnel section beats
+            // one describing an SA mid-negotiation.
+            return Ok(StatusResult {
+                state: state.to_owned(),
+                detail: sa_summary_line(&block),
+                ..Default::default()
+            });
+        }
+        let virtual_ip = parse_virtual_ip(&block).unwrap_or_default();
+        // swanctl doesn't name the utun, but the virtual IP is assigned to it,
+        // so ifconfig can point back. Resolving via the IP rather than "the
+        // newest utun" keeps it right when several tunnels are up at once.
+        let (interface, virtual_gateway) = if virtual_ip.is_empty() {
+            (String::new(), String::new())
+        } else {
+            utun_for_address(&virtual_ip).unwrap_or_default()
+        };
+        Ok(StatusResult {
+            state: state.to_owned(),
+            detail: sa_summary_line(&block),
+            interface,
+            virtual_ip,
+            virtual_gateway,
+            active_routes: parse_child_remote_ts(&block),
+        })
     }
+}
+
+/// Pull one connection's block out of `swanctl --list-sas`.
+///
+/// The block is the line starting `<profile_id>: `, then every indented line
+/// under it — which is where the child SAs and their traffic selectors live.
+/// This used to `.take(8)`, and a real block is eleven lines: the cut landed
+/// between the byte counters and the `local`/`remote` selectors, so the two
+/// lines saying what the tunnel actually carries were the ones being thrown
+/// away.
+fn extract_sa_block(list_sas: &str, profile_id: &str) -> String {
+    let marker = format!("{}: ", profile_id);
+    let mut lines = list_sas.lines().skip_while(|l| !l.starts_with(&marker));
+    let Some(head) = lines.next() else {
+        return String::new();
+    };
+    // A following unindented line starts the next connection's block. The child
+    // SA repeats the profile id but indented, so it stays with us.
+    let rest = lines.take_while(|l| l.starts_with(char::is_whitespace));
+    std::iter::once(head).chain(rest).collect::<Vec<_>>().join("\n")
+}
+
+/// The "established 8s ago, rekeying in 14105s" line, as the detail string.
+///
+/// `detail` used to be the raw eight-line block, rendered under the status pill
+/// as a monospaced blob. It was standing in for structure we didn't extract;
+/// now that we do, it goes back to being one line a human reads.
+fn sa_summary_line(block: &str) -> String {
+    block
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("established "))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// The virtual IP from the IKE SA's `local` line:
+///
+/// ```text
+///   local  '192.168.200.136' @ 192.168.200.136[4500] [192.168.250.1]
+/// ```
+///
+/// Both bracket groups have to be considered: the first is the UDP port. Take
+/// the last, and only if it looks like an address — with no virtual IP assigned
+/// the line ends at `[4500]` and returning "4500" as an address would be worse
+/// than returning nothing.
+fn parse_virtual_ip(block: &str) -> Option<String> {
+    let line = block
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("local ") && l.contains('@'))?;
+    let inner = line.rsplit_once('[')?.1.strip_suffix(']')?;
+    // An address, not a port. IPv6 virtual IPs contain ':'.
+    if inner.contains('.') || inner.contains(':') {
+        Some(inner.to_string())
+    } else {
+        None
+    }
+}
+
+/// Every child SA's remote traffic selector — what the gateway agreed to carry.
+///
+/// Must not pick up the IKE SA's own `remote '193.214.73.114' @ ...` line,
+/// which names the peer rather than a route. The identity is quoted and a
+/// selector never is, so the quote is the discriminator; indent depth would
+/// also work but is the kind of thing a swanctl release can restyle.
+///
+/// One child SA can list several selectors, space-separated.
+fn parse_child_remote_ts(block: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in block.lines().map(str::trim) {
+        let Some(rest) = line.strip_prefix("remote ") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.starts_with('\'') {
+            continue; // IKE peer identity, not a selector
+        }
+        for ts in rest.split_whitespace() {
+            if !out.iter().any(|e| e == ts) {
+                out.push(ts.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// `(interface, peer)` for whichever utun carries `addr`.
+///
+/// ```text
+/// utun11: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1400
+///         inet 192.168.250.1 --> 192.168.250.1 netmask 0xffffffff
+/// ```
+fn utun_for_address(addr: &str) -> Option<(String, String)> {
+    let out = std::process::Command::new("/sbin/ifconfig").output().ok()?;
+    let body = String::from_utf8_lossy(&out.stdout);
+    let mut current: Option<&str> = None;
+    for line in body.lines() {
+        if let Some(name) = line.split(':').next().filter(|_| !line.starts_with(char::is_whitespace)) {
+            current = if name.starts_with("utun") { Some(name) } else { None };
+            continue;
+        }
+        let Some(iface) = current else { continue };
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("inet") {
+            continue;
+        }
+        if fields.next() != Some(addr) {
+            continue;
+        }
+        // "--> <peer>" is present on point-to-point utuns, absent otherwise.
+        let peer = match (fields.next(), fields.next()) {
+            (Some("-->"), Some(p)) => p.to_string(),
+            _ => String::new(),
+        };
+        return Some((iface.to_string(), peer));
+    }
+    None
 }
 
 use std::os::unix::fs::PermissionsExt;
@@ -1104,6 +1267,107 @@ mod tests {
             routes: Vec::new(),
             local_id: String::new(),
         }
+    }
+
+    /// Verbatim `swanctl --list-sas` from strongSwan 6.0.6, captured from a
+    /// live full-tunnel IKEv2 connection to a FortiGate. Not reconstructed: an
+    /// earlier change in this file shipped a swanctl option that looked right
+    /// and wasn't, and strongSwan silently discarded the whole config. Parsers
+    /// get written against output someone actually saw.
+    const REAL_LIST_SAS_FULL_TUNNEL: &str = "\
+4a08fdd4-1818-4826-aedc-f1466c96d113: #1, ESTABLISHED, IKEv2, 9f2c31ad4a19aa57_i* 8b0e9e4c7ae0fa98_r
+  local  '192.168.200.136' @ 192.168.200.136[4500] [192.168.250.1]
+  remote '193.214.73.114' @ 193.214.73.114[4500]
+  AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_384
+  established 8s ago, rekeying in 14105s
+  4a08fdd4-1818-4826-aedc-f1466c96d113: #1, reqid 1, INSTALLED, TUNNEL-in-UDP, ESP:AES_CBC-128/HMAC_SHA1_96
+    installed 8s ago, rekeying in 3336s, expires in 3952s
+    in  cb9ab05e,  42670 bytes,   116 packets,     0s ago
+    out 42ee1011,  67088 bytes,   163 packets,     0s ago
+    local  192.168.250.1/32
+    remote 0.0.0.0/0
+";
+
+    const PROFILE: &str = "4a08fdd4-1818-4826-aedc-f1466c96d113";
+
+    #[test]
+    fn block_extends_past_the_byte_counters_to_the_selectors() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, PROFILE);
+        // The old `.take(8)` stopped at the `in`/`out` counters. These two lines
+        // are the whole point of reading the block.
+        assert!(block.contains("local  192.168.250.1/32"));
+        assert!(block.contains("remote 0.0.0.0/0"));
+        assert!(block.contains("ESTABLISHED"));
+    }
+
+    #[test]
+    fn block_stops_at_the_next_connection() {
+        let two = format!(
+            "{}other-profile-id: #2, ESTABLISHED, IKEv2, aaaa_i* bbbb_r\n  local  'x' @ 10.0.0.1[4500] [10.9.9.9]\n",
+            REAL_LIST_SAS_FULL_TUNNEL
+        );
+        let block = extract_sa_block(&two, PROFILE);
+        assert!(!block.contains("other-profile-id"));
+        assert!(!block.contains("10.9.9.9"), "must not inherit the next SA's virtual IP");
+        assert_eq!(parse_virtual_ip(&block).as_deref(), Some("192.168.250.1"));
+    }
+
+    #[test]
+    fn virtual_ip_is_the_bracket_after_the_port_not_the_port() {
+        assert_eq!(
+            parse_virtual_ip(REAL_LIST_SAS_FULL_TUNNEL).as_deref(),
+            Some("192.168.250.1")
+        );
+    }
+
+    #[test]
+    fn virtual_ip_absent_yields_none_never_the_port() {
+        let no_vip = "conn: #1, ESTABLISHED, IKEv2, a_i* b_r\n  local  'me' @ 192.168.1.5[4500]\n  remote 'gw' @ 1.2.3.4[4500]\n";
+        assert_eq!(parse_virtual_ip(no_vip), None, "[4500] is a port, not an address");
+    }
+
+    #[test]
+    fn routes_are_child_selectors_not_the_peer_identity() {
+        let routes = parse_child_remote_ts(REAL_LIST_SAS_FULL_TUNNEL);
+        // `remote '193.214.73.114' @ ...` names the gateway. It is not a route.
+        assert_eq!(routes, vec!["0.0.0.0/0"]);
+    }
+
+    #[test]
+    fn routes_collect_every_child_sa_and_dedupe() {
+        // A split tunnel opens one child SA per subnet. Shape taken from this
+        // machine's charon log: `TS 10.0.60.100/32 === 10.0.10.0/24` etc.
+        let split = "\
+conn: #1, ESTABLISHED, IKEv2, a_i* b_r
+  local  'me' @ 10.0.0.5[4500] [10.0.60.100]
+  remote 'gw' @ 1.2.3.4[4500]
+  established 3s ago, rekeying in 14000s
+  conn: #1, reqid 1, INSTALLED, TUNNEL, ESP:AES_GCM_16-256
+    local  10.0.60.100/32
+    remote 10.0.10.0/24
+  conn: #2, reqid 2, INSTALLED, TUNNEL, ESP:AES_GCM_16-256
+    local  10.0.60.100/32
+    remote 10.99.0.0/24 10.0.10.0/24
+";
+        let routes = parse_child_remote_ts(split);
+        assert_eq!(routes, vec!["10.0.10.0/24", "10.99.0.0/24"],
+                   "every child SA, space-separated selectors split, first-seen order, no repeats");
+    }
+
+    #[test]
+    fn detail_is_one_readable_line_not_the_raw_block() {
+        assert_eq!(
+            sa_summary_line(REAL_LIST_SAS_FULL_TUNNEL),
+            "established 8s ago, rekeying in 14105s"
+        );
+    }
+
+    #[test]
+    fn missing_profile_yields_empty_block_and_no_metadata() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, "not-a-real-profile");
+        assert!(block.is_empty());
+        assert_eq!(parse_virtual_ip(&block), None);
+        assert!(parse_child_remote_ts(&block).is_empty());
     }
 
     #[test]

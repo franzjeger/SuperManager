@@ -961,7 +961,13 @@ struct VpnDetailView: View {
             // Don't duplicate it here.
             if !live.routes.isEmpty {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("Pushed routes")
+                    // "Routes", not "Pushed routes". Only OpenVPN is pushed
+                    // anything — it's told its routes in a PUSH_REPLY. IKEv2
+                    // negotiates the same information as per-child-SA traffic
+                    // selectors, so under an IKEv2 profile "Pushed" would name
+                    // a mechanism that isn't happening. Both answer "what goes
+                    // through this tunnel", which is what the operator asked.
+                    Text("Routes")
                         .foregroundStyle(.secondary)
                         .frame(width: 120, alignment: .leading)
                     VStack(alignment: .leading, spacing: 2) {
@@ -1246,6 +1252,12 @@ struct VpnDetailView: View {
                 let result = try await HelperClient.shared.vpnStatus(profileId: profileId)
                 stateDetail = result["detail"] as? String ?? ""
                 strongswanMissing = stateDetail.contains("strongSwan not installed")
+                // strongSwan reports the same four fields as OpenVPN now, from
+                // the IKE SA's virtual IP and its child SAs' traffic selectors.
+                applyLiveTunnelMetadata(
+                    from: result,
+                    connected: (result["state"] as? String) == "connected"
+                )
             case .wireguard:
                 let result = try await HelperClient.shared.wgStatus(profileId: profileId)
                 let rawConnected = (result["state"] as? String) == "connected"
