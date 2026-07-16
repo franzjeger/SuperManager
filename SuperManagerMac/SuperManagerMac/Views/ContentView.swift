@@ -3,6 +3,11 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppState.self) private var appState
     @State private var sshTab: SSHTab = .hosts
+    /// The design's sun/moon toolbar toggle, persisted. "system" (default)
+    /// follows macOS; "light"/"dark" override just this app. Stored as a
+    /// string rather than ColorScheme because @AppStorage can't hold an
+    /// optional enum and "follow the OS" needs to be representable.
+    @AppStorage("appearanceOverride") private var appearanceOverride = "system"
     @State private var searchText = ""
     @State private var showingAddHost = false
     @State private var showingGenerateKey = false
@@ -83,6 +88,13 @@ struct ContentView: View {
             }
         }
         .navigationTitle("SuperManager")
+        // nil = follow macOS. The override applies to this window and every
+        // sheet and popover presented from it.
+        .preferredColorScheme(
+            appearanceOverride == "light" ? .light
+                : appearanceOverride == "dark" ? .dark
+                : nil
+        )
         // Drag-and-drop VPN config import from anywhere in the
         // window. Works for `.conf` (WireGuard) and `.ovpn`
         // (OpenVPN). Auto-routes by extension, prompts the
@@ -131,6 +143,29 @@ struct ContentView: View {
                 if appState.selectedSection != .tailscale {
                     GlobalCustomerPicker()
                 }
+            }
+            // The design's appearance toggle: system → dark → light → system.
+            // Cycling three states rather than flipping two because "follow
+            // macOS" is the right default and must stay reachable — a
+            // two-state flip would trap the app in an override forever.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    switch appearanceOverride {
+                    case "system": appearanceOverride = "dark"
+                    case "dark":   appearanceOverride = "light"
+                    default:       appearanceOverride = "system"
+                    }
+                } label: {
+                    Image(systemName: appearanceOverride == "dark" ? "moon.fill"
+                            : appearanceOverride == "light" ? "sun.max.fill"
+                            : "circle.lefthalf.filled")
+                }
+                .help(appearanceOverride == "system"
+                        ? "Appearance: following macOS. Click for dark."
+                        : appearanceOverride == "dark"
+                        ? "Appearance: dark. Click for light."
+                        : "Appearance: light. Click to follow macOS.")
+                .accessibilityLabel("Appearance")
             }
             // ONE "+", every section, same place, same meaning: make a new one
             // of whatever you're looking at. Click adds the obvious thing;
