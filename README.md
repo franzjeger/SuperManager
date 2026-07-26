@@ -26,7 +26,10 @@ All three share `supermgr-core` (types, traits, secret-store abstraction, RPC pr
 - Generate, import, and manage SSH key pairs (Ed25519, RSA)
 - Organize hosts by groups with device type support (Linux, FortiGate, UniFi, pfSense, OpenWrt)
 - One-click SSH terminal sessions with automatic credential handling
-- Push/revoke public keys to remote hosts via SSH or FortiGate REST API
+- Push/revoke public keys to remote hosts via SSH or FortiGate REST API — SFTP
+  where available, falling back to BusyBox-safe shell commands for embedded gear
+- Host-key verification with a visible fingerprint and a Forget action
+  ([details](#ssh-host-keys))
 - Host health monitoring with live reachability indicators
 - **Batch command execution** — run commands on multiple hosts simultaneously
 - **~/.ssh/config sync** — generate SSH config entries for all managed hosts
@@ -128,11 +131,15 @@ starting with an empty store and re-trusting the whole fleet.
 ## Architecture
 
 ```
-supermgr-core/         Shared types, D-Bus interface definitions, keychain
-                       abstraction (Linux: secret-service, macOS: Keychain),
-                       error hierarchy
-supermgr-engine/       Shared engine — renderers (Azure VPN, OpenVPN), scan
-                       logic, JSON-RPC handlers (used by macOS daemon)
+# Shared by every platform
+supermgr-core/         Types, IPC interface definitions (D-Bus / named pipe),
+                       keychain abstraction (Linux: secret-service, macOS:
+                       Keychain, Windows: Credential Manager), error
+                       hierarchy, and the shared SSH layer — key generation,
+                       ~/.ssh import scanning, known-hosts verification, and
+                       authorized_keys push/revoke
+supermgr-engine/       Renderers (Azure VPN, OpenVPN), scan and recon logic,
+                       JSON-RPC handlers (used by the macOS daemon)
 supermgr-mcp/          MCP server for Claude Code integration
 
 # Linux
@@ -145,11 +152,28 @@ supermgrd-mac/         User-space daemon — wraps supermgr-engine, JSON-RPC
 supermanager-helper/   Privileged helper (LaunchDaemon, JSON-RPC over Unix
                        socket, ovpncli/openvpn/strongSwan supervision)
 SuperManagerMac/       Native SwiftUI app
+
+# Windows
+supermgrd-win/         Privileged daemon (Windows Service running as
+                       LocalSystem, named-pipe RPC)
+supermgr-win/          Slint GUI (runs as user)
 ```
 
 **Linux:** the GUI talks to `supermgrd` over D-Bus on the system bus. The daemon handles privileged operations: network interface creation, secret storage (Secret Service), SSH connections, and VPN management.
 
 **macOS:** the SwiftUI app talks to `supermgrd-mac` (user) and `supermanager-helper` (root) over Unix sockets. The helper supervises VPN tunnels (`ovpncli` for OpenVPN3 / `openvpn` for 2.x, `strongSwan` for IKEv2, kernel `wg` for WireGuard). Secrets live in the macOS Keychain via `security-framework`.
+
+**Windows:** the Slint GUI talks to the `supermgrd-win` service over `\\.\pipe\supermgrd`. The service drives WireGuardNT, the OpenVPN and openfortivpn executables, Windows RAS for IKEv2, and WFP for the kill switch. Secrets live in Credential Manager. See [WINDOWS.md](WINDOWS.md).
+
+### Where the shared code lives
+
+Anything a host-management operation does that isn't platform-specific belongs in
+`supermgr-core`, not in a daemon. The SSH layer got there the hard way: `supermgrd`
+and `supermgr-engine` carried byte-identical copies of key generation, import,
+push and revoke, and copies drift — macOS and Windows both verified SSH host keys
+while Linux accepted whatever it was offered. The daemons now keep only what is
+genuinely theirs (session setup, auth methods, transport) and drive the shared
+logic through `supermgr_core::ssh::remote::RemoteShell`.
 
 ## Building
 
@@ -198,8 +222,13 @@ If your distro's `rustc` is older than the workspace MSRV, install via [rustup](
 
 #### Build
 
+Name the crates explicitly. A bare `cargo build` honours `default-members` in
+the workspace `Cargo.toml`, which is only the two crates that build on every
+platform — it will not produce `supermgrd` or `supermgr`, and the install step
+below would then fail on a missing file.
+
 ```bash
-cargo build --release
+cargo build --release -p supermgrd -p supermgr -p supermgr-mcp
 
 # Install
 sudo install -m755 target/release/supermgrd /usr/bin/supermgrd
@@ -275,6 +304,53 @@ For a smoother dev loop, pre-authorise the specific commands the install script 
 
 (Disable with `disable_nopasswd.sh` when done.)
 
+### Windows
+
+See [WINDOWS.md](WINDOWS.md) for the full install and packaging story. To build:
+
+```powershell
+cargo build --release -p supermgrd-win -p supermgr-win -p supermgr-mcp
+```
+
+## Development
+
+### Building and testing a platform
+
+There is no single command that builds everything — the daemons and GUIs each need
+SDKs the other platforms don't have. Name the crates for the host you're on:
+
+```bash
+# Linux — daemon, GTK GUI, engine, core, MCP server
+cargo build   -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -p supermgr
+cargo test    -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -p supermgr
+cargo clippy --all-targets -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -p supermgr
+
+# macOS — everything, including the SwiftUI app
+cargo test --workspace
+cd SuperManagerMac && xcodegen generate && xcodebuild test \
+    -project SuperManager.xcodeproj -scheme SuperManagerMac -destination 'platform=macOS'
+
+# Windows
+cargo test -p supermgr-core -p supermgr-mcp -p supermgrd-win -p supermgr-win
+```
+
+`default-members` in the workspace `Cargo.toml` is deliberately just
+`supermgr-core` + `supermgr-mcp`, so a bare `cargo build` stays fast and portable on
+any machine. It is **not** the set to build or test against — see the Linux build
+note above.
+
+Extra system packages the tests need beyond the build dependencies:
+
+- **Linux:** `tcpdump` — the engine's traffic-sniff analysis shells out to it, and
+  its tests do too.
+
+### CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs three jobs, one per
+platform, each naming its crates the same way. The Linux job also runs clippy; the
+Windows job additionally builds the WiX MSI and Burn bundle on every push so
+installer schema mistakes surface before a release tag.
+
 ## Usage
 
 ```bash
@@ -285,18 +361,24 @@ supermgr          # Launch the GUI (daemon starts automatically via D-Bus activa
 open /Applications/SuperManagerMac.app   # or via Spotlight
 ```
 
+On Windows the MSI installs the `supermgrd-win` service and adds a Start Menu
+shortcut for the GUI.
+
 ## Tech Stack
 
 - **Languages:** Rust (core, daemons, helpers, MCP), Swift / SwiftUI (macOS app)
 - **GUI (Linux):** GTK4 + libadwaita (Adwaita design language)
 - **GUI (macOS):** SwiftUI (Sequoia/Tahoe), AppKit interop
-- **IPC:** zbus D-Bus on Linux, JSON-RPC over Unix sockets on macOS
-- **SSH:** russh (pure Rust, async)
-- **VPN:** WireGuard netlink (Linux) / kernel `wg` (macOS), strongSwan swanctl, OpenVPN3 `ovpncli` (macOS Azure path) + OpenVPN 2.x CLI, Azure Entra ID OAuth2 (PKCE)
-- **Keychain:** Secret Service / GNOME Keyring on Linux, `security-framework` on macOS
+- **GUI (Windows):** Slint
+- **IPC:** zbus D-Bus on Linux, JSON-RPC over Unix sockets on macOS, named pipe on Windows
+- **SSH:** russh (pure Rust, async), with host-key verification and `authorized_keys` editing shared across all three platforms in `supermgr-core`
+- **VPN:** WireGuard netlink (Linux) / kernel `wg` (macOS) / WireGuardNT (Windows), strongSwan swanctl, OpenVPN3 `ovpncli` (macOS Azure path) + OpenVPN 2.x CLI, Windows RAS for IKEv2, Azure Entra ID OAuth2 (PKCE)
+- **Keychain:** Secret Service / GNOME Keyring on Linux, `security-framework` on macOS, Credential Manager on Windows
+- **Password hashing:** Argon2id (`argon2` crate, OWASP defaults)
 - **AI:** Anthropic Claude API + Claude Code CLI
 - **HTTP:** reqwest (native-tls)
 - **Cloud:** UI.com Site Manager API (UniFi)
+- **Packaging:** systemd + D-Bus activation (Linux), signed `.app` with Sparkle updates (macOS), WiX MSI + Burn bundle (Windows)
 
 ## License
 
