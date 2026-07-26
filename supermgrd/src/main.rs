@@ -137,7 +137,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("profile directory: {}", profile_dir.display());
 
-    let mut daemon_state = DaemonState::new(profile_dir);
+    let mut daemon_state = DaemonState::new(profile_dir)
+        .context("failed to initialise daemon state")?;
     daemon_state
         .load_profiles()
         .context("failed to load profiles")?;

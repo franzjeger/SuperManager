@@ -171,6 +171,17 @@ async fn ssh_try_auth(
     use crate::error::EngineError;
     use russh::client::{Config, Handle};
 
+    // Deliberately accepts any host key, unlike every other SSH path in
+    // the workspace (which goes through `KnownHostsStore`). This is a
+    // scanner: it probes hosts it has never met to find out whether a
+    // vendor default password still works, and recording a fingerprint
+    // for each one would fill the known-hosts store with machines the
+    // operator never chose to trust. Nothing secret is sent — the
+    // credentials being tried are the published defaults, and a session
+    // is never used for anything beyond the auth result.
+    //
+    // Do not copy this handler into a code path that transmits keys,
+    // passwords the user owns, or device configuration.
     struct Client;
     #[async_trait::async_trait]
     impl russh::client::Handler for Client {

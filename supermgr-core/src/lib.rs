@@ -6,7 +6,7 @@
 //! |--------|----------|
 //! | [`vpn`]      | VPN profile types, state machine, backend trait |
 //! | [`host`]     | Managed-device model (`Host`, `HostSummary`) — used for SSH boxes, firewalls, controllers, anything we manage |
-//! | [`ssh`]      | SSH-specific types: keys, audit log, authentication method |
+//! | [`ssh`]      | SSH-specific types: keys, audit log, authentication method, known-hosts store |
 //! | [`dbus`]     | D-Bus interface constants, client proxy, error mapping (Linux only) |
 //! | [`pipe`]     | Windows named-pipe client (Windows only) |
 //! | [`protocol`] | Wire-format types shared by all transports |
@@ -34,6 +34,7 @@ pub use error::{BackendError, CoreError, ProfileError, SecretError, SshError};
 pub use host::{AuthMethod, Host, HostSummary};
 pub use ssh::device_type::DeviceType;
 pub use ssh::key::{SshKey, SshKeySummary, SshKeyType};
+pub use ssh::known_hosts::{HostKeyCheck, KnownHostsStore};
 pub use vpn::profile::{Profile, ProfileConfig, ProfileSummary, SecretRef};
 pub use vpn::state::{ErrorCode, TunnelStats, VpnState};
 

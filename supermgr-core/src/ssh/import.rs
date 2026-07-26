@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use ssh_key::{HashAlg, LineEnding, PrivateKey};
-use supermgr_core::ssh::key::SshKeyType;
+use crate::ssh::key::SshKeyType;
 
 /// A candidate key found during a directory scan.
 #[derive(Debug, Clone, Serialize, Deserialize)]

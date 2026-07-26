@@ -10,28 +10,54 @@ permissions:
   contents: read
 
 jobs:
-  # Linux build — exercises the `default-members` crates only
-  # (supermgr-core, supermgrd, supermgr, supermgr-mcp). The Mac stack
-  # (supermgr-engine, supermgrd-mac, supermanager-helper, SuperManagerMac)
-  # is platform-gated out via target_os and is covered by the
-  # `mac` job below.
+  # Linux build — the daemon, the GTK GUI, the shared core, the MCP server
+  # and the engine.
+  #
+  # These are named explicitly with `-p`. A bare `cargo build` obeys
+  # `default-members`, which is only supermgr-core + supermgr-mcp — so it
+  # silently skipped supermgrd and supermgr (~35k lines and 50-odd tests)
+  # while this job installed GTK for them. Naming the crates is what makes
+  # the job mean what its title says.
+  #
+  # `supermgrd-mac` / `supermanager-helper` stay out: they need launchd and
+  # the Apple SDKs, and the `mac` job below covers them.
   linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # tcpdump is a runtime dependency of the engine's traffic-sniff
+      # analysis, and its tests shell out to it. Installed explicitly rather
+      # than relying on whatever the runner image happens to ship.
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libssl-dev pkg-config
-      # All three steps respect `default-members` in the workspace
-      # Cargo.toml — they touch only Linux crates and skip the Mac stack.
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libssl-dev pkg-config tcpdump
       - name: Build
-        run: cargo build --release
+        run: |
+          cargo build --release \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgr-mcp \
+            -p supermgrd \
+            -p supermgr
       - name: Clippy
-        run: cargo clippy -- -W warnings
+        run: |
+          cargo clippy --all-targets \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgr-mcp \
+            -p supermgrd \
+            -p supermgr \
+            -- -W warnings
       - name: Tests
-        run: cargo test
+        run: |
+          cargo test \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgr-mcp \
+            -p supermgrd \
+            -p supermgr
 
   # macOS build + test — exercises the Mac-only Rust crates plus
   # the SwiftUI app via `xcodebuild test`. Signing is disabled
@@ -126,11 +152,17 @@ jobs:
             -p supermgrd-win `
             -p supermgr-win
 
-      - name: Tests (cross-platform crates)
+      # supermgrd-win / supermgr-win carry no tests of their own yet, but
+      # naming them still compiles their `#[cfg(test)]` code — which a
+      # plain `cargo build` never does, and which is where test-only
+      # compile errors hide.
+      - name: Tests (Windows + cross-platform crates)
         run: |
           cargo test `
             -p supermgr-core `
-            -p supermgr-mcp
+            -p supermgr-mcp `
+            -p supermgrd-win `
+            -p supermgr-win
 
       # Build the MSI on every push to main + every PR — catches WiX
       # schema mistakes before they hit a release tag. Cached

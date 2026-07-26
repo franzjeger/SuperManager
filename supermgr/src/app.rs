@@ -176,6 +176,14 @@ pub enum AppMsg {
         /// Whether the host is reachable.
         reachable: bool,
     },
+    /// The daemon's recorded SSH host-key fingerprint for a host was fetched.
+    SshHostKeyFetched {
+        /// UUID string of the host the fingerprint belongs to.
+        host_id: String,
+        /// SHA-256 fingerprint (lowercase hex), or `None` if the daemon has
+        /// never connected to this host and so has nothing recorded.
+        fingerprint: Option<String>,
+    },
     // FortiGate messages
     /// FortiGate system status data fetched for a host.
     FortigateStatus {
