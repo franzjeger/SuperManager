@@ -1487,6 +1487,15 @@ pub fn build_ui(
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
 
+                // Fetch the recorded host-key fingerprint for the Host Key row.
+                ssh::host_detail::refresh_host_key_row(
+                    host.id.to_string(),
+                    host.hostname.clone(),
+                    host.port,
+                    &rt_sel,
+                    &tx_sel,
+                );
+
                 // Auto-refresh FortiGate dashboard if applicable.
                 if host.device_type == supermgr_core::ssh::DeviceType::Fortigate && host.has_api {
                     ssh::host_detail::refresh_fortigate_dashboard(
@@ -1508,6 +1517,78 @@ pub fn build_ui(
                     });
                 }
             }
+        });
+    }
+
+    // --- SSH Forget Host Key button -------------------------------------------
+    {
+        let app_state = Arc::clone(&app_state);
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        ssh_host_detail.forget_host_key_btn.connect_clicked(move |_| {
+            let Some((host_id, hostname, port, label)) = ({
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.selected_ssh_host.as_ref().and_then(|id| {
+                    s.hosts
+                        .iter()
+                        .find(|h| h.id.to_string() == *id)
+                        .map(|h| (id.clone(), h.hostname.clone(), h.port, h.label.clone()))
+                })
+            }) else {
+                return;
+            };
+
+            // Forgetting a host key re-arms trust-on-first-use, so the next
+            // connection accepts whatever key is presented. That's exactly
+            // what you want after a rebuild and exactly what an attacker
+            // wants you to do, so make the operator say it out loud.
+            let dialog = adw::AlertDialog::new(
+                Some("Forget this host key?"),
+                Some(&format!(
+                    "SuperManager will accept and record whatever host key {hostname}:{port} \
+                     presents on the next connection.\n\n\
+                     Only do this if you know why the key changed — a rebuilt server, a \
+                     replaced appliance, a deliberate rotation. If you don't, the change \
+                     may be someone intercepting your connection to {label}."
+                )),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("forget", "Forget");
+            dialog.set_response_appearance("forget", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+
+            let tx = tx.clone();
+            let rt = rt.clone();
+            dialog.connect_response(Some("forget"), move |_dlg, _resp| {
+                let (host_id, hostname) = (host_id.clone(), hostname.clone());
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    match crate::dbus_client::dbus_ssh_forget_host_key(hostname.clone(), port).await
+                    {
+                        Ok(removed) => {
+                            let _ = tx.send(AppMsg::ShowToast(if removed {
+                                format!("Forgot host key for {hostname}")
+                            } else {
+                                format!("No host key was recorded for {hostname}")
+                            }));
+                            // Repaint the row only once the daemon has
+                            // confirmed. Clearing it optimistically would
+                            // claim the key is gone even when the call failed.
+                            let _ = tx.send(AppMsg::SshHostKeyFetched {
+                                host_id,
+                                fingerprint: None,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!(
+                                "Could not forget host key: {e}"
+                            )));
+                        }
+                    }
+                });
+            });
+            dialog.present(Some(&window));
         });
     }
 
@@ -3236,6 +3317,20 @@ pub fn build_ui(
                         &filter,
                         &health,
                     );
+                }
+                AppMsg::SshHostKeyFetched { host_id, fingerprint } => {
+                    // Only paint it if that host is still the selected one —
+                    // the fetch is async and the user may have moved on.
+                    let still_selected = {
+                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        s.selected_ssh_host.as_deref() == Some(host_id.as_str())
+                    };
+                    if still_selected {
+                        ssh::host_detail::apply_host_key(
+                            &rx_ssh_host_detail,
+                            fingerprint.as_deref(),
+                        );
+                    }
                 }
                 AppMsg::SshOperationProgress {
                     operation_id: _,

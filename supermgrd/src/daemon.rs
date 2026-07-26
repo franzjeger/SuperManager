@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context as _;
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -33,6 +34,7 @@ use supermgr_core::{
 };
 
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
+use supermgr_core::ssh::known_hosts::KnownHostsStore;
 use supermgr_core::host::{AuthMethod, Host, HostSummary};
 
 use crate::secrets;
@@ -93,6 +95,13 @@ pub struct DaemonState {
     /// SSH host health (reachability) map: host UUID → reachable.
     pub host_health: std::collections::HashMap<Uuid, bool>,
 
+    /// Verified SSH host-key fingerprints, keyed by `host:port`.
+    ///
+    /// Consulted on every outbound SSH connection — see
+    /// [`crate::ssh::connection::SshSession`]. Shared behind an `Arc` because
+    /// the russh handler outlives the state lock.
+    pub known_hosts: Arc<KnownHostsStore>,
+
     /// Directory where SSH key TOML files are stored.
     pub ssh_key_dir: PathBuf,
 
@@ -123,10 +132,21 @@ pub struct DaemonState {
 
 impl DaemonState {
     /// Create daemon state with an empty profile table.
-    #[must_use]
-    pub fn new(profile_dir: PathBuf) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Fails if the SSH known-hosts store exists but cannot be read or
+    /// parsed. That is deliberately fatal: starting with an empty store
+    /// would silently re-trust every host in the fleet on its next
+    /// connection, which is exactly the failure mode host-key verification
+    /// exists to prevent. An operator seeing this needs to look at the file
+    /// named in the error, not have the daemon paper over it.
+    pub fn new(profile_dir: PathBuf) -> anyhow::Result<Self> {
         let base = profile_dir.parent().unwrap_or(&profile_dir).to_owned();
-        Self {
+        let ssh_dir = base.join("ssh");
+        let known_hosts = KnownHostsStore::open(&ssh_dir)
+            .with_context(|| format!("failed to open SSH known-hosts store in {}", ssh_dir.display()))?;
+        Ok(Self {
             profiles: std::collections::HashMap::new(),
             vpn_state: VpnState::Disconnected,
             active_backend: None,
@@ -135,13 +155,14 @@ impl DaemonState {
             ssh_keys: std::collections::HashMap::new(),
             hosts: std::collections::HashMap::new(),
             host_health: std::collections::HashMap::new(),
-            ssh_key_dir: base.join("ssh/keys"),
-            host_dir: base.join("ssh/hosts"),
+            known_hosts: Arc::new(known_hosts),
+            ssh_key_dir: ssh_dir.join("keys"),
+            host_dir: ssh_dir.join("hosts"),
             port_forwards: std::collections::HashMap::new(),
             webhook_url: String::new(),
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
-        }
+        })
     }
 
     /// Load all `.toml` profile files from `profile_dir`.
@@ -2915,6 +2936,54 @@ impl DaemonService {
     }
 
     // =======================================================================
+    // SSH known hosts
+    // =======================================================================
+
+    /// Return the recorded SSH host-key fingerprints as a JSON object mapping
+    /// `"host:port"` → SHA-256 fingerprint (lowercase hex).
+    ///
+    /// Lets the GUI show what the daemon currently trusts rather than making
+    /// the operator go and read `known_hosts.json` as root.
+    async fn ssh_list_known_hosts(&self) -> fdo::Result<String> {
+        let entries: std::collections::HashMap<String, String> = {
+            let state = self.state.lock().await;
+            state.known_hosts.entries().into_iter().collect()
+        };
+        serde_json::to_string(&entries).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Drop the recorded host key for `hostname:port` so the next connection
+    /// is treated as first sight and re-recorded.
+    ///
+    /// This is the remedy for a host-key mismatch the operator has looked at
+    /// and found benign — a reinstalled server, a deliberate key rotation, a
+    /// replacement appliance on the same address. Without it a legitimate
+    /// rotation locks the host out permanently, which is the fastest way to
+    /// teach people to turn host-key checking off.
+    ///
+    /// Returns `true` if an entry was removed, `false` if there was nothing
+    /// recorded for that address.
+    async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool> {
+        let store = {
+            let state = self.state.lock().await;
+            Arc::clone(&state.known_hosts)
+        };
+        let removed = store
+            .forget(hostname, port)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        if removed {
+            info!("forgot SSH host key for {hostname}:{port}");
+            crate::audit::log_event(
+                "SSH_FORGET_HOST_KEY",
+                &format!("{hostname}:{port} — recorded host key dropped on operator request"),
+            );
+        } else {
+            debug!("no recorded SSH host key for {hostname}:{port}");
+        }
+        Ok(removed)
+    }
+
+    // =======================================================================
     // Config backup & restore
     // =======================================================================
 
@@ -4539,6 +4608,7 @@ async fn connect_direct(
     push_key_pem: &Option<String>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
+    let known_hosts = Arc::clone(&state_arc.lock().await.known_hosts);
     match host.auth_method {
         AuthMethod::Key | AuthMethod::Certificate => {
             // Resolve the private key PEM.
@@ -4569,6 +4639,7 @@ async fn connect_direct(
                         if let Ok(cert_str) = String::from_utf8(cert_bytes) {
                             return crate::ssh::connection::SshSession::connect_certificate(
                                 &host.hostname, host.port, &host.username, &pem, &cert_str, 30,
+                                known_hosts,
                             ).await;
                         }
                     }
@@ -4578,7 +4649,7 @@ async fn connect_direct(
             }
 
             crate::ssh::connection::SshSession::connect_key(
-                &host.hostname, host.port, &host.username, &pem, 30,
+                &host.hostname, host.port, &host.username, &pem, 30, known_hosts,
             ).await
         }
         AuthMethod::Password => {
@@ -4586,7 +4657,7 @@ async fn connect_direct(
                 if let Ok(bytes) = crate::secrets::retrieve_secret(pw_ref.label()).await {
                     if let Ok(pw) = String::from_utf8(bytes) {
                         return crate::ssh::connection::SshSession::connect_password(
-                            &host.hostname, host.port, &host.username, &pw, 30,
+                            &host.hostname, host.port, &host.username, &pw, 30, known_hosts,
                         ).await;
                     }
                 }
@@ -4674,13 +4745,16 @@ async fn connect_via_jump(
         .open_tunnel(&target.hostname, target.port)
         .await?;
 
-    let target_addr = format!("{}:{}", target.hostname, target.port);
+    // The target's own host key is verified against the store, keyed by the
+    // target's hostname and port — not the jump host's. A tunnelled hop gets
+    // the same MITM protection as a direct one.
+    let known_hosts = Arc::clone(&state_arc.lock().await.known_hosts);
 
     // Authenticate through the tunnel to the target host.
     if target.auth_method == AuthMethod::Key || target.auth_method == AuthMethod::Certificate {
         if let Some(ref pem) = push_key_pem {
             return crate::ssh::connection::SshSession::connect_key_stream(
-                tunnel_stream, &target_addr, &target.username, pem,
+                tunnel_stream, &target.hostname, target.port, &target.username, pem, known_hosts,
             ).await;
         }
         if let Some(auth_key_id) = target.auth_key_id {
@@ -4691,7 +4765,8 @@ async fn connect_via_jump(
                 if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
                     if let Ok(pem) = String::from_utf8(bytes) {
                         return crate::ssh::connection::SshSession::connect_key_stream(
-                            tunnel_stream, &target_addr, &target.username, &pem,
+                            tunnel_stream, &target.hostname, target.port, &target.username, &pem,
+                            known_hosts,
                         ).await;
                     }
                 }
@@ -4703,7 +4778,8 @@ async fn connect_via_jump(
             if let Ok(bytes) = crate::secrets::retrieve_secret(pw_ref.label()).await {
                 if let Ok(pw) = String::from_utf8(bytes) {
                     return crate::ssh::connection::SshSession::connect_password_stream(
-                        tunnel_stream, &target_addr, &target.username, &pw,
+                        tunnel_stream, &target.hostname, target.port, &target.username, &pw,
+                        known_hosts,
                     ).await;
                 }
             }
@@ -6053,6 +6129,63 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // SSH known hosts
+    // -----------------------------------------------------------------------
+
+    /// `DaemonState` must root the known-hosts store in the same `ssh/`
+    /// directory as keys and hosts. If this drifts, an upgrade silently
+    /// starts from an empty store and re-trusts the whole fleet.
+    #[test]
+    fn known_hosts_store_lives_beside_the_ssh_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = DaemonState::new(dir.path().join("profiles")).unwrap();
+        state.known_hosts.record("fw.example.com", 22, "fp").unwrap();
+        assert!(dir.path().join("ssh/known_hosts.json").exists());
+        assert_eq!(state.ssh_key_dir, dir.path().join("ssh/keys"));
+        assert_eq!(state.host_dir, dir.path().join("ssh/hosts"));
+    }
+
+    /// Fingerprints recorded by one daemon run must be enforced by the next.
+    /// A restart that forgets is a restart that re-TOFUs an attacker.
+    #[test]
+    fn recorded_fingerprints_survive_a_daemon_restart() {
+        use supermgr_core::ssh::known_hosts::HostKeyCheck;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let profile_dir = dir.path().join("profiles");
+        {
+            let state = DaemonState::new(profile_dir.clone()).unwrap();
+            state.known_hosts.record("fw.example.com", 22, "fp-A").unwrap();
+        }
+        let state = DaemonState::new(profile_dir).unwrap();
+        assert!(matches!(
+            state.known_hosts.check("fw.example.com", 22, "fp-A"),
+            HostKeyCheck::Match
+        ));
+        assert!(matches!(
+            state.known_hosts.check("fw.example.com", 22, "fp-B"),
+            HostKeyCheck::Mismatch { .. }
+        ));
+    }
+
+    /// A corrupt store is fatal at startup rather than silently empty —
+    /// see the `DaemonState::new` docs for why.
+    #[test]
+    fn corrupt_known_hosts_file_stops_the_daemon_starting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("ssh")).unwrap();
+        std::fs::write(dir.path().join("ssh/known_hosts.json"), "}{ not json").unwrap();
+        let err = match DaemonState::new(dir.path().join("profiles")) {
+            Err(e) => e,
+            Ok(_) => panic!("a corrupt known_hosts.json must not be started over"),
+        };
+        assert!(
+            err.to_string().contains("known-hosts"),
+            "error should name the known-hosts store, got: {err}"
+        );
+    }
 
     #[test]
     fn parse_dns_server_list_handles_common_separators() {

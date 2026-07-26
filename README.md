@@ -87,6 +87,35 @@ All three share `supermgr-core` (types, traits, secret-store abstraction, RPC pr
 - Auto-lock after configurable inactivity timeout
 - Secrets stored via system keyring (Secret Service API)
 - Audit logging for all SSH, VPN, and API operations
+- **SSH host-key verification** on every platform — trust-on-first-use, then
+  a fingerprint mismatch refuses the connection (see below)
+
+#### SSH host keys
+
+Every outbound SSH connection is checked against a stored fingerprint, on
+Linux, macOS and Windows alike. The policy matches OpenSSH's
+`StrictHostKeyChecking=accept-new`:
+
+- **First connection** to a `host:port` records the server's SHA-256 host-key
+  fingerprint and proceeds.
+- **Later connections** must present the same fingerprint. A mismatch aborts
+  the connection and reports both fingerprints — it is never silently
+  accepted.
+
+The host detail panel shows the recorded fingerprint with a **Forget host
+key** button. Use it after a deliberate rebuild, appliance swap or key
+rotation; the next connection re-records whatever the host presents. From a
+script, the same thing over D-Bus:
+
+```bash
+busctl call org.supermgr.Daemon /org/supermgr/Daemon org.supermgr.Daemon1 \
+    SshForgetHostKey sq fw.example.com 22
+```
+
+Fingerprints live in `known_hosts.json` (mode 0600) alongside the daemon's
+SSH data — `/etc/supermgrd/ssh/` when running as root. If that file is
+present but unreadable or corrupt the daemon refuses to start rather than
+starting with an empty store and re-trusting the whole fleet.
 
 ### Other
 - Desktop notifications for VPN and host health changes

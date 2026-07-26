@@ -137,6 +137,10 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //
 //       async fn ssh_host_health(&self) -> fdo::Result<String> { ... }
 //
+//       // --- SSH known hosts ---
+//       async fn ssh_list_known_hosts(&self) -> fdo::Result<String> { ... }
+//       async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool> { ... }
+//
 //       // --- Config backup & restore ---
 //       async fn export_all(&self) -> fdo::Result<String> { ... }
 //       async fn import_all(&self, data: &str) -> fdo::Result<String> { ... }
@@ -803,6 +807,21 @@ pub trait Daemon {
 
     /// Return a JSON map of `host_id → reachable(bool)` for all SSH hosts.
     async fn ssh_host_health(&self) -> fdo::Result<String>;
+
+    // =======================================================================
+    // SSH known hosts
+    // =======================================================================
+
+    /// Return the recorded SSH host-key fingerprints as a JSON object mapping
+    /// `"host:port"` → SHA-256 fingerprint (lowercase hex).
+    async fn ssh_list_known_hosts(&self) -> fdo::Result<String>;
+
+    /// Drop the recorded host key for `hostname:port` so the next connection
+    /// is treated as first sight and re-recorded.
+    ///
+    /// The remedy for a host-key mismatch that turned out to be a legitimate
+    /// rotation or reinstall. Returns `true` if an entry was removed.
+    async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool>;
 
     // =======================================================================
     // Config backup & restore

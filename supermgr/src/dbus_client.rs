@@ -630,6 +630,18 @@ pub async fn dbus_ssh_export_private_key(key_id: String) -> anyhow::Result<Strin
     Ok(proxy.ssh_export_private_key(&key_id).await?)
 }
 
+/// Drop the daemon's recorded SSH host key for `hostname:port`.
+///
+/// The remedy after a host-key mismatch that the operator has checked and
+/// found benign — a reinstalled server or a deliberate key rotation. The
+/// next connection re-records whatever the host presents. Returns `true` if
+/// there was an entry to remove.
+pub async fn dbus_ssh_forget_host_key(hostname: String, port: u16) -> anyhow::Result<bool> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy.ssh_forget_host_key(&hostname, port).await?)
+}
+
 pub async fn dbus_ssh_set_password(host_id: String, password: String) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;

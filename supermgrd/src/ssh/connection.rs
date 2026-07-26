@@ -8,19 +8,43 @@ use std::sync::Arc;
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse, Msg};
 use russh::Channel;
 use russh_keys::key::PublicKey;
+use russh_keys::PublicKeyBase64;
 use supermgr_core::error::SshError;
+use supermgr_core::ssh::known_hosts::{HostKeyCheck, KnownHostsStore};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 // ---------------------------------------------------------------------------
 // Client handler
 // ---------------------------------------------------------------------------
 
-/// Minimal russh client handler.
+/// russh client handler that verifies the server's host key against the
+/// persistent [`KnownHostsStore`].
 ///
-/// Accepts all host keys (trust-on-first-use). In a production deployment the
-/// handler should check known_hosts, but for a management tool that pushes
-/// keys to many ephemeral hosts this is the pragmatic default.
-struct SshClientHandler;
+/// First-sight policy is **TOFU + record**: an unrecorded host has its key
+/// fingerprint saved, then accepted. Every subsequent connection to the same
+/// `host:port` requires the recorded fingerprint to match — a mismatch is
+/// rejected loudly. This is the same posture OpenSSH gives you with
+/// `StrictHostKeyChecking=accept-new`.
+///
+/// Without this layer every man-in-the-middle is invisible, and this daemon
+/// runs as root and pushes SSH private keys, runs remote commands and reads
+/// device configuration over these sessions. macOS (`supermgr-engine`) and
+/// Windows (`supermgrd-win`) already verified; Linux did not.
+struct SshClientHandler {
+    known_hosts: Arc<KnownHostsStore>,
+    host: String,
+    port: u16,
+}
+
+impl SshClientHandler {
+    fn new(known_hosts: Arc<KnownHostsStore>, host: &str, port: u16) -> Self {
+        Self {
+            known_hosts,
+            host: host.to_owned(),
+            port,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl client::Handler for SshClientHandler {
@@ -28,10 +52,48 @@ impl client::Handler for SshClientHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &PublicKey,
+        server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Accept all host keys (TOFU).
-        Ok(true)
+        // We hash the SSH wire-format public key. Different from OpenSSH's
+        // base64-truncated SHA256 representation, but stable across restarts
+        // and we only ever compare it to ourselves.
+        let fingerprint = KnownHostsStore::fingerprint(&server_public_key.public_key_bytes());
+
+        match self.known_hosts.check(&self.host, self.port, &fingerprint) {
+            HostKeyCheck::Match => Ok(true),
+            HostKeyCheck::NewHost => {
+                tracing::info!(
+                    host = %self.host,
+                    port = self.port,
+                    fingerprint = %fingerprint,
+                    "TOFU: recording new SSH host key"
+                );
+                if let Err(e) = self.known_hosts.record(&self.host, self.port, &fingerprint) {
+                    tracing::warn!(error = %e, "could not persist new host fingerprint");
+                }
+                Ok(true)
+            }
+            HostKeyCheck::Mismatch { stored, current } => {
+                tracing::error!(
+                    host = %self.host,
+                    port = self.port,
+                    stored = %stored,
+                    current = %current,
+                    "host key MISMATCH — rejecting connection"
+                );
+                // An `Err` here aborts the handshake the same way `Ok(false)`
+                // would, but it carries both fingerprints out to the GUI so
+                // the operator can tell a rotation from an attack.
+                Err(anyhow::anyhow!(
+                    "host key mismatch for {}:{} — stored={stored}, server-presented={current}; \
+                     refusing to connect. If this host was legitimately reinstalled or had its \
+                     key rotated, forget the recorded key (host detail → Forget host key, or \
+                     the SshForgetHostKey D-Bus method) and reconnect.",
+                    self.host,
+                    self.port,
+                ))
+            }
+        }
     }
 }
 
@@ -88,19 +150,26 @@ impl SshSession {
     }
 
     /// Connect to a remote host using password authentication.
+    ///
+    /// `known_hosts` is consulted via the russh handler — see
+    /// [`SshClientHandler::check_server_key`]. A previously-seen host whose
+    /// fingerprint has changed fails the connection here with a
+    /// `ConnectionFailed` carrying both the stored and current fingerprint.
     pub async fn connect_password(
         hostname: &str,
         port: u16,
         username: &str,
         password: &str,
         timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
         let config = Arc::new(client::Config::default());
         let addr = format!("{hostname}:{port}");
+        let handler = SshClientHandler::new(known_hosts, hostname, port);
 
         let mut handle = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            client::connect(config, &addr as &str, SshClientHandler),
+            client::connect(config, &addr as &str, handler),
         )
         .await
         .map_err(|_| SshError::ConnectionFailed {
@@ -127,14 +196,27 @@ impl SshSession {
     ///
     /// If `cert_pem` is provided, attempts OpenSSH certificate authentication
     /// first, then falls back to plain public-key authentication.
+    ///
+    /// See [`Self::connect_password`] for the host-key verification
+    /// semantics — it's the same handler.
     pub async fn connect_key(
         hostname: &str,
         port: u16,
         username: &str,
         private_key_pem: &str,
         timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
-        Self::connect_key_with_cert(hostname, port, username, private_key_pem, None, timeout_secs).await
+        Self::connect_key_with_cert(
+            hostname,
+            port,
+            username,
+            private_key_pem,
+            None,
+            timeout_secs,
+            known_hosts,
+        )
+        .await
     }
 
     /// Connect to a remote host using OpenSSH certificate authentication.
@@ -147,8 +229,18 @@ impl SshSession {
         private_key_pem: &str,
         cert_pem: &str,
         timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
-        Self::connect_key_with_cert(hostname, port, username, private_key_pem, Some(cert_pem), timeout_secs).await
+        Self::connect_key_with_cert(
+            hostname,
+            port,
+            username,
+            private_key_pem,
+            Some(cert_pem),
+            timeout_secs,
+            known_hosts,
+        )
+        .await
     }
 
     /// Internal: connect with optional certificate.
@@ -159,16 +251,18 @@ impl SshSession {
         private_key_pem: &str,
         cert_pem: Option<&str>,
         timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
         let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
         let config = Arc::new(client::Config::default());
         let addr = format!("{hostname}:{port}");
+        let handler = SshClientHandler::new(known_hosts, hostname, port);
 
         let mut handle = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            client::connect(config, &addr as &str, SshClientHandler),
+            client::connect(config, &addr as &str, handler),
         )
         .await
         .map_err(|_| SshError::ConnectionFailed {
@@ -223,21 +317,30 @@ impl SshSession {
 
     /// Connect to a remote host using password authentication over an
     /// existing stream (e.g. a tunnel from a jump host).
+    ///
+    /// The target's host key is verified exactly as it would be on a direct
+    /// connection — a tunnelled hop is still a hop an attacker can sit on,
+    /// and `hostname`/`port` name the *target*, not the jump host, so the
+    /// fingerprint is recorded against the right identity.
     pub async fn connect_password_stream<S>(
         stream: S,
-        target_addr: &str,
+        hostname: &str,
+        port: u16,
         username: &str,
         password: &str,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let config = Arc::new(client::Config::default());
+        let target_addr = format!("{hostname}:{port}");
+        let handler = SshClientHandler::new(known_hosts, hostname, port);
 
-        let mut handle = client::connect_stream(config, stream, SshClientHandler)
+        let mut handle = client::connect_stream(config, stream, handler)
             .await
             .map_err(|e| SshError::ConnectionFailed {
-                host: target_addr.to_owned(),
+                host: target_addr.clone(),
                 reason: format!("stream connect failed: {e}"),
             })?;
 
@@ -254,11 +357,16 @@ impl SshSession {
 
     /// Connect to a remote host using private-key authentication over an
     /// existing stream (e.g. a tunnel from a jump host).
+    ///
+    /// See [`Self::connect_password_stream`] for the host-key verification
+    /// semantics — it's the same handler.
     pub async fn connect_key_stream<S>(
         stream: S,
-        target_addr: &str,
+        hostname: &str,
+        port: u16,
         username: &str,
         private_key_pem: &str,
+        known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -267,11 +375,13 @@ impl SshSession {
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
         let config = Arc::new(client::Config::default());
+        let target_addr = format!("{hostname}:{port}");
+        let handler = SshClientHandler::new(known_hosts, hostname, port);
 
-        let mut handle = client::connect_stream(config, stream, SshClientHandler)
+        let mut handle = client::connect_stream(config, stream, handler)
             .await
             .map_err(|e| SshError::ConnectionFailed {
-                host: target_addr.to_owned(),
+                host: target_addr.clone(),
                 reason: format!("stream connect failed: {e}"),
             })?;
 

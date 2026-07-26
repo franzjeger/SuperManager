@@ -10,9 +10,11 @@
 pub mod audit;
 pub mod device_type;
 pub mod key;
+pub mod known_hosts;
 
 pub use device_type::DeviceType;
 pub use key::{SshKey, SshKeySummary, SshKeyType};
+pub use known_hosts::{HostKeyCheck, KnownHostsStore};
 
 // `AuthMethod` describes how the SSH connection authenticates and is
 // genuinely SSH-specific, so it stays here. `Host` users that need it can

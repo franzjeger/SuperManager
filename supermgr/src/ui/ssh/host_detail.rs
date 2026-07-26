@@ -37,6 +37,13 @@ pub struct SshHostDetail {
     pub auth_method_row: adw::ActionRow,
     pub jump_host_row: adw::ActionRow,
 
+    /// Shows the host-key fingerprint the daemon has recorded for this host,
+    /// with a button to forget it. Forgetting is the documented remedy after
+    /// a legitimate key rotation — without it the daemon refuses the host
+    /// forever and the only escape is editing JSON as root.
+    pub host_key_row: adw::ActionRow,
+    pub forget_host_key_btn: gtk4::Button,
+
     pub connect_btn: gtk4::Button,
     pub test_btn: gtk4::Button,
     pub push_key_btn: gtk4::Button,
@@ -158,6 +165,21 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .visible(false)
         .build();
     details_group.add(&jump_host_row);
+
+    let host_key_row = adw::ActionRow::builder()
+        .title("Host Key")
+        .subtitle("Not yet recorded")
+        .activatable(false)
+        .build();
+    let forget_host_key_btn = gtk4::Button::builder()
+        .icon_name("edit-clear-symbolic")
+        .tooltip_text("Forget the recorded host key — do this only after a deliberate rebuild or key rotation")
+        .css_classes(["flat"])
+        .valign(gtk4::Align::Center)
+        .sensitive(false)
+        .build();
+    host_key_row.add_suffix(&forget_host_key_btn);
+    details_group.add(&host_key_row);
 
     // FortiGate dashboard (hidden by default).
     let fg_dashboard_group = adw::PreferencesGroup::builder()
@@ -386,6 +408,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         device_type_row,
         auth_method_row,
         jump_host_row,
+        host_key_row,
+        forget_host_key_btn,
         connect_btn,
         test_btn,
         push_key_btn,
@@ -459,6 +483,11 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
     }
 
     detail.pin_btn.set_active(host.pinned);
+
+    // Cleared here and filled in by `apply_host_key` when the async fetch
+    // lands, so a stale fingerprint from the previously selected host can't
+    // linger under the new host's name.
+    apply_host_key(detail, None);
 
     // Show FortiGate dashboard and "Push Key via API" button when applicable.
     let is_fortigate_api = host.device_type == DeviceType::Fortigate && host.has_api;
@@ -773,6 +802,78 @@ pub fn show_add_port_forward_dialog(
     }
 
     dialog.present(Some(window));
+}
+
+// ---------------------------------------------------------------------------
+// SSH host key
+// ---------------------------------------------------------------------------
+
+/// Kick off an async fetch of the daemon's recorded host-key fingerprint for
+/// `hostname:port` and send the result back via `AppMsg::SshHostKeyFetched`.
+pub fn refresh_host_key_row(
+    host_id: String,
+    hostname: String,
+    port: u16,
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+) {
+    let tx = tx.clone();
+    rt.spawn(async move {
+        let fingerprint = async {
+            let conn = zbus::Connection::system().await?;
+            let proxy = DaemonProxy::new(&conn).await?;
+            let json = proxy.ssh_list_known_hosts().await?;
+            let map: std::collections::HashMap<String, String> = serde_json::from_str(&json)?;
+            Ok::<_, anyhow::Error>(map.get(&format!("{hostname}:{port}")).cloned())
+        }
+        .await;
+
+        match fingerprint {
+            Ok(fp) => {
+                let _ = tx.send(AppMsg::SshHostKeyFetched {
+                    host_id,
+                    fingerprint: fp,
+                });
+            }
+            // A daemon that can't answer isn't worth a toast here — the row
+            // just stays on its placeholder. Anything the operator actually
+            // needs to act on surfaces when they try to connect.
+            Err(e) => warn!("could not fetch known hosts: {e}"),
+        }
+    });
+}
+
+/// Show the recorded fingerprint (or its absence) in the Host Key row.
+///
+/// `None` means the daemon has never connected to this host, so there is
+/// nothing to forget and the button stays insensitive.
+pub fn apply_host_key(detail: &SshHostDetail, fingerprint: Option<&str>) {
+    match fingerprint {
+        Some(fp) => {
+            // The full SHA-256 hex is 64 characters and would wrap the row.
+            // First and last 8 are plenty to eyeball against a mismatch
+            // message, and the tooltip carries the whole thing for anyone
+            // comparing it properly. Sliced by char, not by byte: the string
+            // arrives over D-Bus from a file on disk, and a hand-edited
+            // known_hosts.json should not be able to panic the GUI.
+            let chars: Vec<char> = fp.chars().collect();
+            let short = if chars.len() > 20 {
+                let head: String = chars[..8].iter().collect();
+                let tail: String = chars[chars.len() - 8..].iter().collect();
+                format!("{head}…{tail}")
+            } else {
+                fp.to_owned()
+            };
+            detail.host_key_row.set_subtitle(&format!("SHA256 {short}"));
+            detail.host_key_row.set_tooltip_text(Some(fp));
+            detail.forget_host_key_btn.set_sensitive(true);
+        }
+        None => {
+            detail.host_key_row.set_subtitle("Not yet recorded");
+            detail.host_key_row.set_tooltip_text(None);
+            detail.forget_host_key_btn.set_sensitive(false);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
