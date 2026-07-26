@@ -25,10 +25,16 @@
 #      (we don't auto-upload to avoid pushing half-baked builds).
 #
 # Required environment variables:
-#   DEVELOPER_ID_APP   — e.g. "Developer ID Application: Your Name (LY6LJ395B8)"
-#   AC_API_KEY_PATH    — path to AuthKey_XXXXXX.p8 from App Store Connect
-#   AC_API_KEY_ID      — the 10-char key ID
-#   AC_API_ISSUER_ID   — your Issuer ID (UUID)
+#   DEVELOPER_ID_APP        — e.g. "Developer ID Application: Your Name (LY6LJ395B8)"
+#   AC_API_KEY_PATH         — path to AuthKey_XXXXXX.p8 from App Store Connect
+#   AC_API_KEY_ID           — the 10-char key ID
+#   AC_API_ISSUER_ID        — your Issuer ID (UUID)
+#
+# Optional environment variables:
+#   DEVELOPER_ID_INSTALLER  — e.g. "Developer ID Installer: Your Name (LY6LJ395B8)"
+#                             When set the .pkg is signed and notarised.
+#                             When absent the .pkg is built unsigned (suitable
+#                             for dev/test; Gatekeeper will warn on install).
 #
 # Set these in your shell profile, ~/.zshenv, or pass on the command line.
 
@@ -57,6 +63,12 @@ for var in DEVELOPER_ID_APP AC_API_KEY_PATH AC_API_KEY_ID AC_API_ISSUER_ID; do
         exit 1
     fi
 done
+
+# Optional: Developer ID Installer cert for .pkg signing + notarisation.
+if [ -z "${DEVELOPER_ID_INSTALLER:-}" ]; then
+    echo "⚠️  DEVELOPER_ID_INSTALLER not set — .pkg will be unsigned."
+    echo "   Set it to enable .pkg signing and notarisation."
+fi
 
 # Tag must not already exist.
 if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
@@ -148,6 +160,24 @@ codesign --force --options runtime --timestamp --deep \
 codesign --verify --verbose=2 "$APP"
 spctl --assess --type execute --verbose=2 "$APP" || true
 
+# ---- 4b. Build the .pkg installer ------------------------------------------
+#
+# The package installs:
+#   /Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist
+#   owner root:wheel, mode 644
+#
+# postinstall loads the daemon immediately (launchctl bootstrap system).
+# preinstall unloads any running instance first (idempotent on first install).
+
+echo "→ Building .pkg installer"
+PKG_FILE="$RELEASE_DIR/SuperManager-vpn-dns-cleanup-$VERSION.pkg"
+if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
+    "$REPO_ROOT/installer/pkg/build-pkg.sh" "$VERSION" \
+        --sign "$DEVELOPER_ID_INSTALLER"
+else
+    "$REPO_ROOT/installer/pkg/build-pkg.sh" "$VERSION"
+fi
+
 # ---- 5. Notarize -----------------------------------------------------------
 
 echo "→ Zipping for notarization"
@@ -166,6 +196,26 @@ xcrun notarytool submit "$NOTARIZE_ZIP" \
 echo "→ Stapling notarization ticket"
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
+
+# ---- 6b. Notarise and staple the .pkg (only when signed) --------------------
+#
+# Apple requires notarisation for Developer ID-signed packages distributed
+# outside the Mac App Store (Gatekeeper enforces this on macOS 10.15+).
+# We skip this entirely when DEVELOPER_ID_INSTALLER is absent because
+# notarytool rejects unsigned submissions.
+
+if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
+    echo "→ Submitting .pkg to Apple notary (this can take 5-15 minutes)…"
+    xcrun notarytool submit "$PKG_FILE" \
+        --key "$AC_API_KEY_PATH" \
+        --key-id "$AC_API_KEY_ID" \
+        --issuer "$AC_API_ISSUER_ID" \
+        --wait
+
+    echo "→ Stapling .pkg notarization ticket"
+    xcrun stapler staple "$PKG_FILE"
+    xcrun stapler validate "$PKG_FILE"
+fi
 
 # ---- 7. Final zip for distribution ------------------------------------------
 
@@ -239,16 +289,22 @@ cat <<EOF
 
   Artifacts:
     $DIST_ZIP
+    $PKG_FILE
     $APPCAST
 
   Next steps (manual):
     1. \`git commit -am "chore: release v$VERSION"\`
     2. \`git tag v$VERSION && git push origin main v$VERSION\`
-    3. \`gh release create v$VERSION "$DIST_ZIP" "$APPCAST" \\
+    3. \`gh release create v$VERSION \\
+            "$DIST_ZIP" \\
+            "$PKG_FILE" \\
+            "$APPCAST" \\
             --title "v$VERSION" \\
             --notes-file CHANGELOG.md\`
     4. Sparkle picks up the new appcast within
        SUScheduledCheckInterval (1 day) — or sooner if the user
        hits "Check for Updates…" manually.
+    5. MDM admins can deploy $PKG_FILE
+       directly to managed Macs via their MDM solution.
 ════════════════════════════════════════════════════════════════
 EOF

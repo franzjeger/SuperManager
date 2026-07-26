@@ -1,0 +1,40 @@
+#!/bin/bash
+# installer/pkg/scripts/postinstall
+# ──────────────────────────────────
+# Runs as root AFTER the package payload has been written to the target volume.
+#
+# installer(8) passes three positional arguments:
+#   $1  — full path to the flat .pkg file being installed
+#   $2  — target volume (e.g. "/" or "/Volumes/Macintosh HD")
+#   $3  — path to the per-package temp directory (a copy of the scripts dir)
+
+set -euo pipefail
+
+TARGET_VOL="${2:-/}"
+PLIST_REL="Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist"
+
+# Build the absolute path, collapsing any double slash when $TARGET_VOL == "/".
+PLIST="${TARGET_VOL%/}/${PLIST_REL}"
+
+# Belt-and-suspenders: enforce root:wheel 644 even if pkgbuild --ownership
+# recommended chose differently on the build machine.
+chown root:wheel "$PLIST"
+chmod 644 "$PLIST"
+
+# Warn if the privileged helper binary is not yet present.
+# The daemon's ProgramArguments point at this path; it will run correctly once
+# SuperManager.app has been launched and SMAppService has installed the helper.
+HELPER="/Library/PrivilegedHelperTools/no.sybr.supermanager.helper"
+if [ ! -x "$HELPER" ]; then
+    echo "Note: $HELPER not found." >&2
+    echo "  Launch SuperManager.app once to install the privileged helper." >&2
+    echo "  The DNS cleanup daemon will activate correctly on the next boot." >&2
+fi
+
+# Bootstrap the daemon immediately — only when installing to the live boot
+# volume.  Skip for off-line imaging workflows where $TARGET_VOL != "/".
+if [ "$TARGET_VOL" = "/" ]; then
+    launchctl bootstrap system "/Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist"
+fi
+
+exit 0

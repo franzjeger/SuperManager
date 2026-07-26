@@ -503,7 +503,6 @@ class AppState {
         await refreshProfiles()
         await refreshAutoReconnect()
         await refreshCustomers()
-        await refreshEngagements()
         await refreshUnifiControllers()
     }
 
@@ -1276,32 +1275,22 @@ class AppState {
 /// values are kept (commented below) so the eventual feature can wire
 /// itself back in without renaming things downstream.
 enum AppSection: String, CaseIterable, Identifiable {
-    case fleet = "Fleet"
     case ssh = "SSH"
     case vpn = "VPN"
     case tailscale = "Tailscale"
     case compliance = "Compliance"
     case provisioning = "Provisioning"
-    case security = "Security"
-    /// Recon / pentest tool launcher — surfaces every active-audit
-    /// capability as a clickable tile instead of burying them in
-    /// engagement-panel sub-menus. The toolkit's white/gray-hat
-    /// face: discovery, DNS audit, traffic capture, etc.
-    case recon = "Recon"
     // case console = "Console"          — re-enable once we ship the Claude integration
 
     var id: String { rawValue }
 
     var icon: String {
         switch self {
-        case .fleet: return "building.2.fill"
         case .ssh: return "terminal"
         case .vpn: return "lock.shield"
         case .tailscale: return "network"
         case .compliance: return "checkmark.shield"
         case .provisioning: return "wand.and.stars"
-        case .security: return "shield.lefthalf.filled.badge.checkmark"
-        case .recon: return "binoculars.fill"
         }
     }
 }

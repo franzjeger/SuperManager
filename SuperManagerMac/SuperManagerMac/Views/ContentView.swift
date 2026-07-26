@@ -63,14 +63,11 @@ struct ContentView: View {
                     sidebarColumn
                 } content: {
                     listColumn
-                        // ideal == max on purpose. Switching to Fleet or Recon
-                        // and back rebuilds this split view, and a fresh build
-                        // settles the column at max while a rebuild settles it
-                        // at ideal — so with the two apart (280/380) the list
-                        // was 380pt wide if you came here directly and 280pt if
-                        // you came via Fleet. Same section, same window, two
-                        // widths. Equal values make every path agree; the 240
-                        // floor keeps the divider draggable.
+                        // ideal == max on purpose: a fresh split-view build
+                        // settles the column at max, a rebuild at ideal, so
+                        // unequal values gave the list two different widths
+                        // depending on how you arrived. The 240 floor keeps the
+                        // divider draggable.
                         .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
                 } detail: {
                     detailColumn
@@ -340,7 +337,6 @@ struct ContentView: View {
         case .ssh where sshTab == .keys: showingGenerateKey = true
         case .vpn:                       showingAddVpn = true
         case .provisioning:              appState.showingAddCustomer = true
-        case .security:                  appState.showingAddEngagement = true
         default:                         showingAddHost = true
         }
     }
@@ -352,7 +348,6 @@ struct ContentView: View {
         case .ssh where sshTab == .keys: return "Generate SSH key"
         case .vpn:                       return "Add VPN profile"
         case .provisioning:              return "Add customer"
-        case .security:                  return "New engagement"
         default:                         return "Add host"
         }
     }
@@ -371,10 +366,6 @@ struct ContentView: View {
             addDeviceMenu
         case .provisioning:
             Button("Add customer…") { appState.showingAddCustomer = true }
-            Divider()
-            addDeviceMenu
-        case .security:
-            Button("New engagement…") { appState.showingAddEngagement = true }
             Divider()
             addDeviceMenu
         default:
@@ -425,16 +416,6 @@ struct ContentView: View {
             + "from clipboard, parses IPs / URLs / banners, "
             + "and lets you add as SSH host, append to "
             + "engagement scope, or kick off a network scan."
-        )
-
-        Button {
-            appState.selectedSection = .recon
-        } label: {
-            Label("Scan network for devices…", systemImage: "network")
-        }
-        .help(
-            "Opens the Recon section. The Network Scan tile "
-            + "discovers hosts + open ports in a CIDR range."
         )
 
         Divider()
@@ -497,18 +478,15 @@ struct ContentView: View {
     /// because with nothing to size to it just takes a share of the slack.
     /// Pinning the width to zero doesn't help either — the constraint is
     /// ignored, which is how it got to 720 in the first place.
-    private var sectionHasListColumn: Bool {
-        switch appState.selectedSection {
-        case .fleet, .recon: return false
-        default:             return true
-        }
-    }
+    /// Every remaining section has a list column now that Fleet and Recon
+    /// (the two full-width, list-less surfaces) are gone. Kept as a constant
+    /// rather than inlined so the two-column fallback path stays available if
+    /// a list-less section returns.
+    private var sectionHasListColumn: Bool { true }
 
     @ViewBuilder
     private var listColumn: some View {
         switch appState.selectedSection {
-        case .fleet:
-            EmptyView()
         case .ssh:
             sshListColumn
         case .vpn:
@@ -519,10 +497,6 @@ struct ContentView: View {
             ComplianceListColumn()
         case .provisioning:
             ProvisioningListColumn()
-        case .security:
-            SecurityListColumn()
-        case .recon:
-            EmptyView()
         }
     }
 
@@ -553,8 +527,6 @@ struct ContentView: View {
     @ViewBuilder
     private var sectionDetail: some View {
         switch appState.selectedSection {
-        case .fleet:
-            FleetView()
         case .ssh:
             if let hostId = appState.selectedHostId, sshTab == .hosts {
                 HostDetailView(hostId: hostId)
@@ -629,10 +601,6 @@ struct ContentView: View {
             }
         case .provisioning:
             ProvisioningView()
-        case .security:
-            SecurityView()
-        case .recon:
-            ReconView()
         }
     }
 
