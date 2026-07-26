@@ -8,13 +8,21 @@
 //! [`crate::host::Host`] and is re-exported at the crate root.
 
 pub mod audit;
+pub mod authorized_keys;
 pub mod device_type;
+pub mod import;
 pub mod key;
+pub mod keygen;
 pub mod known_hosts;
+pub mod remote;
 
+pub use authorized_keys::{push_public_key, revoke_public_key, PushResult};
 pub use device_type::DeviceType;
+pub use import::{scan_ssh_directory, ImportCandidate};
 pub use key::{SshKey, SshKeySummary, SshKeyType};
+pub use keygen::{compute_fingerprint, generate_key, GeneratedKey};
 pub use known_hosts::{HostKeyCheck, KnownHostsStore};
+pub use remote::{RemoteFiles, RemoteShell};
 
 // `AuthMethod` describes how the SSH connection authenticates and is
 // genuinely SSH-specific, so it stays here. `Host` users that need it can

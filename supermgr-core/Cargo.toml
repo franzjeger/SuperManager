@@ -7,7 +7,11 @@ license     = "GPL-3.0-or-later"
 
 [dependencies]
 async-trait    = { workspace = true }
+# Shell-safe transport of public keys in `ssh::authorized_keys`
+base64         = { workspace = true }
 chrono         = { workspace = true }
+# Key-pair generation in `ssh::keygen`
+rand           = { workspace = true }
 ipnet          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }

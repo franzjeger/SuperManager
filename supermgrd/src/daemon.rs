@@ -33,6 +33,7 @@ use supermgr_core::{
     vpn::state::{state_to_json, stats_to_json, VpnState},
 };
 
+use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::known_hosts::KnownHostsStore;
 use supermgr_core::host::{AuthMethod, Host, HostSummary};
@@ -1660,7 +1661,7 @@ impl DaemonService {
             _ => return Err(fdo::Error::InvalidArgs(format!("unknown key type: {key_type}"))),
         };
 
-        let generated = crate::ssh::keygen::generate_key(kt, name)
+        let generated = supermgr_core::ssh::keygen::generate_key(kt, name)
             .map_err(|e| fdo::Error::Failed(format!("key generation failed: {e}")))?;
 
         let key_id = Uuid::new_v4();
@@ -1764,7 +1765,7 @@ impl DaemonService {
 
     /// Scan a directory for SSH key files.
     async fn ssh_import_keys_scan(&self, directory: &str) -> fdo::Result<String> {
-        let candidates = crate::ssh::import::scan_ssh_directory(std::path::Path::new(directory));
+        let candidates = supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(directory));
         serde_json::to_string(&candidates).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
@@ -1776,7 +1777,7 @@ impl DaemonService {
             _ => SshKeyType::Ed25519,
         };
 
-        let fingerprint = crate::ssh::keygen::compute_fingerprint(public_key)
+        let fingerprint = supermgr_core::ssh::keygen::compute_fingerprint(public_key)
             .map_err(|e| fdo::Error::Failed(format!("fingerprint: {e}")))?;
 
         // Check for duplicates
@@ -2085,7 +2086,7 @@ impl DaemonService {
                         let _ = DaemonService::ssh_operation_progress(
                             &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                         ).await;
-                        crate::ssh::push::PushResult {
+                        PushResult {
                             host_id: host.id.to_string(),
                             host_label: host.label.clone(),
                             success: false,
@@ -2098,7 +2099,7 @@ impl DaemonService {
                             "Pushing key...".into(),
                         ).await;
 
-                        match crate::ssh::push::push_public_key(&session, &public_key, use_sudo).await {
+                        match push_public_key(&session, &public_key, use_sudo).await {
                             Ok(()) => {
                                 // Record deployment
                                 {
@@ -2127,7 +2128,7 @@ impl DaemonService {
                                 let _ = DaemonService::ssh_operation_progress(
                                     &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                                 ).await;
-                                crate::ssh::push::PushResult {
+                                PushResult {
                                     host_id: host.id.to_string(),
                                     host_label: host.label.clone(),
                                     success: true,
@@ -2149,7 +2150,7 @@ impl DaemonService {
                                 let _ = DaemonService::ssh_operation_progress(
                                     &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                                 ).await;
-                                crate::ssh::push::PushResult {
+                                PushResult {
                                     host_id: host.id.to_string(),
                                     host_label: host.label.clone(),
                                     success: false,
@@ -2236,7 +2237,7 @@ impl DaemonService {
                         let _ = DaemonService::ssh_operation_progress(
                             &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                         ).await;
-                        crate::ssh::push::PushResult {
+                        PushResult {
                             host_id: host.id.to_string(),
                             host_label: host.label.clone(),
                             success: false,
@@ -2249,7 +2250,7 @@ impl DaemonService {
                             "Revoking key...".into(),
                         ).await;
 
-                        match crate::ssh::revoke::revoke_public_key(&session, &public_key, use_sudo).await {
+                        match revoke_public_key(&session, &public_key, use_sudo).await {
                             Ok(()) => {
                                 // Remove from deployed_to
                                 {
@@ -2276,7 +2277,7 @@ impl DaemonService {
                                 let _ = DaemonService::ssh_operation_progress(
                                     &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                                 ).await;
-                                crate::ssh::push::PushResult {
+                                PushResult {
                                     host_id: host.id.to_string(),
                                     host_label: host.label.clone(),
                                     success: true,
@@ -2298,7 +2299,7 @@ impl DaemonService {
                                 let _ = DaemonService::ssh_operation_progress(
                                     &ctx_owned, op_id_clone.clone(), host.label.clone(), msg.clone(),
                                 ).await;
-                                crate::ssh::push::PushResult {
+                                PushResult {
                                     host_id: host.id.to_string(),
                                     host_label: host.label.clone(),
                                     success: false,

@@ -8,13 +8,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use supermgr_core::host::{Host, HostSummary};
+use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
+use supermgr_core::ssh::keygen;
 
 use crate::protocol::{self, Response};
 use crate::server::{
     connect_to_host_owned, get_uuid_param, merge_host_update, EngineServer,
 };
-use crate::ssh::{keygen, push, revoke};
 
 /// Two operations share fan-out plumbing in `handle_ssh_fanout_key_op`.
 /// Encoded as an enum so we can branch the inner SSH call without
@@ -183,7 +184,7 @@ impl EngineServer {
         } else {
             directory.to_owned()
         };
-        let candidates = crate::ssh::import::scan_ssh_directory(std::path::Path::new(&expanded));
+        let candidates = supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(&expanded));
         match serde_json::to_value(&candidates) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -586,11 +587,11 @@ impl EngineServer {
                 match connect_to_host_owned(&state, &secrets, hid).await {
                     Ok((host, session)) => {
                         let outcome = match op {
-                            FanoutOp::Push => push::push_public_key(&session, &public_key, use_sudo).await,
-                            FanoutOp::Revoke => revoke::revoke_public_key(&session, &public_key, use_sudo).await,
+                            FanoutOp::Push => push_public_key(&session, &public_key, use_sudo).await,
+                            FanoutOp::Revoke => revoke_public_key(&session, &public_key, use_sudo).await,
                         };
                         let result = match outcome {
-                            Ok(()) => push::PushResult {
+                            Ok(()) => PushResult {
                                 host_id: hid.to_string(),
                                 host_label: host.label.clone(),
                                 success: true,
@@ -599,7 +600,7 @@ impl EngineServer {
                                     FanoutOp::Revoke => "key revoked".into(),
                                 },
                             },
-                            Err(e) => push::PushResult {
+                            Err(e) => PushResult {
                                 host_id: hid.to_string(),
                                 host_label: host.label.clone(),
                                 success: false,
@@ -616,7 +617,7 @@ impl EngineServer {
                             let st = state.lock().await;
                             st.ssh_hosts.get(&hid).map(|h| h.label.clone()).unwrap_or_default()
                         };
-                        push::PushResult {
+                        PushResult {
                             host_id: hid.to_string(),
                             host_label: label,
                             success: false,

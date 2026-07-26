@@ -11,6 +11,7 @@ use russh_keys::key::PublicKey;
 use russh_keys::PublicKeyBase64;
 use supermgr_core::error::SshError;
 use supermgr_core::ssh::known_hosts::{HostKeyCheck, KnownHostsStore};
+use supermgr_core::ssh::remote::{RemoteFiles, RemoteShell};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 // ---------------------------------------------------------------------------
@@ -655,5 +656,60 @@ impl SshSession {
                 host: String::new(),
                 reason: format!("disconnect failed: {e}"),
             })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// supermgr-core transport adapter
+// ---------------------------------------------------------------------------
+//
+// `supermgr_core::ssh::authorized_keys` drives key push/revoke against the
+// `RemoteShell` trait rather than this type, so the same logic serves the
+// macOS engine's session too. This is the whole of what it needs from us.
+
+/// Wraps an established SFTP session as [`RemoteFiles`].
+struct SftpFiles(russh_sftp::client::SftpSession);
+
+#[async_trait::async_trait]
+impl RemoteFiles for SftpFiles {
+    async fn read(&self, path: &str) -> Result<Vec<u8>, SshError> {
+        self.0.read(path).await.map_err(|e| sftp_err("read", path, &e))
+    }
+
+    async fn write(&self, path: &str, contents: &[u8]) -> Result<(), SshError> {
+        self.0
+            .write(path, contents)
+            .await
+            .map_err(|e| sftp_err("write", path, &e))
+    }
+
+    async fn create_dir(&self, path: &str) -> Result<(), SshError> {
+        self.0
+            .create_dir(path)
+            .await
+            .map_err(|e| sftp_err("create_dir", path, &e))
+    }
+
+    async fn exists(&self, path: &str) -> bool {
+        self.0.metadata(path).await.is_ok()
+    }
+}
+
+fn sftp_err(op: &str, path: &str, e: &impl std::fmt::Display) -> SshError {
+    SshError::ConnectionFailed {
+        host: String::new(),
+        reason: format!("sftp {op} {path}: {e}"),
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteShell for SshSession {
+    async fn exec(&self, command: &str) -> Result<(u32, String, String), SshError> {
+        // Inherent method — the trait method is the one being defined here.
+        SshSession::exec(self, command).await
+    }
+
+    async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
+        Ok(Box::new(SftpFiles(self.sftp().await?)))
     }
 }

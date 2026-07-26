@@ -6,8 +6,8 @@
 
 use ssh_key::private::{KeypairData, RsaKeypair};
 use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
-use supermgr_core::error::SshError;
-use supermgr_core::ssh::key::SshKeyType;
+use crate::error::SshError;
+use crate::ssh::key::SshKeyType;
 
 /// Generated key material returned by [`generate_key`].
 pub struct GeneratedKey {

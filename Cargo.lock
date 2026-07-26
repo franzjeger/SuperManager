@@ -7102,9 +7102,11 @@ name = "supermgr-core"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "ipnet",
  "keyring",
+ "rand 0.8.6",
  "secret-service",
  "security-framework 3.7.0",
  "serde",
