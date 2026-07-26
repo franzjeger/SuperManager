@@ -27,13 +27,28 @@ output = "wireguard-installer.msi"
 
 [openvpn]
 # OpenVPN Community Edition — official upstream "latest stable" amd64
-# build. The `latest-stable` symlink rotates, so re-pin whenever you
-# refresh the bundle against a new release; the hash here is whatever
-# `openvpn-latest-stable-amd64.msi` was when this manifest was
-# committed.
+# build.
+#
+# Re-pinned 2026-07-26 to the current `latest-stable` build. The previous
+# hash (7B70D592...) was pinned 2026-05-19 and went stale when upstream
+# rotated the symlink to a new release, which had `windows` red on every
+# branch — main included — since 2026-07-16.
+#
+# Provenance of this hash: the artifact GitHub Actions fetched from this
+# URL over TLS on 2026-07-26 (run 30199755843). It has NOT been checked
+# against a checksum published by OpenVPN — trust-on-download, same basis
+# as the previous pin. If you want the stronger property, replace this
+# with a hash taken from OpenVPN's own published checksum for a named
+# release.
+#
+# This entry will go stale again on OpenVPN's next stable release,
+# because a fixed hash against a rotating URL always does. The durable
+# fix is a versioned URL + hash pinned together, the way [wireguard]
+# below does it — that needs whoever re-pins to record which version
+# `latest-stable` actually resolved to, which the symlink doesn't say.
 version = "latest-stable"
 url = "https://build.openvpn.net/downloads/releases/latest/openvpn-latest-stable-amd64.msi"
-sha256 = "7B70D592B421C20744D704D66A9C7B0C0FFF6B23C76A90F6AB52D9D2CECFAF25"
+sha256 = "20A9B2831CC3BE26C250CAF60891C230F3BF3E1E7BD6E17B4E182F166026377A"
 output = "openvpn-installer.msi"
 
 # openfortivpn (FortiGate SSL VPN client) has no maintained Windows
