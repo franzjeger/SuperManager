@@ -551,7 +551,7 @@ pub fn export_all_keys_to_ssh_dir(
     for key in keys {
         let (priv_name, _pub_name) = ssh_dir_filenames(key.key_type, &key.name);
         let priv_path = ssh_dir.join(&priv_name);
-        let pub_path = ssh_dir.join(format!("{}.pub", &priv_name));
+        let pub_path = ssh_dir.join(format!("{priv_name}.pub"));
         let key_id = key.id.to_string();
 
         do_export_to_ssh_dir(
