@@ -64,7 +64,7 @@ async fn tcp_preflight(host: &str, port: u16) -> Result<()> {
         .await
     };
     match attempt().await {
-        Ok(Ok(_)) => return Ok(()),
+        Ok(Ok(_)) => Ok(()),
         Ok(Err(e1)) => {
             tracing::debug!("TCP probe attempt 1 failed: {e1}, retrying in 300ms");
             tokio::time::sleep(Duration::from_millis(300)).await;

@@ -174,11 +174,11 @@ pub fn select_to_prune(group: &[BackupFile], keep_last: usize) -> Vec<&BackupFil
 /// "Old enough" = `timestamp < now - older_than`. Already-compressed files
 /// are excluded. Returns a list of mutable references so the caller can
 /// update in place after re-writing the file path.
-pub fn select_to_compress<'a>(
-    group: &'a [BackupFile],
+pub fn select_to_compress(
+    group: &[BackupFile],
     now: DateTime<Utc>,
     older_than: chrono::Duration,
-) -> Vec<&'a BackupFile> {
+) -> Vec<&BackupFile> {
     let cutoff = now - older_than;
     group
         .iter()
@@ -265,15 +265,13 @@ pub fn housekeep(
     // Phase 1 — compression. Walk the pre-compression scan and rewrite
     // anything older than the threshold to .gz in place.
     let pre = scan_backups(dir);
-    for f in &pre {
-        if !f.compressed && f.timestamp < (now - compress_after) {
-            match compress_in_place(&f.path) {
-                Ok(new_path) => {
-                    info!("housekeep: compressed {}", f.path.display());
-                    report.compressed.push(new_path);
-                }
-                Err(e) => warn!("housekeep: compress {}: {e}", f.path.display()),
+    for f in select_to_compress(&pre, now, compress_after) {
+        match compress_in_place(&f.path) {
+            Ok(new_path) => {
+                info!("housekeep: compressed {}", f.path.display());
+                report.compressed.push(new_path);
             }
+            Err(e) => warn!("housekeep: compress {}: {e}", f.path.display()),
         }
     }
 

@@ -315,11 +315,7 @@ fn dn_to_dns(dn: &str) -> String {
         .filter_map(|component| {
             let trimmed = component.trim();
             let lower = trimmed.to_lowercase();
-            if let Some(rest) = lower.strip_prefix("dc=") {
-                Some(rest.to_owned())
-            } else {
-                None
-            }
+            lower.strip_prefix("dc=").map(|rest| rest.to_owned())
         })
         .collect::<Vec<_>>()
         .join(".")

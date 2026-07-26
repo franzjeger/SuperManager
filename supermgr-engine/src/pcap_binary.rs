@@ -30,7 +30,6 @@
 //! traffic analysis, revisit then.
 
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
@@ -513,7 +512,6 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(tmp.path(), pcap).expect("write");
 
-        let _ = Duration::from_secs(1); // touch import
         let findings = detect_tls_downgrade_clients(tmp.path()).await.expect("ok");
         assert_eq!(findings.len(), 2, "TLS 1.0 + TLS 1.1 = two findings");
         assert!(findings.iter().any(|f| f.id == "tls.client-downgrade-tls1.0"));

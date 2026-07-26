@@ -30,8 +30,10 @@ use uuid::Uuid;
 /// The connection state as tracked by the daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum VpnState {
     /// No tunnel is active and no connection attempt is in progress.
+    #[default]
     Disconnected,
 
     /// A connection attempt is in progress for the identified profile.
@@ -110,11 +112,6 @@ impl VpnState {
     }
 }
 
-impl Default for VpnState {
-    fn default() -> Self {
-        Self::Disconnected
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Error codes

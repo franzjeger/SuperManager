@@ -321,7 +321,11 @@ fn guess_service(port: u16) -> String {
         21 => "ftp".into(),
         22 | 2222 => "ssh".into(),
         23 => "telnet".into(),
-        25 | 465 | 587 => "smtp".into(),
+        // 465 is implicit-TLS SMTPS and is matched further down. Listing it
+        // here too made that arm unreachable, so every 465 came back as
+        // cleartext "smtp" — wrong in a service inventory, and wrong in the
+        // direction that understates how a mail port is protected.
+        25 | 587 => "smtp".into(),
         53 => "dns".into(),
         80 | 81 | 8000 | 8008 | 8080 | 8081 | 8088 | 8090 | 8888 => "http".into(),
         110 => "pop3".into(),
@@ -331,7 +335,7 @@ fn guess_service(port: u16) -> String {
         143 => "imap".into(),
         161 => "snmp".into(),
         389 => "ldap".into(),
-        443 | 8443 | 5001 | 9090 | 5601 | 8443 | 6443 => "https".into(),
+        443 | 5001 | 6443 | 8443 | 9090 | 5601 => "https".into(),
         465 => "smtps".into(),
         514 => "syslog".into(),
         548 => "afp".into(),
@@ -901,7 +905,10 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
     Ok(combined.contains("verify return code") || combined.contains("cipher    : "))
 }
 
-fn parse_tls_output(text: &str, host: &str) -> Result<TlsInfo> {
+/// `_host` is unused today; it stays in the signature because the
+/// certificate-name checks this parser will grow need it, and the
+/// callers already have it to hand.
+fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
     let mut version = "unknown".to_owned();
     let mut cipher = "unknown".to_owned();
     let mut subject: Option<String> = None;
@@ -951,10 +958,6 @@ fn parse_tls_output(text: &str, host: &str) -> Result<TlsInfo> {
         self_signed,
         weak_ciphers_accepted: Vec::new(),  // populated by tls_audit
         protocols_accepted: Vec::new(),     // populated by tls_audit
-    })
-    .map(|info| {
-        let _ = host; // marker — keep signature flexible
-        info
     })
 }
 
@@ -1128,5 +1131,37 @@ New, TLSv1/SSLv3, Cipher is AEAD-AES256-GCM-SHA384
         assert!(!cipher_matches_family(&name, "3DES"));
         assert!(!cipher_matches_family(&name, "EXP"));
         assert!(!cipher_matches_family(&name, "aNULL"));
+    }
+}
+
+#[cfg(test)]
+mod service_name_tests {
+    use super::guess_service;
+
+    #[test]
+    fn implicit_tls_mail_port_is_not_reported_as_cleartext() {
+        // 465 used to be swallowed by the `25 | 465 | 587 => "smtp"` arm,
+        // which made the `465 => "smtps"` arm below it unreachable. A
+        // service inventory that calls an implicit-TLS port "smtp"
+        // understates how the port is protected.
+        assert_eq!(guess_service(465), "smtps");
+        assert_eq!(guess_service(25), "smtp");
+        assert_eq!(guess_service(587), "smtp");
+    }
+
+    #[test]
+    fn common_tls_ports_map_to_https() {
+        for port in [443, 5001, 5601, 6443, 8443, 9090] {
+            assert_eq!(guess_service(port), "https", "port {port}");
+        }
+    }
+
+    #[test]
+    fn unknown_ports_are_not_guessed() {
+        // Whatever the fallback is, it must be stable and must not
+        // silently claim a service we did not identify.
+        let unknown = guess_service(49152);
+        assert_ne!(unknown, "https");
+        assert_ne!(unknown, "smtp");
     }
 }

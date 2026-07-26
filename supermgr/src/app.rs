@@ -60,6 +60,13 @@ pub struct AppState {
 }
 
 /// A notification event stored in the notification center.
+///
+/// Every field is currently write-only: `push_notification` fills this in
+/// and the UI builds its row from the same arguments rather than reading
+/// back from the stored history, so nothing ever reads a `Notification`.
+/// Kept rather than deleted because the fields are what a real history
+/// view needs — see the follow-up issue on the notification centre.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Notification {
     /// When the event occurred.

@@ -392,7 +392,7 @@ pub async fn connect_to_host_owned_typed(
     host_id: uuid::Uuid,
 ) -> Result<(Host, SshSession), crate::error::EngineError> {
     use crate::error::EngineError;
-    use supermgr_core::error::SshError;
+    
 
     let (host, known_hosts) = {
         let st = state.lock().await;
@@ -571,6 +571,9 @@ pub async fn connect_to_host_owned(
 }
 
 /// Extract a UUID parameter from JSON-RPC params.
+// See the note on `resolve_findings_scope`: boxing `Response` is a
+// wide change for an unmeasured win.
+#[allow(clippy::result_large_err)]
 pub(crate) fn get_uuid_param(params: &serde_json::Value, name: &str) -> Result<uuid::Uuid, Response> {
     let s = params
         .get(name)

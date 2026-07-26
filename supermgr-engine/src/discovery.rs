@@ -807,15 +807,9 @@ fn oui_database() -> HashMap<String, String> {
     for p in ["00:0c:29", "00:1c:14", "00:50:56", "00:05:69"] {
         m.insert(p.to_owned(), "VMware, Inc.".to_owned());
     }
-    for p in ["00:1c:42"] {
-        m.insert(p.to_owned(), "Parallels".to_owned());
-    }
-    for p in ["52:54:00"] {
-        m.insert(p.to_owned(), "QEMU / KVM (libvirt)".to_owned());
-    }
-    for p in ["02:42:ac"] {
-        m.insert(p.to_owned(), "Docker container".to_owned());
-    }
+    m.insert("00:1c:42".to_owned(), "Parallels".to_owned());
+    m.insert("52:54:00".to_owned(), "QEMU / KVM (libvirt)".to_owned());
+    m.insert("02:42:ac".to_owned(), "Docker container".to_owned());
 
     // ---- Raspberry Pi (B+/Zero/3/4/5)
     for p in ["b8:27:eb", "dc:a6:32", "e4:5f:01", "2c:cf:67", "d8:3a:dd"] {
@@ -853,15 +847,9 @@ fn oui_database() -> HashMap<String, String> {
     for p in ["00:25:90", "0c:c4:7a", "30:5a:3a"] {
         m.insert(p.to_owned(), "Super Micro Computer".to_owned());
     }
-    for p in ["00:e0:b8"] {
-        m.insert(p.to_owned(), "Foxconn".to_owned());
-    }
-    for p in ["00:e0:4c"] {
-        m.insert(p.to_owned(), "Realtek Semiconductor".to_owned());
-    }
-    for p in ["ac:de:48"] {
-        m.insert(p.to_owned(), "Private (locally administered)".to_owned());
-    }
+    m.insert("00:e0:b8".to_owned(), "Foxconn".to_owned());
+    m.insert("00:e0:4c".to_owned(), "Realtek Semiconductor".to_owned());
+    m.insert("ac:de:48".to_owned(), "Private (locally administered)".to_owned());
 
     // Apply an external Wireshark manuf overlay if present —
     // that file has ~35k entries and covers everything the
@@ -911,7 +899,7 @@ fn apply_wireshark_manuf_overlay(out: &mut HashMap<String, String>) {
             // Lines with /36 (28-bit MA-M) or /28 (24+4 bit
             // MA-S) prefixes look like "8C:1F:64:1A:0/28 ..."
             // — skip those, our key is a /24 (first 3 octets).
-            let mut parts = trimmed.splitn(3, |c: char| c == '\t' || c == ' ');
+            let mut parts = trimmed.splitn(3, ['\t', ' ']);
             let raw_prefix = parts.next().unwrap_or("");
             if raw_prefix.contains('/') { continue }
             let prefix_clean: String = raw_prefix
@@ -1260,7 +1248,6 @@ pub async fn active_scan(
             }
         }
     }
-    let mut findings = findings;
     findings.append(&mut anomaly_findings);
 
     let mut result = ActiveScanResult {

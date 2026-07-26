@@ -663,7 +663,7 @@ pub fn show_push_key_dialog(
             .build();
         let row = adw::ActionRow::builder()
             .title(host.label.as_str())
-            .subtitle(&format!("{}@{}", host.username, host.hostname))
+            .subtitle(format!("{}@{}", host.username, host.hostname))
             .activatable(true)
             .build();
         row.add_prefix(&check);
@@ -817,7 +817,7 @@ pub fn show_revoke_key_dialog(
             .build();
         let row = adw::ActionRow::builder()
             .title(host.label.as_str())
-            .subtitle(&format!("{}@{}", host.username, host.hostname))
+            .subtitle(format!("{}@{}", host.username, host.hostname))
             .activatable(true)
             .build();
         row.add_prefix(&check);
@@ -925,7 +925,7 @@ pub fn show_edit_host_dialog(
 
     let label_row = adw::EntryRow::builder().title("Label").text(&host.label).build();
     let hostname_row = adw::EntryRow::builder().title("Hostname").text(&host.hostname).build();
-    let port_row = adw::EntryRow::builder().title("Port").text(&host.port.to_string()).build();
+    let port_row = adw::EntryRow::builder().title("Port").text(host.port.to_string()).build();
     let username_row = adw::EntryRow::builder().title("Username").text(&host.username).build();
     let group_row = adw::EntryRow::builder().title("Group (optional)").text(&host.group).build();
 
@@ -1060,7 +1060,7 @@ pub fn show_edit_host_dialog(
         .build();
     let api_port_row = adw::EntryRow::builder()
         .title("HTTPS Port")
-        .text(&host.api_port.unwrap_or(443).to_string())
+        .text(host.api_port.unwrap_or(443).to_string())
         .build();
     api_group.add(&api_token_row);
     api_group.add(&api_port_row);
@@ -1124,11 +1124,11 @@ pub fn show_edit_host_dialog(
         .build();
     let rdp_port_row = adw::EntryRow::builder()
         .title("RDP Port (leave empty to disable)")
-        .text(&host.rdp_port.map(|p| p.to_string()).unwrap_or_default())
+        .text(host.rdp_port.map(|p| p.to_string()).unwrap_or_default())
         .build();
     let vnc_port_row = adw::EntryRow::builder()
         .title("VNC Port (leave empty to disable)")
-        .text(&host.vnc_port.map(|p| p.to_string()).unwrap_or_default())
+        .text(host.vnc_port.map(|p| p.to_string()).unwrap_or_default())
         .build();
     remote_group.add(&rdp_port_row);
     remote_group.add(&vnc_port_row);

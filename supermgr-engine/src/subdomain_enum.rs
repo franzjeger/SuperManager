@@ -102,7 +102,7 @@ struct CrtEntry {
 /// that happen to share infrastructure CT logs).
 fn extract_hostnames(blob: &str, apex: &str, out: &mut HashSet<String>) {
     let apex_lc = apex.to_lowercase();
-    for raw in blob.split(|c: char| c == '\n' || c == ' ' || c == ',' || c == ';') {
+    for raw in blob.split(['\n', ' ', ',', ';']) {
         let mut name = raw.trim().to_lowercase();
         if name.is_empty() { continue; }
         if let Some(rest) = name.strip_prefix("*.") {

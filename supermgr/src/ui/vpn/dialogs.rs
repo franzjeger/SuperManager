@@ -1189,7 +1189,7 @@ pub fn show_logs_dialog(
         let paused = paused.clone();
         move || {
             let text_view = text_view.clone();
-            let scroll = scroll.clone();
+            let _scroll = scroll.clone();
             let rt = rt.clone();
             let mode = filter_mode.borrow().clone();
             let query = search_text.borrow().to_lowercase();
@@ -1429,7 +1429,7 @@ pub fn show_settings_dialog(
             .build();
         pw_status_row.add_suffix(&remove_pw_btn);
 
-        let app_settings_rm = Arc::clone(&app_settings);
+        let _app_settings_rm = Arc::clone(&app_settings);
         let pw_status_row_rm = pw_status_row.clone();
         remove_pw_btn.connect_clicked(move |btn| {
             crate::master_password::clear();

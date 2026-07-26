@@ -177,9 +177,18 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 /// # Ok(())
 /// # }
 /// ```
-// `#[allow(missing_docs)]` suppresses lint errors on the internal helper types
-// and methods that `#[zbus::proxy]` generates and that we cannot doc-comment.
-#[allow(missing_docs)]
+// `#[zbus::proxy]` expands into several *sibling* items — `DaemonProxy`,
+// `DaemonProxyBlocking` and their inherent methods — none of which we can
+// doc-comment from here. An `#[allow(missing_docs)]` on the trait doesn't
+// reach the siblings, so the allow goes on the enclosing module instead and
+// the generated items are re-exported below. Keeping the scope to this inner
+// module means the hand-written `DBUS_*` constants and `core_error_to_fdo`
+// above are still held to `#![warn(missing_docs)]`.
+mod generated {
+    #![allow(missing_docs)]
+
+    use zbus::fdo;
+
 #[zbus::proxy(
     interface = "org.supermgr.Daemon1",
     default_service = "org.supermgr.Daemon",
@@ -902,3 +911,8 @@ pub trait Daemon {
         reachable: bool,
     ) -> fdo::Result<()>;
 }
+}
+
+// `#[zbus::proxy]` consumes the `Daemon` trait it is applied to and emits
+// these two in its place.
+pub use generated::{DaemonProxy, DaemonProxyBlocking};

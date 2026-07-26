@@ -319,7 +319,7 @@ async fn accept_auth_code(
         .nth(1)
         .ok_or_else(|| "malformed HTTP request line".to_string())?;
 
-    let query = path.splitn(2, '?').nth(1).unwrap_or("");
+    let query = path.split_once('?').map(|x| x.1).unwrap_or("");
 
     let mut code: Option<String> = None;
     let mut returned_state: Option<String> = None;
@@ -734,7 +734,7 @@ impl VpnBackend for AzureBackend {
                 loop {
                     tokio::select! {
                         line = out_lines.next_line() => {
-                            let Some(Some(line)) = line.ok().map(|l| l) else { break };
+                            let Some(Some(line)) = line.ok() else { break };
                             info!("openvpn: {}", line.trim());
                             if line.contains("TUN/TAP device") {
                                 if let Some(iface) = extract_tun_iface(&line) {
@@ -763,7 +763,7 @@ impl VpnBackend for AzureBackend {
                             }
                         }
                         line = err_lines.next_line() => {
-                            let Some(Some(line)) = line.ok().map(|l| l) else { break };
+                            let Some(Some(line)) = line.ok() else { break };
                             info!("openvpn stderr: {}", line.trim());
                             if line.contains("Initialization Sequence Completed") {
                                 return Ok(());
@@ -945,7 +945,7 @@ fn extract_virtual_ip(line: &str) -> Option<String> {
     // OpenVPN 2.6 format: "ip addr add dev <iface> <cidr>"
     if let Some(idx) = line.find("ip addr add dev ") {
         let rest = &line[idx + "ip addr add dev ".len()..];
-        let rest = rest.splitn(2, ' ').nth(1)?.trim();
+        let rest = rest.split_once(' ')?.1.trim();
         let cidr = rest.split_whitespace().next()?;
         if cidr.contains('.') || cidr.contains(':') {
             return Some(cidr.to_owned());

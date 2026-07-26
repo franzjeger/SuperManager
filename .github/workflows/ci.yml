@@ -41,6 +41,33 @@ jobs:
             -p supermgr-mcp \
             -p supermgrd \
             -p supermgr
+      # `-D warnings` is what makes this step a gate rather than a report.
+      # It covers every rustc lint (unused imports and variables, dead
+      # code, unreachable patterns) plus clippy's correctness, suspicious
+      # and perf groups — the categories that catch defects. Two real bugs
+      # were sitting in that output while the step ran `-W warnings` and
+      # could never fail: a mail port reported as cleartext because its
+      # match arm was unreachable, and a kill switch whose two branches
+      # were identical.
+      #
+      # style, complexity and pedantic stay advisory. They are ~76 mostly
+      # cosmetic findings (doc-comment indentation is the bulk of it);
+      # gating on them would have meant a churn-heavy diff for no defect
+      # caught. Promote them once they're worked down.
+      #
+      # The toolchain above is `stable`, which floats. A new Rust can add
+      # or sharpen a lint and turn this step red on a PR that changed
+      # nothing related — that is not a mystery failure, it is the float.
+      # When it happens, fix the lint; reach for `#[allow]` only when the
+      # finding genuinely isn't worth acting on, and say why in the code.
+      # To reproduce a CI-only finding locally, match the version rather
+      # than guessing:
+      #
+      #   rustup toolchain install <version> --component clippy
+      #   rustup run <version> cargo clippy --all-targets -p ... -- -D warnings ...
+      #
+      # Pinning the toolchain instead would trade these surprises for
+      # manual bumps; that's a repo-wide policy call, not a clippy one.
       - name: Clippy
         run: |
           cargo clippy --all-targets \
@@ -49,7 +76,10 @@ jobs:
             -p supermgr-mcp \
             -p supermgrd \
             -p supermgr \
-            -- -W warnings
+            -- -D warnings \
+               -A clippy::pedantic \
+               -A clippy::style \
+               -A clippy::complexity
       - name: Tests
         run: |
           cargo test \
