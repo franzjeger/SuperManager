@@ -5200,10 +5200,17 @@ pub async fn connect_profile(
                         .map(|sa| sa.ip().to_string())
                         .unwrap_or_else(|| fg.host.clone());
                     let mode = if profile.kill_switch {
+                        // Both branches used to call `current_system_dns_ips`,
+                        // so a profile that named its own resolvers had them
+                        // ignored: the kill switch punched holes for the
+                        // system resolvers instead — the wrong addresses, and
+                        // holes the operator never asked for. The split below
+                        // is what `current_system_dns_ips` documents itself as
+                        // being for.
                         let dns_ips = if fg.dns_servers.is_empty() {
                             current_system_dns_ips().await
                         } else {
-                            current_system_dns_ips().await
+                            fg.dns_servers.iter().map(ToString::to_string).collect()
                         };
                         Some(KillSwitchMode::IPsec { server_ip, allowed_ips: dns_ips })
                     } else {
