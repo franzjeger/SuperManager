@@ -11,17 +11,20 @@ members = [
     "supermgr-mcp",
     "supermanager-helper",
 ]
-# `cargo build` / `cargo test` (no -p / --workspace) only touches
-# this list. Platform-specific daemons and GUIs (supermgrd, supermgrd-mac,
-# supermgrd-win, supermgr, supermgr-win, supermgrd-mac, supermanager-helper,
-# supermgr-engine) stay out so a Linux/Windows CI image — which has no
-# Apple SDKs, no launchd, no Xcode — doesn't try to compile macOS crates,
-# and a Mac/Linux image doesn't try to compile the Windows daemon/GUI.
+# `cargo build` / `cargo test` (no -p / --workspace) only touches this
+# list: the two crates that build anywhere, with no GTK, launchd, Apple
+# SDK or Windows SDK needed. It keeps a bare `cargo build` fast and
+# portable on any dev machine.
+#
+# It is NOT the set CI builds. Every CI job names its crates with `-p`
+# (see .github/workflows/ci.yml) — relying on this list would have meant
+# the Linux job compiling neither the daemon nor the GUI, which is
+# exactly what it used to do.
 #
 # Per-host invocations:
-#   cargo build -p supermgrd -p supermgr                  # Linux
-#   cargo build --workspace                               # macOS only
-#   cargo build -p supermgrd-win -p supermgr-win          # Windows
+#   cargo build -p supermgrd -p supermgr -p supermgr-engine   # Linux
+#   cargo build --workspace                                   # macOS only
+#   cargo build -p supermgrd-win -p supermgr-win              # Windows
 default-members = [
     "supermgr-core",
     "supermgr-mcp",
