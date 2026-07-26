@@ -108,10 +108,10 @@ pub fn populate_ssh_key_list(
         // Deployed-count badge.
         if key.deployed_count > 0 {
             let badge = gtk4::Label::builder()
-                .label(&format!("{}", key.deployed_count))
+                .label(format!("{}", key.deployed_count))
                 .css_classes(["caption", "dim-label"])
                 .valign(gtk4::Align::Center)
-                .tooltip_text(&format!("Deployed to {} host(s)", key.deployed_count))
+                .tooltip_text(format!("Deployed to {} host(s)", key.deployed_count))
                 .build();
             row.add_suffix(&badge);
         }

@@ -526,11 +526,6 @@ mod tests {
     // preserved. Apache 2.4 → matches Apache CVE with version 2.4.
     #[test]
     fn specific_keyword_uses_banner_wide_match() {
-        let cache = cache_with(vec![entry(
-            "CVE-2017-XXXX",
-            &["apache_http_server"],
-            &["2.4"],
-        )]);
         let banner = "Apache/2.4.6 (Linux)";
         // banner doesn't lowercase-contain "apache_http_server"
         // but contains "2.4". For this test, use a banner that

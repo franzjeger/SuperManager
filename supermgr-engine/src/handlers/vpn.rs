@@ -460,6 +460,12 @@ impl EngineServer {
         }
     }
 
+    // These two are implemented but not reachable: no RPC method name
+    // dispatches to them and the macOS app never asks for one, so the
+    // Entra ID device-code flow is dead on that platform. Left in place
+    // rather than deleted — the work is done, only the wiring is missing.
+    // See the follow-up issue.
+    #[allow(dead_code)]
     /// Start the Entra ID device-code flow for an Azure VPN
     /// profile. Returns the user_code + verification_uri so the
     /// GUI can show them and open the browser, plus the device_code
@@ -513,6 +519,7 @@ impl EngineServer {
     /// returns the rendered `.ovpn` body + a temp file path the
     /// helper can `--config` against, so the GUI just needs one
     /// last RPC to the helper to bring the tunnel up.
+    #[allow(dead_code)]
     pub(crate) async fn handle_vpn_azure_device_code_poll(
         &self,
         id: u64,
@@ -1001,7 +1008,7 @@ impl EngineServer {
                 Ok(zs) => zs,
                 Err(e) => return Err(format!("retrieve {}: {e}", old_ref.label())),
             };
-            if let Err(e) = secrets.store(&new_label, &*bytes).await {
+            if let Err(e) = secrets.store(&new_label, &bytes).await {
                 return Err(format!("store {new_label}: {e}"));
             }
             Ok(SecretRef::new(new_label))

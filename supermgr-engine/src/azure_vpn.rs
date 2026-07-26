@@ -216,7 +216,7 @@ fn extract_tenant_id(xml: &str) -> Option<String> {
         return Some(trimmed.to_owned());
     }
     // URL-shaped? Find the first GUID-looking path segment.
-    for seg in trimmed.split(|c: char| c == '/' || c == '?' || c == '&') {
+    for seg in trimmed.split(['/', '?', '&']) {
         if looks_like_guid(seg) {
             return Some(seg.to_owned());
         }
@@ -875,7 +875,6 @@ mod tests {
     #[test]
     fn embedded_digicert_pem_decodes_and_matches_thumbprint() {
         use base64::Engine as _;
-        use sha2::Digest as _;
         let pem = DIGICERT_GLOBAL_ROOT_CA_PEM;
         // Strip PEM markers + whitespace.
         let body: String = pem

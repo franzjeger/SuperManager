@@ -67,7 +67,7 @@ pub async fn detect() -> NetworkDetect {
                             .position(|p| *p == "netmask")
                             .map(|i| i + 1);
                         let mask = mask_idx.and_then(|i| parts.get(i)).copied();
-                        let prefix = mask.and_then(|m| parse_hex_mask(m)).unwrap_or(24);
+                        let prefix = mask.and_then(parse_hex_mask).unwrap_or(24);
                         out.primary_cidr = Some(format!("{ip}/{prefix}"));
                         out.lan_base = network_address(ip, prefix).map(|n| format!("{n}/{prefix}"));
                     }

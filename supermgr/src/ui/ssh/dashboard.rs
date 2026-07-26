@@ -575,7 +575,7 @@ fn populate_dashboard(
                             if name.starts_with(&prefix) {
                                 if let Ok(meta) = entry.metadata().await {
                                     if let Ok(modified) = meta.modified() {
-                                        if newest.map_or(true, |n| modified > n) {
+                                        if newest.is_none_or(|n| modified > n) {
                                             newest = Some(modified);
                                         }
                                     }
@@ -1324,9 +1324,9 @@ pub fn add_cloud_device_cards(
     let flow_box = flow_box.clone();
     let idx = std::rc::Rc::new(std::cell::Cell::new(0usize));
     let batch = std::rc::Rc::new(batch);
-    let idx_c = idx.clone();
-    let batch_c = batch.clone();
-    let fb = flow_box.clone();
+    let _idx_c = idx.clone();
+    let _batch_c = batch.clone();
+    let _fb = flow_box.clone();
 
     for (ref card_id, ref label, ref hostname, ref data) in batch.iter() {
         let site = data.get("site").and_then(|v| v.as_str()).unwrap_or("");

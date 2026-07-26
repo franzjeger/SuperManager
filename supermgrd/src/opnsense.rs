@@ -128,7 +128,7 @@ pub async fn request(
     };
 
     req = req.basic_auth(&creds.key, Some(&creds.secret));
-    if !body.is_empty() && method.eq_ignore_ascii_case("GET") == false {
+    if !body.is_empty() && !method.eq_ignore_ascii_case("GET") {
         req = req
             .header("Content-Type", "application/json")
             .body(body.to_owned());

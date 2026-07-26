@@ -323,8 +323,8 @@ pub fn reconcile(customer_slug: &str, fresh: &[Finding]) -> Result<ScanDiff> {
 
     // Auto-resolve: anything Open in store but not in fresh scan.
     for existing in store.findings.values_mut() {
-        if !fresh_keys.contains(&existing.key) {
-            if matches!(existing.disposition, Disposition::Open) {
+        if !fresh_keys.contains(&existing.key)
+            && matches!(existing.disposition, Disposition::Open) {
                 let prev = existing.disposition.clone();
                 existing.disposition = Disposition::Fixed { auto: true };
                 existing.history.push(DispositionChange {
@@ -336,7 +336,6 @@ pub fn reconcile(customer_slug: &str, fresh: &[Finding]) -> Result<ScanDiff> {
                 });
                 diff.auto_resolved.push(existing.clone());
             }
-        }
     }
 
     store.last_scan_at = Some(now);
@@ -531,7 +530,7 @@ mod tests {
     fn missing_finding_auto_resolves() {
         let scope = unique_scope("resolve");
         let f1 = fake_finding("config.smb-open", "10.0.0.1", Severity::Medium);
-        reconcile(&scope, &[f1.clone()]).unwrap();
+        reconcile(&scope, std::slice::from_ref(&f1)).unwrap();
         // Second scan finds nothing → previous open finding should
         // flip to Fixed{auto:true}.
         let diff = reconcile(&scope, &[]).expect("reconcile ok");
@@ -548,11 +547,11 @@ mod tests {
     fn fixed_finding_redetected_marks_regression() {
         let scope = unique_scope("regress");
         let f = fake_finding("cve.cve-2023-38408", "10.0.0.1", Severity::High);
-        reconcile(&scope, &[f.clone()]).unwrap();
+        reconcile(&scope, std::slice::from_ref(&f)).unwrap();
         // Scan with no findings → auto-fixed.
         reconcile(&scope, &[]).unwrap();
         // Same finding comes back → regression.
-        let diff = reconcile(&scope, &[f.clone()]).expect("reconcile ok");
+        let diff = reconcile(&scope, std::slice::from_ref(&f)).expect("reconcile ok");
         assert_eq!(diff.regressed.len(), 1);
         assert_eq!(diff.new_findings.len(), 0);
         assert!(matches!(diff.regressed[0].disposition, Disposition::Open));
@@ -563,7 +562,7 @@ mod tests {
     fn accepted_risk_kept_until_expiry() {
         let scope = unique_scope("accepted");
         let f = fake_finding("config.smb-open", "10.0.0.1", Severity::Medium);
-        reconcile(&scope, &[f.clone()]).unwrap();
+        reconcile(&scope, std::slice::from_ref(&f)).unwrap();
         let key = finding_key(&f);
         // Accept the risk indefinitely.
         set_disposition(
@@ -575,7 +574,7 @@ mod tests {
         )
         .unwrap();
         // Re-scan still detects it — should remain in accepted_risk bucket.
-        let diff = reconcile(&scope, &[f.clone()]).expect("reconcile ok");
+        let diff = reconcile(&scope, std::slice::from_ref(&f)).expect("reconcile ok");
         assert_eq!(diff.accepted_risk.len(), 1);
         assert_eq!(diff.regressed.len(), 0);
         assert_eq!(diff.still_open.len(), 0);
@@ -586,7 +585,7 @@ mod tests {
     fn expired_accepted_risk_reopens() {
         let scope = unique_scope("expired");
         let f = fake_finding("config.smb-open", "10.0.0.1", Severity::Medium);
-        reconcile(&scope, &[f.clone()]).unwrap();
+        reconcile(&scope, std::slice::from_ref(&f)).unwrap();
         let key = finding_key(&f);
         // Acceptance window expired yesterday.
         set_disposition(
@@ -600,7 +599,7 @@ mod tests {
             "",
         )
         .unwrap();
-        let diff = reconcile(&scope, &[f.clone()]).expect("reconcile ok");
+        let diff = reconcile(&scope, std::slice::from_ref(&f)).expect("reconcile ok");
         assert_eq!(diff.regressed.len(), 1);
         assert!(matches!(diff.regressed[0].disposition, Disposition::Open));
         cleanup(&scope);

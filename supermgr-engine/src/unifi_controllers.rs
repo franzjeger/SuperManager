@@ -118,6 +118,10 @@ async fn evict_expired_challenges() {
 /// completed in one round-trip (no MFA), or the caller needs
 /// to drive the operator through an MFA challenge before the
 /// controller can be persisted.
+// `Saved` carries a full controller + sysinfo and `MfaRequired` two
+// short strings. Boxing the large variant would touch every
+// construction and match site for a win nobody has measured.
+#[allow(clippy::large_enum_variant)]
 pub enum SaveOutcome {
     Saved {
         controller: UnifiController,
@@ -197,6 +201,7 @@ pub async fn complete_pending_save(
 /// in the Ubiquiti ecosystem expects.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum UnifiAuthMethod {
     /// Long-lived `X-API-KEY` token minted in the controller UI
     /// under Admins → API. Sent as a header on every request;
@@ -205,14 +210,10 @@ pub enum UnifiAuthMethod {
     /// Classic local-user or SSO username + password. Cookie-
     /// based session. Falls into the MFA flow when the
     /// controller demands a second factor.
+    #[default]
     Password,
 }
 
-impl Default for UnifiAuthMethod {
-    fn default() -> Self {
-        Self::Password
-    }
-}
 
 /// A configured UniFi controller. The struct is the canonical
 /// on-disk record (one TOML file per controller); the
@@ -472,7 +473,7 @@ pub async fn password_login(
         .with_context(|| format!("POST {login_url}"))?;
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         return Ok(PasswordLoginOutcome::Ok(client));
     }
 
@@ -556,7 +557,7 @@ pub async fn mfa_send_email(
         match client.post(&url).send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                if status >= 200 && status < 300 {
+                if (200..300).contains(&status) {
                     info!("MFA email triggered via {url}");
                     return Ok(());
                 }
@@ -604,7 +605,7 @@ pub async fn mfa_complete_login(
         .await
         .with_context(|| format!("POST {login_url}"))?;
     let status = resp.status().as_u16();
-    if status >= 200 && status < 300 {
+    if (200..300).contains(&status) {
         return Ok(client);
     }
     let text = resp.text().await.unwrap_or_default();

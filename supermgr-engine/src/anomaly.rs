@@ -88,7 +88,7 @@ pub fn reconcile_host(
     host_ip: &str,
     observed_ports: &[u16],
 ) -> Result<Vec<Finding>> {
-    let mut baseline = load(customer_slug, host_ip);
+    let baseline = load(customer_slug, host_ip);
     let observed: HashSet<u16> = observed_ports.iter().copied().collect();
     let stable: HashSet<u16> = baseline.stable_ports.iter().copied().collect();
     let pending: HashSet<u16> = baseline.pending_ports.iter().copied().collect();

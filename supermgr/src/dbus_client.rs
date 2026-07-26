@@ -491,7 +491,7 @@ pub async fn dbus_set_kill_switch(profile_id: String, enabled: bool) -> anyhow::
 pub async fn dbus_rotate_wireguard_key(profile_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    Ok(proxy.rotate_wireguard_key(&profile_id).await.context("RotateWireguardKey")?)
+    proxy.rotate_wireguard_key(&profile_id).await.context("RotateWireguardKey")
 }
 
 /// Call `ExportProfile(profile_id)` on the daemon.
@@ -499,7 +499,7 @@ pub async fn dbus_rotate_wireguard_key(profile_id: String) -> anyhow::Result<Str
 pub async fn dbus_export_profile(profile_id: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    Ok(proxy.export_profile(&profile_id).await.context("ExportProfile")?)
+    proxy.export_profile(&profile_id).await.context("ExportProfile")
 }
 
 // ---------------------------------------------------------------------------
@@ -510,7 +510,7 @@ pub async fn dbus_export_profile(profile_id: String) -> anyhow::Result<String> {
 pub async fn dbus_export_all() -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    Ok(proxy.export_all().await.context("ExportAll")?)
+    proxy.export_all().await.context("ExportAll")
 }
 
 /// Call `ImportAll(data)` on the daemon.  Returns the summary JSON string
@@ -518,7 +518,7 @@ pub async fn dbus_export_all() -> anyhow::Result<String> {
 pub async fn dbus_import_all(data: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    Ok(proxy.import_all(&data).await.context("ImportAll")?)
+    proxy.import_all(&data).await.context("ImportAll")
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,7 +1039,7 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
         y * 365 + y / 4 - y / 100 + y / 400
     };
     let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
     let day_of_year: u64 = days_in_month[..month as usize].iter().sum::<u64>()
         + if leap && month > 2 { 1 } else { 0 }
         + day

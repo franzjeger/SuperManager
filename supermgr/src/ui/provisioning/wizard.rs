@@ -3848,13 +3848,13 @@ fn show_batch_dialog(
                 Ok(entries) => {
                     for (i, entry) in entries.iter().enumerate() {
                         let row = adw::ActionRow::builder()
-                            .title(&format!(
+                            .title(format!(
                                 "{}. {} — {}",
                                 i + 1,
                                 entry.customer_name,
                                 entry.location,
                             ))
-                            .subtitle(&format!(
+                            .subtitle(format!(
                                 "{} | WAN: {} {} | LAN: {}",
                                 entry.device_type,
                                 entry.wan_type,
@@ -4221,7 +4221,7 @@ fn show_diff_dialog(
     let unchanged = diff_lines.iter().filter(|(t, _)| *t == ' ').count();
 
     let stats_label = gtk4::Label::builder()
-        .label(&format!(
+        .label(format!(
             "  +{added} added   -{removed} removed   {unchanged} unchanged",
         ))
         .css_classes(["dim-label"])

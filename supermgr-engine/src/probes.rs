@@ -905,7 +905,10 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
     Ok(combined.contains("verify return code") || combined.contains("cipher    : "))
 }
 
-fn parse_tls_output(text: &str, host: &str) -> Result<TlsInfo> {
+/// `_host` is unused today; it stays in the signature because the
+/// certificate-name checks this parser will grow need it, and the
+/// callers already have it to hand.
+fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
     let mut version = "unknown".to_owned();
     let mut cipher = "unknown".to_owned();
     let mut subject: Option<String> = None;
@@ -955,10 +958,6 @@ fn parse_tls_output(text: &str, host: &str) -> Result<TlsInfo> {
         self_signed,
         weak_ciphers_accepted: Vec::new(),  // populated by tls_audit
         protocols_accepted: Vec::new(),     // populated by tls_audit
-    })
-    .map(|info| {
-        let _ = host; // marker — keep signature flexible
-        info
     })
 }
 

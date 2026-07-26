@@ -565,7 +565,7 @@ impl DaemonService {
     /// `"info"`, `"debug"`, or `"trace"`.
     async fn set_log_level(&self, level: &str) -> fdo::Result<()> {
         info!("set_log_level: changing to '{level}'");
-        (self.set_log_level)(level).map_err(|e| fdo::Error::Failed(e))
+        (self.set_log_level)(level).map_err(fdo::Error::Failed)
     }
 
     // =======================================================================
@@ -700,7 +700,7 @@ impl DaemonService {
                 .map(str::trim)
                 .filter(|l| !l.starts_with('#') && !l.is_empty())
                 .collect();
-            let is_wg = active.iter().any(|l| *l == "[Interface]");
+            let is_wg = active.contains(&"[Interface]");
             let looks_like_ovpn = active.iter().any(|l| {
                 let lc = l.to_ascii_lowercase();
                 lc == "client" || lc.starts_with("remote ") || lc.starts_with("dev tun")
@@ -3224,11 +3224,10 @@ impl DaemonService {
             for (filename, content) in obj {
                 if let Some(text) = content.as_str() {
                     let path = backup_dir.join(filename);
-                    if !path.exists() {
-                        if std::fs::write(&path, text).is_ok() {
+                    if !path.exists()
+                        && std::fs::write(&path, text).is_ok() {
                             restored_backups += 1;
                         }
-                    }
                 }
             }
             if restored_backups > 0 {
@@ -4566,8 +4565,8 @@ impl DaemonService {
                 })
             })
             .collect();
-        Ok(serde_json::to_string(&list)
-            .map_err(|e| fdo::Error::Failed(e.to_string()))?)
+        serde_json::to_string(&list)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Emitted when the reachability of an SSH host changes.
@@ -5469,7 +5468,7 @@ fn validate_ovpn_config(text: &str) -> Result<(), String> {
 
     // Must be a client config, not a server config.
     if !has_directive("client") && !has_directive("tls-client") {
-        if active_lines.iter().any(|l| *l == "[Interface]") {
+        if active_lines.contains(&"[Interface]") {
             return Err(
                 "this looks like a WireGuard config — use 'Import WireGuard' instead".into(),
             );
@@ -5739,7 +5738,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
 
             for (id, reachable) in &results {
                 let prev_reachable = state_guard.host_health.get(id).copied();
-                let changed = prev_reachable.map_or(true, |prev| prev != *reachable);
+                let changed = prev_reachable != Some(*reachable);
                 state_guard.host_health.insert(*id, *reachable);
                 if changed {
                     let object_path = zbus::zvariant::ObjectPath::try_from(
@@ -5836,8 +5835,7 @@ pub fn spawn_monitor_task(
                     }
 
                     // Check for unexpected disconnects.
-                    if let Some(_) =
-                        supermgr_core::vpn::backend::reconcile_status(&current_state, &backend_status)
+                    if supermgr_core::vpn::backend::reconcile_status(&current_state, &backend_status).is_some()
                     {
                         // The VPN dropped unexpectedly.  Run backend.disconnect()
                         // to restore the original default route, revert DNS, and
@@ -5880,7 +5878,7 @@ pub fn spawn_monitor_task(
                             if let VpnState::Connected { profile_id, .. } = &current_state {
                                 s.profiles
                                     .get(profile_id)
-                                    .map_or(false, |p| p.kill_switch)
+                                    .is_some_and(|p| p.kill_switch)
                             } else {
                                 false
                             }
@@ -6026,9 +6024,7 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                 s.hosts
                     .values()
                     .filter_map(|h| {
-                        if h.api_token_ref.is_none() {
-                            return None;
-                        }
+                        h.api_token_ref.as_ref()?;
                         let v = match h.device_type {
                             supermgr_core::ssh::DeviceType::Fortigate => Vendor::FortiGate,
                             supermgr_core::ssh::DeviceType::OpnSense => Vendor::OpnSense,

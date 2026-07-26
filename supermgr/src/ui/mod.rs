@@ -1315,18 +1315,18 @@ pub fn build_ui(
                 let entry = sorted.get(idx).copied();
                 let name = entry.map(|p| p.name.clone());
                 let exists = entry.is_some();
-                let ac = entry.map_or(false, |p| p.auto_connect);
-                let ft = entry.map_or(true, |p| p.full_tunnel);
-                let ks = entry.map_or(false, |p| p.kill_switch);
-                let supports = entry.map_or(false, |p| {
+                let ac = entry.is_some_and(|p| p.auto_connect);
+                let ft = entry.is_none_or(|p| p.full_tunnel);
+                let ks = entry.is_some_and(|p| p.kill_switch);
+                let supports = entry.is_some_and(|p| {
                     p.backend == "WireGuard" || p.backend.starts_with("FortiGate")
                 });
                 let routes = entry.map(|p| p.split_routes.clone()).unwrap_or_default();
-                let editable = entry.map_or(false, |p| {
+                let editable = entry.is_some_and(|p| {
                     p.backend == "OpenVPN3" || p.backend.starts_with("FortiGate")
                 });
-                let wg = entry.map_or(false, |p| p.backend == "WireGuard");
-                let azure = entry.map_or(false, |p| p.backend.starts_with("Azure"));
+                let wg = entry.is_some_and(|p| p.backend == "WireGuard");
+                let azure = entry.is_some_and(|p| p.backend.starts_with("Azure"));
                 s.selected_profile = entry.map(|p| p.id.to_string());
                 if matches!(s.vpn_state, VpnState::Error { .. }) {
                     s.vpn_state = VpnState::Disconnected;
@@ -1408,7 +1408,7 @@ pub fn build_ui(
                     deployed_list.remove(&child);
                 }
                 let deployed_row = adw::ActionRow::builder()
-                    .title(&format!("Deployed to {} host(s)", key.deployed_count))
+                    .title(format!("Deployed to {} host(s)", key.deployed_count))
                     .activatable(false)
                     .build();
                 deployed_list.append(&deployed_row);
@@ -1474,7 +1474,7 @@ pub fn build_ui(
             }
             // Flatten with group headers as None.
             let mut flat: Vec<Option<HostSummary>> = Vec::new();
-            for (_group_name, hosts_in_group) in &groups {
+            for hosts_in_group in groups.values() {
                 flat.push(None); // group header
                 for h in hosts_in_group {
                     flat.push(Some(h.clone()));
@@ -1890,10 +1890,7 @@ pub fn build_ui(
                 }
 
                 // Refresh port forwards status.
-                match crate::dbus_client::dbus_ssh_list_port_forwards().await {
-                    Ok(json) => { let _ = tx.send(AppMsg::PortForwardsRefreshed(json)); }
-                    Err(_) => {}
-                }
+                if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await { let _ = tx.send(AppMsg::PortForwardsRefreshed(json)); }
             });
         });
     }
@@ -2031,7 +2028,7 @@ pub fn build_ui(
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let idx = s.profiles.iter().position(|p| Some(p.id.to_string()) == pid);
-                let supports = idx.map_or(false, |i| {
+                let supports = idx.is_some_and(|i| {
                     let b = &s.profiles[i].backend;
                     b == "WireGuard" || b.starts_with("FortiGate")
                 });
@@ -2711,7 +2708,7 @@ pub fn build_ui(
                     match proxy.unifi_set_inform(&host_id, &inform_url).await {
                         Ok(resp) => {
                             let _ = tx.send(AppMsg::ShowToast(
-                                format!("set-inform sent successfully"),
+                                "set-inform sent successfully".to_string(),
                             ));
                             tracing::info!("set-inform result: {resp}");
                         }
@@ -3438,7 +3435,7 @@ pub fn build_ui(
                 }
                 AppMsg::FortigateConfigDiff { hostname, diff } => {
                     let win = gtk4::Window::builder()
-                        .title(&format!("Config diff — {hostname}"))
+                        .title(format!("Config diff — {hostname}"))
                         .default_width(700)
                         .default_height(550)
                         .resizable(true)
@@ -3546,7 +3543,7 @@ pub fn build_ui(
         let console_input = console_panel.input_view.clone();
         let outer_stack_k = outer_stack.clone();
         let lock_page_k = lock_page.clone();
-        let app_settings_k = Arc::clone(&app_settings);
+        let _app_settings_k = Arc::clone(&app_settings);
         let key_ctrl = gtk4::EventControllerKey::new();
         key_ctrl.connect_key_pressed(move |_, key, _, mods| {
             let ctrl = mods.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
@@ -3602,7 +3599,7 @@ pub fn build_ui(
 
     // --- Unlock button -------------------------------------------------------
     {
-        let app_settings = Arc::clone(&app_settings);
+        let _app_settings = Arc::clone(&app_settings);
         let outer_stack = outer_stack.clone();
         let lock_page = lock_page.clone();
         let inactivity_counter = inactivity_counter.clone();
@@ -3635,7 +3632,7 @@ pub fn build_ui(
 
     // --- Set Password button (first-time setup, also accessible from lock) ----
     {
-        let app_settings = Arc::clone(&app_settings);
+        let _app_settings = Arc::clone(&app_settings);
         let outer_stack = outer_stack.clone();
         let lock_page = lock_page.clone();
         let inactivity_counter = inactivity_counter.clone();
@@ -3886,13 +3883,10 @@ pub fn build_ui(
                     }
                 }
                 // Re-fetch SSH state.
-                match fetch_initial_ssh_state(&app_state).await {
-                    Ok(()) => {
-                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-                        tx.send(AppMsg::SshKeysRefreshed(s.ssh_keys.clone())).ok();
-                        tx.send(AppMsg::SshHostsRefreshed(s.hosts.clone())).ok();
-                    }
-                    Err(_) => {}
+                if let Ok(()) = fetch_initial_ssh_state(&app_state).await {
+                    let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    tx.send(AppMsg::SshKeysRefreshed(s.ssh_keys.clone())).ok();
+                    tx.send(AppMsg::SshHostsRefreshed(s.hosts.clone())).ok();
                 }
             });
         });
@@ -3942,14 +3936,15 @@ fn push_notification(
     }
 
     // Remove placeholder if present.
-    while let Some(child) = notif_list.first_child() {
-        if child.downcast_ref::<adw::ActionRow>()
-            .map_or(false, |r| r.title() == "No notifications")
+    // Only the first row can be the placeholder, so this is a single
+    // check rather than a scan. It was written as a `while` whose every
+    // branch broke, which read like a loop and never was one.
+    if let Some(child) = notif_list.first_child() {
+        if child
+            .downcast_ref::<adw::ActionRow>()
+            .is_some_and(|r| r.title() == "No notifications")
         {
             notif_list.remove(&child);
-            break;
-        } else {
-            break;
         }
     }
 
