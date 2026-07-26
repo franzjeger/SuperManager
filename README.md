@@ -83,7 +83,8 @@ All three share `supermgr-core` (types, traits, secret-store abstraction, RPC pr
 - Configurable daemon log level (ERROR through TRACE)
 
 ### Security
-- Master password with SHA-256 hash + salt
+- Master password hashed with Argon2id (salted PHC string); hashes written by
+  pre-Argon2 builds still verify and are re-hashed on the next unlock
 - Auto-lock after configurable inactivity timeout
 - Secrets stored via system keyring (Secret Service API)
 - Audit logging for all SSH, VPN, and API operations
