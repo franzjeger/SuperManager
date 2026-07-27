@@ -67,7 +67,7 @@ final class CardModelTests: XCTestCase {
     // MARK: SSH host connection card
 
     func testNotTestedIsUnknownWithAnInvitation() {
-        let c = HostConnectionCardModel(probe: nil)
+        let c = HostConnectionCardModel(probe: .notTested)
         XCTAssertEqual(c.status, .unknown)
         XCTAssertEqual(c.title, "Not tested")
         XCTAssertTrue(c.meta.contains("Test the connection"))
@@ -77,38 +77,39 @@ final class CardModelTests: XCTestCase {
         // The host isn't broken, the path from here is — offline, with the
         // "is the right VPN up?" nudge. This is the distinction the card exists
         // to draw.
-        let c = HostConnectionCardModel(probe: "network: no route to host")
+        let c = HostConnectionCardModel(probe: .unreachable("no route to host"))
         XCTAssertEqual(c.status, .offline)
         XCTAssertEqual(c.title, "Unreachable")
         XCTAssertEqual(c.meta, "no route to host — check that the right VPN tunnel is up.")
     }
 
-    func testAuthFailureIsErrorWithTheMessageUnwrapped() {
+    func testAuthFailureIsErrorWithTheMessage() {
         // The host answered and rejected us — a fact someone must fix.
-        let c = HostConnectionCardModel(probe: "auth: permission denied (publickey)")
+        let c = HostConnectionCardModel(probe: .authFailed("permission denied (publickey)"))
         XCTAssertEqual(c.status, .error)
         XCTAssertEqual(c.title, "Auth failed")
         XCTAssertEqual(c.meta, "permission denied (publickey)")
     }
 
-    func testOkIsOnline() {
-        let c = HostConnectionCardModel(probe: "ok")
+    func testReachableIsOnline() {
+        let c = HostConnectionCardModel(probe: .reachable)
         XCTAssertEqual(c.status, .online)
         XCTAssertEqual(c.title, "Reachable")
     }
 
-    func testUnprefixedFailureIsError() {
-        // "otherFailure" arrives as a bare message with no kind prefix.
-        let c = HostConnectionCardModel(probe: "something went sideways")
+    func testFailedIsError() {
+        let c = HostConnectionCardModel(probe: .failed("something went sideways"))
         XCTAssertEqual(c.status, .error)
         XCTAssertEqual(c.title, "Failed")
         XCTAssertEqual(c.meta, "something went sideways")
     }
-    // NOTE: `probe` is stringly-typed ("auth: …"/"network: …") even though
-    // testConnection already returns a structured kind before flattening it to
-    // this string. Replacing the string with that enum end-to-end is the
-    // honest next cleanup; these tests pin current behaviour so that refactor
-    // has a floor to land on.
+
+    func testTestingIsPendingWithNoMeta() {
+        let c = HostConnectionCardModel(probe: .testing)
+        XCTAssertEqual(c.status, .pending)
+        XCTAssertEqual(c.title, "Testing…")
+        XCTAssertEqual(c.meta, "")
+    }
 
     // MARK: SSH sidebar grouping
 
