@@ -92,9 +92,9 @@ struct HostDetailView: View {
                     // kebab; those are identity/configuration actions and
                     // moved to the header, same split as the VPN detail.
                     ConnectionCard(
-                        status: hostCardStatus,
-                        title: hostCardTitle,
-                        meta: hostCardMeta,
+                        status: hostCard.status,
+                        title: hostCard.title,
+                        meta: hostCard.meta,
                         busy: connectionStatus == "Testing…"
                     ) {
                         HStack(spacing: 10) {
@@ -244,43 +244,10 @@ struct HostDetailView: View {
     /// broken, the path from HERE is — usually a VPN that isn't up — and the
     /// meta line says so. Auth failure is `.error`: the host answered and
     /// rejected us, which is a fact about configuration someone must fix.
-    private var hostCardStatus: StatusStyle {
-        switch connectionStatus {
-        case nil:                                    return .unknown
-        case "Testing…":                             return .pending
-        case "ok":                                   return .online
-        case .some(let s) where s.hasPrefix("auth"): return .error
-        case .some(let s) where s.hasPrefix("network"): return .offline
-        default:                                     return .error
-        }
-    }
-
-    private var hostCardTitle: String {
-        switch connectionStatus {
-        case nil:                                    return "Not tested"
-        case "Testing…":                             return "Testing…"
-        case "ok":                                   return "Reachable"
-        case .some(let s) where s.hasPrefix("auth"): return "Auth failed"
-        case .some(let s) where s.hasPrefix("network"): return "Unreachable"
-        default:                                     return "Failed"
-        }
-    }
-
-    private var hostCardMeta: String {
-        switch connectionStatus {
-        case nil:
-            return "Test the connection to verify reachability and credentials."
-        case "Testing…":
-            return ""
-        case "ok":
-            return "SSH connection and authentication verified."
-        case .some(let s) where s.hasPrefix("auth: "):
-            return String(s.dropFirst(6))
-        case .some(let s) where s.hasPrefix("network: "):
-            return String(s.dropFirst(9)) + " — check that the right VPN tunnel is up."
-        case .some(let s):
-            return s
-        }
+    /// Decision logic lives in `HostConnectionCardModel` (pure, tested); the
+    /// view just wraps its probe-result `@State`.
+    private var hostCard: HostConnectionCardModel {
+        HostConnectionCardModel(probe: connectionStatus)
     }
 
     private func openTerminal(host: SshHostSummary) {
