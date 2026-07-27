@@ -93,6 +93,29 @@ All three share `supermgr-core` (types, traits, secret-store abstraction, RPC pr
 - Audit logging for all SSH, VPN, and API operations
 - **SSH host-key verification** on every platform — trust-on-first-use, then
   a fingerprint mismatch refuses the connection (see below)
+- **Polkit authorization** on the Linux daemon's credential-reading methods
+  (see below)
+
+#### Who may talk to the daemon (Linux)
+
+`supermgrd` runs as root on the D-Bus system bus, and its bus policy lets any
+local user send it messages — that is how the unprivileged GUI reaches it.
+Authorization is therefore the daemon's job, not the bus's.
+
+The methods that hand back credentials — `SshExportPrivateKey`,
+`SshGetPassword` and `ExportAll`, the last of which bundles the entire secret
+store — require the `org.supermgr.daemon.secrets` polkit action, held at
+`auth_admin`. That means administrator authentication **every time**, with no
+session-wide grace period, and no access at all from inactive or remote
+sessions.
+
+This **fails closed**: if polkit is not installed or cannot be reached, those
+methods are refused rather than allowed. Install
+`contrib/polkit/org.supermgr.Daemon.policy` (see the install steps above) —
+without it, polkit has no rule for the action and denies by default.
+
+The remaining methods are not yet gated; see the tracking issue for the rest
+of the surface.
 
 #### SSH host keys
 
@@ -236,6 +259,7 @@ sudo install -m755 target/release/supermgr /usr/bin/supermgr
 sudo install -m755 target/release/supermgr-mcp /usr/bin/supermgr-mcp
 sudo install -Dm644 contrib/systemd/supermgrd.service /etc/systemd/system/supermgrd.service
 sudo install -Dm644 contrib/dbus/org.supermgr.Daemon.conf /usr/share/dbus-1/system.d/org.supermgr.Daemon.conf
+sudo install -Dm644 contrib/polkit/org.supermgr.Daemon.policy /usr/share/polkit-1/actions/org.supermgr.Daemon.policy
 sudo install -Dm644 contrib/dbus/org.supermgr.Daemon.service /usr/share/dbus-1/system-services/org.supermgr.Daemon.service
 sudo install -Dm644 contrib/desktop/org.supermgr.SuperManager.desktop /usr/share/applications/org.supermgr.SuperManager.desktop
 sudo install -Dm644 contrib/icons/org.supermgr.SuperManager.svg /usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg

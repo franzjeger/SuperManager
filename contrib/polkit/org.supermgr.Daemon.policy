@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  Polkit actions for the SuperManager daemon.
+
+  `supermgrd` runs as root on the system bus and its bus policy lets any
+  local user send it messages, because the unprivileged GUI has to be able
+  to reach it. Polkit is what decides whether a given caller may perform a
+  given action once the message arrives.
+
+  Install to /usr/share/polkit-1/actions/. The action ids here must match
+  the constants in supermgrd/src/polkit.rs — there is a test that checks
+  they do, because a missing rule is an implicit deny that reads like a bug.
+-->
+<policyconfig>
+
+  <vendor>SuperManager</vendor>
+  <vendor_url>https://github.com/franzjeger/SuperManager</vendor_url>
+
+  <action id="org.supermgr.daemon.secrets">
+    <description>Read stored SSH keys, passwords and backups</description>
+    <message>Authentication is required to read SuperManager's stored credentials</message>
+
+    <!--
+      auth_admin, not auth_admin_keep: each grant discloses long-lived
+      credentials — a private key or a host password — so one
+      authentication must not silently cover later reads.
+
+      allow_any and allow_inactive are both no. Reading the credential
+      store is for someone sitting at an active local session, not a
+      remote or switched-away one.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+</policyconfig>
