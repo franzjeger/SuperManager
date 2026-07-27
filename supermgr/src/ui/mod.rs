@@ -457,16 +457,18 @@ pub fn build_ui(
         .css_classes(["flat"])
         .build();
     {
+        // Clear the store, then redraw from it. Emptying the ListBox
+        // directly used to leave the history behind, so "Clear" cleared
+        // only what you could see.
         let notif_list = notif_list.clone();
+        let notif_btn = notif_btn.clone();
+        let app_state = Arc::clone(&app_state);
         notif_clear_btn.connect_clicked(move |_| {
-            while let Some(child) = notif_list.first_child() {
-                notif_list.remove(&child);
+            {
+                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.clear_notifications();
             }
-            let placeholder = adw::ActionRow::builder()
-                .title("No notifications")
-                .activatable(false)
-                .build();
-            notif_list.append(&placeholder);
+            render_notifications(&app_state, &notif_list, &notif_btn);
         });
     }
     notif_header.append(&notif_title);
@@ -3922,7 +3924,90 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
 // ---------------------------------------------------------------------------
 
 /// Switch the outer stack to the lock page and prepare it for unlock.
-/// Push a notification into the store and update the popover list.
+/// Build one popover row from a stored notification.
+fn notification_row(notification: &crate::app::Notification) -> gtk4::Box {
+    let row_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    row_box.append(&gtk4::Image::from_icon_name(notification.icon));
+
+    let text_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(2)
+        .hexpand(true)
+        .build();
+    text_box.append(
+        &gtk4::Label::builder()
+            .label(&notification.message)
+            .halign(gtk4::Align::Start)
+            .wrap(true)
+            .wrap_mode(gtk4::pango::WrapMode::WordChar)
+            .build(),
+    );
+    // The stored instant, shown in local time — not a second clock read
+    // at render time. Re-rendering an old notification now gives the
+    // time it happened rather than the time it was redrawn.
+    text_box.append(
+        &gtk4::Label::builder()
+            .label(
+                notification
+                    .timestamp
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string(),
+            )
+            .halign(gtk4::Align::Start)
+            .css_classes(["caption", "dim-label"])
+            .build(),
+    );
+    row_box.append(&text_box);
+    row_box
+}
+
+/// Redraw the popover list from `AppState::notifications`.
+///
+/// The store is the source of truth and this is its view. Previously each
+/// row was built from the arguments that had just been pushed, so the two
+/// were free to disagree — and did: Clear emptied the list but left the
+/// store full, the 100-entry cap bounded the store while the list grew
+/// without limit, and the bell badge, once filled, never went back.
+fn render_notifications(
+    app_state: &Arc<Mutex<AppState>>,
+    notif_list: &gtk4::ListBox,
+    notif_btn: &gtk4::MenuButton,
+) {
+    while let Some(child) = notif_list.first_child() {
+        notif_list.remove(&child);
+    }
+
+    let notifications = {
+        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        s.notifications.clone()
+    };
+
+    if notifications.is_empty() {
+        notif_list.append(
+            &adw::ActionRow::builder()
+                .title("No notifications")
+                .activatable(false)
+                .build(),
+        );
+        notif_btn.set_icon_name("bell-outline-symbolic");
+        return;
+    }
+
+    for notification in &notifications {
+        notif_list.append(&notification_row(notification));
+    }
+    notif_btn.set_icon_name("bell-symbolic");
+}
+
+/// Push a notification into the store and redraw the popover from it.
 fn push_notification(
     app_state: &Arc<Mutex<AppState>>,
     notif_list: &gtk4::ListBox,
@@ -3934,54 +4019,7 @@ fn push_notification(
         let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         s.push_notification(icon, message);
     }
-
-    // Remove placeholder if present.
-    // Only the first row can be the placeholder, so this is a single
-    // check rather than a scan. It was written as a `while` whose every
-    // branch broke, which read like a loop and never was one.
-    if let Some(child) = notif_list.first_child() {
-        if child
-            .downcast_ref::<adw::ActionRow>()
-            .is_some_and(|r| r.title() == "No notifications")
-        {
-            notif_list.remove(&child);
-        }
-    }
-
-    // Prepend new row with wrapping text.
-    let now = chrono::Local::now().format("%H:%M:%S").to_string();
-    let row_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(8)
-        .margin_end(8)
-        .build();
-    row_box.append(&gtk4::Image::from_icon_name(icon));
-    let text_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(2)
-        .hexpand(true)
-        .build();
-    let msg_lbl = gtk4::Label::builder()
-        .label(message)
-        .halign(gtk4::Align::Start)
-        .wrap(true)
-        .wrap_mode(gtk4::pango::WrapMode::WordChar)
-        .build();
-    let time_lbl = gtk4::Label::builder()
-        .label(&now)
-        .halign(gtk4::Align::Start)
-        .css_classes(["caption", "dim-label"])
-        .build();
-    text_box.append(&msg_lbl);
-    text_box.append(&time_lbl);
-    row_box.append(&text_box);
-    notif_list.prepend(&row_box);
-
-    // Badge: update icon to filled bell.
-    notif_btn.set_icon_name("bell-symbolic");
+    render_notifications(app_state, notif_list, notif_btn);
 }
 
 fn lock_session(outer_stack: &gtk4::Stack, lock_page: &LockPage) {
