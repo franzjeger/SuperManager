@@ -1754,7 +1754,13 @@ impl DaemonService {
     }
 
     /// Export the PEM-encoded private key from the secret store.
-    async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String> {
+    async fn ssh_export_private_key(
+        &self,
+        key_id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let state = self.state.lock().await;
         let key = state.ssh_keys.get(&id).ok_or_else(|| fdo::Error::UnknownObject("key not found".into()))?;
@@ -2325,7 +2331,13 @@ impl DaemonService {
 
     /// Store an SSH password for the given host.
     /// Retrieve the stored SSH password for a host (used for RDP/VNC login).
-    async fn ssh_get_password(&self, host_id: &str) -> fdo::Result<String> {
+    async fn ssh_get_password(
+        &self,
+        host_id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let state = self.state.lock().await;
@@ -2992,7 +3004,12 @@ impl DaemonService {
     /// JSON string.  Secret values (private keys, passwords) are **not**
     /// included -- only their `SecretRef` labels.  The caller (GUI) saves the
     /// returned string to a file chosen by the user.
-    async fn export_all(&self) -> fdo::Result<String> {
+    async fn export_all(
+        &self,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let state = self.state.lock().await;
 
         let profiles: Vec<&Profile> = state.profiles.values().collect();
