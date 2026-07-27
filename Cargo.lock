@@ -4379,7 +4379,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -4393,7 +4393,7 @@ dependencies = [
  "num-integer",
  "num-iter",
  "num-traits",
- "rand 0.8.6",
+ "rand 0.8.7",
  "smallvec",
  "zeroize",
 ]
@@ -5003,7 +5003,7 @@ dependencies = [
  "bytes",
  "delegate",
  "futures",
- "rand 0.8.6",
+ "rand 0.8.7",
  "thiserror 1.0.69",
  "tokio",
  "windows 0.58.0",
@@ -5252,7 +5252,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
  "phf_shared",
- "rand 0.8.6",
+ "rand 0.8.7",
 ]
 
 [[package]]
@@ -5689,9 +5689,9 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
-version = "0.8.6"
+version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ca0ecfa931c29007047d1bc58e623ab12e5590e8c7cc53200d5202b69266d8a"
+checksum = "22f6172bdec972074665ed81ed53b71da00bfc44b65a753cfde883ec4c702a1a"
 dependencies = [
  "libc",
  "rand_chacha 0.3.1",
@@ -6125,7 +6125,7 @@ dependencies = [
  "p384",
  "p521",
  "poly1305",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rand_core 0.6.4",
  "russh-cryptovec",
  "russh-keys",
@@ -6185,7 +6185,7 @@ dependencies = [
  "pkcs1",
  "pkcs5",
  "pkcs8",
- "rand 0.8.6",
+ "rand 0.8.7",
  "rand_core 0.6.4",
  "rsa",
  "russh-cryptovec",
@@ -7083,7 +7083,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "serde",
  "serde_json",
@@ -7106,7 +7106,7 @@ dependencies = [
  "chrono",
  "ipnet",
  "keyring",
- "rand 0.8.6",
+ "rand 0.9.4",
  "secret-service",
  "security-framework 3.7.0",
  "serde",
@@ -7135,7 +7135,7 @@ dependencies = [
  "ipnet",
  "nix 0.29.0",
  "proptest",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "rsa",
  "russh",
@@ -7207,7 +7207,7 @@ dependencies = [
  "ipnet",
  "netlink-packet-route 0.19.0",
  "nix 0.29.0",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "rsa",
  "rtnetlink",
@@ -7255,7 +7255,7 @@ dependencies = [
  "eventlog",
  "ipnet",
  "log",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "rsa",
  "russh",
@@ -7443,7 +7443,7 @@ dependencies = [
  "percent-encoding",
  "pest",
  "pest_derive",
- "rand 0.8.6",
+ "rand 0.8.7",
  "regex",
  "serde",
  "serde_json",
@@ -9164,7 +9164,7 @@ dependencies = [
  "ipnet",
  "libloading 0.7.4",
  "log",
- "rand 0.8.6",
+ "rand 0.8.7",
  "widestring 0.4.3",
  "winapi",
 ]
@@ -9484,7 +9484,7 @@ dependencies = [
  "hex",
  "nix 0.29.0",
  "ordered-stream",
- "rand 0.8.6",
+ "rand 0.8.7",
  "serde",
  "serde_repr",
  "sha1",
