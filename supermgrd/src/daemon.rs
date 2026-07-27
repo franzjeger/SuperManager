@@ -600,7 +600,19 @@ impl DaemonService {
     /// ```json
     /// {"url":"https://...","on_host_down":true,"on_vpn_disconnect":false}
     /// ```
-    async fn get_webhook_config(&self) -> fdo::Result<String> {
+    async fn get_webhook_config(
+        &self,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        // The webhook URL is a credential: Slack/Discord/generic webhook URLs
+        // carry an embedded token, and anyone who can read it can post as the
+        // service. `set_webhook` already redacts it to "(set)" in the log for
+        // exactly this reason — but this method handed it back raw to any local
+        // caller. Guard it with the same secrets action as the other
+        // credential reads. No UX cost: nothing calls this (the GUI edits from
+        // its own local settings), so it was pure attack surface.
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let state = self.state.lock().await;
         let obj = serde_json::json!({
             "url": state.webhook_url,
@@ -1572,7 +1584,18 @@ impl DaemonService {
     }
 
     /// Export a profile as a TOML string (secrets replaced by their labels).
-    async fn export_profile(&self, profile_id: &str) -> fdo::Result<String> {
+    async fn export_profile(
+        &self,
+        profile_id: &str,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) -> fdo::Result<String> {
+        // `export_all` is guarded; this exports one profile in the same shape
+        // (config + SecretRef labels) and was not. A local user could
+        // `list_profiles` then export each one, reconstructing the full
+        // inventory the export_all guard protects. Same action, so the two
+        // export paths now agree.
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
