@@ -52,7 +52,7 @@ core-foundation-sys = "0.8"
 # arrival. Declaring it lets Linux CI build and test the engine instead of
 # leaving 290-odd tests to the macOS runner alone.
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.29", features = ["user"] }
+nix = { version = "0.30", features = ["user"] }
 
 [dev-dependencies]
 tempfile = "3"
