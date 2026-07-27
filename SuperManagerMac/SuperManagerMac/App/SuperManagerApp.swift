@@ -110,9 +110,6 @@ struct SuperManagerApp: App {
             // open a new instance of the scene's view, which is exactly
             // what we want for a single-window app like this one.
             CommandMenu("Navigation") {
-                Button("Fleet") { appState.selectedSection = .fleet }
-                    .keyboardShortcut("0", modifiers: .command)
-                Divider()
                 Button("SSH") { appState.selectedSection = .ssh }
                     .keyboardShortcut("1", modifiers: .command)
                 Button("VPN") { appState.selectedSection = .vpn }
@@ -123,10 +120,6 @@ struct SuperManagerApp: App {
                     .keyboardShortcut("4", modifiers: .command)
                 Button("Provisioning") { appState.selectedSection = .provisioning }
                     .keyboardShortcut("5", modifiers: .command)
-                Button("Security") { appState.selectedSection = .security }
-                    .keyboardShortcut("6", modifiers: .command)
-                Button("Recon") { appState.selectedSection = .recon }
-                    .keyboardShortcut("7", modifiers: .command)
                 Divider()
                 // Opens WebCaptureSheet with whatever's on the
                 // clipboard auto-parsed. Lets the operator

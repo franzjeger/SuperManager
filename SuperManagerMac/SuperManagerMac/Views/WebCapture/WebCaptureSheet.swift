@@ -45,7 +45,6 @@ struct WebCaptureSheet: View {
     @State private var deviceType: DeviceType = .linux
     @State private var group: String = ""
 
-    @State private var attachToEngagementId: String?
     @State private var saving: Bool = false
     @State private var errorMessage: String?
 
@@ -55,8 +54,6 @@ struct WebCaptureSheet: View {
 
     enum CaptureAction: String, CaseIterable, Identifiable {
         case addSshHost = "Add as SSH host"
-        case addToScope = "Add to engagement scope"
-        case scanNow = "Run network scan now"
         case copyDetails = "Copy device details"
         var id: String { rawValue }
     }
@@ -257,40 +254,6 @@ struct WebCaptureSheet: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             }
-        case .addToScope:
-            Section("Add to engagement scope") {
-                if appState.engagements.isEmpty {
-                    Text("No engagements exist yet. Create one in Security first.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                } else {
-                    Picker("Engagement", selection: $attachToEngagementId) {
-                        Text("Pick…").tag(Optional<String>.none)
-                        ForEach(appState.engagements) { e in
-                            Text(e.title).tag(Optional(e.id))
-                        }
-                    }
-                    Text(
-                        "Appends `\(hostname)/32` to the engagement's "
-                        + "`scope_cidrs`. Future active scans automatically "
-                        + "include it; existing scope entries are preserved."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-            }
-        case .scanNow:
-            Section("Network scan target") {
-                TextField("Target", text: $hostname)
-                    .font(.body.monospaced())
-                Text(
-                    "Kicks off `discovery_active_scan` against this single "
-                    + "host. Switches to the Recon section so you can watch "
-                    + "the live progress and triage findings."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
         case .copyDetails:
             Section("Clipboard payload") {
                 Text(clipboardPayload)
@@ -324,8 +287,6 @@ struct WebCaptureSheet: View {
     private var actionButtonLabel: String {
         switch action {
         case .addSshHost: return saving ? "Adding…" : "Add SSH host"
-        case .addToScope: return saving ? "Updating…" : "Add to scope"
-        case .scanNow: return saving ? "Starting…" : "Start scan"
         case .copyDetails: return "Copy & close"
         }
     }
@@ -334,8 +295,6 @@ struct WebCaptureSheet: View {
         guard let c = capture, !c.hostname.isEmpty else { return false }
         switch action {
         case .addSshHost: return !label.isEmpty && !hostname.isEmpty
-        case .addToScope: return attachToEngagementId != nil && !hostname.isEmpty
-        case .scanNow: return !hostname.isEmpty
         case .copyDetails: return true
         }
     }
@@ -409,10 +368,6 @@ struct WebCaptureSheet: View {
                 password: nil
             )
             appState.selectedSection = .ssh
-        case .addToScope:
-            await addToEngagementScope()
-        case .scanNow:
-            await runScanNow()
         case .copyDetails:
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(clipboardPayload, forType: .string)
@@ -420,36 +375,6 @@ struct WebCaptureSheet: View {
         dismiss()
     }
 
-    private func addToEngagementScope() async {
-        guard let id = attachToEngagementId,
-              let existing = appState.engagements.first(where: { $0.id == id })
-        else {
-            errorMessage = "Engagement not found — refresh and retry."
-            return
-        }
-        let entry = hostname.contains("/") ? hostname : "\(hostname)/32"
-        var newScope = existing.scopeCidrs
-        if !newScope.contains(entry) { newScope.append(entry) }
-        // appState's engagement update RPC. If it doesn't exist
-        // yet, fall back to selecting Security so the operator
-        // can edit the engagement manually.
-        if !(await appState.updateEngagementScope(
-            id: id, scopeCidrs: newScope
-        )) {
-            errorMessage =
-                "Couldn't update scope automatically — open the engagement in "
-                + "Security and add `\(entry)` manually."
-            appState.selectedSection = .security
-        }
-    }
-
-    private func runScanNow() async {
-        // Stash the target on AppState so the Recon view's
-        // network-scan tile can pick it up on appear. Switching
-        // sections at the same time gives a clean hand-off.
-        appState.pendingNetworkScanTargets = [hostname]
-        appState.selectedSection = .recon
-    }
 }
 
 #if DEBUG

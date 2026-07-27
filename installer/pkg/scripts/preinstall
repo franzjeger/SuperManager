@@ -1,0 +1,21 @@
+#!/bin/bash
+# installer/pkg/scripts/preinstall
+# ─────────────────────────────────
+# Runs as root BEFORE the package payload is written to the target volume.
+# Goal: gracefully unload an already-running instance of the VPN DNS cleanup
+# daemon so that the installer can safely overwrite the plist file.
+#
+# On a first install the service is not loaded, so `launchctl bootout`
+# returns a non-zero exit code — we suppress that with `|| true` to keep
+# the install idempotent.
+#
+# On an upgrade the running service is unloaded here; postinstall reloads
+# it from the freshly installed plist.
+
+set -euo pipefail
+
+LABEL="no.sybr.supermanager.vpn-dns-cleanup"
+
+launchctl bootout "system/${LABEL}" 2>/dev/null || true
+
+exit 0
