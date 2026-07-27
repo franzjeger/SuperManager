@@ -69,7 +69,7 @@ reqwest     = { version = "0.12", default-features = false, features = ["json", 
 # SHA-256 for PKCE code_challenge
 sha2        = "0.10"
 # SSH key generation, parsing, fingerprinting (RustCrypto)
-ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_core"] }
+ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_core", "getrandom"] }
 # RSA key generation with bit-size control
 rsa         = { version = "0.9",  features = ["std"] }
 # Async SSH client (pure Rust, tokio-native)
