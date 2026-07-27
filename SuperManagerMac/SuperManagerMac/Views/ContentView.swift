@@ -1021,12 +1021,11 @@ struct ContentView: View {
     /// customer filter — and falls through gracefully for lab hosts nobody
     /// has linked.
     private func hostSectionTitle(for host: SshHostSummary) -> String {
-        if let slug = appState.hostIndex.customerSlug(forHost: host),
-           !slug.isEmpty,
-           let customer = appState.customers.first(where: { $0.slug == slug }) {
-            return customer.displayName
-        }
-        return host.group.isEmpty ? "Ungrouped" : host.group
+        SshHostGrouping.sectionTitle(
+            for: host,
+            hostIndex: appState.hostIndex,
+            customers: appState.customers
+        )
     }
 
     private var hostListContent: some View {

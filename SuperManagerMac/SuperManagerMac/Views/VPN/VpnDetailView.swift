@@ -479,10 +479,11 @@ struct VpnDetailView: View {
             // the action that changes it, in one block at the top of the pane.
             // Replaces the old pill-plus-buttons row; the per-backend button
             // switch is unchanged and is the card's trailing action.
+            let card = cardModel(profile)
             ConnectionCard(
-                status: cardStatus,
-                title: cardTitle,
-                meta: cardMeta(profile),
+                status: card.status,
+                title: card.title,
+                meta: card.meta,
                 busy: busy || vpnState == "connecting"
             ) {
                 switch profile.config {
@@ -1053,45 +1054,16 @@ struct VpnDetailView: View {
     /// The card's state, in the shared vocabulary. Helper-unreachable wins:
     /// "the app needs setup" and "everything is fine, just not active" are
     /// different colours because they are different next-actions.
-    private var cardStatus: StatusStyle {
-        if !helperReachable { return .warn }
-        return .vpn(vpnState)
-    }
-
-    private var cardTitle: String {
-        if !helperReachable { return "Helper not running" }
-        switch vpnState {
-        case "connected":     return "Connected"
-        case "connecting":    return "Connecting…"
-        case "reconnecting":  return "Reconnecting…"
-        case "disconnecting": return "Disconnecting…"
-        case "problem":       return "Problem"
-        default:              return "Disconnected"
-        }
-    }
-
-    /// One line under the state. Connected → the helper's summary
-    /// ("established 26s ago…"); disconnected → when it was last up plus the
-    /// tunnel mode, because "Disconnected" alone doesn't say whether that has
-    /// been true for a minute or a month.
-    private func cardMeta(_ profile: VpnProfile) -> String {
-        if !helperReachable {
-            return "Approve or install the background daemon to control this tunnel."
-        }
-        let mode = profile.fullTunnel ? "Full tunnel" : "Split tunnel"
-        switch vpnState {
-        case "connected":
-            return stateDetail.isEmpty ? mode : stateDetail
-        case "disconnected":
-            if let last = lastConnectedAt {
-                return "Last connected \(last.formatted(.relative(presentation: .named))) · \(mode)"
-            }
-            return mode
-        default:
-            // Mid-transition the helper's detail line is the most honest thing
-            // we have (e.g. "status query timed out (charon busy)").
-            return stateDetail
-        }
+    /// The card's decision logic lives in `VpnConnectionCardModel` (a pure,
+    /// tested seam); the view just supplies its `@State` and reads the outputs.
+    private func cardModel(_ profile: VpnProfile) -> VpnConnectionCardModel {
+        VpnConnectionCardModel(
+            helperReachable: helperReachable,
+            state: vpnState,
+            fullTunnel: profile.fullTunnel,
+            detail: stateDetail,
+            lastConnectedAt: lastConnectedAt
+        )
     }
 
     /// The most recent successful connect, whether or not that session has
