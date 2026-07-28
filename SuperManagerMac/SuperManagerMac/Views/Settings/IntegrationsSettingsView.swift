@@ -332,7 +332,9 @@ struct IntegrationsSettingsView: View {
                     binding: $slackUrl,
                     placeholder: "https://hooks.slack.com/services/...",
                     onSave: { url in
-                        await appState.setNotifyWebhook(scope: selectedScope, webhookUrl: url)
+                        // Failures already reach the user via `handleError`
+                        // inside the call; the Bool is redundant here.
+                        _ = await appState.setNotifyWebhook(scope: selectedScope, webhookUrl: url)
                     }
                 )
                 notifyField(

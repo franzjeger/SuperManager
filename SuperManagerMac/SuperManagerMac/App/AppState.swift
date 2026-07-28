@@ -432,7 +432,7 @@ class AppState {
         if size < helperLogReadOffset { helperLogReadOffset = 0 }
         guard size > helperLogReadOffset else { return }
 
-        guard let handle = try? FileHandle(forReadingAtPath: path) else { return }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
         try? handle.seek(toOffset: UInt64(helperLogReadOffset))
         let chunk = (try? handle.read(upToCount: size - helperLogReadOffset)) ?? Data()

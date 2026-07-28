@@ -25,7 +25,7 @@ enum DebugLog {
         formatter.dateFormat = "HH:mm:ss.SSS"
         let line = "[\(formatter.string(from: Date()))] \(message)\n"
         if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: path)) {
-            try? handle.seekToEnd()
+            _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: Data(line.utf8))
             try? handle.close()
         }

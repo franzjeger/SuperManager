@@ -110,7 +110,7 @@ enum SupportBundle {
         let tsdLog = "/var/log/supermanager-tailscaled.log"
         if let attrs = try? FileManager.default.attributesOfItem(atPath: tsdLog),
            let size = attrs[.size] as? Int,
-           let handle = try? FileHandle(forReadingAtPath: tsdLog) {
+           let handle = FileHandle(forReadingAtPath: tsdLog) {
             let want = 256 * 1024
             let start = max(0, size - want)
             try? handle.seek(toOffset: UInt64(start))
