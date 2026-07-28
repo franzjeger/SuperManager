@@ -312,6 +312,10 @@ class AppState {
             // that was plainly up as unknown. Polling here makes the one place
             // that owns the state also own the refresh.
             var lastTailscalePoll = Date.distantPast
+            // Host health rides here too, for the same reason and on an
+            // interval the operator chooses (0 = off, and off means no probe
+            // is ever sent — see `refreshHostHealth`).
+            var lastHostHealthPoll = Date.distantPast
             while !Task.isCancelled {
                 // Adaptive cadence: 4 s normally, 500 ms while a
                 // user action is "still settling" (the helper just
@@ -332,6 +336,18 @@ class AppState {
                 if Date().timeIntervalSince(lastTailscalePoll) >= 5 {
                     lastTailscalePoll = Date()
                     await refreshTailscale()
+                }
+                // Host health, opt-in. The setting is re-read every iteration
+                // rather than captured, so switching it on or off in Settings
+                // takes effect on the next tick without restarting anything —
+                // the same way every other runtime setting in this app is
+                // consumed. 0 means the operator turned it off, and then no
+                // probe is sent at all.
+                let healthInterval = AppSettings.shared.hostHealthIntervalSeconds
+                if healthInterval > 0,
+                   Date().timeIntervalSince(lastHostHealthPoll) >= Double(healthInterval) {
+                    lastHostHealthPoll = Date()
+                    await refreshHostHealth()
                 }
                 // Surface helper-side events (auto-reconnect
                 // succeeded, panic_reset escalation) as user

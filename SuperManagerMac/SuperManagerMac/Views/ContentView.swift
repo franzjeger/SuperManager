@@ -1113,9 +1113,22 @@ struct ContentView: View {
         .listStyle(.sidebar)
     }
 
+    /// Three states, and the distinction between the last two matters.
+    ///
+    /// No entry means no probe has run — health checking is off by default,
+    /// so this is the normal case, and it reads `.unknown` rather than
+    /// claiming the host is down.
+    ///
+    /// A failed probe is `.offline`, not `.error`. The probe is a TCP connect
+    /// from *this Mac*; it failing says the host is not reachable from where
+    /// we are standing, which is very often about us — a laptop off the
+    /// customer's network, a VPN that isn't up — and not a fault in the host.
+    /// The same reasoning the connection card uses for a network failure.
+    /// Red would claim something is broken on the far end that we have not
+    /// established.
     private func hostHealthStatus(for hostId: String) -> StatusStyle {
         guard let healthy = appState.hostHealth[hostId] else { return .unknown }
-        return healthy ? .online : .error
+        return healthy ? .online : .offline
     }
 
     // MARK: - Key List

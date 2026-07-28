@@ -670,6 +670,104 @@ impl EngineServer {
         }
     }
 
+    /// Probe every SSH host's reachability, store the result, and return it.
+    ///
+    /// This is the writer `host_health` never had on this side. The Linux
+    /// D-Bus daemon has run the same loop for a long time
+    /// (`supermgrd/src/daemon.rs`, `spawn_health_check_task`), but the engine
+    /// — which is what the macOS app talks to via supermgrd-mac — only ever
+    /// had the reader. `ssh_host_health` therefore returned an empty map
+    /// forever, and the health dot beside every host in the app was
+    /// permanently "never measured".
+    ///
+    /// **TCP connect, not SSH.** Reachability here means "something is
+    /// listening on hostname:port" — a three-way handshake and nothing more.
+    /// The obvious alternative, reusing `ssh_test_connection`, performs a full
+    /// SSH authentication: at a 30-second interval across a handful of hosts
+    /// that is tens of thousands of logins a day, each one a line (often
+    /// several) in the customer's auth log, with fail2ban and account-lockout
+    /// exposure to match. A monitoring feature must not be a self-inflicted
+    /// denial of service on the equipment it monitors.
+    ///
+    /// **Caller-driven, not a background ticker.** The Linux daemon owns its
+    /// own 60-second schedule. Here the app calls this on whatever interval
+    /// the operator chose, which is what lets "off" genuinely mean off: no
+    /// call, no probe, no traffic. A daemon-side ticker would keep probing
+    /// customer equipment after the operator switched the feature off.
+    ///
+    /// Returns the full map so one round-trip both refreshes and reads;
+    /// `ssh_host_health` remains for reading the cache without probing.
+    pub(crate) async fn handle_ssh_probe_hosts(&self, id: u64) -> Response {
+        /// Same budget the Linux loop uses. Long enough for a sleepy gateway
+        /// over a VPN, short enough that one dead host can't stall the sweep.
+        const PROBE_TIMEOUT_MS: u64 = 3_000;
+        /// Higher than the SSH fan-out's cap because a TCP connect is far
+        /// cheaper than an SSH session, but still bounded: an unbounded spawn
+        /// over a large fleet would hold one file descriptor per host.
+        const MAX_CONCURRENT_PROBES: usize = 16;
+
+        // Snapshot under the lock, probe without it. None of the network I/O
+        // happens while the state mutex is held — the same discipline the key
+        // fan-out above follows.
+        let hosts: Vec<(uuid::Uuid, String, u16)> = {
+            let state = self.state.lock().await;
+            state
+                .ssh_hosts
+                .values()
+                .map(|h| (h.id, h.hostname.clone(), h.port))
+                .collect()
+        };
+
+        if hosts.is_empty() {
+            return match serde_json::to_value(HashMap::<String, bool>::new()) {
+                Ok(v) => Response::ok(id, v),
+                Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+            };
+        }
+
+        let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_PROBES));
+        let mut joinset = tokio::task::JoinSet::new();
+        for (host_id, hostname, port) in hosts {
+            let permits = Arc::clone(&permits);
+            joinset.spawn(async move {
+                let _permit = permits.acquire().await.expect("semaphore not closed");
+                let reachable = crate::probes::tcp_check(&hostname, port, PROBE_TIMEOUT_MS).await;
+                (host_id, reachable)
+            });
+        }
+
+        let mut results: Vec<(uuid::Uuid, bool)> = Vec::new();
+        while let Some(joined) = joinset.join_next().await {
+            // A panicking probe task must not lose the whole sweep; the other
+            // hosts' results are still worth returning.
+            if let Ok(pair) = joined {
+                results.push(pair);
+            }
+        }
+
+        let health: HashMap<String, bool> = {
+            let mut state = self.state.lock().await;
+            for (host_id, reachable) in &results {
+                state.host_health.insert(*host_id, *reachable);
+            }
+            // Deliberately return the whole map rather than just this sweep's
+            // results: a host deleted mid-sweep should not linger, and a
+            // caller that missed a tick still gets a complete picture.
+            state
+                .host_health
+                .iter()
+                .map(|(k, v)| (k.to_string(), *v))
+                .collect()
+        };
+
+        match serde_json::to_value(&health) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Read the cached reachability map without probing anything.
+    /// Populated by `ssh_probe_hosts`; empty until the first sweep runs.
     pub(crate) async fn handle_ssh_host_health(&self, id: u64) -> Response {
         let state = self.state.lock().await;
         let health: HashMap<String, bool> = state

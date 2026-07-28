@@ -19,7 +19,9 @@ final class AppSettings {
     // MARK: - General
 
     /// Refresh interval for SSH host health probes, in seconds.
-    /// 30s is the same default as the Linux GUI; 0 disables polling.
+    /// 0 disables polling entirely — no probe is sent — and is the default.
+    /// Consumed by the global poll loop in `AppState.startVpnStatusPolling`,
+    /// which re-reads it every tick so a change here takes effect immediately.
     var hostHealthIntervalSeconds: Int {
         didSet { defaults.set(hostHealthIntervalSeconds, forKey: Keys.hostHealthInterval) }
     }
@@ -153,8 +155,11 @@ final class AppSettings {
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         // Load with sensible defaults for first run.
+        // Off by default. This sends TCP probes to customer equipment on a
+        // timer, so it is the operator's call to switch on, not something the
+        // app decides for them on first launch.
         self.hostHealthIntervalSeconds =
-            (defaults.object(forKey: Keys.hostHealthInterval) as? Int) ?? 30
+            (defaults.object(forKey: Keys.hostHealthInterval) as? Int) ?? 0
         self.showMenuBarItem =
             (defaults.object(forKey: Keys.showMenuBarItem) as? Bool) ?? true
         self.requireMasterPassword =

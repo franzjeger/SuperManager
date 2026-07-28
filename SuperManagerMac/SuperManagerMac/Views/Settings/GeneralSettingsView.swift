@@ -136,7 +136,9 @@ struct GeneralSettingsView: View {
                     Text("Every minute").tag(60)
                     Text("Every 5 minutes").tag(300)
                 }
-                .help("How often SuperManager pings each SSH host to update its health indicator.")
+                .help("""
+                    How often to check each SSH host's reachability, shown as the dot beside it in the SSH list. Each check is a TCP connection to the host's SSH port — it does not log in, so it leaves nothing in the host's authentication log. Off by default.
+                    """)
             }
 
             Section("About") {

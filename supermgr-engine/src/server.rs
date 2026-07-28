@@ -187,6 +187,7 @@ impl EngineServer {
             "ssh_test_connection" => self.handle_ssh_test_connection(id, req.params).await,
             "ssh_push_key" => self.handle_ssh_push_key(id, req.params).await,
             "ssh_revoke_key" => self.handle_ssh_revoke_key(id, req.params).await,
+            "ssh_probe_hosts" => self.handle_ssh_probe_hosts(id).await,
             "ssh_host_health" => self.handle_ssh_host_health(id).await,
             "ssh_set_api_token" => self.handle_ssh_set_api_token(id, req.params).await,
             "ssh_clear_api_token" => self.handle_ssh_clear_api_token(id, req.params).await,

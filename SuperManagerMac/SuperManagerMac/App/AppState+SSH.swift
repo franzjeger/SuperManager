@@ -14,6 +14,33 @@ extension AppState {
         }
     }
 
+    /// Probe every host's reachability and update the dots in the SSH list.
+    ///
+    /// Opt-in: called from the global poll loop only when
+    /// `hostHealthIntervalSeconds > 0`. Until this shipped, `hostHealth` was
+    /// declared and read but never written, so the dot beside every host was
+    /// permanently blue "never measured" — and the interval setting in
+    /// Settings drove nothing at all.
+    ///
+    /// The daemon side is a TCP connect per host, not an SSH login. That
+    /// distinction is the whole reason this can run on a timer: a full
+    /// authentication every 30 seconds would write tens of thousands of lines
+    /// a day into customers' auth logs and invite fail2ban. See
+    /// `handle_ssh_probe_hosts` in supermgr-engine for the reasoning.
+    ///
+    /// Errors are swallowed rather than surfaced. This is a background probe
+    /// the operator didn't ask for at this instant; a daemon hiccup should
+    /// leave the previous dots alone, not raise an alert over a health check.
+    func refreshHostHealth() async {
+        do {
+            // Keyed by host UUID string → reachable.
+            let health: [String: Bool] = try await client.call("ssh_probe_hosts")
+            hostHealth = health
+        } catch {
+            DebugLog.write("[AppState] host health probe failed: \(error)")
+        }
+    }
+
     func addHost(label: String, hostname: String, port: UInt16, username: String,
                  group: String, deviceType: DeviceType,
                  unrecognizedDeviceTypeRawValue: String? = nil,
