@@ -24,7 +24,12 @@ pub struct GeneratedKey {
 /// The `comment` is appended to the public key line and embedded in the
 /// private key's metadata.
 pub fn generate_key(key_type: SshKeyType, comment: &str) -> Result<GeneratedKey, SshError> {
-    let mut rng = rand::rngs::OsRng;
+    // ssh-key's own re-exported OsRng, not rand's. ssh-key 0.6 is built on
+    // rand_core 0.6, whose `CryptoRng` trait is what `PrivateKey::random`
+    // requires; rand 0.9's OsRng implements rand_core 0.9's incompatible
+    // trait. Using ssh-key's keeps the RNG on the version ssh-key expects,
+    // independent of whatever rand the workspace is on.
+    let mut rng = ssh_key::rand_core::OsRng;
 
     let private_key = match key_type {
         SshKeyType::Ed25519 => {

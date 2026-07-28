@@ -563,7 +563,10 @@ async fn handle_ssh_generate_key(state: &Arc<DaemonState>, args: &Value) -> Resu
     let description = args.get("description").and_then(Value::as_str).unwrap_or("");
     let tags_json = args.get("tags_json").and_then(Value::as_str).unwrap_or("[]");
 
-    let mut rng = rand::rngs::OsRng;
+    // ssh-key's own OsRng (rand_core 0.6), not rand 0.9's — same reason as
+    // supermgr-core::ssh::keygen: ssh-key's `random` requires rand_core 0.6's
+    // CryptoRng, which rand 0.9's OsRng doesn't implement.
+    let mut rng = ssh_key::rand_core::OsRng;
 
     // Mirror the existing Linux daemon's generator (see supermgrd/src/ssh/keygen.rs)
     // so the on-disk artefacts produced on Windows are bit-for-bit compatible
