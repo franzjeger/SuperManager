@@ -7,7 +7,7 @@ struct HostDetailView: View {
     @State private var commandInput = ""
     @State private var commandOutput = ""
     @State private var isRunning = false
-    @State private var connectionStatus: String?
+    @State private var probe: HostProbeState = .notTested
     @State private var showingEditSheet = false
 
     private var host: SshHostSummary? {
@@ -95,7 +95,7 @@ struct HostDetailView: View {
                         status: hostCard.status,
                         title: hostCard.title,
                         meta: hostCard.meta,
-                        busy: connectionStatus == "Testing…"
+                        busy: probe == .testing
                     ) {
                         HStack(spacing: 10) {
                             Button(action: { openTerminal(host: host) }) {
@@ -105,22 +105,19 @@ struct HostDetailView: View {
 
                             Button("Test Connection") {
                                 Task {
-                                    connectionStatus = "Testing…"
-                                    // Structured kinds from the daemon; the
-                                    // card maps each to state + explanation:
-                                    //   .authFailed    → error, message
-                                    //   .networkFailed → offline, "is the
-                                    //                    right VPN up?" hint
-                                    //   .otherFailure  → error, message
+                                    probe = .testing
+                                    // The daemon's structured result maps
+                                    // straight to the probe state — no string
+                                    // round-trip. The card reads the state.
                                     switch await appState.testConnection(hostId: hostId) {
                                     case .ok:
-                                        connectionStatus = "ok"
+                                        probe = .reachable
                                     case .authFailed(let msg):
-                                        connectionStatus = "auth: \(msg)"
+                                        probe = .authFailed(msg)
                                     case .networkFailed(let msg):
-                                        connectionStatus = "network: \(msg)"
+                                        probe = .unreachable(msg)
                                     case .otherFailure(let msg):
-                                        connectionStatus = msg
+                                        probe = .failed(msg)
                                     }
                                 }
                             }
@@ -237,7 +234,7 @@ struct HostDetailView: View {
         return rows
     }
 
-    /// The card's reading of `connectionStatus` — a manual, per-session probe,
+    /// The card's reading of the probe — a manual, per-session test,
     /// so "no reading yet" is `.unknown` and never a claim either way.
     ///
     /// A network failure maps to `.offline`, not `.error`: the host isn't
@@ -247,7 +244,7 @@ struct HostDetailView: View {
     /// Decision logic lives in `HostConnectionCardModel` (pure, tested); the
     /// view just wraps its probe-result `@State`.
     private var hostCard: HostConnectionCardModel {
-        HostConnectionCardModel(probe: connectionStatus)
+        HostConnectionCardModel(probe: probe)
     }
 
     private func openTerminal(host: SshHostSummary) {

@@ -73,57 +73,73 @@ struct VpnConnectionCardModel {
 
 // MARK: - SSH host connection card
 
-/// The connection card at the top of `HostDetailView`, decided from the
-/// manual test-connection probe result.
+/// What the manual "Test connection" probe last told us about a host.
 ///
-/// `probe` is the raw `connectionStatus` string the view holds: `nil` (not
-/// tested), `"Testing…"`, `"ok"`, or `"<kind>: <message>"` where kind is
-/// `auth` / `network` / anything else. The stringly-typed contract is
-/// preserved verbatim from the view — see the note in HostConnectionCardTests
-/// on why it's worth eventually replacing with the structured kind the daemon
-/// already returns.
+/// Replaces a `String?` that packed six states into one field with `nil`,
+/// `"Testing…"`, `"ok"`, and `"<kind>: <message>"` prefixes — a shape the
+/// card then re-parsed by string-matching. `AppState.SshTestResult` was
+/// already a proper enum; this carries that structure through to the card
+/// instead of flattening it to a string and picking it back apart.
+enum HostProbeState: Equatable {
+    /// No probe run this session.
+    case notTested
+    /// A probe is in flight.
+    case testing
+    /// SSH connected and authenticated.
+    case reachable
+    /// Couldn't reach the host — the path from here is down (often a VPN
+    /// that isn't up), not the host itself.
+    case unreachable(String)
+    /// The host answered and rejected our credentials.
+    case authFailed(String)
+    /// Anything else the probe reported.
+    case failed(String)
+}
+
+/// The connection card at the top of `HostDetailView`, decided from the
+/// probe state.
 struct HostConnectionCardModel {
-    let probe: String?
+    let probe: HostProbeState
 
     /// A network failure is `.offline`, not `.error`: the host isn't broken,
     /// the path from here is. An auth failure is `.error`: the host answered
-    /// and rejected us. "Not tested" is `.unknown`, never a reading of down.
+    /// and rejected us. Not-tested is `.unknown`, never a reading of down.
     var status: StatusStyle {
         switch probe {
-        case nil:                                       return .unknown
-        case "Testing…":                                return .pending
-        case "ok":                                      return .online
-        case .some(let s) where s.hasPrefix("auth"):    return .error
-        case .some(let s) where s.hasPrefix("network"): return .offline
-        default:                                        return .error
+        case .notTested:    return .unknown
+        case .testing:      return .pending
+        case .reachable:    return .online
+        case .unreachable:  return .offline
+        case .authFailed:   return .error
+        case .failed:       return .error
         }
     }
 
     var title: String {
         switch probe {
-        case nil:                                       return "Not tested"
-        case "Testing…":                                return "Testing…"
-        case "ok":                                      return "Reachable"
-        case .some(let s) where s.hasPrefix("auth"):    return "Auth failed"
-        case .some(let s) where s.hasPrefix("network"): return "Unreachable"
-        default:                                        return "Failed"
+        case .notTested:    return "Not tested"
+        case .testing:      return "Testing…"
+        case .reachable:    return "Reachable"
+        case .unreachable:  return "Unreachable"
+        case .authFailed:   return "Auth failed"
+        case .failed:       return "Failed"
         }
     }
 
     var meta: String {
         switch probe {
-        case nil:
+        case .notTested:
             return "Test the connection to verify reachability and credentials."
-        case "Testing…":
+        case .testing:
             return ""
-        case "ok":
+        case .reachable:
             return "SSH connection and authentication verified."
-        case .some(let s) where s.hasPrefix("auth: "):
-            return String(s.dropFirst(6))
-        case .some(let s) where s.hasPrefix("network: "):
-            return String(s.dropFirst(9)) + " — check that the right VPN tunnel is up."
-        case .some(let s):
-            return s
+        case .unreachable(let msg):
+            return msg + " — check that the right VPN tunnel is up."
+        case .authFailed(let msg):
+            return msg
+        case .failed(let msg):
+            return msg
         }
     }
 }
