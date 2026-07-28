@@ -70,12 +70,12 @@ struct BackupSettingsView: View {
                 CaveatRow(
                     icon: "exclamationmark.triangle.fill",
                     color: .orange,
-                    text: "VPN passwords and PSKs live in the macOS Keychain (per-Mac encryption). They are NOT included in the backup; you'll re-enter them on restore."
+                    text: "The archive contains secrets in plain text: SSH private keys, stored SSH host passwords, UniFi controller passwords, and WireGuard private keys. Treat it like a password vault — keep it on encrypted storage."
                 )
                 CaveatRow(
                     icon: "lock.fill",
                     color: .blue,
-                    text: "The archive contains your private SSH keys. Treat it like a password vault — keep it on encrypted storage."
+                    text: "IKEv2 passwords and PSKs are the exception. They live in the macOS Keychain, bound to this Mac, so they are NOT in the archive and you will re-enter them on restore."
                 )
                 CaveatRow(
                     icon: "arrow.counterclockwise",

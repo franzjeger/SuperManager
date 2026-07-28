@@ -11,19 +11,26 @@ import Foundation
 ///     persist alongside metadata. This is intentional — restoring on
 ///     a new Mac without the private keys would leave hosts orphaned.
 ///   • VPN profile metadata (`profiles/*.toml`)
-///   • SSH password store (`ssh-secrets.json`) — only present when
-///     the user has stored SSH passwords with the daemon
+///   • Daemon secret store (`secrets.json`, mode 0600). Despite the
+///     name this is not SSH-only: on macOS the daemon runs the
+///     file-backed store (see the comment at `supermgrd-mac`'s
+///     `FileSecretStore::default_path()` for why it can't hold the
+///     keychain-access-groups entitlement), so this file carries SSH
+///     host passwords, SSH private keys, UniFi controller passwords
+///     and **WireGuard private keys** as plain base64.
 ///   • Audit log (`ssh-audit.log`)
 ///
 /// What's *not* in the archive:
-///   • **VPN credentials** (passwords, PSKs). They live in the macOS
-///     Data Protection Keychain, scoped to this Mac's hardware. They
-///     can't be exported in any meaningful way without breaking the
-///     security model — and even if we did, they'd refuse to import on
-///     a different Mac (different machine identity = different
-///     keychain access). Restoring on a new Mac means re-entering
-///     each VPN profile's password and PSK.
-///   • **Master-password hash**. Same reason — keychain-bound.
+///   • **IKEv2 credentials** (EAP passwords, PSKs) — and only those.
+///     The GUI puts them in the macOS Data Protection Keychain via
+///     `VPNKeychain`, scoped to this Mac's hardware, so they can't be
+///     exported without breaking the security model and would refuse
+///     to import on a different Mac anyway. Restoring on a new Mac
+///     means re-entering each IKEv2 profile's password and PSK.
+///     WireGuard is NOT in this category: its private keys are minted
+///     by the engine (`handlers/vpn.rs`) straight into the secret
+///     store above, so they travel with the archive.
+///   • **Master-password hash**. Keychain-bound.
 ///
 /// Because the data dir contains private SSH keys and possibly
 /// password material, the produced archive is just as sensitive as

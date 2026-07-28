@@ -116,22 +116,6 @@ final class AppSettings {
         didSet { defaults.set(autoLockMinutes, forKey: Keys.autoLockMinutes) }
     }
 
-    // MARK: - Backup
-
-    /// Default location for new backup exports. UserDefaults stores the
-    /// security-scoped bookmark blob so the app can re-resolve the
-    /// directory across launches without re-prompting for permission.
-    var defaultBackupBookmark: Data? {
-        didSet { defaults.set(defaultBackupBookmark, forKey: Keys.defaultBackupBookmark) }
-    }
-
-    /// Whether to include secrets (passwords, PSKs, key passphrases) in
-    /// backups. Default off — backups stay safer at the cost of needing
-    /// the user to re-enter creds on restore.
-    var backupIncludesSecrets: Bool {
-        didSet { defaults.set(backupIncludesSecrets, forKey: Keys.backupIncludesSecrets) }
-    }
-
     // MARK: -
 
     private let defaults: UserDefaults
@@ -141,8 +125,6 @@ final class AppSettings {
         static let showMenuBarItem           = "general.showMenuBarItem"
         static let requireMasterPassword     = "security.requireMasterPassword"
         static let autoLockMinutes           = "security.autoLockMinutes"
-        static let defaultBackupBookmark     = "backup.defaultBookmark"
-        static let backupIncludesSecrets     = "backup.includesSecrets"
         static let notifyVpnReconnected      = "notify.vpnReconnected"
         static let notifyVpnReconnectFailing = "notify.vpnReconnectFailing"
         static let notifyExitNodeReverted    = "notify.exitNodeReverted"
@@ -166,10 +148,6 @@ final class AppSettings {
             (defaults.object(forKey: Keys.requireMasterPassword) as? Bool) ?? false
         self.autoLockMinutes =
             (defaults.object(forKey: Keys.autoLockMinutes) as? Int) ?? 15
-        self.defaultBackupBookmark =
-            defaults.data(forKey: Keys.defaultBackupBookmark)
-        self.backupIncludesSecrets =
-            (defaults.object(forKey: Keys.backupIncludesSecrets) as? Bool) ?? false
         self.notifyVpnReconnected =
             (defaults.object(forKey: Keys.notifyVpnReconnected) as? Bool) ?? true
         self.notifyVpnReconnectFailing =
