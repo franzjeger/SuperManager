@@ -160,12 +160,17 @@ private struct AuditRow: View {
                         .clipShape(Capsule())
                     Text(entry.keyName)
                         .fontWeight(.medium)
-                    Text("→")
-                        .foregroundStyle(.tertiary)
-                    Text(entry.hostLabel)
-                    Text("(\(entry.hostname):\(String(entry.port)))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    // Key-lifecycle events (generate/import/delete)
+                    // have no target host, so the arrow and the
+                    // host:port suffix would read as "→  (:0)".
+                    if !entry.hostname.isEmpty {
+                        Text("→")
+                            .foregroundStyle(.tertiary)
+                        Text(entry.hostLabel)
+                        Text("(\(entry.hostname):\(String(entry.port)))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Text(Self.dateFormatter.string(from: entry.timestamp))
                     .font(.caption2)
