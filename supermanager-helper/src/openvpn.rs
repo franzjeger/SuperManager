@@ -677,49 +677,6 @@ impl OpenVpn {
     }
 }
 
-/// Allocate a POSIX PTY pair via `posix_openpt` + `grantpt` +
-/// `unlockpt`. Returns `(master_fd, slave_fd)`. The caller is
-/// responsible for closing both.
-///
-/// Used by the openvpn3 dispatch to feed `ovpncli`'s `getpass()`
-/// without putting the JWT on the command line. macOS doesn't
-/// expose `openpty(3)` from libc directly the way Linux does
-/// (it's in libutil), so we go through the lower-level pty
-/// allocation primitives that work everywhere.
-fn openpty() -> std::io::Result<(libc::c_int, libc::c_int)> {
-    unsafe {
-        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
-        if master < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if libc::grantpt(master) != 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master);
-            return Err(e);
-        }
-        if libc::unlockpt(master) != 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master);
-            return Err(e);
-        }
-        let slave_name = libc::ptsname(master);
-        if slave_name.is_null() {
-            let e = std::io::Error::last_os_error();
-            libc::close(master);
-            return Err(e);
-        }
-        // ptsname returns a pointer into a static buffer; safe to
-        // pass straight to open() before doing anything else.
-        let slave = libc::open(slave_name, libc::O_RDWR | libc::O_NOCTTY);
-        if slave < 0 {
-            let e = std::io::Error::last_os_error();
-            libc::close(master);
-            return Err(e);
-        }
-        Ok((master, slave))
-    }
-}
-
 // ── Log-state scanner ─────────────────────────────────────────────────────
 
 /// Scan the VPN log from top to bottom and return the state

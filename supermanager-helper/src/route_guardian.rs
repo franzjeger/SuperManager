@@ -119,15 +119,6 @@ pub fn spawn_guardian() -> Result<()> {
     Ok(())
 }
 
-/// Read the most recent v4 snapshot — useful for debug RPC.
-pub fn current_snapshot() -> Option<(String, String)> {
-    SNAPSHOT_V4
-        .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|s| s.clone())
-        .map(|s| (s.gateway, s.interface))
-}
-
 /// Clear both v4 and v6 snapshots.
 ///
 /// Call this on system wake. Before sleep the guardian snapshotted the
@@ -389,6 +380,11 @@ fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
 /// guardian without involving tailscaled. NOT exposed in
 /// production paths — only an RPC handler we run from the
 /// command line during verification.
+/// Gated to match its only dispatch arm in `main.rs`. Without this the
+/// function is compiled into production builds where nothing can reach
+/// it, and the compiler rightly calls it dead — a root helper should not
+/// carry a "delete the default route" primitive it never uses.
+#[cfg(feature = "dev-rpc")]
 pub fn debug_strip_default_route() -> Result<()> {
     let out = Command::new("/sbin/route")
         .args(["-q", "delete", "default"])

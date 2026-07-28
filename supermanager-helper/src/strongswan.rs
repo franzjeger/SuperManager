@@ -305,6 +305,16 @@ impl Strongswan {
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
         self.resolve()?;
+        // The display name only ever travelled the wire to be ignored. Log
+        // it: /var/log/supermanager-helper.log is where a failed connect
+        // gets diagnosed, and `profile_id` alone is a UUID nobody can match
+        // to the profile the operator was looking at. No secrets here.
+        tracing::info!(
+            "strongswan connect: {} (profile {}) -> {}",
+            args.name,
+            args.profile_id,
+            args.host
+        );
         // Force a fresh charon on every connect. strongSwan caches secrets
         // and connections on the IKE-SA level; re-initiating against an
         // existing charon that was started with stale config can produce
