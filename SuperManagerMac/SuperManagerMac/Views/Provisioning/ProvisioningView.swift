@@ -481,13 +481,6 @@ struct ProvisioningView: View {
         return nil
     }
 
-    private func hasFortigateHost(in customer: Customer) -> Bool {
-        customer.sites
-            .flatMap(\.hostIds)
-            .contains { token in
-                appState.hostIndex.host(forToken: token)?.deviceType == .fortigate
-            }
-    }
 
     // MARK: - Output
 

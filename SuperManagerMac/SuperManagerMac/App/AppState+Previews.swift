@@ -115,10 +115,6 @@ extension Customer {
     )
 }
 
-extension Engagement {
-
-}
-
 extension SshHostSummary {
     /// Bare-minimum constructor matching whatever the real init
     /// requires. We can't always know that without reading SshHost.swift —
@@ -205,69 +201,4 @@ extension VpnProfileSummary {
     }()
 }
 
-extension PersistedFinding {
-    /// CVE-2023-38408 OpenSSH on Synology — visible default story.
-    static let previewExampleSshOpen: PersistedFinding = {
-        let json = """
-        {
-            "key": "cve.cve-2023-38408|192.0.2.111|22|ssh",
-            "finding": {
-                "id": "cve.cve-2023-38408",
-                "host_ip": "192.0.2.111",
-                "port": 22,
-                "service": "ssh",
-                "severity": "high",
-                "title": "OpenSSH agent forwarding RCE (CVE-2023-38408)",
-                "detail": "Detected via banner: SSH-2.0-OpenSSH_8.2. PKCS#11 provider RCE via forwarded ssh-agent. Affects OpenSSH < 9.3p2.",
-                "recommendation": "Upgrade to OpenSSH 9.3p2 or later. Disable agent forwarding (-A flag) where not strictly needed.",
-                "cve": "CVE-2023-38408",
-                "cvss": 7.4
-            },
-            "disposition": { "kind": "open" },
-            "first_seen": "2026-04-10T09:30:00Z",
-            "last_seen": "2026-05-10T08:20:00Z",
-            "scan_count": 4,
-            "history": [],
-            "note": ""
-        }
-        """
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        return try! dec.decode(PersistedFinding.self, from: Data(json.utf8))
-    }()
-
-    /// Same finding marked Accepted Risk — for the "after disposition" preview.
-    static let previewAccepted: PersistedFinding = {
-        let json = """
-        {
-            "key": "config.smb-open|192.0.2.111|139|smb",
-            "finding": {
-                "id": "config.smb-open",
-                "host_ip": "192.0.2.111",
-                "port": 139,
-                "service": "smb",
-                "severity": "medium",
-                "title": "SMB share-server open",
-                "detail": "SMB is high-value to attackers (EternalBlue / SMBGhost / share enumeration).",
-                "recommendation": "Disable SMBv1 protocol. Restrict SMB access to internal-only via firewall.",
-                "cve": null,
-                "cvss": 5.0
-            },
-            "disposition": {
-                "kind": "accepted_risk",
-                "reason": "NAS shares are intentional, hardened (SMBv1 disabled, signing required)",
-                "until": null
-            },
-            "first_seen": "2026-04-10T09:30:00Z",
-            "last_seen": "2026-05-10T08:20:00Z",
-            "scan_count": 4,
-            "history": [],
-            "note": ""
-        }
-        """
-        let dec = JSONDecoder()
-        dec.dateDecodingStrategy = .iso8601
-        return try! dec.decode(PersistedFinding.self, from: Data(json.utf8))
-    }()
-}
 #endif

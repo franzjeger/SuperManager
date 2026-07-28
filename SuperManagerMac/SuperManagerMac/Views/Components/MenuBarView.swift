@@ -11,7 +11,6 @@ import SwiftUI
 /// `systemImage` parameter, which it derives from `appState`.
 struct MenuBarView: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         // Daemon health

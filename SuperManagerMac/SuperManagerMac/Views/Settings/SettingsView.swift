@@ -17,7 +17,6 @@ import SwiftUI
 ///   • **Permissions** — macOS permissions + Homebrew tools state
 ///   • **Network**     — DNS fallbacks, device-type overrides
 struct SettingsView: View {
-    @Environment(AppState.self) private var appState
 
     var body: some View {
         TabView {

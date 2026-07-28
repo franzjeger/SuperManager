@@ -294,32 +294,6 @@ extension AppState {
         }
     }
 
-    /// Generic FortiGate REST proxy. Returns (status, body). Phase 2
-    /// uses this for the live dashboard; phase 5 builds compliance
-    /// and template-deploy on top.
-    func fortigateApi(
-        hostId: String,
-        method: String,
-        path: String,
-        body: String = ""
-    ) async -> (status: Int, body: String)? {
-        do {
-            let result: FortigateApiRawResponse = try await client.call(
-                "fortigate_api",
-                params: [
-                    "host_id": hostId,
-                    "method": method,
-                    "path": path,
-                    "body": body,
-                ]
-            )
-            return (status: result.status, body: result.body)
-        } catch {
-            handleError(error)
-            return nil
-        }
-    }
-
     // MARK: - UniFi controller
 
     @discardableResult
@@ -406,34 +380,6 @@ extension AppState {
             return .success(stdout: r.stdout)
         } catch {
             return .failure(message: String(describing: error))
-        }
-    }
-
-    /// Generic UniFi REST proxy. Returns (status, body).
-    func unifiApi(
-        hostId: String,
-        method: String,
-        path: String,
-        body: String = ""
-    ) async -> (status: Int, body: String)? {
-        struct R: Codable {
-            let status: Int
-            let body: String
-        }
-        do {
-            let r: R = try await client.call(
-                "unifi_api",
-                params: [
-                    "host_id": hostId,
-                    "method": method,
-                    "path": path,
-                    "body": body,
-                ]
-            )
-            return (status: r.status, body: r.body)
-        } catch {
-            handleError(error)
-            return nil
         }
     }
 

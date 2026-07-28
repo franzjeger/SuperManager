@@ -96,7 +96,6 @@ extension AppState {
                     "extras": extrasObj,
                 ]
             )
-            lastRenderResult = result
             return result
         } catch {
             handleError(error)

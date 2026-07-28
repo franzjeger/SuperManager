@@ -323,7 +323,6 @@ struct FortigateApiPanel: View {
 /// onResult fires with the token) or shows the error inline.
 private struct GenerateTokenSheet: View {
     @Environment(AppState.self) private var appState
-    @Environment(\.dismiss) private var dismiss
     let hostId: String
     let onResult: (String?) -> Void
 

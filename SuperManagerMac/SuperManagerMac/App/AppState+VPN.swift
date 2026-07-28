@@ -872,31 +872,4 @@ extension AppState {
         UserDefaults.standard.set(Array(pinnedVpnIds), forKey: Self.pinnedVpnDefaultsKey)
     }
 
-    /// Aggregate of CIDRs reachable via currently-connected VPN
-    /// profiles (split-tunnel routes pushed by the customer endpoint).
-    /// Drives the "scan over VPN" affordance — when an MSP connects
-    /// to a customer's IPsec/WireGuard, the routes that VPN pushed are
-    /// exactly the ranges the operator has line-of-sight to.
-    ///
-    /// Each entry is `(profileName, [cidr, …])`. Empty list means
-    /// no VPN is connected, no full-tunnel-with-routes is up, or
-    /// every connected profile is full-tunnel without split-routes
-    /// (in which case the entire internet is "reachable" — not a
-    /// useful scan-scope suggestion).
-    func reachableVpnNetworks() -> [(name: String, cidrs: [String])] {
-        var out: [(String, [String])] = []
-        for profile in vpnProfiles {
-            // Only surface profiles that the daemon currently
-            // reports as connected.
-            let state = vpnConnectionStates[profile.id] ?? "disconnected"
-            guard state == "connected" else { continue }
-            let routes = profile.splitRoutes
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty && !$0.starts(with: "0.0.0.0") && !$0.starts(with: "::") }
-            // Full-tunnel with no split routes = the world; skip.
-            if routes.isEmpty { continue }
-            out.append((profile.name, routes))
-        }
-        return out
-    }
 }
