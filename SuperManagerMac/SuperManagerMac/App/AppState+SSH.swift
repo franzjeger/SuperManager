@@ -377,37 +377,22 @@ extension AppState {
         }
     }
 
-    /// Run `set-inform <inform_url>` on the device via SSH.
-    /// Used both for first-time adoption (factory defaults
-    /// ubnt/ubnt) and to repoint a device at a different
-    /// controller.
-    @discardableResult
-    func unifiSetInform(hostId: String, informUrl: String) async -> String? {
-        struct R: Codable { let stdout: String }
-        do {
-            let r: R = try await client.call(
-                "unifi_set_inform",
-                params: ["host_id": hostId, "inform_url": informUrl]
-            )
-            return r.stdout
-        } catch {
-            handleError(error)
-            return nil
-        }
-    }
-
-    /// Detailed outcome of a UniFi `set-inform` invocation —
-    /// success carries stdout; failure carries the raw engine
-    /// error string for direct surfacing in the UI.
+    /// Outcome of a UniFi `set-inform` invocation — success carries
+    /// stdout; failure carries the raw engine error string for direct
+    /// surfacing in the UI.
     enum UnifiSetInformOutcome {
         case success(stdout: String)
         case failure(message: String)
     }
 
-    /// Detailed variant of `unifiSetInform`. Used by the
-    /// Network-scan → Adopt flow so it can surface the actual
-    /// SSH exit / stderr / "command not found" / etc. instead
-    /// of swallowing it into a generic "something went wrong".
+    /// Run `set-inform <inform_url>` on the device via SSH. Used both for
+    /// first-time adoption (factory defaults ubnt/ubnt) and to repoint a
+    /// device at a different controller.
+    ///
+    /// Returns the outcome rather than routing failures through
+    /// `handleError`, so the caller can show the actual SSH exit /
+    /// stderr / "command not found" inline instead of raising the
+    /// app-wide error alert on top of a generic inline message.
     func unifiSetInformDetailed(
         hostId: String,
         informUrl: String
