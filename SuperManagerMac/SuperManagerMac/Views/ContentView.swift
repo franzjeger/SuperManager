@@ -139,11 +139,25 @@ struct ContentView: View {
             }
             // Global customer-context picker — sits next to the
             // connection pill so the operator always sees which
-            // customer they're acting on. Hidden on Tailscale: the
-            // tailnet is a per-account concept with no customer
-            // scope, so showing the picker there is misleading.
+            // customer they're acting on.
+            //
+            // Shown only where it actually scopes something.
+            //
+            //   Tailscale — the tailnet is a per-account concept with no
+            //     customer scope at all.
+            //   VPN — profiles carry a `customer` tag in the wire format, but
+            //     on macOS it is always empty: supermgr-engine (what this app
+            //     talks to via supermgrd-mac) has no customer setter, and each
+            //     of its profile-creating handlers hardcodes an empty one. The
+            //     setter exists only on the Linux D-Bus daemon. So the picker
+            //     sat here scoping nothing — and worse, wiring the filter up
+            //     anyway would have hidden EVERY profile the moment a customer
+            //     was picked, since none of them match. Hiding it is the honest
+            //     state until the engine can store the tag; see the note in
+            //     AppState+VPN.
             ToolbarItem(placement: .navigation) {
-                if appState.selectedSection != .tailscale {
+                if appState.selectedSection != .tailscale
+                    && appState.selectedSection != .vpn {
                     GlobalCustomerPicker()
                 }
             }
