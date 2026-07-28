@@ -458,6 +458,35 @@ extension AppState {
 
     // MARK: - VPN Profiles
 
+    /// Loads every profile. Deliberately unscoped by customer — see below.
+    ///
+    /// ## Why the global customer picker is hidden on the VPN section
+    ///
+    /// The wire format already has the field. `ProfileSummary` in
+    /// supermgr-core carries `customer: String` and the list response emits it
+    /// (as `customer`, absent rather than `""` when unset, because of
+    /// `skip_serializing_if`). So decoding it here would work today.
+    ///
+    /// It would also be useless, and then harmful. This app talks to
+    /// supermgrd-mac, which is a thin wrapper around `supermgr_engine`, and the
+    /// engine has no customer setter: `set_profile_customer` exists only on the
+    /// Linux D-Bus daemon, and every profile-creating handler in
+    /// supermgr-engine/src/handlers/vpn.rs hardcodes `customer: String::new()`.
+    /// Every profile on macOS therefore has an empty tag. Filter on it and
+    /// picking any customer hides the entire list.
+    ///
+    /// Making it real needs, in order:
+    ///   1. a `vpn_set_customer` handler in supermgr-engine + its dispatch entry
+    ///   2. `customer` decoded in VpnProfileSummary
+    ///      (`decodeIfPresent(...) ?? ""`, since the key is omitted when empty)
+    ///   3. somewhere to set it — a picker in the profile editor or an
+    ///      "Assign to customer…" item in the list row's context menu
+    ///   4. the filter itself, mirroring `filteredHosts`
+    ///   5. a one-time pass tagging the existing profiles
+    ///
+    /// Until step 1 exists there is nothing to filter on, so the picker is
+    /// hidden on this section rather than left there implying a scope it
+    /// doesn't have.
     func refreshProfiles() async {
         do {
             vpnProfiles = try await client.call("list_profiles")

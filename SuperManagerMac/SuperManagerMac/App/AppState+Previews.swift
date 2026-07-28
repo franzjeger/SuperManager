@@ -32,7 +32,6 @@ extension AppState {
     static var previewSeeded: AppState {
         let s = AppState()
         s.customers = [.previewAcme, .previewLab, .previewNetcraft]
-        s.engagements = [.previewActive, .previewExpired]
         s.sshHosts = [
             .previewFortigate,
             .previewSynology,
@@ -117,39 +116,7 @@ extension Customer {
 }
 
 extension Engagement {
-    static let previewActive = Engagement(
-        id: "preview-eng-1",
-        customerSlug: "acme-corp",
-        title: "Acme Q1 audit",
-        scopeCidrs: ["10.0.0.0/16"],
-        scopeHosts: [],
-        exclusions: [],
-        allowedTechniques: SecurityTechnique.allCases.filter {
-            $0 != .wireless && $0 != .dosTest
-        },
-        startedAt: Date().addingTimeInterval(-30 * 86400),
-        expiresAt: Date().addingTimeInterval(60 * 86400),
-        authorizedBy: "Alex Doe, CTO",
-        authorizationDocPath: nil,
-        log: [],
-        notes: "Quarterly authorised pen-test."
-    )
 
-    static let previewExpired = Engagement(
-        id: "preview-eng-2",
-        customerSlug: "lab",
-        title: "Lab continuous",
-        scopeCidrs: ["192.0.2.0/24"],
-        scopeHosts: [],
-        exclusions: [],
-        allowedTechniques: SecurityTechnique.allCases,
-        startedAt: Date().addingTimeInterval(-200 * 86400),
-        expiresAt: Date().addingTimeInterval(-10 * 86400),
-        authorizedBy: "self",
-        authorizationDocPath: nil,
-        log: [],
-        notes: ""
-    )
 }
 
 extension SshHostSummary {
