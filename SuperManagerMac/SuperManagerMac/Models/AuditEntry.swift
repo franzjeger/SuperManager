@@ -45,18 +45,37 @@ struct AuditEntry: Identifiable, Hashable {
     let port: UInt16
     let success: Bool
 
+    /// RFC3339 timestamp, tolerant of a fractional-seconds component.
+    ///
+    /// The daemon writes seconds precision, which is what the plain
+    /// internet-date-time parser wants. Older lines were written with
+    /// chrono's `%+`, which appends however many sub-second digits the
+    /// clock produced (`…:18.026235+00:00`) — those parse to nil under
+    /// `.withInternetDateTime` alone, which silently emptied the whole
+    /// pane rather than dropping one row. Fractional digits are stripped
+    /// rather than parsed: `ISO8601DateFormatter.withFractionalSeconds`
+    /// expects milliseconds and chokes on six digits, and sub-second
+    /// resolution is worthless in an audit log anyway.
+    static func parseTimestamp(_ raw: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        if let date = formatter.date(from: raw) { return date }
+
+        guard let dot = raw.firstIndex(of: ".") else { return nil }
+        // Sub-second digits run until the zone designator (`Z`, `+`, `-`).
+        let rest = raw[raw.index(after: dot)...]
+        guard let zoneOffset = rest.firstIndex(where: { $0 == "Z" || $0 == "+" || $0 == "-" })
+        else { return nil }
+        return formatter.date(from: String(raw[..<dot]) + String(rest[zoneOffset...]))
+    }
+
     /// Parse a single audit-log line. Returns `nil` for malformed input.
     static func parse(line: String, id: Int) -> AuditEntry? {
         let parts = line.split(separator: "|", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
         guard parts.count == 7 else { return nil }
 
-        // RFC3339 with offset (`%+` chrono format) — ISO8601DateFormatter
-        // is what we want here, with both internet-date-time and
-        // fractional seconds disabled (Rust's `%+` doesn't emit them).
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        guard let ts = formatter.date(from: parts[0]) else { return nil }
+        guard let ts = parseTimestamp(parts[0]) else { return nil }
 
         guard let action = Action(rawValue: parts[1]) else { return nil }
 

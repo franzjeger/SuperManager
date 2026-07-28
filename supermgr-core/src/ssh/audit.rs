@@ -71,7 +71,13 @@ impl fmt::Display for AuditEntry {
         write!(
             f,
             "{} | {} | {} | {} | {} | {}:{} | {}",
-            self.timestamp.format("%+"),
+            // Seconds precision, not `%+`. `%+` emits whatever
+            // sub-second digits the clock happened to produce
+            // (`…:18.026235+00:00`), and the macOS reader parses these
+            // lines with `ISO8601DateFormatter`, which rejects
+            // fractional seconds unless explicitly configured for
+            // them. Sub-second resolution buys an audit log nothing.
+            self.timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             action,
             self.key_name,
             self.key_fingerprint,
@@ -80,5 +86,59 @@ impl fmt::Display for AuditEntry {
             self.port,
             status,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(action: AuditAction, host: &str, port: u16, success: bool) -> AuditEntry {
+        AuditEntry {
+            timestamp: "2026-03-28T14:30:00Z".parse::<DateTime<Utc>>().unwrap(),
+            action,
+            key_name: "my-key".to_owned(),
+            key_fingerprint: "SHA256:abc".to_owned(),
+            host_label: if host.is_empty() { String::new() } else { "webserver".to_owned() },
+            hostname: host.to_owned(),
+            port,
+            success,
+        }
+    }
+
+    /// The macOS reader parses these lines with `ISO8601DateFormatter`
+    /// configured for `.withInternetDateTime`, which rejects fractional
+    /// seconds. A timestamp like `…:00.026235Z` makes every entry parse
+    /// to nil and the audit pane silently shows nothing.
+    #[test]
+    fn timestamp_has_no_fractional_seconds() {
+        let line = entry(AuditAction::Push, "10.0.0.1", 22, true).to_string();
+        let ts = line.split(" | ").next().unwrap();
+        assert_eq!(ts, "2026-03-28T14:30:00Z");
+        assert!(!ts.contains('.'), "fractional seconds break the reader: {ts}");
+    }
+
+    #[test]
+    fn renders_documented_shape() {
+        assert_eq!(
+            entry(AuditAction::Push, "10.0.0.1", 22, true).to_string(),
+            "2026-03-28T14:30:00Z | PUSH | my-key | SHA256:abc | webserver | 10.0.0.1:22 | OK"
+        );
+    }
+
+    #[test]
+    fn failures_render_as_fail() {
+        let line = entry(AuditAction::Revoke, "10.0.0.1", 22, false).to_string();
+        assert!(line.ends_with(" | FAIL"), "{line}");
+        assert!(line.contains(" | REVOKE | "), "{line}");
+    }
+
+    /// Key-lifecycle events carry no host. The reader splits host:port on
+    /// the last colon, so the empty form still has to keep its `:0`.
+    #[test]
+    fn key_lifecycle_entry_keeps_seven_fields() {
+        let line = entry(AuditAction::Generate, "", 0, true).to_string();
+        assert_eq!(line.split(" | ").count(), 7, "{line}");
+        assert!(line.contains(" |  | :0 | "), "{line}");
     }
 }

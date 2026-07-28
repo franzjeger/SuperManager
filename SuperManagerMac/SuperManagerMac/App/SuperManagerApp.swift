@@ -24,6 +24,11 @@ extension Notification.Name {
 @main
 struct SuperManagerApp: App {
     @State private var appState = AppState()
+    /// Bound to the MenuBarExtra's `isInserted` below. Uses the same
+    /// UserDefaults key `AppSettings.showMenuBarItem` writes, so the Settings
+    /// toggle and this stay in step without a second source of truth —
+    /// `AppSettings` is not observable from a `Scene`.
+    @AppStorage("general.showMenuBarItem") private var showMenuBarItem = true
     /// Drives the auto-lock timer. SwiftUI doesn't fire `task` for the
     /// app itself, so we run a polling timer for now — cheap, runs
     /// once per second, only does work when the lock is *enabled* and
@@ -38,6 +43,15 @@ struct SuperManagerApp: App {
         // `~/Library/Application Support/SuperManager/crashes/`
         // where the Support Bundle picks it up.
         CrashReporting.start()
+    }
+
+    /// `isInserted` binding for the menu bar item.
+    ///
+    /// Must stay echo-suppressed — see `echoSuppressed(_:)` for what goes
+    /// wrong (a 100% CPU hang on launch) if this is replaced with a plain
+    /// `$showMenuBarItem`.
+    private var menuBarInserted: Binding<Bool> {
+        echoSuppressed($showMenuBarItem)
     }
 
     var body: some Scene {
@@ -233,7 +247,17 @@ struct SuperManagerApp: App {
         // the user can glance at the menu bar to know if Tailscale
         // is up, an exit node is active, or a VPN profile is
         // connected. Computed in `menuBarSymbol(for:)`.
-        MenuBarExtra("SuperManager", systemImage: menuBarSymbol(for: appState)) {
+        //
+        // `isInserted` is what makes the "Show menu bar item" toggle in
+        // Settings actually do something. The scene, the icon and the whole
+        // MenuBarView were already built; the setting was persisted to
+        // UserDefaults and read by nothing, so the icon was always present no
+        // matter which way the operator flipped the switch.
+        MenuBarExtra(
+            "SuperManager",
+            systemImage: menuBarSymbol(for: appState),
+            isInserted: menuBarInserted
+        ) {
             MenuBarView()
                 .environment(appState)
         }

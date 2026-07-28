@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use supermgr_core::host::{Host, HostSummary};
+use supermgr_core::ssh::audit::{AuditAction, AuditEntry};
 use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::keygen;
@@ -24,6 +25,21 @@ use crate::server::{
 pub(crate) enum FanoutOp {
     Push,
     Revoke,
+}
+
+/// Audit line for a key-lifecycle event. These have no target host, so
+/// the host columns stay empty and the UI omits them.
+fn audit_key_event(action: AuditAction, key_name: &str, fingerprint: &str) {
+    crate::ssh::audit::append_audit(&AuditEntry {
+        timestamp: chrono::Utc::now(),
+        action,
+        key_name: key_name.to_owned(),
+        key_fingerprint: fingerprint.to_owned(),
+        host_label: String::new(),
+        hostname: String::new(),
+        port: 0,
+        success: true,
+    });
 }
 
 impl EngineServer {
@@ -71,7 +87,9 @@ impl EngineServer {
         if let Err(e) = state.save_ssh_key(&ssh_key) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("save key: {e}"));
         }
+        let fingerprint = ssh_key.fingerprint.clone();
         state.ssh_keys.insert(key_id, ssh_key);
+        audit_key_event(AuditAction::Generate, name, &fingerprint);
 
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
@@ -106,8 +124,11 @@ impl EngineServer {
             Err(r) => return r,
         };
         let mut state = self.state.lock().await;
-        if state.ssh_keys.remove(&key_id).is_some() {
+        if let Some(removed) = state.ssh_keys.remove(&key_id) {
             let _ = state.delete_ssh_key_file(key_id);
+            // Recorded from the removed key, since after this point the
+            // name and fingerprint exist nowhere else.
+            audit_key_event(AuditAction::Delete, &removed.name, &removed.fingerprint);
         }
         Response::ok(id, serde_json::json!(null))
     }
@@ -171,7 +192,9 @@ impl EngineServer {
         if let Err(e) = state.save_ssh_key(&ssh_key) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("save key: {e}"));
         }
+        let fingerprint = ssh_key.fingerprint.clone();
         state.ssh_keys.insert(key_id, ssh_key);
+        audit_key_event(AuditAction::Import, name, &fingerprint);
 
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
@@ -560,10 +583,16 @@ impl EngineServer {
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("invalid host_ids: {e}")),
         };
 
-        let public_key = {
+        // Name and fingerprint travel with the public key so each spawned
+        // probe can write its own audit line without re-locking state.
+        let (public_key, key_name, key_fingerprint) = {
             let state = self.state.lock().await;
             match state.ssh_keys.get(&key_id) {
-                Some(key) => key.public_key.clone(),
+                Some(key) => (
+                    key.public_key.clone(),
+                    key.name.clone(),
+                    key.fingerprint.clone(),
+                ),
                 None => return Response::err(id, protocol::INVALID_PARAMS, format!("key not found: {key_id}")),
             }
         };
@@ -577,6 +606,8 @@ impl EngineServer {
         for hid in host_ids {
             let permits = Arc::clone(&permits);
             let public_key = public_key.clone();
+            let key_name = key_name.clone();
+            let key_fingerprint = key_fingerprint.clone();
             // Spawn-friendly handle: clone just the two Arcs we need so
             // the closure is `'static`. Cheap — these are reference-counted
             // pointers to the same shared state and secret store.
@@ -608,15 +639,50 @@ impl EngineServer {
                             },
                         };
                         let _ = session.disconnect().await;
+                        // The audit log's whole purpose: which key reached
+                        // which host, when, and whether it took. Written for
+                        // failures too — "we tried and it was refused" is the
+                        // entry you want when a customer asks.
+                        crate::ssh::audit::append_audit(&AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            action: match op {
+                                FanoutOp::Push => AuditAction::Push,
+                                FanoutOp::Revoke => AuditAction::Revoke,
+                            },
+                            key_name: key_name.clone(),
+                            key_fingerprint: key_fingerprint.clone(),
+                            host_label: host.label.clone(),
+                            hostname: host.hostname.clone(),
+                            port: host.port,
+                            success: result.success,
+                        });
                         result
                     }
                     Err(e) => {
                         // Connect-time failures: look up the label via the
                         // shared state so the GUI shows a useful row.
-                        let label = {
+                        let (label, hostname, port) = {
                             let st = state.lock().await;
-                            st.ssh_hosts.get(&hid).map(|h| h.label.clone()).unwrap_or_default()
+                            st.ssh_hosts
+                                .get(&hid)
+                                .map(|h| (h.label.clone(), h.hostname.clone(), h.port))
+                                .unwrap_or_default()
                         };
+                        // A host we could not even reach is still an audit
+                        // event — the attempt happened.
+                        crate::ssh::audit::append_audit(&AuditEntry {
+                            timestamp: chrono::Utc::now(),
+                            action: match op {
+                                FanoutOp::Push => AuditAction::Push,
+                                FanoutOp::Revoke => AuditAction::Revoke,
+                            },
+                            key_name: key_name.clone(),
+                            key_fingerprint: key_fingerprint.clone(),
+                            host_label: label.clone(),
+                            hostname,
+                            port,
+                            success: false,
+                        });
                         PushResult {
                             host_id: hid.to_string(),
                             host_label: label,

@@ -116,6 +116,14 @@ struct ComplianceHostView: View {
                 baselineEstablishedCard
             }
             breakdownSection(for: run)
+            // The history strip was written, complete and clickable, and then
+            // never placed in the view — `historyStrip` had exactly one
+            // reference in the codebase: its own declaration. Two runs is the
+            // same threshold the trend chart uses; below that there is no
+            // history to strip.
+            if history.count >= 2 {
+                historyStrip
+            }
         } else {
             emptyStateCard(for: host.deviceType)
         }
