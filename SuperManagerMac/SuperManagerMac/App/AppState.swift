@@ -85,41 +85,17 @@ class AppState {
     /// nil when the sheet dismisses.
     var pendingWebCapture: WebCapture?
 
-    /// "Add customer" / "New engagement" sheet triggers.
+    /// "Add customer" sheet trigger.
     ///
-    /// These live here rather than in the list columns that present them
-    /// because two views now raise them: the column's own empty-state CTA, and
-    /// the toolbar "+" over in ContentView. Same reason `pendingWebCapture` is
-    /// here — a sheet asked for from one view and presented by another needs
-    /// state both can see. The columns still own the `.sheet` modifiers.
+    /// Lives here rather than in the list column that presents it because two
+    /// views raise it: the column's own empty-state CTA, and the toolbar "+"
+    /// in ContentView. Same reason `pendingWebCapture` is here — a sheet asked
+    /// for from one view and presented by another needs state both can see.
+    /// The column still owns the `.sheet` modifier.
     var showingAddCustomer = false
-    var showingAddEngagement = false
 
-    /// Pre-seeded targets for the Recon → Network scan sheet.
-    /// The WebCapture sheet's "Run network scan now" action
-    /// sets this, then switches the section to `.recon`, so the
-    /// scan tile can open pre-populated without round-tripping
-    /// through another picker. ReconView clears it after use.
-    var pendingNetworkScanTargets: [String]?
 
-    /// Cross-section "open this Recon tool" message. Set by
-    /// callers in other sections that previously hosted a
-    /// duplicate copy of the same sheet (the Security panel's
-    /// DNS-audit / traffic-capture buttons before Tranche 1).
-    /// Value is the `ReconTool.rawValue`. ReconView consumes
-    /// + clears it on appear.
-    var pendingReconTool: String?
 
-    /// Engagement context that should travel with a Recon
-    /// hand-off. Critical for traffic capture (pcap path is
-    /// `<engagement>/captures/foo.pcap`) — without carrying the
-    /// source engagement, files land in whatever Recon's own
-    /// picker selected, which is "first active engagement" by
-    /// default. That's the wrong-scope bug C1 was about; the
-    /// 1.8/1.9 cross-link is responsible for not re-introducing
-    /// it. ReconView's onAppear sets `selectedEngagementId`
-    /// from this before its usual sync, then clears it.
-    var pendingReconEngagementId: String?
     /// Last error from a Tailscale login/logout/up/down RPC.
     /// Surfaced inline in the header instead of a system alert —
     /// auth flows fail in mundane ways (network down, browser
@@ -1048,8 +1024,6 @@ class AppState {
         }
     }
 
-    var engagements: [Engagement] = []
-    var selectedEngagementId: String?
     var lastDiscoveryResult: PassiveScanResult?
     var discoveryInFlight = false
 
@@ -1208,27 +1182,6 @@ class AppState {
         let raw = UserDefaults.standard.array(forKey: pinnedVpnDefaultsKey) as? [String] ?? []
         return Set(raw)
     }()
-
-    /// Set of persisted-finding ids the user has pinned to the top
-    /// of the findings list. Same persistence pattern as VPN pins:
-    /// device-local, UserDefaults-backed, survives restart. The
-    /// finding-id (`PersistedFinding.id`) is the daemon's `key`
-    /// hash — stable across scans for the same finding.
-    static let pinnedFindingsDefaultsKey = "findings.pinned"
-    var pinnedFindingIds: Set<String> = {
-        let raw = UserDefaults.standard.array(forKey: pinnedFindingsDefaultsKey) as? [String] ?? []
-        return Set(raw)
-    }()
-
-    /// Toggle the pin state of a finding and persist immediately.
-    func toggleFindingPin(_ findingId: String) {
-        if pinnedFindingIds.contains(findingId) {
-            pinnedFindingIds.remove(findingId)
-        } else {
-            pinnedFindingIds.insert(findingId)
-        }
-        UserDefaults.standard.set(Array(pinnedFindingIds), forKey: Self.pinnedFindingsDefaultsKey)
-    }
 
     // MARK: - Error handling
 
