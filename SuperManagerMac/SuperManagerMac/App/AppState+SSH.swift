@@ -379,7 +379,13 @@ extension AppState {
             )
             return .success(stdout: r.stdout)
         } catch {
-            return .failure(message: String(describing: error))
+            // `localizedDescription`, not `String(describing:)`.
+            // ServiceError is a LocalizedError with no
+            // CustomStringConvertible, so `String(describing:)` falls
+            // back to the stdlib mirror and renders the operator a raw
+            // `rpcError(SuperManagerMac.RpcErrorInfo(code: -32000, …))`
+            // instead of "Daemon error: ssh exec failed: …".
+            return .failure(message: error.localizedDescription)
         }
     }
 

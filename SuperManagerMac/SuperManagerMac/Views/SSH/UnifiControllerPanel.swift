@@ -507,9 +507,12 @@ struct UnifiSetInformSheet: View {
         case .success(let stdout):
             output = stdout.isEmpty ? "set-inform completed (no output)." : stdout
         case .failure(let message):
-            error = message.isEmpty
-                ? "set-inform failed. Make sure the device is reachable over SSH and the credentials are correct."
-                : message
+            // The hint used to be a fallback for an empty message, which
+            // never happens — so it never showed. Appended instead, so the
+            // operator gets the daemon's actual error AND what to check.
+            error = message
+                + "\n\nMake sure the device is reachable over SSH and the "
+                + "credentials are correct."
         }
     }
 
