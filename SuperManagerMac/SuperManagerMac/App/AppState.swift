@@ -32,7 +32,6 @@ class AppState {
 
     // VPN
     var vpnProfiles: [VpnProfileSummary] = []
-    var vpnState: VpnConnectionState = .disconnected
     /// Per-profile connection state, keyed by profile id. Populated
     /// by the global VPN poller (`startVpnStatusPolling`). Drives
     /// the green-dot indicators in the VPN list — without this, you
@@ -109,9 +108,7 @@ class AppState {
     var tailscalePrefs: TailscalePrefs?
 
     // UI
-    var isLocked = false
     var daemonAvailable = false
-    var statusMessage: String?
     /// True when the alert is currently visible. Bound to via
     /// `RootView.alertBinding`. Setting back to false drains the
     /// next queued error (see `dismissCurrentError`).
@@ -432,7 +429,7 @@ class AppState {
         if size < helperLogReadOffset { helperLogReadOffset = 0 }
         guard size > helperLogReadOffset else { return }
 
-        guard let handle = try? FileHandle(forReadingAtPath: path) else { return }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
         try? handle.seek(toOffset: UInt64(helperLogReadOffset))
         let chunk = (try? handle.read(upToCount: size - helperLogReadOffset)) ?? Data()
@@ -971,12 +968,6 @@ class AppState {
     /// when the Provisioning section first activates.
     var provisioningTemplates: [ProvisioningTemplate] = []
 
-    /// Last successful render result per (customer, template) pair.
-    /// Cached so navigating away and back doesn't re-render
-    /// (which is cheap but would discard the user's extras-form
-    /// inputs without persistence).
-    var lastRenderResult: ProvisioningRenderResult?
-
     // MARK: - Security: Engagement + Discovery
     //
     // SecurityTechnique, EngagementEvent, ScheduleCadence,
@@ -1043,43 +1034,13 @@ class AppState {
     var lastDiscoveryResult: PassiveScanResult?
     var discoveryInFlight = false
 
-    // MARK: Active scan + findings
-    //
-    // FindingSeverity, SecurityFinding, TlsInfo, PortProbe, WebPath,
-    // SmbShare, SmbInfo, SnmpDetail, ActiveHost, ActiveScanResult,
-    // Disposition, DispositionChange, PersistedFinding, ScanDiff,
-    // StoreSummary, RiskBand, HostRisk, NotifyConfig, SubdomainResult,
-    // AssetZone, AssetEnrichment, DnsHealthReport, ActivityKind,
-    // ActivityEvent, RemediationScript live in
+    // FindingSeverity, SecurityFinding, Disposition, RiskBand,
+    // NotifyConfig, SubdomainResult and DnsHealthReport live in
     // `Models/SecurityModels.swift`.
     //
     // ToolInfo, CveFeedStatus live in `Models/ToolModels.swift`.
     //
     // NetworkDetect lives in `Models/ProvisioningModels.swift`.
-
-    var lastActiveScan: ActiveScanResult?
-    var activeScanInFlight = false
-
-    /// Running long-running operations, refreshed by
-    /// `pollOperations()` while `activeScanInFlight` (and friends)
-    /// is true. Drives the Stop button + "Cancelling…" indicator.
-    var runningOperations: [RunningOperation] = []
-
-    struct RunningOperation: Codable, Identifiable, Equatable {
-        let id: String
-        let kind: String
-        let label: String
-        let startedAt: Date
-        let cancelRequested: Bool
-
-        enum CodingKeys: String, CodingKey {
-            case id
-            case kind
-            case label
-            case startedAt = "started_at"
-            case cancelRequested = "cancel_requested"
-        }
-    }
 
     // MARK: Provisioning — diff preview + deploy
 

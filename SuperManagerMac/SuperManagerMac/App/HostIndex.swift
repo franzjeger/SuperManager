@@ -83,12 +83,6 @@ struct HostIndex {
         return slugForRecordId[host.id]
     }
 
-    /// Bridge an IP-keyed security finding (`HostRisk.hostIp`) back to a real
-    /// host record. Used by Fleet / Security to make findings actionable.
-    func host(forIp ip: String) -> SshHostSummary? {
-        byIp[ip]
-    }
-
     /// Every host record id belonging to a customer — lets Fleet fold the
     /// record-id-keyed compliance store into per-customer cards.
     func recordIds(forCustomer slug: String) -> Set<String> {

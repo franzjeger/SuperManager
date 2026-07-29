@@ -57,11 +57,17 @@ struct UnifiControllersSettingsView: View {
                 ContentUnavailableView(
                     "No controllers",
                     systemImage: "antenna.radiowaves.left.and.right",
+                    // Describes what the app does, not what it might
+                    // one day do. The engine has a devmgr handler that
+                    // can locate/restart/forget/adopt, but no UI reaches
+                    // it, so promising those here sends the operator
+                    // hunting for buttons that do not exist.
                     description: Text(
                         "Click + to add your UniFi controller. "
-                        + "Once registered, every device it manages "
-                        + "shows up in network scans with one-click "
-                        + "actions (locate / restart / forget / adopt)."
+                        + "Once registered, you can browse the devices "
+                        + "it manages, and re-point a device's inform "
+                        + "URL when you need to move it to another "
+                        + "controller."
                     )
                 )
                 .frame(maxHeight: .infinity)

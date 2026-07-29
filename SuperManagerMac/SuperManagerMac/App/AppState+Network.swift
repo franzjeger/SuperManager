@@ -68,16 +68,4 @@ extension AppState {
             return nil
         }
     }
-
-    func enrichAssets(ips: [String]) async -> [AssetEnrichment]? {
-        do {
-            return try await client.call(
-                "asset_enrich",
-                params: ["ips": ips]
-            )
-        } catch {
-            handleError(error)
-            return nil
-        }
-    }
 }

@@ -498,12 +498,19 @@ struct UnifiSetInformSheet: View {
             error = "Pick a controller (or enable Override and type a URL)."
             return
         }
-        if let stdout = await appState.unifiSetInform(hostId: host.id, informUrl: url) {
+        // The detailed variant returns the engine's error to us
+        // directly. The plain one routed it through `handleError`,
+        // which also fires the app-wide error alert — so a failed
+        // set-inform produced a modal AND an inline message, and the
+        // inline one was read back off shared mutable state.
+        switch await appState.unifiSetInformDetailed(hostId: host.id, informUrl: url) {
+        case .success(let stdout):
             output = stdout.isEmpty ? "set-inform completed (no output)." : stdout
-        } else {
-            error = appState.errorMessage.isEmpty
-                ? "set-inform failed. Make sure the device is reachable over SSH and the credentials are correct."
-                : appState.errorMessage
+        case .failure(let message):
+            // Message is presented as-is. `unifiSetInformDetailed` owns
+            // the wording, including whether the SSH-reachability hint
+            // applies — it is the layer that still has the error type.
+            error = message
         }
     }
 

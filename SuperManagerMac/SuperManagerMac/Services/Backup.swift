@@ -11,19 +11,49 @@ import Foundation
 ///     persist alongside metadata. This is intentional — restoring on
 ///     a new Mac without the private keys would leave hosts orphaned.
 ///   • VPN profile metadata (`profiles/*.toml`)
-///   • SSH password store (`ssh-secrets.json`) — only present when
-///     the user has stored SSH passwords with the daemon
-///   • Audit log (`ssh-audit.log`)
+///   • Daemon secret store (`secrets.json`, mode 0600, plus any
+///     `secrets.json.migrated` left by an earlier store migration).
+///     On macOS the daemon runs the file-backed store — see the
+///     comment at `supermgrd-mac`'s `FileSecretStore::default_path()`
+///     for why it can't hold the keychain-access-groups entitlement —
+///     so this file carries, as plain base64, everything the engine
+///     calls `secrets.store()` on: SSH private keys and host passwords
+///     (`handlers/ssh.rs`), FortiGate API tokens (`handlers/ssh.rs`
+///     and `fortigate.rs`), UniFi controller passwords
+///     (`handlers/unifi.rs`), and **WireGuard private keys and peer
+///     PSKs** (`handlers/vpn.rs`).
+///   • `.ovpn` config files (`ovpn/<profile-id>.ovpn`), which carry
+///     inline `<key>`, `<cert>`, `<ca>` and `<tls-auth>` blocks — an
+///     embedded client private key is secret material in its own right.
+///   • Notification config (`notify.toml`): Slack/Mattermost webhook
+///     URLs, PagerDuty routing keys, OpsGenie API keys.
+///   • Audit log (`ssh-audit.log`), `known_hosts.json`, and whatever
+///     else the daemon has written under the data dir.
 ///
-/// What's *not* in the archive:
-///   • **VPN credentials** (passwords, PSKs). They live in the macOS
-///     Data Protection Keychain, scoped to this Mac's hardware. They
-///     can't be exported in any meaningful way without breaking the
-///     security model — and even if we did, they'd refuse to import on
-///     a different Mac (different machine identity = different
-///     keychain access). Restoring on a new Mac means re-entering
-///     each VPN profile's password and PSK.
-///   • **Master-password hash**. Same reason — keychain-bound.
+/// That list is illustrative, not exhaustive, and enumerating it has
+/// already gone stale twice. The invariant is the thing to remember:
+/// `export` tars the ENTIRE data directory with no filter, so anything
+/// the daemon writes there is in the archive by construction. Treat the
+/// file as being exactly as sensitive as the directory.
+///
+/// What's *not* in the archive — everything the GUI routes through
+/// `VPNKeychain`/`MasterPassword` into the macOS Data Protection
+/// Keychain, which is scoped to this Mac's hardware and so can't be
+/// exported without breaking the security model (it would refuse to
+/// import on another Mac anyway):
+///   • **IKEv2 credentials** — EAP passwords and PSKs.
+///   • **OpenVPN and Azure VPN credentials** — `vpn/<id>/ovpn-username`
+///     and `vpn/<id>/ovpn-password`, read back at connect time in
+///     `AppState+VPN.openVPNConnect`. Note the engine mints matching
+///     `SecretRef` labels for these, but on macOS the GUI supplies the
+///     values over RPC, so nothing lands in the file store.
+///   • **Master-password hash**.
+///
+/// Restoring on a new Mac means re-entering each of those.
+///
+/// WireGuard is deliberately NOT in that list: its keys are minted by
+/// the engine straight into the secret store above, so they travel
+/// with the archive.
 ///
 /// Because the data dir contains private SSH keys and possibly
 /// password material, the produced archive is just as sensitive as

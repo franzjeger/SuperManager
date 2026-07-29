@@ -294,32 +294,6 @@ extension AppState {
         }
     }
 
-    /// Generic FortiGate REST proxy. Returns (status, body). Phase 2
-    /// uses this for the live dashboard; phase 5 builds compliance
-    /// and template-deploy on top.
-    func fortigateApi(
-        hostId: String,
-        method: String,
-        path: String,
-        body: String = ""
-    ) async -> (status: Int, body: String)? {
-        do {
-            let result: FortigateApiRawResponse = try await client.call(
-                "fortigate_api",
-                params: [
-                    "host_id": hostId,
-                    "method": method,
-                    "path": path,
-                    "body": body,
-                ]
-            )
-            return (status: result.status, body: result.body)
-        } catch {
-            handleError(error)
-            return nil
-        }
-    }
-
     // MARK: - UniFi controller
 
     @discardableResult
@@ -377,37 +351,22 @@ extension AppState {
         }
     }
 
-    /// Run `set-inform <inform_url>` on the device via SSH.
-    /// Used both for first-time adoption (factory defaults
-    /// ubnt/ubnt) and to repoint a device at a different
-    /// controller.
-    @discardableResult
-    func unifiSetInform(hostId: String, informUrl: String) async -> String? {
-        struct R: Codable { let stdout: String }
-        do {
-            let r: R = try await client.call(
-                "unifi_set_inform",
-                params: ["host_id": hostId, "inform_url": informUrl]
-            )
-            return r.stdout
-        } catch {
-            handleError(error)
-            return nil
-        }
-    }
-
-    /// Detailed outcome of a UniFi `set-inform` invocation —
-    /// success carries stdout; failure carries the raw engine
-    /// error string for direct surfacing in the UI.
+    /// Outcome of a UniFi `set-inform` invocation — success carries
+    /// stdout; failure carries the raw engine error string for direct
+    /// surfacing in the UI.
     enum UnifiSetInformOutcome {
         case success(stdout: String)
         case failure(message: String)
     }
 
-    /// Detailed variant of `unifiSetInform`. Used by the
-    /// Network-scan → Adopt flow so it can surface the actual
-    /// SSH exit / stderr / "command not found" / etc. instead
-    /// of swallowing it into a generic "something went wrong".
+    /// Run `set-inform <inform_url>` on the device via SSH. Used both for
+    /// first-time adoption (factory defaults ubnt/ubnt) and to repoint a
+    /// device at a different controller.
+    ///
+    /// Returns the outcome rather than routing failures through
+    /// `handleError`, so the caller can show the actual SSH exit /
+    /// stderr / "command not found" inline instead of raising the
+    /// app-wide error alert on top of a generic inline message.
     func unifiSetInformDetailed(
         hostId: String,
         informUrl: String
@@ -419,36 +378,34 @@ extension AppState {
                 params: ["host_id": hostId, "inform_url": informUrl]
             )
             return .success(stdout: r.stdout)
-        } catch {
-            return .failure(message: String(describing: error))
-        }
-    }
-
-    /// Generic UniFi REST proxy. Returns (status, body).
-    func unifiApi(
-        hostId: String,
-        method: String,
-        path: String,
-        body: String = ""
-    ) async -> (status: Int, body: String)? {
-        struct R: Codable {
-            let status: Int
-            let body: String
-        }
-        do {
-            let r: R = try await client.call(
-                "unifi_api",
-                params: [
-                    "host_id": hostId,
-                    "method": method,
-                    "path": path,
-                    "body": body,
-                ]
+        } catch let error as ServiceError {
+            // `localizedDescription`, not `String(describing:)`.
+            // ServiceError is a LocalizedError with no
+            // CustomStringConvertible, so `String(describing:)` falls
+            // back to the stdlib mirror and renders the operator a raw
+            // `rpcError(SuperManagerMac.RpcErrorInfo(code: -32000, …))`
+            // instead of "Daemon error: ssh exec failed: …".
+            //
+            // The SSH hint only belongs on `rpcError`: that means the
+            // daemon was reached and the remote command is what failed.
+            // On a transport error ("Not connected to daemon") telling
+            // the operator to check the device's SSH is a wrong steer.
+            guard case .rpcError = error else {
+                return .failure(message: error.localizedDescription)
+            }
+            return .failure(
+                message: error.localizedDescription
+                    + "\n\nMake sure the device is reachable over SSH and "
+                    + "the credentials are correct."
             )
-            return (status: r.status, body: r.body)
         } catch {
-            handleError(error)
-            return nil
+            // Anything that is not a ServiceError is a decode or
+            // serialization failure, i.e. daemon/app protocol drift.
+            // `localizedDescription` collapses DecodingError to "The
+            // data couldn't be read because it is missing." and drops
+            // the coding path; the raw description keeps the key name,
+            // which is the only thing that identifies the drift.
+            return .failure(message: String(describing: error))
         }
     }
 

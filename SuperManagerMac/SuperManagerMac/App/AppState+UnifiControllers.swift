@@ -208,42 +208,6 @@ extension AppState {
         }
     }
 
-    /// Run a devmgr command (adopt / forget / restart / locate /
-    /// unset-locate / upgrade / set-inform) against a MAC the
-    /// controller manages. `extra` carries command-specific
-    /// args — e.g. `["url": "http://controller:8080/inform"]`
-    /// for set-inform.
-    func runUnifiDevmgrCommand(
-        controllerId: String,
-        cmd: String,
-        mac: String,
-        extra: [String: Any] = [:]
-    ) async -> Result<String, AppError> {
-        var params: [String: Any] = [
-            "id": controllerId,
-            "cmd": cmd,
-            "mac": mac,
-        ]
-        if !extra.isEmpty {
-            params["extra"] = extra
-        }
-        do {
-            let body: [String: AnyDecodable] = try await client.call(
-                "unifi_controller_devmgr",
-                params: params
-            )
-            // Stringify the controller's JSON response so the
-            // GUI can show it raw in a success drawer.
-            let data = try? JSONSerialization.data(
-                withJSONObject: body.mapValues { $0.value },
-                options: .prettyPrinted
-            )
-            let str = data.flatMap { String(data: $0, encoding: .utf8) }
-            return .success(str ?? "ok")
-        } catch {
-            return .failure(AppError(String(describing: error)))
-        }
-    }
 }
 
 /// Mirrors `engine::device_type_overrides::SnapshotView`: two
@@ -274,7 +238,6 @@ struct DeviceTypeOverrides: Codable, Equatable {
     }
 
     var isEmpty: Bool { byMac.isEmpty && byOui.isEmpty }
-    var totalCount: Int { byMac.count + byOui.count }
 }
 
 extension AppState {

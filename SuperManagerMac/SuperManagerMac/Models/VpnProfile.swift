@@ -42,15 +42,6 @@ struct VpnProfileSummary: Decodable, Identifiable, Hashable {
     }
 }
 
-/// VPN connection state.
-enum VpnConnectionState: Equatable {
-    case disconnected
-    case connecting(profileId: String, phase: String)
-    case connected(profileId: String, interface: String)
-    case disconnecting(profileId: String)
-    case error(message: String)
-}
-
 // MARK: - Full profile (decoded from `vpn_get_profile`)
 
 /// Full VPN profile returned by `vpn_get_profile`. Mirrors the Rust `Profile`.

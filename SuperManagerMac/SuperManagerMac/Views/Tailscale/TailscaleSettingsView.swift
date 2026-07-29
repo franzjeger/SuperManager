@@ -378,10 +378,6 @@ struct TailscaleSettingsView: View {
     private var hasExitNode: Bool {
         appState.tailscalePrefs?.hasExitNode ?? false
     }
-    private var currentExitNodeIP: String {
-        appState.tailscalePrefs?.exitNodeIP ?? ""
-    }
-
     /// Display label for the picker — peer hostname if we can
     /// resolve it, IP otherwise, "None" if no exit node selected.
     private var currentExitNodeLabel: String {
@@ -401,29 +397,6 @@ struct TailscaleSettingsView: View {
 
     // MARK: - Bindings
 
-    /// Build a SwiftUI Binding<Bool> that reads from
-    /// `tailscalePrefs.<keyPath>` and writes via the supplied CLI
-    /// closure. Optimistic update happens inside
-    /// `applyTailscalePref`, so the toggle snaps instantly.
-    private func bindToggle(
-        _ keyPath: WritableKeyPath<TailscalePrefs, Bool>,
-        cli: @escaping (Bool) async throws -> Void
-    ) -> Binding<Bool> {
-        Binding(
-            get: { appState.tailscalePrefs?[keyPath: keyPath] ?? false },
-            set: { newValue in
-                // Synchronous log so we KNOW the binding fired even
-                // when the async work behind it errors silently.
-                DebugLog.write("[ts/binding] toggle set newValue=\(newValue)")
-                Task {
-                    await appState.applyTailscalePref(
-                        optimistic: { $0[keyPath: keyPath] = newValue },
-                        cli: { try await cli(newValue) }
-                    )
-                }
-            }
-        )
-    }
 
     /// Special-case binding for advertiseExitNode (computed
     /// property; can't use the generic keypath helper).

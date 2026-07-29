@@ -17,8 +17,6 @@ struct AuditSettingsView: View {
     @State private var actionFilter: AuditEntry.Action? = nil
     @State private var showOnlyFailures = false
     @State private var lastLoaded = Date.distantPast
-    /// Drives the auto-reload timer; tied to view lifetime via `.task`.
-    @State private var refreshTrigger = 0
 
     var body: some View {
         VStack(spacing: 0) {

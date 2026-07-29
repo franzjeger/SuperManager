@@ -1149,21 +1149,6 @@ struct VpnDetailView: View {
 
     // MARK: - State formatting
 
-    private func displayState(_ state: String) -> String {
-        switch state {
-        case "connected":    return "Connected"
-        case "connecting":   return "Connecting…"
-        case "reconnecting": return "Reconnecting…"
-        // Was connected, but the helper can no longer confirm the tunnel
-        // (repeated status timeouts / RPC failures). Distinct from a clean
-        // "Disconnected" so the user knows something is wrong, not that they
-        // deliberately hung up.
-        case "problem":      return "Disconnected (problem)"
-        case "disconnected":
-            return helperReachable ? "Disconnected" : "Helper not installed"
-        default: return state.capitalized
-        }
-    }
 
     // MARK: - Lifecycle
 
