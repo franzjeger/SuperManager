@@ -350,8 +350,35 @@ class AppState {
                 // succeeded, panic_reset escalation) as user
                 // notifications. Cheap tail-of-log read.
                 await pollHelperEventsForNotifications()
+                // The menu bar icon shows WHETHER a tunnel is up; the
+                // tooltip is where WHICH one lives. Refreshed here
+                // rather than from MenuBarView, which only exists while
+                // the menu is open — the hover has to work before that.
+                MenuBarTooltip.set(menuBarTooltipText)
             }
         }
+    }
+
+    /// Text for the menu bar item's hover tooltip. See
+    /// `MenuBarTooltipText.build` for the wording rules.
+    var menuBarTooltipText: String {
+        let tunnels = vpnProfiles.map {
+            MenuBarTunnel(name: $0.name, state: vpnConnectionStates[$0.id] ?? "disconnected")
+        }
+        var tailscale: String?
+        if let status = tailscaleStatus, status.backendState == "Running" {
+            if let prefs = tailscalePrefs,
+               let exit = prefs.currentExitNode(in: status.peers) {
+                tailscale = "Tailscale: exit via \(exit.hostName)"
+            } else {
+                tailscale = "Tailscale: connected (\(status.peers.count) peers)"
+            }
+        }
+        return MenuBarTooltipText.build(
+            daemonAvailable: daemonAvailable,
+            tunnels: tunnels,
+            tailscale: tailscale
+        )
     }
 
     /// Trigger a 30-second window of fast (500 ms) VPN-status
