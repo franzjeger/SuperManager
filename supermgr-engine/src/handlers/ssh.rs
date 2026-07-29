@@ -123,9 +123,30 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let mut state = self.state.lock().await;
-        if let Some(removed) = state.ssh_keys.remove(&key_id) {
-            let _ = state.delete_ssh_key_file(key_id);
+        let removed = {
+            let mut state = self.state.lock().await;
+            match state.ssh_keys.remove(&key_id) {
+                Some(k) => {
+                    let _ = state.delete_ssh_key_file(key_id);
+                    Some(k)
+                }
+                None => None,
+            }
+        };
+        if let Some(removed) = removed {
+            // The private key itself outlived every delete until now, so
+            // the store accumulated PEMs for keys the UI no longer showed
+            // — and the backup archive tars that store whole. Taken from
+            // the record's own `private_key_ref` rather than a rebuilt
+            // label, so an imported key with a non-default label is
+            // cleaned too.
+            match self.secrets.delete(removed.private_key_ref.label()).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!(
+                    "deleting key {key_id}: secret {} not removed: {e}",
+                    removed.private_key_ref.label()
+                ),
+            }
             // Recorded from the removed key, since after this point the
             // name and fingerprint exist nowhere else.
             audit_key_event(AuditAction::Delete, &removed.name, &removed.fingerprint);
@@ -337,8 +358,28 @@ impl EngineServer {
             Err(r) => return r,
         };
         let mut state = self.state.lock().await;
-        if state.ssh_hosts.remove(&host_id).is_some() {
+        let removed = state.ssh_hosts.remove(&host_id);
+        if removed.is_some() {
             let _ = state.delete_ssh_host_file(host_id);
+        }
+        drop(state);
+
+        // Same omission the key path had: the host record went away and
+        // its stored password stayed behind forever. Every `SecretRef`
+        // the host owns is cleared, not just the password — a FortiGate
+        // or UniFi API token is just as much a credential.
+        if let Some(host) = removed {
+            let refs = [
+                host.auth_password_ref.as_ref(),
+                host.auth_cert_ref.as_ref(),
+                host.api_token_ref.as_ref(),
+                host.unifi_api_token_ref.as_ref(),
+            ];
+            for label in refs.into_iter().flatten().map(|r| r.label().to_owned()) {
+                if let Err(e) = self.secrets.delete(&label).await {
+                    tracing::warn!("deleting host {host_id}: secret {label} not removed: {e}");
+                }
+            }
         }
         Response::ok(id, serde_json::json!(null))
     }
