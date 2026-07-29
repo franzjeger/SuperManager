@@ -131,10 +131,44 @@ enum VPNKeychain {
         SecItemDelete(query as CFDictionary)
     }
 
-    /// Delete both password and PSK entries for a profile id.
-    /// Account-name format matches the producer in `AddVpnProfileSheet`.
+    /// Every account name this app stores for one profile.
+    ///
+    /// Single source of truth: `deleteAll` and the duplicate flow both
+    /// read it, so a new credential kind can't be added to one and
+    /// forgotten in the other. Account-name format matches the
+    /// producers in `AddVpnProfileSheet`, `EditOvpnCredentialsSheet`
+    /// and `ImportVpnSheet`.
+    static func accounts(for profileId: String) -> [String] {
+        [
+            "vpn/\(profileId)/password",
+            "vpn/\(profileId)/psk",
+            "vpn/\(profileId)/ovpn-username",
+            "vpn/\(profileId)/ovpn-password",
+        ]
+    }
+
+    /// Delete every stored entry for a profile id.
+    ///
+    /// Previously covered only password and PSK, so deleting an OpenVPN
+    /// or Azure profile left its username and password behind in the
+    /// Keychain indefinitely.
     static func deleteAll(profileId: String) {
-        delete(account: "vpn/\(profileId)/password")
-        delete(account: "vpn/\(profileId)/psk")
+        for account in accounts(for: profileId) {
+            delete(account: account)
+        }
+    }
+
+    /// Copy every stored entry from one profile id to another.
+    ///
+    /// Used by Duplicate. The daemon can only clone what lives in its
+    /// own store, which on macOS excludes IKEv2, OpenVPN and Azure
+    /// credentials, so the GUI carries those across itself. Entries the
+    /// source doesn't have are skipped — a WireGuard profile has none of
+    /// these, and that is not a failure.
+    static func copyAll(from sourceId: String, to targetId: String) {
+        for (source, target) in zip(accounts(for: sourceId), accounts(for: targetId)) {
+            guard let data = try? getData(account: source) else { continue }
+            try? set(data, account: target)
+        }
     }
 }
