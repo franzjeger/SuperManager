@@ -304,9 +304,14 @@ extension AppState {
     }
 
     /// Duplicate a VPN profile via the daemon's
-    /// `vpn_duplicate_profile` RPC. Daemon clones secrets +
-    /// .ovpn files server-side; we just refresh the list and
-    /// auto-select the duplicate so the user sees the result.
+    /// `vpn_duplicate_profile` RPC.
+    ///
+    /// The daemon clones the .ovpn file and whatever secrets live in its
+    /// own store — on macOS that is WireGuard key material only. IKEv2,
+    /// OpenVPN and Azure credentials are in the Keychain, which the
+    /// daemon cannot reach, so we copy those across here. Without this
+    /// the duplicate points at credential labels that were never
+    /// populated and the tunnel fails to authenticate.
     @discardableResult
     func duplicateVpnProfile(profileId: String) async -> Bool {
         do {
@@ -314,6 +319,7 @@ extension AppState {
                 "vpn_duplicate_profile",
                 params: ["profile_id": profileId]
             )
+            VPNKeychain.copyAll(from: profileId, to: result.id)
             await refreshProfiles()
             // Select the duplicate so it's immediately visible —
             // matches the import-flow UX.
