@@ -12,6 +12,41 @@ use tracing::warn;
 use crate::protocol::{self, Response};
 use crate::server::{parse_ip_list, parse_ipnet_list, EngineServer};
 
+/// Every secret label a profile owns.
+///
+/// The single source of truth for "what belongs to this profile", used
+/// both when deleting one and when reasoning about what a duplicate has
+/// to carry. Add a variant here the day a new `ProfileConfig` gains a
+/// `SecretRef`, or its secret becomes an orphan that nothing can reach
+/// and nothing cleans up.
+fn profile_secret_labels(profile: &Profile) -> Vec<String> {
+    let mut labels = Vec::new();
+    match &profile.config {
+        ProfileConfig::WireGuard(wg) => {
+            labels.push(wg.private_key.label().to_owned());
+            for peer in &wg.peers {
+                if let Some(psk) = &peer.preshared_key {
+                    labels.push(psk.label().to_owned());
+                }
+            }
+        }
+        ProfileConfig::FortiGate(fg) => {
+            labels.push(fg.password.label().to_owned());
+            labels.push(fg.psk.label().to_owned());
+        }
+        ProfileConfig::ForticlientSslvpn(fc) => labels.push(fc.password.label().to_owned()),
+        ProfileConfig::OpenVpn(ov) => {
+            if let Some(pw) = &ov.password {
+                labels.push(pw.label().to_owned());
+            }
+        }
+        // Azure authenticates interactively and Generic holds no
+        // credentials of its own.
+        ProfileConfig::AzureVpn(_) | ProfileConfig::Generic(_) => {}
+    }
+    labels
+}
+
 impl EngineServer {
     pub(crate) async fn handle_list_profiles(&self, id: u64) -> Response {
         let state = self.state.lock().await;
@@ -185,11 +220,28 @@ impl EngineServer {
         };
 
         let mut state = self.state.lock().await;
-        if state.profiles.remove(&pid).is_none() {
+        let Some(profile) = state.profiles.remove(&pid) else {
             return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
-        }
+        };
         if let Err(e) = state.delete_profile_file(pid) {
             warn!("failed to delete profile file for {pid}: {e}");
+        }
+        // Drop the lock before touching the secret store: it is a
+        // different backend (file or keychain) with its own I/O, and
+        // holding the state mutex across it serialises every other RPC.
+        drop(state);
+
+        // The profile file used to be all that was removed, which left
+        // every deleted profile's private key sitting in the store
+        // forever — and the backup archive tars that store whole. Not
+        // finding a label is normal rather than an error: on macOS the
+        // GUI keeps IKEv2 and OpenVPN credentials in the Keychain and
+        // deletes them itself, so only WireGuard material is ours here.
+        for label in profile_secret_labels(&profile) {
+            match self.secrets.delete(&label).await {
+                Ok(()) => tracing::debug!("deleted secret {label} with profile {pid}"),
+                Err(e) => tracing::debug!("no secret to delete for {label}: {e}"),
+            }
         }
         Response::ok(id, serde_json::json!({ "deleted": true }))
     }
@@ -999,6 +1051,16 @@ impl EngineServer {
         // bubble up the first error rather than partially-cloning,
         // since a duplicate that's missing its private key is
         // worse than no duplicate at all.
+        //
+        // A source secret that isn't in OUR store is NOT an error. On
+        // macOS the daemon runs the file-backed store while the GUI
+        // keeps IKEv2, OpenVPN and Azure credentials in the Keychain,
+        // so `retrieve` legitimately misses for those — and aborting on
+        // it meant Duplicate failed outright for 15 of 22 profiles on a
+        // real machine, with "secret not found for key vpn/…/password".
+        // Return the fresh label anyway: the new profile points at where
+        // its credential belongs, and the GUI copies the Keychain entry
+        // across after the RPC returns.
         async fn copy_secret(
             secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
             old_ref: &SecretRef,
@@ -1006,8 +1068,18 @@ impl EngineServer {
         ) -> Result<SecretRef, String> {
             let bytes = match secrets.retrieve(old_ref.label()).await {
                 Ok(zs) => zs,
-                Err(e) => return Err(format!("retrieve {}: {e}", old_ref.label())),
+                Err(e) => {
+                    tracing::debug!(
+                        "duplicate: {} not in the daemon store ({e}) — leaving \
+                         {new_label} for the GUI to populate",
+                        old_ref.label()
+                    );
+                    return Ok(SecretRef::new(new_label));
+                }
             };
+            // A store failure IS fatal: we hold the bytes and cannot
+            // persist them, so the duplicate would silently lose a
+            // credential we were able to read.
             if let Err(e) = secrets.store(&new_label, &bytes).await {
                 return Err(format!("store {new_label}: {e}"));
             }
