@@ -378,14 +378,34 @@ extension AppState {
                 params: ["host_id": hostId, "inform_url": informUrl]
             )
             return .success(stdout: r.stdout)
-        } catch {
+        } catch let error as ServiceError {
             // `localizedDescription`, not `String(describing:)`.
             // ServiceError is a LocalizedError with no
             // CustomStringConvertible, so `String(describing:)` falls
             // back to the stdlib mirror and renders the operator a raw
             // `rpcError(SuperManagerMac.RpcErrorInfo(code: -32000, …))`
             // instead of "Daemon error: ssh exec failed: …".
-            return .failure(message: error.localizedDescription)
+            //
+            // The SSH hint only belongs on `rpcError`: that means the
+            // daemon was reached and the remote command is what failed.
+            // On a transport error ("Not connected to daemon") telling
+            // the operator to check the device's SSH is a wrong steer.
+            guard case .rpcError = error else {
+                return .failure(message: error.localizedDescription)
+            }
+            return .failure(
+                message: error.localizedDescription
+                    + "\n\nMake sure the device is reachable over SSH and "
+                    + "the credentials are correct."
+            )
+        } catch {
+            // Anything that is not a ServiceError is a decode or
+            // serialization failure, i.e. daemon/app protocol drift.
+            // `localizedDescription` collapses DecodingError to "The
+            // data couldn't be read because it is missing." and drops
+            // the coding path; the raw description keeps the key name,
+            // which is the only thing that identifies the drift.
+            return .failure(message: String(describing: error))
         }
     }
 
