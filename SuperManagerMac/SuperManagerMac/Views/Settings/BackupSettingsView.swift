@@ -70,7 +70,7 @@ struct BackupSettingsView: View {
                 CaveatRow(
                     icon: "exclamationmark.triangle.fill",
                     color: .orange,
-                    text: "The archive contains everything the daemon stores in plain text: SSH private keys, stored SSH host passwords, FortiGate API tokens, UniFi controller passwords, and WireGuard private keys and peer PSKs. Treat it like a password vault — keep it on encrypted storage."
+                    text: "The archive is a tar of the whole data directory, so treat everything in it as secret. That includes the daemon's secret store as plain text (SSH private keys and host passwords, FortiGate API tokens, UniFi controller passwords, WireGuard private keys and peer PSKs), your .ovpn files with their embedded client keys, and any notification webhooks and API keys. Keep it on encrypted storage."
                 )
                 CaveatRow(
                     icon: "lock.fill",

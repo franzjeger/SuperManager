@@ -11,16 +11,30 @@ import Foundation
 ///     persist alongside metadata. This is intentional — restoring on
 ///     a new Mac without the private keys would leave hosts orphaned.
 ///   • VPN profile metadata (`profiles/*.toml`)
-///   • Daemon secret store (`secrets.json`, mode 0600). On macOS the
-///     daemon runs the file-backed store — see the comment at
-///     `supermgrd-mac`'s `FileSecretStore::default_path()` for why it
-///     can't hold the keychain-access-groups entitlement — so this
-///     file carries, as plain base64, everything the engine calls
-///     `secrets.store()` on: SSH private keys and host passwords
-///     (`handlers/ssh.rs`), FortiGate API tokens (same file),
-///     UniFi controller passwords (`handlers/unifi.rs`), and
-///     **WireGuard private keys and peer PSKs** (`handlers/vpn.rs`).
-///   • Audit log (`ssh-audit.log`)
+///   • Daemon secret store (`secrets.json`, mode 0600, plus any
+///     `secrets.json.migrated` left by an earlier store migration).
+///     On macOS the daemon runs the file-backed store — see the
+///     comment at `supermgrd-mac`'s `FileSecretStore::default_path()`
+///     for why it can't hold the keychain-access-groups entitlement —
+///     so this file carries, as plain base64, everything the engine
+///     calls `secrets.store()` on: SSH private keys and host passwords
+///     (`handlers/ssh.rs`), FortiGate API tokens (`handlers/ssh.rs`
+///     and `fortigate.rs`), UniFi controller passwords
+///     (`handlers/unifi.rs`), and **WireGuard private keys and peer
+///     PSKs** (`handlers/vpn.rs`).
+///   • `.ovpn` config files (`ovpn/<profile-id>.ovpn`), which carry
+///     inline `<key>`, `<cert>`, `<ca>` and `<tls-auth>` blocks — an
+///     embedded client private key is secret material in its own right.
+///   • Notification config (`notify.toml`): Slack/Mattermost webhook
+///     URLs, PagerDuty routing keys, OpsGenie API keys.
+///   • Audit log (`ssh-audit.log`), `known_hosts.json`, and whatever
+///     else the daemon has written under the data dir.
+///
+/// That list is illustrative, not exhaustive, and enumerating it has
+/// already gone stale twice. The invariant is the thing to remember:
+/// `export` tars the ENTIRE data directory with no filter, so anything
+/// the daemon writes there is in the archive by construction. Treat the
+/// file as being exactly as sensitive as the directory.
 ///
 /// What's *not* in the archive — everything the GUI routes through
 /// `VPNKeychain`/`MasterPassword` into the macOS Data Protection
