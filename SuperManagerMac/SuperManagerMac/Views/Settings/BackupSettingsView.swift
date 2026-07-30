@@ -16,6 +16,8 @@ struct BackupSettingsView: View {
     /// Confirmation alert state. Restore needs the user to acknowledge
     /// that any unsaved daemon state will be lost.
     @State private var pendingRestoreURL: URL?
+    /// Dress-rehearsal result, rendered as a per-check list.
+    @State private var verifyReport: BackupVerify.Report?
 
     var body: some View {
         Form {
@@ -39,6 +41,36 @@ struct BackupSettingsView: View {
                     Label("Restore from Backup…", systemImage: "tray.and.arrow.down")
                 }
                 .disabled(isWorking)
+
+                // Dress rehearsal: extract to a scratch dir and run the
+                // checks a restore would care about, without touching
+                // the live data dir. Exists so a broken archive is found
+                // the day it is taken, not the day it is needed.
+                Button {
+                    pickVerifyFile()
+                } label: {
+                    Label("Verify Backup…", systemImage: "checkmark.seal")
+                }
+                .disabled(isWorking)
+            }
+
+            if let report = verifyReport {
+                Section("Verification") {
+                    ForEach(report.checks) { check in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Image(systemName: symbol(for: check.status))
+                                .foregroundStyle(color(for: check.status))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(check.title).font(.callout.weight(.medium))
+                                Text(check.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
             }
 
             // Status / result
@@ -117,12 +149,14 @@ struct BackupSettingsView: View {
         case idle
         case exporting
         case restoring
+        case verifying
 
         var label: String {
             switch self {
             case .idle:      return ""
             case .exporting: return "Creating archive…"
             case .restoring: return "Restoring archive…"
+            case .verifying: return "Verifying archive…"
             }
         }
     }
@@ -163,6 +197,41 @@ struct BackupSettingsView: View {
                     self.status = .idle
                     self.error = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    private func symbol(for status: BackupVerify.Check.Status) -> String {
+        switch status {
+        case .pass: return "checkmark.circle.fill"
+        case .warn: return "exclamationmark.triangle.fill"
+        case .fail: return "xmark.octagon.fill"
+        }
+    }
+
+    private func color(for status: BackupVerify.Check.Status) -> Color {
+        switch status {
+        case .pass: return .green
+        case .warn: return .orange
+        case .fail: return .red
+        }
+    }
+
+    private func pickVerifyFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.gzip, .archive, .data]
+        panel.allowsMultipleSelection = false
+        panel.message = "Pick a SuperManager backup archive to verify."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        status = .verifying
+        verifyReport = nil
+        Task.detached {
+            // Off the main actor — tar + extraction of a large archive
+            // shouldn't freeze the pane.
+            let report = BackupVerify.verify(archive: url)
+            await MainActor.run {
+                verifyReport = report
+                status = .idle
             }
         }
     }
