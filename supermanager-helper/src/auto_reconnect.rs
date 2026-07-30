@@ -66,6 +66,30 @@ pub struct WatchedProfile {
     pub mode: WatchMode,
 }
 
+impl WatchedProfile {
+    /// Can a replay actually run, or is this entry enrolled but toothless?
+    ///
+    /// The GUI enrols an IKEv2 profile with empty args, because the rich
+    /// connect args are only captured by `refresh_args` after a successful
+    /// manual connect. Until that happens `replay_sw`'s decode fails every
+    /// tick while the Always-on toggle sits there showing ON — the toggle
+    /// claims protection the helper cannot deliver. Reported so the GUI can
+    /// say "arms after the next connect" instead of lying.
+    ///
+    /// Deliberately the same decode the replay path performs, so the answer
+    /// cannot drift from the behaviour it describes.
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
+        let a = self.last_connect_args.clone();
+        match self.backend.as_str() {
+            "wireguard" => serde_json::from_value::<crate::wireguard::WgConnectArgs>(a).is_ok(),
+            "openvpn" => serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a).is_ok(),
+            "ikev2" => serde_json::from_value::<crate::strongswan::ConnectArgs>(a).is_ok(),
+            _ => false,
+        }
+    }
+}
+
 /// Process-wide state. Built up at startup by `spawn_watchdog`,
 /// then mutated via the public `enable` / `disable` APIs.
 #[derive(Default)]
@@ -144,6 +168,20 @@ pub async fn disable(profile_id: &str) -> Result<()> {
 pub async fn list_watched() -> Vec<String> {
     let Some(state) = STATE.get() else { return Vec::new() };
     state.lock().await.watched.keys().cloned().collect()
+}
+
+/// Watched profiles whose stored args cannot be replayed — enrolled but not
+/// yet armed. See `WatchedProfile::is_armed`.
+pub async fn list_unarmed() -> Vec<String> {
+    let Some(state) = STATE.get() else { return Vec::new() };
+    state
+        .lock()
+        .await
+        .watched
+        .values()
+        .filter(|w| !w.is_armed())
+        .map(|w| w.profile_id.clone())
+        .collect()
 }
 
 /// Refresh stored args for a watched profile. Called from connect

@@ -384,8 +384,9 @@ extension AppState {
     /// leaves the local set untouched.
     func refreshAutoReconnect() async {
         do {
-            let list = try await HelperClient.shared.autoReconnectList()
-            autoReconnectEnabled = Set(list)
+            let r = try await HelperClient.shared.autoReconnectList()
+            autoReconnectEnabled = Set(r.watched)
+            autoReconnectUnarmed = Set(r.unarmed)
         } catch {
             // Silent; not critical for steady-state.
         }
