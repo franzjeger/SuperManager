@@ -208,6 +208,31 @@ extension AppState {
         }
     }
 
+    /// Run a devmgr command (adopt / forget / restart / locate /
+    /// unset-locate) against a MAC the controller manages.
+    ///
+    /// Deleted in the dead-code sweep, resurrected now that the device
+    /// list actually offers these actions. Errors come back as
+    /// `localizedDescription`, not `String(describing:)` — the latter
+    /// renders a raw enum dump for ServiceError (same trap the
+    /// set-inform sheet fell into, see unifiSetInformDetailed).
+    func runUnifiDevmgrCommand(
+        controllerId: String,
+        cmd: String,
+        mac: String
+    ) async -> Result<Void, AppError> {
+        do {
+            let _: [String: AnyDecodable] = try await client.call(
+                "unifi_controller_devmgr",
+                params: ["id": controllerId, "cmd": cmd, "mac": mac]
+            )
+            return .success(())
+        } catch let error as ServiceError {
+            return .failure(AppError(error.localizedDescription))
+        } catch {
+            return .failure(AppError(String(describing: error)))
+        }
+    }
 }
 
 /// Mirrors `engine::device_type_overrides::SnapshotView`: two

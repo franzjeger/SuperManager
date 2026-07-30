@@ -17,6 +17,24 @@ struct UnifiControllersSettingsView: View {
     @State private var devices: [UnifiManagedDevice] = []
     @State private var loadingDevices = false
     @State private var devicesError: String?
+    /// MAC currently running a devmgr command — disables that row's menu
+    /// and shows a spinner, so a slow controller can't be double-poked.
+    @State private var busyMac: String?
+    /// Last devmgr outcome, shown inline under the device list.
+    @State private var deviceActionNote: String?
+    @State private var deviceActionFailed = false
+    /// Destructive commands go through a confirmation. Forget un-adopts a
+    /// device at a customer site — that is a site visit if it goes wrong,
+    /// so it does not get to be a single click.
+    @State private var pendingDestructive: PendingDeviceCommand?
+
+    /// A device command awaiting confirmation.
+    struct PendingDeviceCommand: Identifiable {
+        let cmd: String
+        let device: UnifiManagedDevice
+        var id: String { "\(cmd)-\(device.mac)" }
+        var deviceName: String { device.name ?? device.model ?? device.mac }
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -35,6 +53,43 @@ struct UnifiControllersSettingsView: View {
         .sheet(item: $editing) { c in
             UnifiControllerEditSheet(controller: c)
                 .environment(appState)
+        }
+        .confirmationDialog(
+            pendingDestructive.map { confirmTitle(for: $0) } ?? "",
+            isPresented: Binding(
+                get: { pendingDestructive != nil },
+                set: { if !$0 { pendingDestructive = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDestructive
+        ) { pending in
+            Button(pending.cmd.capitalized, role: .destructive) {
+                runDeviceCommand(pending.cmd, pending.device)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            Text(confirmMessage(for: pending))
+        }
+    }
+
+    private func confirmTitle(for p: PendingDeviceCommand) -> String {
+        "\(p.cmd.capitalized) \(p.deviceName)?"
+    }
+
+    /// Spell out the customer-visible consequence. "Are you sure?" tells
+    /// the operator nothing they didn't already know; "the AP drops for
+    /// about a minute" is what they actually need before clicking.
+    private func confirmMessage(for p: PendingDeviceCommand) -> String {
+        switch p.cmd {
+        case "restart":
+            return "The device goes offline for roughly a minute. "
+                + "Anything connected through it loses its link."
+        case "forget":
+            return "The controller un-adopts the device. It stops being "
+                + "managed and returns to factory-default state — "
+                + "re-adopting usually needs physical or console access."
+        default:
+            return "This affects a live device at a customer site."
         }
     }
 
@@ -57,17 +112,17 @@ struct UnifiControllersSettingsView: View {
                 ContentUnavailableView(
                     "No controllers",
                     systemImage: "antenna.radiowaves.left.and.right",
-                    // Describes what the app does, not what it might
-                    // one day do. The engine has a devmgr handler that
-                    // can locate/restart/forget/adopt, but no UI reaches
-                    // it, so promising those here sends the operator
-                    // hunting for buttons that do not exist.
+                    // Kept honest in both directions: this used to promise
+                    // adopt/locate/restart/forget that no UI implemented, so
+                    // it was narrowed to what the app could actually do.
+                    // Those actions now exist on the device rows, so the
+                    // promise is back — and this time it is true.
                     description: Text(
                         "Click + to add your UniFi controller. "
-                        + "Once registered, you can browse the devices "
-                        + "it manages, and re-point a device's inform "
-                        + "URL when you need to move it to another "
-                        + "controller."
+                        + "Once registered, you can browse the devices it "
+                        + "manages, adopt pending ones, flash their locate "
+                        + "LED, restart them, and re-point a device's "
+                        + "inform URL."
                     )
                 )
                 .frame(maxHeight: .infinity)
@@ -196,6 +251,14 @@ struct UnifiControllersSettingsView: View {
                         ForEach(devices) { d in
                             deviceRow(d)
                         }
+                        if let note = deviceActionNote {
+                            Label(note, systemImage: deviceActionFailed
+                                  ? "exclamationmark.triangle.fill"
+                                  : "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(deviceActionFailed ? .red : .secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                 }
             }
@@ -206,6 +269,7 @@ struct UnifiControllersSettingsView: View {
         .onChange(of: selectedId) { _, _ in
             devices = []
             devicesError = nil
+            deviceActionNote = nil
         }
     }
 
@@ -216,6 +280,11 @@ struct UnifiControllersSettingsView: View {
                     .font(.body.weight(.medium))
                 Spacer()
                 stateBadge(d.state)
+                if busyMac == d.mac {
+                    ProgressView().controlSize(.small)
+                } else {
+                    deviceActionMenu(d)
+                }
             }
             HStack(spacing: 8) {
                 Text(d.mac).font(.caption.monospaced()).foregroundStyle(.tertiary)
@@ -232,6 +301,83 @@ struct UnifiControllersSettingsView: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// Per-device actions. The engine has had `unifi_controller_devmgr`
+    /// all along and no UI reached it — the empty-state text used to
+    /// promise these very actions, which is why it had to be reworded.
+    ///
+    /// Only the commands that make sense from a device row are offered.
+    /// `move` needs a target site and `upgrade` a firmware choice, so
+    /// they belong in their own flows rather than a one-click menu.
+    @ViewBuilder
+    private func deviceActionMenu(_ d: UnifiManagedDevice) -> some View {
+        Menu {
+            if d.state == "pending-adoption" {
+                Button {
+                    runDeviceCommand("adopt", d)
+                } label: {
+                    Label("Adopt", systemImage: "plus.circle")
+                }
+                Divider()
+            }
+            Button {
+                runDeviceCommand("locate", d)
+            } label: {
+                Label("Flash locate LED", systemImage: "light.beacon.max")
+            }
+            Button {
+                runDeviceCommand("unset-locate", d)
+            } label: {
+                Label("Stop flashing", systemImage: "light.beacon.min")
+            }
+            Divider()
+            // Restart and Forget both interrupt service at a customer
+            // site, so both confirm first.
+            Button {
+                pendingDestructive = PendingDeviceCommand(cmd: "restart", device: d)
+            } label: {
+                Label("Restart…", systemImage: "arrow.clockwise")
+            }
+            Button(role: .destructive) {
+                pendingDestructive = PendingDeviceCommand(cmd: "forget", device: d)
+            } label: {
+                Label("Forget…", systemImage: "minus.circle")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    private func runDeviceCommand(_ cmd: String, _ d: UnifiManagedDevice) {
+        guard let id = selectedId else { return }
+        let name = d.name ?? d.model ?? d.mac
+        Task {
+            busyMac = d.mac
+            defer { busyMac = nil }
+            deviceActionNote = nil
+            switch await appState.runUnifiDevmgrCommand(
+                controllerId: id, cmd: cmd, mac: d.mac
+            ) {
+            case .success:
+                deviceActionFailed = false
+                deviceActionNote = "\(cmd) sent to \(name)."
+                // The controller needs a moment before the state field
+                // reflects an adopt or a restart; reload so the badge is
+                // not stale the instant after the operator acted.
+                if cmd == "adopt" || cmd == "forget" {
+                    try? await Task.sleep(for: .seconds(2))
+                    if let c = appState.unifiControllers.first(where: { $0.id == id }) {
+                        await loadDevices(c)
+                    }
+                }
+            case .failure(let err):
+                deviceActionFailed = true
+                deviceActionNote = "\(cmd) failed on \(name): \(err.message)"
+            }
+        }
     }
 
     private func stateBadge(_ state: String) -> some View {
