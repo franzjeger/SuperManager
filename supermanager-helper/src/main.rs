@@ -913,7 +913,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "auto_reconnect_list" => {
             let watched = auto_reconnect::list_watched().await;
-            Response::ok(id, serde_json::json!({"watched": watched}))
+            // `unarmed` is additive — older GUIs read only `watched` and
+            // keep working. A profile in both is enrolled but cannot be
+            // replayed yet, which the GUI must not present as protected.
+            let unarmed = auto_reconnect::list_unarmed().await;
+            Response::ok(id, serde_json::json!({
+                "watched": watched,
+                "unarmed": unarmed,
+            }))
         }
 
         // Kill-switch: install pf rules that block all egress

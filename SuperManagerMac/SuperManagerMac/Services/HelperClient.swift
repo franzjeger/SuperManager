@@ -267,11 +267,18 @@ final class HelperClient {
                        params: ["profile_id": profileId])
     }
 
-    /// List currently-watched profile IDs. UI reads this to render
-    /// the always-on toggle's correct state.
-    func autoReconnectList() async throws -> [String] {
+    /// List watched profile IDs, and the subset that is enrolled but not
+    /// yet armed (no replayable connect args stored — IKEv2 before its
+    /// first manual connect). UI reads this to render the always-on
+    /// toggle's correct state, and to avoid presenting an unarmed entry
+    /// as protection. `unarmed` is absent from older helpers; that maps
+    /// to the empty set, which is also the honest default.
+    func autoReconnectList() async throws -> (watched: [String], unarmed: [String]) {
         let r = try await call("auto_reconnect_list", params: [:])
-        return (r["watched"] as? [String]) ?? []
+        return (
+            watched: (r["watched"] as? [String]) ?? [],
+            unarmed: (r["unarmed"] as? [String]) ?? []
+        )
     }
 
     // MARK: - Kill-switch

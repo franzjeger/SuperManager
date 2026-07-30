@@ -302,6 +302,15 @@ struct VpnDetailView: View {
     /// SwiftUI binding for the always-on Toggle. Reads from
     /// AppState's set; on flip calls `setAutoReconnect` which
     /// pushes to the helper.
+    private var alwaysOnHelp: String {
+        if appState.autoReconnectUnarmed.contains(profileId) {
+            return "Enabled, but arms after the next successful connect."
+        }
+        return appState.autoReconnectEnabled.contains(profileId)
+            ? "Reconnecting automatically every 30s."
+            : "Reconnect automatically if the tunnel drops."
+    }
+
     private var alwaysOnBinding: Binding<Bool> {
         Binding(
             get: { appState.autoReconnectEnabled.contains(profileId) },
@@ -749,11 +758,24 @@ struct VpnDetailView: View {
                         // secret store, so it works on first toggle).
                         ToggleRow(
                             title: "Always on",
-                            help: appState.autoReconnectEnabled.contains(profileId)
-                                ? "Reconnecting automatically every 30s."
-                                : "Reconnect automatically if the tunnel drops.",
+                            help: alwaysOnHelp,
                             isOn: alwaysOnBinding
                         )
+                        // Enrolled-but-unarmed is the state the toggle can't
+                        // express on its own: ON, yet the helper has no args
+                        // to replay until the first manual connect succeeds.
+                        // Showing nothing here would present a dead switch as
+                        // protection.
+                        if appState.autoReconnectUnarmed.contains(profileId) {
+                            Label(
+                                "Arms after the next successful connect — "
+                                + "the helper replays the credentials from it.",
+                                systemImage: "exclamationmark.triangle.fill"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
 
                     // Routing changes need a reconnect, so they commit through a

@@ -1145,6 +1145,11 @@ class AppState {
     /// from helper's `auto_reconnect_list` RPC. Drives the
     /// "Always on" toggle in the VPN detail view.
     var autoReconnectEnabled: Set<String> = []
+    /// Enrolled in always-on but with no replayable connect args stored —
+    /// an IKEv2 profile before its first manual connect. The toggle shows
+    /// ON, but the helper cannot actually reconnect it yet, and the UI
+    /// must say so rather than imply protection.
+    var autoReconnectUnarmed: Set<String> = []
     /// Per-profile bandwidth counters from the helper's status
     /// RPC (rx_bytes / tx_bytes). nil if the backend doesn't
     /// expose them or the tunnel isn't connected.
