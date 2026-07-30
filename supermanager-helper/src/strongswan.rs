@@ -1148,14 +1148,28 @@ fn delete_full_tunnel_routes() {
     // drop egress to the local uplink. Unlike foreign_tunnel_ifaces (which
     // remove_exit_routes uses and must be able to delete tailscale routes from),
     // this protection is local to the sweep only.
-    if let Some(ts) = tailscale_tunnel_iface() {
-        foreign.insert(ts);
+    // FAIL-SAFE, mirroring `ikev2_sa_present_or_unknown` below: uncertainty
+    // resolves to KEEP. Right after wake tailscaled is alive but has not yet
+    // reinstalled the 100.64/10 route this detection keys on, so the lookup
+    // returns None, the exit node's utun went unprotected, and this sweep
+    // wiped a live exit node's /1 pair on every single wake — ~15 seconds of
+    // route-guardian churn and a couple of minutes without egress, observed
+    // 2026-07-30. If the daemon is alive but its utun is unidentifiable,
+    // protect ALL utun-backed /1 routes this pass; the next sweep runs with
+    // the route back and full precision.
+    let mut ts_uncertain = false;
+    match tailscale_tunnel_iface() {
+        Some(ts) => {
+            foreign.insert(ts);
+        }
+        None if tailscaled_alive() => ts_uncertain = true,
+        None => {}
     }
     // Is a strongSwan tunnel ESTABLISHED right now? If so, a utun-backed /1
     // route belongs to it (e.g. auto_reconnect re-established the tunnel after
     // wake, or another IKEv2 profile is up while this one disconnects). We must
     // not delete a live IKEv2 tunnel's default routes.
-    let live_sa = has_established_strongswan_sa();
+    let live_sa = has_established_strongswan_sa() || ts_uncertain;
 
     // IPv4 split-defaults charon installs for a full tunnel. (get-spec,
     // delete-spec, family-flag): `route get` wants a full address, `route
@@ -1396,6 +1410,16 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
 /// connectivity blip (unlike a `route get 100.100.100.100`, which goes dark
 /// mid-blip). The strongSwan post-wake sweep uses this to avoid wiping a live
 /// exit node's `0/1` split-defaults.
+/// Is tailscaled alive at all, independent of routing state?
+///
+/// The socket exists for the daemon's whole lifetime, while the CGNAT
+/// route `tailscale_tunnel_iface` keys on is torn down across sleep and
+/// only reappears once tailscaled re-establishes itself after wake.
+/// That gap is exactly when the post-wake sweep runs.
+pub(crate) fn tailscaled_alive() -> bool {
+    std::path::Path::new("/var/run/tailscaled.socket").exists()
+}
+
 pub(crate) fn tailscale_tunnel_iface() -> Option<String> {
     let out = std::process::Command::new("/usr/sbin/netstat")
         .args(["-rn", "-f", "inet"])
