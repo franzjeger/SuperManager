@@ -40,6 +40,9 @@ struct VpnDetailView: View {
         /// point at `interface`. nil = helper couldn't determine (or an older
         /// helper that doesn't report it) — say nothing rather than guess.
         var routesInstalled: Bool?
+        /// Negotiated IKE proposal. IKEv2 only; empty for every other
+        /// backend, and empty against a helper too old to report it.
+        var cipherSuite = ""
 
         /// Nothing measured. Also the test for whether the section renders at
         /// all — an empty tunnel has nothing to say.
@@ -933,6 +936,13 @@ struct VpnDetailView: View {
                     : "\(live.virtualIp) → \(live.virtualGateway)"
                 row("Assigned IP", assigned)
             }
+            // What the tunnel actually negotiated. Otherwise invisible
+            // without reading charon's log, and the difference between
+            // AES-256 and something the gateway defaulted to is worth a
+            // glance before telling a customer they're covered.
+            if !live.cipherSuite.isEmpty {
+                row("Cipher", live.cipherSuite)
+            }
             // Connection-uptime row, ticking every second via
             // TimelineView. Sourced from the latest
             // `.connectSucceeded` activity event — same source the
@@ -1292,7 +1302,8 @@ struct VpnDetailView: View {
             virtualIp: (result["virtual_ip"] as? String) ?? "",
             virtualGateway: (result["virtual_gateway"] as? String) ?? "",
             routes: (result["active_routes"] as? [String]) ?? [],
-            routesInstalled: result["routes_installed"] as? Bool
+            routesInstalled: result["routes_installed"] as? Bool,
+            cipherSuite: (result["cipher_suite"] as? String) ?? ""
         )
     }
 
