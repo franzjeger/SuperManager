@@ -236,10 +236,17 @@ extension AppState {
                 if state == "connecting" && detail.contains("timed out") {
                     state = "unknown"
                 }
+                // IKEv2 does expose counters — swanctl prints them on the
+                // child SA's in/out lines, inside the block the helper
+                // already parses for the traffic selectors. This used to
+                // pass nil on the belief that it didn't.
+                let rx = (r["bytes_in"] as? NSNumber)?.uint64Value
+                let tx = (r["bytes_out"] as? NSNumber)?.uint64Value
+                let bytes: (UInt64, UInt64)? = (rx != nil && tx != nil) ? (rx!, tx!) : nil
                 return VpnPollSample(
                     profileId: summary.id,
                     state: state,
-                    bytes: nil,
+                    bytes: bytes,
                     lastHandshakeUnix: nil,
                     peerEndpoint: nil
                 )

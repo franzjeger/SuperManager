@@ -191,6 +191,26 @@ pub struct StatusResult {
     /// check against) — the GUI stays silent rather than guessing.
     #[serde(default)]
     pub routes_installed: Option<bool>,
+    /// The negotiated IKE proposal, e.g.
+    /// `AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_384`.
+    ///
+    /// Answers "is this tunnel actually using decent crypto", which for an
+    /// IKEv2 dial-up is otherwise invisible without reading charon's log.
+    #[serde(default)]
+    pub cipher_suite: String,
+    /// Bytes and packets over the child SA, gateway's own counters.
+    ///
+    /// The GUI previously believed IKEv2 had no throughput data and hid the
+    /// row. It does: swanctl prints it on the child SA's `in`/`out` lines,
+    /// inside the block we already extract for the traffic selectors.
+    #[serde(default)]
+    pub bytes_in: u64,
+    #[serde(default)]
+    pub bytes_out: u64,
+    #[serde(default)]
+    pub packets_in: u64,
+    #[serde(default)]
+    pub packets_out: u64,
 }
 
 /// Holds onto the strongSwan install paths and the supervised charon
@@ -514,6 +534,7 @@ impl Strongswan {
         let routes_installed = routes_installed_verdict(&interface, &active_routes, |dest| {
             route_iface_family(dest, "-inet")
         });
+        let (bytes_in, packets_in, bytes_out, packets_out) = parse_traffic(&block);
         Ok(StatusResult {
             state: state.to_owned(),
             detail: sa_summary_line(&block),
@@ -522,6 +543,11 @@ impl Strongswan {
             virtual_gateway,
             active_routes,
             routes_installed,
+            cipher_suite: parse_cipher_suite(&block).unwrap_or_default(),
+            bytes_in,
+            bytes_out,
+            packets_in,
+            packets_out,
         })
     }
 }
@@ -612,6 +638,58 @@ fn sa_summary_line(block: &str) -> String {
 /// the last, and only if it looks like an address — with no virtual IP assigned
 /// the line ends at `[4500]` and returning "4500" as an address would be worse
 /// than returning nothing.
+/// The bare IKE proposal line from an SA block.
+///
+/// swanctl prints it unadorned between the `remote` line and `established`:
+/// no spaces, no colon, slash-separated. That shape is what distinguishes it
+/// from the child SA's `ESP:…` line (which carries both) and from the
+/// `local`/`remote` traffic selectors (which contain spaces).
+fn parse_cipher_suite(block: &str) -> Option<String> {
+    block
+        .lines()
+        .map(str::trim)
+        .find(|l| l.contains('/') && !l.contains(char::is_whitespace) && !l.contains(':'))
+        .map(str::to_owned)
+}
+
+/// `(bytes, packets)` from a child SA counter line such as
+/// `in  cb9ab05e,  42670 bytes,   116 packets,     0s ago`.
+fn parse_counter_line(line: &str) -> Option<(u64, u64)> {
+    let mut bytes = None;
+    let mut packets = None;
+    let fields: Vec<&str> = line.split(',').map(str::trim).collect();
+    for f in fields {
+        let mut parts = f.split_whitespace();
+        let (Some(n), Some(unit)) = (parts.next(), parts.next()) else { continue };
+        let Ok(n) = n.parse::<u64>() else { continue };
+        match unit {
+            "bytes" => bytes = Some(n),
+            "packets" => packets = Some(n),
+            _ => {}
+        }
+    }
+    Some((bytes?, packets?))
+}
+
+/// Traffic counters for the block: `(bytes_in, packets_in, bytes_out, packets_out)`.
+fn parse_traffic(block: &str) -> (u64, u64, u64, u64) {
+    let mut r = (0, 0, 0, 0);
+    for line in block.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("in ") {
+            if let Some((b, p)) = parse_counter_line(rest) {
+                r.0 = b;
+                r.1 = p;
+            }
+        } else if let Some(rest) = line.strip_prefix("out ") {
+            if let Some((b, p)) = parse_counter_line(rest) {
+                r.2 = b;
+                r.3 = p;
+            }
+        }
+    }
+    r
+}
+
 fn parse_virtual_ip(block: &str) -> Option<String> {
     let line = block
         .lines()
@@ -693,16 +771,137 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
-        return Err(anyhow!(
-            "{} {:?} exited {}: {}{}",
-            bin.display(),
-            args,
-            output.status,
-            stderr,
-            stdout
-        ));
+        let combined = format!("{stderr}{stdout}");
+        // A failed IKEv2 connect used to surface the whole swanctl
+        // blob verbatim in the GUI. The cause is in there, but it is
+        // buried in negotiation chatter. Lead with a one-line
+        // diagnosis when we recognise the failure, and keep the raw
+        // output below the marker so nothing is ever hidden.
+        let header = match diagnose_strongswan_failure(&combined) {
+            Some(d) => format!("{} ({})", d, output.status),
+            None => format!("{} {:?} exited {}", bin.display(), args, output.status),
+        };
+        return Err(anyhow!("{header}\n\n--- swanctl output ---\n{combined}"));
     }
     Ok([stdout, stderr].concat())
+}
+
+/// Map strongSwan's verbose negotiation log onto a one-line
+/// human diagnosis. Returns `None` for novel failures so the
+/// caller falls back to the raw exit message — we never hide
+/// the original.
+///
+/// Patterns are matched in priority order: the first one that
+/// hits wins, so more specific patterns come first.
+fn diagnose_strongswan_failure(log: &str) -> Option<String> {
+    let l = log.to_ascii_lowercase();
+
+    // Authentication-side failures — most common operator
+    // confusion, deserves the clearest message.
+    if l.contains("eap-ms-chapv2 failed")
+        || l.contains("eap_mschapv2 method failed")
+    {
+        return Some(
+            "EAP-MSCHAPv2 authentication failed. Username or \
+             password rejected by the server. If your FortiGate / \
+             Windows RADIUS expects a domain prefix, try \
+             `DOMAIN\\user` or `user@realm` in the username field."
+                .to_owned(),
+        );
+    }
+    if l.contains("received authentication_failed notify") {
+        return Some(
+            "Server rejected our credentials (AUTHENTICATION_FAILED). \
+             Most often a wrong pre-shared key for IKEv2, or the \
+             user account is locked / disabled."
+                .to_owned(),
+        );
+    }
+    if l.contains("invalid_id_information") || l.contains("invalid_id") {
+        return Some(
+            "Server rejected our identity (INVALID_ID_INFORMATION). \
+             Check the `local_id` / `remote_id` in the profile."
+                .to_owned(),
+        );
+    }
+
+    // Crypto / proposal-mismatch failures.
+    if l.contains("no_proposal_chosen") || l.contains("no proposal chosen") {
+        return Some(
+            "No matching IKE/ESP proposal. The server didn't accept \
+             any cipher suite we offered. Pin a specific proposal in \
+             the profile (Advanced → IKE proposals)."
+                .to_owned(),
+        );
+    }
+    // ECP/MODP mismatch is recoverable — strongSwan retries
+    // with the requested group automatically. We only see this
+    // if the retry ALSO failed.
+    if l.contains("ts_unacceptable") {
+        return Some(
+            "Traffic-selector mismatch (TS_UNACCEPTABLE). The local \
+             or remote subnets in your profile don't match what the \
+             gateway is configured to allow."
+                .to_owned(),
+        );
+    }
+
+    // Network / reachability.
+    if l.contains("retransmit") && l.contains("giving up") {
+        return Some(
+            "Gateway unreachable — every retransmit timed out. \
+             Check the server address / port and that UDP 500 + \
+             4500 aren't blocked between you and the gateway."
+                .to_owned(),
+        );
+    }
+    if l.contains("no route to host") || l.contains("network is unreachable") {
+        return Some(
+            "Kernel returned 'no route to host' for the gateway. \
+             You may need to grant SuperManager the Local Network \
+             permission under System Settings → Privacy & Security."
+                .to_owned(),
+        );
+    }
+    if l.contains("connection refused") {
+        return Some(
+            "Gateway actively refused the connection (TCP). For an \
+             IKEv2 dial-up the gateway must listen on UDP 500/4500, \
+             not TCP — verify the address + port."
+                .to_owned(),
+        );
+    }
+
+    // Config / profile problems.
+    if l.contains("no matching peer config found") {
+        return Some(
+            "Server doesn't have a peer config that matches our \
+             identity / IP. The user account or group on the \
+             gateway may not exist, or the local_id is wrong."
+                .to_owned(),
+        );
+    }
+    if l.contains("unable to install policy")
+        || l.contains("kernel install")
+    {
+        return Some(
+            "Tunnel established but the kernel rejected the routing \
+             policy. Usually a conflict with an existing route to \
+             the same subnet — disconnect other VPNs and retry."
+                .to_owned(),
+        );
+    }
+
+    // Catch-all: connection attempt finished without a successful
+    // CHILD_SA. Common when the EAP phase was never reached.
+    if l.contains("establishing child_sa") && l.contains("failed") {
+        return Some(
+            "IKE_AUTH completed but CHILD_SA setup failed — usually \
+             a phase-2 proposal mismatch or traffic-selector issue."
+                .to_owned(),
+        );
+    }
+    None
 }
 
 async fn run_with_timeout(
@@ -1354,7 +1553,7 @@ mod tests {
     /// earlier change in this file shipped a swanctl option that looked right
     /// and wasn't, and strongSwan silently discarded the whole config. Parsers
     /// get written against output someone actually saw.
-    const REAL_LIST_SAS_FULL_TUNNEL: &str = "\
+    pub(super) const REAL_LIST_SAS_FULL_TUNNEL: &str = "\
 4a08fdd4-1818-4826-aedc-f1466c96d113: #1, ESTABLISHED, IKEv2, 9f2c31ad4a19aa57_i* 8b0e9e4c7ae0fa98_r
   local  '192.168.200.136' @ 192.168.200.136[4500] [192.168.250.1]
   remote '193.214.73.114' @ 193.214.73.114[4500]
@@ -1368,7 +1567,7 @@ mod tests {
     remote 0.0.0.0/0
 ";
 
-    const PROFILE: &str = "4a08fdd4-1818-4826-aedc-f1466c96d113";
+    pub(super) const PROFILE: &str = "4a08fdd4-1818-4826-aedc-f1466c96d113";
 
     #[test]
     fn block_extends_past_the_byte_counters_to_the_selectors() {
@@ -1669,5 +1868,81 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert_eq!(escape_swanctl(r"a\b"), r"a\\b");
         assert_eq!(escape_swanctl("line1\nline2"), "line1line2");
         assert_eq!(escape_swanctl("with\rcarriage"), "withcarriage");
+    }
+}
+
+#[cfg(test)]
+mod diagnose_tests {
+    use super::diagnose_strongswan_failure;
+
+    #[test]
+    fn mschapv2_auth_failure() {
+        let log = "[IKE] EAP-MS-CHAPv2 failed with error \
+                   ERROR_AUTHENTICATION_FAILURE: 'FAILED'\n\
+                   [IKE] EAP_MSCHAPV2 method failed";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("EAP-MSCHAPv2 authentication failed"));
+        assert!(d.contains("DOMAIN"));
+    }
+
+    #[test]
+    fn proposal_mismatch() {
+        let log = "[IKE] received NO_PROPOSAL_CHOSEN notify error";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("No matching IKE/ESP proposal"));
+    }
+
+    /// Novel failures must fall through to the raw message rather
+    /// than be papered over with a wrong guess.
+    #[test]
+    fn unknown_failure_returns_none() {
+        assert!(diagnose_strongswan_failure("something we've never seen before").is_none());
+    }
+
+    /// Priority order matters: an auth failure often also mentions
+    /// the CHILD_SA catch-all, and the specific message must win.
+    #[test]
+    fn specific_pattern_beats_catch_all() {
+        let log = "[IKE] received AUTHENTICATION_FAILED notify\n\
+                   [IKE] establishing CHILD_SA failed";
+        let d = diagnose_strongswan_failure(log).unwrap();
+        assert!(d.contains("AUTHENTICATION_FAILED"), "{d}");
+    }
+}
+
+#[cfg(test)]
+mod traffic_tests {
+    use super::{extract_sa_block, parse_cipher_suite, parse_traffic};
+    use super::tests::{PROFILE, REAL_LIST_SAS_FULL_TUNNEL};
+
+    /// Both read the block main already extracts, against output captured
+    /// from a real strongSwan 6.0.6 tunnel — see the fixture's own note.
+    #[test]
+    fn reads_ike_proposal_not_the_esp_line() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, PROFILE);
+        assert_eq!(
+            parse_cipher_suite(&block).as_deref(),
+            Some("AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_384")
+        );
+    }
+
+    /// The traffic selectors (`local 192.168.250.1/32`) also contain a
+    /// slash; the whitespace rule is what keeps them out.
+    #[test]
+    fn traffic_selectors_are_not_mistaken_for_a_proposal() {
+        assert_eq!(parse_cipher_suite("  local  192.168.250.1/32\n  remote 0.0.0.0/0"), None);
+    }
+
+    #[test]
+    fn reads_both_directions() {
+        let block = extract_sa_block(REAL_LIST_SAS_FULL_TUNNEL, PROFILE);
+        assert_eq!(parse_traffic(&block), (42670, 116, 67088, 163));
+    }
+
+    /// A half-built SA has no counter lines at all; zero is the honest
+    /// answer, not a parse failure.
+    #[test]
+    fn missing_counters_are_zero() {
+        assert_eq!(parse_traffic("  established 8s ago"), (0, 0, 0, 0));
     }
 }
