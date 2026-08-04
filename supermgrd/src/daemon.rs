@@ -6950,20 +6950,34 @@ mod tests {
             // either way, so the daemon never notices it is writing private
             // keys into a directory somebody else controls.
             //
-            // Asserted on the parent, not the directory itself: the mode we
-            // give our own directory is irrelevant if the door it sits behind
-            // is open.
+            // Asserted on the ancestors, not the directory itself: the mode
+            // we give our own directory is irrelevant if a door it sits
+            // behind is open. Walked rather than checking only the immediate
+            // parent, because a writable grandparent lets the whole subtree
+            // be swapped — and walking is also what makes this safe to run
+            // before anything has been created, which as a non-root user is
+            // the normal case.
             let dir = credential_dir_path().expect("a place to stage credentials");
-            let parent = dir.parent().expect("credential dir has a parent");
-            let mode = std::fs::metadata(parent).unwrap().permissions().mode();
+            let mut ancestor = dir.parent();
+            let mut checked = 0;
 
-            assert_eq!(
-                mode & 0o022,
-                0,
-                "{} is group/world writable ({mode:o}) — another account can plant {}",
-                parent.display(),
-                dir.display()
-            );
+            while let Some(path) = ancestor {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mode = meta.permissions().mode();
+                    assert_eq!(
+                        mode & 0o022,
+                        0,
+                        "{} is group/world writable ({mode:o}) — another account \
+                         can plant something under it and have {} land inside",
+                        path.display(),
+                        dir.display()
+                    );
+                    checked += 1;
+                }
+                ancestor = path.parent();
+            }
+
+            assert!(checked > 0, "no existing ancestor of {} to check", dir.display());
         }
 
         #[test]
