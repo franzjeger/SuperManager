@@ -12,7 +12,6 @@
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="https://github.com/franzjeger/SuperManager/releases/download/v1.6.0/SuperManager-1.6.0.zip"
-                length="18191842"
                 type="application/octet-stream"
                 sparkle:edSignature="LP0NXXHHqIZ32UbRved54EuiSRU0oUwjprdqciLH6b3ZEONbD+ohg7XPELDRazFbODZfFrLQ3KDK4f/ksa2oCA==" length="18191842" />
         </item>

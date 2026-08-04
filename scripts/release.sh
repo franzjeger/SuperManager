@@ -252,7 +252,6 @@ esac
 echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
 
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
-LENGTH="$(stat -f%z "$DIST_ZIP")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
 
 cat > "$APPCAST" <<EOF
@@ -270,7 +269,12 @@ cat > "$APPCAST" <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DOWNLOAD_URL"
-                length="$LENGTH"
+                <!-- length + sparkle:edSignature come from sign_update's
+                     output line. Do NOT add a length attribute here: it
+                     duplicated the one in $SPARKLE_SIG_LINE, produced
+                     invalid XML, and Sparkle failed the whole feed with
+                     "An error occurred while parsing the update feed"
+                     (seen live on 1.6.0's first check). -->
                 type="application/octet-stream"
                 $SPARKLE_SIG_LINE />
         </item>
@@ -278,7 +282,14 @@ cat > "$APPCAST" <<EOF
 </rss>
 EOF
 
-echo "→ Wrote appcast: $APPCAST"
+# The 1.6.0 feed shipped as invalid XML (duplicate length attribute)
+# and Sparkle failed the whole feed at first live check. Reachable and
+# content-correct is not the same as parseable — validate for real.
+if ! xmllint --noout "$APPCAST"; then
+    echo "error: generated appcast is not valid XML — refusing to continue" >&2
+    exit 1
+fi
+echo "→ Wrote appcast: $APPCAST (xmllint: valid)"
 
 # The feed the app polls is the appcast COMMITTED TO MAIN
 # (raw.githubusercontent.com/…/main/appcast.xml), not a release asset.
