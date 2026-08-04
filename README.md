@@ -30,6 +30,27 @@ Updates after that are in-app: the app checks the committed
 [appcast](appcast.xml) daily (Sparkle), or on demand via
 **Check for Updates…**.
 
+### What works out of the box, and what needs a tool
+
+SuperManager drives the real VPN clients rather than reimplementing
+them, so each VPN type needs its client present. Install only the ones
+you use — the installer reports which are missing, and the app tells
+you again if you try to connect a profile whose tool isn't there.
+
+| Feature | Needs |
+|---|---|
+| SSH, key management, network scan, compliance, UniFi, FortiGate API | nothing |
+| Tailscale | nothing — `tailscaled` is bundled and installed on first use |
+| WireGuard | `brew install wireguard-tools` |
+| IKEv2 / FortiGate IPsec | `brew install strongswan` |
+| OpenVPN 2.x | `brew install openvpn` |
+| Azure VPN (Entra ID) | `./contrib/build-openvpn3-mac.sh` — no Homebrew formula; Microsoft's gateway rejects OpenVPN 2.x |
+
+The app asks for admin rights once, on first launch, to install its
+privileged helper (`/Library/PrivilegedHelperTools`). Nothing else
+requires elevation, and the install script itself does nothing
+privileged.
+
 ## Features
 
 ### Dashboard

@@ -65,7 +65,41 @@ fi
 ditto "$TMP/unpacked/$APP_NAME" "$DEST"
 say "Installed to $DEST"
 
-say "Launching. The app asks for admin rights when it installs its"
-say "helper, and offers the strongSwan install command if you add an"
-say "IKEv2 profile — nothing privileged happens in this script."
+# ---------------------------------------------------------------------------
+# Dependency report.
+#
+# SuperManager drives the real VPN clients rather than reimplementing
+# them, so each VPN type needs its tool present. We REPORT rather than
+# install: a curl|bash script silently running `brew install` is not a
+# trade anyone agreed to, and each tool is only needed if you actually
+# use that VPN type. The app also surfaces this per profile when you
+# try to connect.
+# ---------------------------------------------------------------------------
+
+have() { command -v "$1" >/dev/null 2>&1 || [ -x "/opt/homebrew/bin/$1" ] || [ -x "/usr/local/bin/$1" ]; }
+
+MISSING=""
+have wg-quick   || MISSING="$MISSING\n  WireGuard profiles      brew install wireguard-tools"
+have swanctl    || MISSING="$MISSING\n  IKEv2 / FortiGate IPsec brew install strongswan"
+have openvpn3   || MISSING="$MISSING\n  Azure VPN (Entra ID)    ./contrib/build-openvpn3-mac.sh  (no brew formula)"
+have openvpn    || MISSING="$MISSING\n  OpenVPN 2.x profiles    brew install openvpn"
+
+echo
+if [ -n "$MISSING" ]; then
+    say "Optional VPN tools not found. Install only what you need:"
+    printf '%b\n' "$MISSING"
+    echo
+    if ! have brew; then
+        say "Homebrew itself is missing — https://brew.sh"
+        echo
+    fi
+else
+    say "All optional VPN tools present."
+fi
+
+say "Tailscale needs nothing: the app bundles tailscaled and installs it"
+say "on first use. SSH, network scanning and compliance work out of the box."
+say "The app asks for admin rights once, to install its privileged helper."
+echo
+
 open "$DEST"
