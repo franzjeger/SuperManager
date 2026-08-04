@@ -126,6 +126,20 @@ jobs:
             -p supermanager-helper
 
       # Generate the Xcode project from project.yml.
+      # The install script's only test used to be "someone ran it once".
+      # A user hit `unbound variable` in the wild after a change that was
+      # only ever syntax-checked. Run it for real in every shell people
+      # actually pipe it into; dry-run stops before the download and the
+      # /Applications replacement.
+      - name: install.sh smoke test (bash, sh, zsh)
+        run: |
+          for shell in bash sh zsh; do
+            echo "── $shell ──"
+            SUPERMGR_INSTALL_DRY_RUN=1 "$shell" scripts/install.sh
+            echo "── piped into $shell ──"
+            cat scripts/install.sh | SUPERMGR_INSTALL_DRY_RUN=1 "$shell"
+          done
+
       - name: xcodegen
         run: |
           cd SuperManagerMac
