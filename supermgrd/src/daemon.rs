@@ -305,6 +305,244 @@ impl DaemonState {
 }
 
 // ---------------------------------------------------------------------------
+// Short-lived credential files handed to the caller's SSH client
+// ---------------------------------------------------------------------------
+//
+// `ssh_connect_command` returns a shell command for the user to run, and the
+// user's `ssh`/`sshpass` runs as them while the daemon runs as root. Getting
+// a password or a private key across that boundary needs a file the caller
+// can read and nobody else can.
+//
+// The old arrangement got the first half right and the second half wrong: it
+// wrote to `/tmp/supermgrd/<host-uuid>` at mode 0644 — readable by every
+// account on the machine — and left it there for a minute. It also emitted a
+// shell wrapper that copied the key to `/tmp/.supermgr_key_<host-uuid>` and
+// chmod'd it afterwards, in a directory any user can write to.
+
+/// Directory for the credential files `ssh_connect_command` writes.
+///
+/// `/run/supermgrd` when running as root. `/run` is root-owned and not
+/// world-writable, so no other account can pre-create the directory and have
+/// root write credentials into a location it controls — which `/tmp` allowed,
+/// since `create_dir_all` succeeds happily on a directory someone else already
+/// owns and every path under it is then theirs to redirect.
+///
+/// Mode 0711: the caller opens a path it was told and never needs to list the
+/// directory. With unguessable file names that keeps the set of live
+/// credential files private even from someone who knows the directory exists.
+///
+/// Not root — a development run — has no privilege boundary to defend, since
+/// the daemon and the client are the same account. `XDG_RUNTIME_DIR` is the
+/// right home there anyway: it is `/run/user/<uid>`, mode 0700 and owned by
+/// that user.
+fn ssh_credential_dir() -> std::io::Result<PathBuf> {
+    let dir = credential_dir_path()?;
+    ensure_credential_dir(&dir)?;
+    Ok(dir)
+}
+
+/// Where the credential directory lives, without touching the filesystem.
+///
+/// The one rule every branch has to satisfy: **the parent must be a directory
+/// no other account can create entries in.** That is what rules out `/tmp`,
+/// where these used to live — an attacker who wins the race to create
+/// `/tmp/supermgrd` owns every path beneath it, and `create_dir_all` reports
+/// success either way.
+///
+/// Erroring beats guessing. A daemon with nowhere safe to stage a credential
+/// falls back to a plain `ssh` command, which fails to authenticate — noisy,
+/// but it does not put a private key somewhere it can be read.
+fn credential_dir_path() -> std::io::Result<PathBuf> {
+    if nix::unistd::getuid().is_root() {
+        // `/run` is root-owned and mode 0755 on every distro we target.
+        //
+        // A sibling of the daemon's runtime directory rather than a child of
+        // it, because the two need different modes. This one has to be
+        // traversable by the calling user; `/run/supermgrd` must not be,
+        // since it holds VPN material — `azure-<profile-uuid>/tls-auth.key`
+        // among it — that is only kept private by that directory's 0750, and
+        // profile UUIDs are listable over the bus.
+        return Ok(PathBuf::from("/run/supermgrd-ssh"));
+    }
+    // Development runs. No privilege boundary here — the daemon and the ssh
+    // client are the same account — but the directory still must not be
+    // somewhere a third account can reach.
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        // /run/user/<uid>, mode 0700 and owned by that user.
+        return Ok(PathBuf::from(runtime).join("supermgrd"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Ok(PathBuf::from(home).join(".local/state/supermgrd"));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "no XDG_RUNTIME_DIR or HOME to stage SSH credentials in, and /tmp is not safe for them",
+    ))
+}
+
+/// Create `dir` as mode 0711 owned by us, or verify that it already is.
+///
+/// Mode 0711 because the caller opens a path it was told and never needs to
+/// list the directory; with unguessable file names that keeps the set of live
+/// credential files private even from someone who knows the directory exists.
+///
+/// A directory that exists but is a symlink, or is owned by someone else, is
+/// refused rather than used. Writing a private key into a directory another
+/// account controls is worse than failing to connect.
+fn ensure_credential_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    if let Some(parent) = dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    match std::fs::DirBuilder::new().mode(0o711).create(dir) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{} exists and is not a directory", dir.display()),
+        ));
+    }
+    if meta.uid() != nix::unistd::getuid().as_raw() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "{} is owned by uid {}, not by this daemon — refusing to write credentials into it",
+                dir.display(),
+                meta.uid()
+            ),
+        ));
+    }
+    // Narrow the mode if an earlier version, or anything else, left it wider.
+    if meta.permissions().mode() & 0o777 != 0o711 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))?;
+    }
+    Ok(())
+}
+
+/// Write `bytes` to a fresh file that only `uid` can read, and return its path.
+///
+/// The file is created with `O_CREAT | O_EXCL` at mode 0600 in a single step,
+/// so it never exists with wider permissions and the open cannot follow a
+/// symlink someone planted at the path. It is then handed to `uid` via the
+/// open descriptor rather than the path, so nothing can be swapped underneath
+/// in between.
+///
+/// The name carries 128 random bits instead of the host's UUID. Host UUIDs are
+/// listable over the bus, which made every live credential file's path known in
+/// advance.
+fn write_caller_credential(
+    dir: &std::path::Path,
+    prefix: &str,
+    bytes: &[u8],
+    uid: u32,
+) -> std::io::Result<PathBuf> {
+    let path = dir.join(credential_name(prefix));
+    write_credential_at(&path, bytes, uid)?;
+    Ok(path)
+}
+
+/// [`write_caller_credential`] into the daemon's credential directory,
+/// resolving and creating it on the way.
+fn stage_credential(prefix: &str, bytes: &[u8], uid: u32) -> std::io::Result<PathBuf> {
+    let dir = ssh_credential_dir()?;
+    write_caller_credential(&dir, prefix, bytes, uid)
+}
+
+/// A name carrying 128 random bits, prefixed for readability in a log line.
+///
+/// Deliberately not derived from the host: host UUIDs are listable over the
+/// bus, so `pw_<host-uuid>.txt` told anyone watching the exact path of every
+/// live credential file before it was written.
+fn credential_name(prefix: &str) -> String {
+    format!("{prefix}_{:032x}", rand::random::<u128>())
+}
+
+/// The write itself, split out so the refusal to follow a planted path can be
+/// exercised against a path a test controls.
+fn write_credential_at(path: &std::path::Path, bytes: &[u8], uid: u32) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+
+    // Given to the caller while it is still 0600, so it goes straight from
+    // root-only to caller-only with no readable-by-others moment in between.
+    std::os::unix::fs::fchown(&file, Some(uid), None)?;
+    Ok(())
+}
+
+/// Build the shell command the GUI runs in a terminal.
+///
+/// Split out from the D-Bus method so the shape of the command is testable
+/// without a bus, a keyring, or a host to connect to. What it must *not*
+/// contain is as much the point as what it must: the key path is passed
+/// straight to `ssh -i`, with no `cp`/`chmod` dance through a predictable
+/// world-writable path.
+fn build_ssh_command(
+    port: u16,
+    username: &str,
+    hostname: &str,
+    proxy_jump: Option<&str>,
+    password_file: Option<&std::path::Path>,
+    key_file: Option<&std::path::Path>,
+) -> String {
+    let jump = proxy_jump.map_or_else(String::new, |j| format!(" -J {j}"));
+
+    if let Some(key) = key_file {
+        return format!(
+            "ssh -p {port}{jump} -i {key} -o IdentitiesOnly=yes {username}@{hostname}",
+            key = key.display()
+        );
+    }
+
+    if let Some(pw) = password_file {
+        return format!(
+            "sshpass -f {pw} ssh -p {port}{jump} -o PreferredAuthentications=password \
+             -o PubkeyAuthentication=no {username}@{hostname}",
+            pw = pw.display()
+        );
+    }
+
+    format!("ssh -p {port}{jump} {username}@{hostname}")
+}
+
+/// Resolve the uid behind a D-Bus message.
+///
+/// Asked of the bus daemon rather than taken from anything the caller sends,
+/// so a caller cannot name a uid it does not have.
+///
+/// Failing here is fatal to the call by design. The alternative — writing the
+/// credential file without an owner to hand it to — means either a file the
+/// caller cannot read (a confusing connect failure) or one widened until it
+/// can, which is the bug being fixed.
+async fn caller_uid(connection: &zbus::Connection, header: &zbus::message::Header<'_>) -> fdo::Result<u32> {
+    let Some(sender) = header.sender() else {
+        return Err(fdo::Error::AccessDenied(
+            "refusing an unidentified caller".to_owned(),
+        ));
+    };
+    let dbus = fdo::DBusProxy::new(connection).await.map_err(|e| {
+        fdo::Error::Failed(format!("cannot reach the bus daemon to identify the caller: {e}"))
+    })?;
+    dbus.get_connection_unix_user(sender.to_owned().into())
+        .await
+        .map_err(|e| fdo::Error::Failed(format!("cannot determine the calling user: {e}")))
+}
+
+// ---------------------------------------------------------------------------
 // Secret lifetime
 // ---------------------------------------------------------------------------
 
@@ -2874,9 +3112,16 @@ impl DaemonService {
     async fn ssh_connect_command(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
         host_id: &str,
     ) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+
+        // Resolved up front: if we cannot tell who is asking, we cannot write
+        // a credential file only they can read, and there is no version of
+        // this call that is safe without one.
+        let uid = caller_uid(conn, &hdr).await?;
 
         // --- Auto-VPN: connect the mapped VPN profile if needed -----------
         {
@@ -2959,93 +3204,76 @@ impl DaemonService {
 
         crate::audit::log_event("SSH_CONNECT", &format!("{username}@{hostname}:{port}"));
 
-        // Collect temp files created during this call so we can schedule cleanup.
-        let mut tmp_files_to_clean: Vec<PathBuf> = Vec::new();
-
-        let mut cmd = if auth_method == AuthMethod::Password {
-            // Check if we have a stored password — use sshpass if available.
-            let mut pw_cmd = String::new();
-            if let Some(ref pw_label) = password_label {
-                info!("ssh_connect_command: retrieving password from '{pw_label}'");
-                match crate::secrets::retrieve_secret(pw_label).await {
-                    Ok(pw_bytes) => {
-                        if let Ok(pw) = String::from_utf8(pw_bytes) {
-                            let tmp_dir = std::env::temp_dir().join("supermgrd");
-                            let _ = std::fs::create_dir_all(&tmp_dir);
-                            let tmp_path = tmp_dir.join(format!("pw_{}.txt", id.simple()));
-                            info!("ssh_connect_command: writing password to {}", tmp_path.display());
-                            if std::fs::write(&tmp_path, pw.as_bytes()).is_ok() {
-                                #[cfg(unix)]
-                                {
-                                    // Readable by owner + group + other so the
-                                    // user's sshpass process can read it.  The
-                                    // file is deleted after 60 seconds.
-                                    use std::os::unix::fs::PermissionsExt;
-                                    let _ = std::fs::set_permissions(
-                                        &tmp_path,
-                                        std::fs::Permissions::from_mode(0o644),
-                                    );
-                                }
-                                tmp_files_to_clean.push(tmp_path.clone());
-                                pw_cmd = format!("sshpass -f {} ", tmp_path.display());
-                            } else {
-                                warn!("ssh_connect_command: failed to write password file");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!("ssh_connect_command: failed to retrieve password: {e}");
-                    }
-                }
-            }
-            let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
-            format!(
-                "{pw_cmd}ssh -p {port}{jump_flag} -o PreferredAuthentications=password \
-                 -o PubkeyAuthentication=no {username}@{hostname}"
-            )
-        } else {
-            let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
-            format!("ssh -p {port}{jump_flag} {username}@{hostname}")
+        // Whichever credential this host needs, staged as one file the caller
+        // owns. Key and password auth are mutually exclusive, so at most one
+        // of these is written; agent or on-box-key auth writes neither and
+        // exposes nothing.
+        //
+        // Every failure below is a warning rather than an error: the command
+        // is still useful without the credential — `ssh` prompts, or the
+        // user's own key works — and returning nothing at all would turn a
+        // staging problem into "the Connect button is broken".
+        let (password_label, secret_label) = match auth_method {
+            AuthMethod::Password => (password_label, None),
+            AuthMethod::Key => (None, secret_label),
+            AuthMethod::Certificate => (None, None),
         };
 
-        if auth_method == AuthMethod::Key {
-            if let Some(label) = secret_label {
-                if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
-                    let tmp_dir = std::env::temp_dir().join("supermgrd");
-                    let _ = std::fs::create_dir_all(&tmp_dir);
-                    let src_path = tmp_dir.join(format!("connect_{}.pem", id.simple()));
-                    if std::fs::write(&src_path, &bytes).is_ok() {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let _ = std::fs::set_permissions(
-                                &src_path,
-                                std::fs::Permissions::from_mode(0o644),
-                            );
-                        }
-                        tmp_files_to_clean.push(src_path.clone());
-                        // ssh requires 0600 on key files. The daemon writes as
-                        // root, so we wrap the command: copy the key to a
-                        // user-owned temp file with correct permissions, then ssh.
-                        let user_key = format!("/tmp/.supermgr_key_{}", id.simple());
-                        let jump_flag = if let Some(ref j) = proxy_jump_str { format!(" -J {j}") } else { String::new() };
-                        cmd = format!(
-                            "cp {src} {dst} && chmod 600 {dst} && ssh -p {port}{jump_flag} -i {dst} -o IdentitiesOnly=yes {username}@{hostname}; rm -f {dst}",
-                            src = src_path.display(),
-                            dst = user_key,
-                        );
+        let mut password_file: Option<PathBuf> = None;
+        if let Some(ref pw_label) = password_label {
+            info!("ssh_connect_command: retrieving password from '{pw_label}'");
+            match crate::secrets::retrieve_secret(pw_label).await {
+                Ok(pw_bytes) => match stage_credential("pw", &pw_bytes, uid) {
+                    Ok(path) => {
+                        debug!("ssh_connect_command: password staged for uid {uid}");
+                        password_file = Some(path);
                     }
+                    Err(e) => warn!("ssh_connect_command: failed to stage password: {e}"),
+                },
+                Err(e) => warn!("ssh_connect_command: failed to retrieve password: {e}"),
+            }
+        }
+
+        let mut key_file: Option<PathBuf> = None;
+        if let Some(label) = secret_label {
+            if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
+                // Written 0600 and owned by the caller, which is exactly what
+                // `ssh -i` insists on, so the path goes straight into the
+                // command. The old code copied it to `/tmp/.supermgr_key_<uuid>`
+                // and chmod'd afterwards — a predictable name in a
+                // world-writable directory, with the copy landing at the
+                // shell's umask before the chmod caught up.
+                match stage_credential("key", &bytes, uid) {
+                    Ok(path) => {
+                        debug!("ssh_connect_command: private key staged for uid {uid}");
+                        key_file = Some(path);
+                    }
+                    Err(e) => warn!("ssh_connect_command: failed to stage private key: {e}"),
                 }
             }
         }
 
-        // Schedule cleanup of temp files after 60 seconds.
+        let tmp_files_to_clean: Vec<PathBuf> =
+            password_file.iter().chain(key_file.iter()).cloned().collect();
+
+        let cmd = build_ssh_command(
+            port,
+            &username,
+            &hostname,
+            proxy_jump_str.as_deref(),
+            password_file.as_deref(),
+            key_file.as_deref(),
+        );
+
+        // Remove the credential files a minute later. `ssh` and `sshpass` both
+        // read theirs at startup, so the session outlives the file. The window
+        // only ever exposes them to the one account they were written for.
         for path in tmp_files_to_clean {
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 if path.exists() {
                     let _ = std::fs::remove_file(&path);
-                    debug!("cleaned up temp file: {}", path.display());
+                    debug!("cleaned up credential file: {}", path.display());
                 }
             });
         }
@@ -6604,6 +6832,311 @@ mod tests {
                 2,
                 "a refused delete destroyed secrets anyway"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Credential files handed to the caller's SSH client
+    // -----------------------------------------------------------------------
+    //
+    // These files carry a host password or a private key across the
+    // root-daemon/user-client boundary. Everything asserted here was once
+    // false: the files were mode 0644, named after the host UUID, in a
+    // world-writable directory, and the key was copied through a second
+    // predictable path by a shell command that chmod'd it afterwards.
+
+    mod ssh_credentials {
+        use super::*;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        fn scratch() -> tempfile::TempDir {
+            tempfile::TempDir::new().unwrap()
+        }
+
+        #[test]
+        fn credential_files_are_readable_only_by_their_owner() {
+            let dir = scratch();
+            let me = nix::unistd::getuid().as_raw();
+            let path = write_caller_credential(dir.path(), "pw", b"hunter2", me).unwrap();
+
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "credential world-readable at {mode:o} — this was the bug"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"hunter2");
+        }
+
+        #[test]
+        fn credential_files_are_handed_to_the_calling_user() {
+            // Can only be checked against a uid we are allowed to give the
+            // file away to. As root any uid works, so use one that is not
+            // ours; unprivileged, only our own.
+            let dir = scratch();
+            let me = nix::unistd::getuid().as_raw();
+            let target = if nix::unistd::getuid().is_root() { 12345 } else { me };
+
+            let path = write_caller_credential(dir.path(), "key", b"-----BEGIN", target).unwrap();
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().uid(),
+                target,
+                "file not transferred to the caller — their ssh cannot read it, \
+                 and widening the mode instead is what this replaced"
+            );
+        }
+
+        #[test]
+        fn credential_names_are_unguessable_and_carry_no_host_identity() {
+            // The old names were `pw_<host-uuid>.txt` and
+            // `connect_<host-uuid>.pem`, and host UUIDs are listable over the
+            // bus — so every live credential file's path was known in advance.
+            let dir = scratch();
+            let me = nix::unistd::getuid().as_raw();
+
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..64 {
+                let p = write_caller_credential(dir.path(), "pw", b"x", me).unwrap();
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                assert!(seen.insert(name), "credential name repeated");
+            }
+            assert_eq!(seen.len(), 64);
+
+            // 128 bits of hex after the prefix.
+            let sample = seen.iter().next().unwrap();
+            let suffix = sample.strip_prefix("pw_").expect("prefix kept for readability");
+            assert_eq!(suffix.len(), 32, "expected 128 random bits, got {sample}");
+            assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+
+        #[test]
+        fn writing_a_credential_never_follows_a_planted_path() {
+            // `create_new` is what makes this true: O_CREAT|O_EXCL refuses an
+            // existing path, symlink or not, so a name planted ahead of time
+            // cannot redirect a private key somewhere the planter can read.
+            let dir = scratch();
+            let me = nix::unistd::getuid().as_raw();
+            let victim = dir.path().join("elsewhere");
+            let planted = dir.path().join("pw_planted");
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+            let err = write_credential_at(&planted, b"-----BEGIN PRIVATE KEY", me)
+                .expect_err("writing to a planted symlink must fail");
+
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert!(!victim.exists(), "the private key was written through the symlink");
+        }
+
+        #[test]
+        fn writing_a_credential_never_overwrites_an_existing_file() {
+            // Same guarantee, without a symlink: a file someone else created
+            // and can still read must not be filled with a credential.
+            let dir = scratch();
+            let me = nix::unistd::getuid().as_raw();
+            let existing = dir.path().join("pw_taken");
+            std::fs::write(&existing, b"not a credential").unwrap();
+
+            let err = write_credential_at(&existing, b"hunter2", me)
+                .expect_err("clobbering an existing path must fail");
+
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+            assert_eq!(std::fs::read(&existing).unwrap(), b"not a credential");
+        }
+
+        #[test]
+        fn nobody_else_can_create_the_credential_directory() {
+            // The reason these moved off `/tmp`. A world-writable parent means
+            // an attacker can win the race to create `supermgrd` inside it and
+            // own every path beneath — and `create_dir_all` reports success
+            // either way, so the daemon never notices it is writing private
+            // keys into a directory somebody else controls.
+            //
+            // Asserted on the ancestors, not the directory itself: the mode
+            // we give our own directory is irrelevant if a door it sits
+            // behind is open. Walked rather than checking only the immediate
+            // parent, because a writable grandparent lets the whole subtree
+            // be swapped — and walking is also what makes this safe to run
+            // before anything has been created, which as a non-root user is
+            // the normal case.
+            let dir = credential_dir_path().expect("a place to stage credentials");
+            let mut ancestor = dir.parent();
+            let mut checked = 0;
+
+            while let Some(path) = ancestor {
+                if let Ok(meta) = std::fs::metadata(path) {
+                    let mode = meta.permissions().mode();
+                    assert_eq!(
+                        mode & 0o022,
+                        0,
+                        "{} is group/world writable ({mode:o}) — another account \
+                         can plant something under it and have {} land inside",
+                        path.display(),
+                        dir.display()
+                    );
+                    checked += 1;
+                }
+                ancestor = path.parent();
+            }
+
+            assert!(checked > 0, "no existing ancestor of {} to check", dir.display());
+        }
+
+        #[test]
+        fn the_credential_directory_is_ours_and_unlistable() {
+            let dir = ssh_credential_dir().expect("credential dir");
+            let meta = std::fs::symlink_metadata(&dir).unwrap();
+            let mode = meta.permissions().mode() & 0o777;
+
+            assert!(meta.is_dir(), "{} is not a directory", dir.display());
+            assert_eq!(mode, 0o711, "expected 0711, got {mode:o} for {}", dir.display());
+            assert_eq!(
+                meta.uid(),
+                nix::unistd::getuid().as_raw(),
+                "credential directory is owned by someone else"
+            );
+        }
+
+        #[test]
+        fn a_directory_owned_by_someone_else_is_refused() {
+            // Refusing beats connecting: writing a private key into a
+            // directory another account controls is worse than a failed SSH.
+            //
+            // Needs a directory we do not own, which only root can arrange —
+            // so this exercises the check on the root runs, where the branch
+            // taken in production also lives.
+            if !nix::unistd::getuid().is_root() {
+                return;
+            }
+            let scratch = scratch();
+            let planted = scratch.path().join("supermgrd");
+            std::fs::create_dir(&planted).unwrap();
+            std::os::unix::fs::chown(&planted, Some(12345), None).unwrap();
+
+            let err = ensure_credential_dir(&planted)
+                .expect_err("used a directory owned by another account");
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+
+        #[test]
+        fn a_symlink_standing_in_for_the_directory_is_refused() {
+            // Otherwise the credential files land wherever it points, which
+            // for a root daemon is an arbitrary-write primitive.
+            let scratch = scratch();
+            let elsewhere = scratch.path().join("attacker-owned");
+            std::fs::create_dir(&elsewhere).unwrap();
+            let planted = scratch.path().join("supermgrd");
+            std::os::unix::fs::symlink(&elsewhere, &planted).unwrap();
+
+            let err = ensure_credential_dir(&planted)
+                .expect_err("followed a symlink standing in for the credential directory");
+            assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        }
+
+        #[test]
+        fn a_freshly_created_directory_is_born_narrow() {
+            // Separate from the assertion on the real path, which on a
+            // machine that has run the daemon before only exercises the
+            // narrowing branch — leaving the mode the directory is *created*
+            // with untested.
+            let scratch = scratch();
+            let dir = scratch.path().join("supermgrd");
+
+            ensure_credential_dir(&dir).unwrap();
+
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o711, "created at {mode:o}");
+        }
+
+        #[test]
+        fn an_over_wide_directory_is_narrowed_rather_than_used_as_found() {
+            // An install carrying a 0755 directory from an earlier version
+            // should not keep it.
+            let scratch = scratch();
+            let dir = scratch.path().join("supermgrd");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+            ensure_credential_dir(&dir).unwrap();
+
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o711, "left at {mode:o}");
+        }
+
+        // --- the command string ------------------------------------------
+
+        #[test]
+        fn the_key_path_goes_straight_to_ssh() {
+            // Was: `cp {src} /tmp/.supermgr_key_<uuid> && chmod 600 ... ; rm -f`.
+            // A predictable name in a world-writable directory, with the copy
+            // landing at the shell's umask before the chmod caught up.
+            let cmd = build_ssh_command(
+                22,
+                "root",
+                "fw.example.com",
+                None,
+                None,
+                Some(std::path::Path::new("/run/supermgrd-ssh/key_deadbeef")),
+            );
+
+            assert!(cmd.contains("-i /run/supermgrd-ssh/key_deadbeef"), "{cmd}");
+            assert!(cmd.contains("-o IdentitiesOnly=yes"), "{cmd}");
+            for banned in ["cp ", "chmod", "rm -f", "/tmp/"] {
+                assert!(!cmd.contains(banned), "command still contains {banned:?}: {cmd}");
+            }
+        }
+
+        #[test]
+        fn the_password_file_is_passed_to_sshpass() {
+            let cmd = build_ssh_command(
+                2222,
+                "admin",
+                "10.0.0.1",
+                None,
+                Some(std::path::Path::new("/run/supermgrd-ssh/pw_c0ffee")),
+                None,
+            );
+
+            assert!(cmd.starts_with("sshpass -f /run/supermgrd-ssh/pw_c0ffee ssh "), "{cmd}");
+            assert!(cmd.contains("-o PubkeyAuthentication=no"), "{cmd}");
+            assert!(cmd.contains("-p 2222"), "{cmd}");
+            assert!(!cmd.contains("/tmp/"), "{cmd}");
+        }
+
+        #[test]
+        fn no_credential_means_a_plain_ssh() {
+            // Agent or on-box key: nothing is written, so nothing is exposed.
+            let cmd = build_ssh_command(22, "u", "h", None, None, None);
+            assert_eq!(cmd, "ssh -p 22 u@h");
+        }
+
+        #[test]
+        fn a_jump_host_survives_every_auth_method() {
+            let jump = Some("bastion@jump:22");
+            let key = std::path::Path::new("/run/supermgrd-ssh/key_1");
+            let pw = std::path::Path::new("/run/supermgrd-ssh/pw_1");
+
+            for cmd in [
+                build_ssh_command(22, "u", "h", jump, None, Some(key)),
+                build_ssh_command(22, "u", "h", jump, Some(pw), None),
+                build_ssh_command(22, "u", "h", jump, None, None),
+            ] {
+                assert!(cmd.contains(" -J bastion@jump:22"), "jump host dropped: {cmd}");
+            }
+        }
+
+        #[test]
+        fn a_password_is_never_placed_in_the_command_string() {
+            // It goes via a 0600 file precisely so it stays out of the
+            // caller's shell history and everyone else's `ps` output.
+            let cmd = build_ssh_command(
+                22,
+                "u",
+                "h",
+                None,
+                Some(std::path::Path::new("/run/supermgrd-ssh/pw_1")),
+                None,
+            );
+            assert!(!cmd.contains("SSHPASS"), "{cmd}");
+            assert!(cmd.contains("-f "), "sshpass must read from the file: {cmd}");
         }
     }
 }
