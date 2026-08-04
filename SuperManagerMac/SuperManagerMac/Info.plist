@@ -14,6 +14,8 @@
 	<string>SuperManager</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.6.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -27,16 +29,10 @@
 			<string>Owner</string>
 		</dict>
 	</array>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.0.0</string>
+	<string>1.6.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>SuperManager scans the local network for managed devices (UniFi APs, FortiGate firewalls, switches, servers) and connects to them over SSH / HTTPS for adoption, provisioning, and configuration audits.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_ssh._tcp</string>
@@ -53,6 +49,10 @@
 		<string>_workstation._tcp</string>
 		<string>_services._dns-sd._udp</string>
 	</array>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>SuperManager scans the local network for managed devices (UniFi APs, FortiGate firewalls, switches, servers) and connects to them over SSH / HTTPS for adoption, provisioning, and configuration audits.</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<false/>
 	<key>SUAutomaticallyUpdate</key>
@@ -60,7 +60,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://raw.githubusercontent.com/franzjeger/SuperManager/main/appcast.xml</string>
+	<string>https://github.com/franzjeger/SuperManager/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>VNxZ8z12484X73mOJHRC3qxaDoOxl7M4UEYMeZ+Oxh0=</string>
 	<key>SUScheduledCheckInterval</key>

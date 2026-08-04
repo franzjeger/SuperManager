@@ -19,9 +19,10 @@ One command — downloads the newest signed + notarized release into
 curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh | bash
 ```
 
-Or grab `SuperManager-<version>.zip` (drag-and-drop) or the `.pkg`
-(MDM-friendly) from the [releases page](https://github.com/franzjeger/SuperManager/releases)
-yourself. On first use the app asks for admin rights to install its
+Or grab `SuperManager-<version>.zip` (drag-and-drop) from the
+[releases page](https://github.com/franzjeger/SuperManager/releases)
+yourself. (The `.pkg` asset is NOT the app — it is a small standalone
+VPN/DNS cleanup payload for MDM remediation.) On first use the app asks for admin rights to install its
 privileged helper, and offers the strongSwan install command if you add
 an IKEv2 profile — the install script itself does nothing privileged.
 
