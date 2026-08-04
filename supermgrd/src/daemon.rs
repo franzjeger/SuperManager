@@ -3077,6 +3077,17 @@ impl DaemonService {
     ) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
+        // Before anything else, including the auto-VPN connect below. This
+        // method stages the host's password or private key on disk, which is
+        // what `SshExportPrivateKey` needs `secrets` for — leaving it ungated
+        // meant a caller refused by that one could come here instead. Held at
+        // `auth_admin_keep` rather than `auth_admin` because it is also the
+        // Connect button; see `polkit::ACTION_SSH_CONNECT`.
+        //
+        // Authorising first also means an unauthorised caller cannot bring a
+        // VPN tunnel up as a side effect on its way to being refused.
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SSH_CONNECT).await?;
+
         // Resolved up front: if we cannot tell who is asking, we cannot write
         // a credential file only they can read, and there is no version of
         // this call that is safe without one.

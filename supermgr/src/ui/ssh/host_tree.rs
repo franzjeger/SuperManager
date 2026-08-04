@@ -358,7 +358,10 @@ pub fn populate_ssh_host_list(
                                 }
                                 Err(e) => {
                                     tx.send(AppMsg::OperationFailed(
-                                        format!("SSH connect failed: {e}"),
+                                        crate::dbus_client::describe_daemon_error(
+                                            &e,
+                                            "SSH connect failed",
+                                        ),
                                     ))
                                     .ok();
                                 }

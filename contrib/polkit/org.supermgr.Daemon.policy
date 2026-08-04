@@ -40,4 +40,34 @@
     </defaults>
   </action>
 
+  <action id="org.supermgr.daemon.ssh-connect">
+    <description>Open an SSH session to a managed host</description>
+    <message>Authentication is required to open an SSH session with SuperManager's stored credentials</message>
+
+    <!--
+      auth_admin_keep, not auth_admin. This method stages the host's
+      password or private key on disk for the caller's ssh to read, so
+      by what it discloses it belongs with the secrets action above.
+
+      It is also the Connect button. auth_admin would mean a password
+      prompt for every SSH session an operator opens, and a control that
+      makes the tool unusable gets switched off — a policy file deleted
+      in irritation protects nothing. The grace period is a real
+      concession, not a formality: within it, a second caller on the same
+      session is not asked again.
+
+      Change it to auth_admin if your threat model needs that; nothing in
+      the daemon depends on the weaker setting.
+
+      allow_any and allow_inactive stay no, as for secrets. Opening a
+      session with stored credentials is for someone at an active local
+      seat, not a remote or switched-away one.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
 </policyconfig>
