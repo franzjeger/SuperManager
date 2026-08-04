@@ -10,46 +10,102 @@ SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiG
 
 All three share `supermgr-core` (types, traits, secret-store abstraction, RPC protocol) and `supermgr-engine` (renderers, scan logic).
 
-## Install (macOS)
+## Install
 
-One command — downloads the newest signed + notarized release into
-`/Applications` and launches it:
+One command per platform, dependencies included. None of them leave you
+a list of things to install afterwards.
+
+### macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh | bash
 ```
 
+Installs Homebrew if it's missing, then the VPN clients SuperManager
+drives (`wireguard-tools`, `strongswan`, `openvpn`) in one go, then the
+newest signed + notarized release into `/Applications`. Anything already
+present is left alone.
+
+```bash
+--yes             # don't ask before installing anything
+--no-deps         # app only, you manage the VPN clients
+--deps-only       # VPN clients only, leave /Applications alone
+--with-openvpn3   # also build OpenVPN 3 from source (~5 min)
+```
+
+`openvpn3` is opt-in because it has no Homebrew formula and has to be
+built from source. It matters only for **Azure VPN (Entra ID)**, whose
+gateway rejects OpenVPN 2.x outright.
+
 Or grab `SuperManager-<version>.zip` (drag-and-drop) from the
 [releases page](https://github.com/franzjeger/SuperManager/releases)
 yourself. (The `.pkg` asset is NOT the app — it is a small standalone
-VPN/DNS cleanup payload for MDM remediation.) On first use the app asks for admin rights to install its
-privileged helper, and offers the strongSwan install command if you add
-an IKEv2 profile — the install script itself does nothing privileged.
+VPN/DNS cleanup payload for MDM remediation.)
 
 Updates after that are in-app: the app checks the committed
 [appcast](appcast.xml) daily (Sparkle), or on demand via
 **Check for Updates…**.
 
+### Linux
+
+```bash
+git clone https://github.com/franzjeger/SuperManager.git
+cd SuperManager
+./scripts/install-linux.sh
+```
+
+Detects your distribution (Arch, Debian/Ubuntu, Fedora/RHEL, openSUSE
+and their derivatives), installs build + runtime dependencies in one
+invocation, builds, installs the binaries and all the system integration
+files, and starts the daemon.
+
+```bash
+--yes           # don't ask before installing packages
+--print-deps    # show the distro and package list, change nothing
+--no-deps       # you manage the packages
+--no-build      # install what's already in target/release
+--uninstall     # remove everything it installed
+```
+
+Run it as yourself, not with `sudo` — it asks for root only where it
+needs it, and building as root leaves a root-owned `target/` behind.
+There are no prebuilt Linux binaries, so it builds from source; expect a
+few minutes the first time. The [manual steps](#linux) are still
+documented if you'd rather do it yourself.
+
+### Windows
+
+Download **`SuperManager-Setup-<version>.exe`** from the
+[releases page](https://github.com/franzjeger/SuperManager/releases). It
+is a single bootstrapper that chain-installs WireGuard, OpenVPN, and
+SuperManager itself — one UAC prompt, no separate installs. If you
+already manage WireGuard and OpenVPN through Intune or Group Policy,
+take the bare `.msi` instead. See [WINDOWS.md](WINDOWS.md).
+
 ### What works out of the box, and what needs a tool
 
 SuperManager drives the real VPN clients rather than reimplementing
-them, so each VPN type needs its client present. Install only the ones
-you use — the installer reports which are missing, and the app tells
-you again if you try to connect a profile whose tool isn't there.
+them, so each VPN type needs its client present. The installers put
+these in place for you; the table is here for when you're assembling a
+machine by hand or wondering why one profile type won't connect.
 
 | Feature | Needs |
 |---|---|
 | SSH, key management, network scan, compliance, UniFi, FortiGate API | nothing |
 | Tailscale | nothing — `tailscaled` is bundled and installed on first use |
-| WireGuard | `brew install wireguard-tools` |
-| IKEv2 / FortiGate IPsec | `brew install strongswan` |
-| OpenVPN 2.x | `brew install openvpn` |
-| Azure VPN (Entra ID) | `./contrib/build-openvpn3-mac.sh` — no Homebrew formula; Microsoft's gateway rejects OpenVPN 2.x |
+| WireGuard | `wireguard-tools` |
+| IKEv2 / FortiGate IPsec | `strongswan` |
+| FortiGate SSL VPN | **Windows only** — `openfortivpn.exe`, which you supply (no upstream Windows release). Linux and macOS have no backend for it; use the IPsec/IKEv2 profile type instead |
+| OpenVPN 2.x | `openvpn` |
+| Azure VPN (Entra ID) | `openvpn3` — no Homebrew formula and packaged only on Arch; Microsoft's gateway rejects OpenVPN 2.x |
+| Reading stored credentials (Linux) | `polkit` — the daemon fails closed without it |
 
-The app asks for admin rights once, on first launch, to install its
-privileged helper (`/Library/PrivilegedHelperTools`). Nothing else
-requires elevation, and the install script itself does nothing
-privileged.
+The app tells you again if you try to connect a profile whose tool isn't
+there.
+
+On macOS the app asks for admin rights once, on first launch, to install
+its privileged helper (`/Library/PrivilegedHelperTools`). On Linux the
+installer asks for `sudo` to place system files and start the daemon.
 
 ## Features
 
@@ -263,15 +319,25 @@ logic through `supermgr_core::ssh::remote::RemoteShell`.
 
 ### Linux
 
+`./scripts/install-linux.sh` does everything below in one command —
+dependencies, build, install, and starting the daemon. The manual steps
+are kept here for people packaging SuperManager or building on a distro
+the script doesn't recognise. `--print-deps` prints the package list for
+your distro without installing anything.
+
 #### Dependencies
 
 <details>
 <summary><b>Arch Linux / CachyOS</b></summary>
 
 ```bash
-sudo pacman -S gtk4 libadwaita vte4 openssl sshpass wireguard-tools strongswan openvpn nftables freerdp remmina networkmanager
+sudo pacman -S --needed rust pkgconf gcc git \
+    gtk4 libadwaita vte4 openssl \
+    polkit openssh sshpass nftables \
+    wireguard-tools strongswan openvpn \
+    freerdp remmina networkmanager
 
-# Optional (AUR) — for non-Azure OpenVPN profiles
+# Optional (AUR) — for Azure VPN and openvpn3-driven OpenVPN profiles
 paru -S openvpn3
 ```
 </details>
@@ -283,11 +349,13 @@ paru -S openvpn3
 sudo dnf install -y rust cargo gcc pkg-config \
     gtk4-devel libadwaita-devel vte291-gtk4-devel \
     openssl-devel dbus-devel glib2-devel \
-    sshpass wireguard-tools strongswan openvpn nftables \
+    polkit openssh-clients sshpass nftables \
+    wireguard-tools strongswan openvpn \
     freerdp remmina NetworkManager
 ```
 
-`openvpn3` is not packaged for Fedora — needed only for non-Azure OpenVPN profiles.
+`openvpn3` is not packaged for Fedora — needed only for Azure VPN and
+openvpn3-driven OpenVPN profiles.
 </details>
 
 <details>
@@ -297,12 +365,20 @@ sudo dnf install -y rust cargo gcc pkg-config \
 sudo apt install -y rustc cargo build-essential pkg-config \
     libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
     libssl-dev libdbus-1-dev libglib2.0-dev \
-    sshpass wireguard-tools strongswan strongswan-swanctl \
-    openvpn nftables freerdp3-x11 remmina network-manager
+    polkitd openssh-client sshpass nftables \
+    wireguard-tools strongswan strongswan-swanctl openvpn \
+    freerdp3-x11 remmina network-manager
 ```
 
-If your distro's `rustc` is older than the workspace MSRV, install via [rustup](https://rustup.rs) instead.
+On releases before 24.04 the polkit package is `policykit-1`.
+
+If your distro's `rustc` is too old to build the workspace, install via
+[rustup](https://rustup.rs) instead.
 </details>
+
+`polkit` is not optional. The daemon's credential-reading methods are
+gated on it and **fail closed**, so without it a working install looks
+like a broken one — see [Security](#security).
 
 #### Build
 

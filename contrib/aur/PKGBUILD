@@ -16,6 +16,10 @@ depends=(
     'openvpn'
     'nftables'
     'openssh'
+    # Not optional: the daemon's credential-reading methods are gated on
+    # polkit and fail closed, so without it a working install behaves
+    # like a broken one.
+    'polkit'
 )
 makedepends=(
     'rust'
