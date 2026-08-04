@@ -39,6 +39,18 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 /// Return the canonical path to the secrets JSON file.
 fn secrets_path() -> PathBuf {
+    // Tests must never reach the real store. The uid check below resolves to
+    // `/etc/supermgrd/secrets.json` whenever the suite runs as root — in a
+    // container, or under `sudo cargo test` — and pointing `XDG_DATA_HOME`
+    // somewhere safe does not help, because that branch is not taken. The
+    // result was a test run that read, rewrote, and deleted entries in a
+    // production credential file. Compiled out entirely for the daemon
+    // itself: `cfg(test)` covers only this crate's own unit tests.
+    #[cfg(test)]
+    if let Ok(path) = std::env::var("SUPERMGRD_TEST_SECRETS_PATH") {
+        return PathBuf::from(path);
+    }
+
     if nix::unistd::getuid().is_root() {
         PathBuf::from("/etc/supermgrd/secrets.json")
     } else {
@@ -153,6 +165,47 @@ pub async fn delete_secret(label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Point the secrets store at a private file for the duration of a test.
+///
+/// The returned guard both serialises access and restores the previous value
+/// on drop, including on panic. `secrets_path()` reads the environment on
+/// every call and cargo runs tests as threads of one process, so without the
+/// lock two tests would each be reading the other's file.
+///
+/// Poisoning is ignored deliberately: a panic in one test leaves the variable
+/// pointing at a temp file, and turning that into a cascade of failures in
+/// every other test hides the one that actually broke.
+#[cfg(test)]
+pub(crate) fn test_store(path: &std::path::Path) -> TestStoreGuard {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let lock = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var("SUPERMGRD_TEST_SECRETS_PATH").ok();
+    std::env::set_var("SUPERMGRD_TEST_SECRETS_PATH", path);
+    TestStoreGuard {
+        _lock: lock,
+        previous,
+    }
+}
+
+/// Guard returned by [`test_store`]. See its docs.
+#[cfg(test)]
+pub(crate) struct TestStoreGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    previous: Option<String>,
+}
+
+#[cfg(test)]
+impl Drop for TestStoreGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(v) => std::env::set_var("SUPERMGRD_TEST_SECRETS_PATH", v),
+            None => std::env::remove_var("SUPERMGRD_TEST_SECRETS_PATH"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,15 +213,12 @@ mod tests {
     /// Combined test for store, retrieve, overwrite, and delete.
     ///
     /// Runs as a single test to avoid parallel env-var mutation (the
-    /// `secrets_path()` function reads `XDG_DATA_HOME`).
+    /// `secrets_path()` function reads the environment on every call).
     #[tokio::test]
     async fn store_retrieve_overwrite_delete() {
-        // Use a tmp dir so we don't touch real secrets.
+        // Use a tmp file so we don't touch real secrets.
         let tmp = tempfile::tempdir().expect("create temp dir");
-        // Keep the path alive independently of the TempDir guard so
-        // the directory survives even if TempDir drops early.
-        let dir = tmp.path().to_path_buf();
-        std::env::set_var("XDG_DATA_HOME", &dir);
+        let _store = test_store(&tmp.path().join("secrets.json"));
 
         // --- Round-trip: store then retrieve ---
         let label = "supermgr/test/roundtrip_key";
@@ -195,8 +245,19 @@ mod tests {
         delete_secret("supermgr/test/does-not-exist")
             .await
             .expect("delete non-existent should be no-op");
+    }
 
-        // Restore env
-        std::env::remove_var("XDG_DATA_HOME");
+    /// The override exists so the suite cannot reach the production store.
+    /// If it stops being honoured, every secrets test silently starts
+    /// operating on `/etc/supermgrd/secrets.json` again.
+    #[tokio::test]
+    async fn tests_never_touch_the_real_store() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("secrets.json");
+        let _store = test_store(&path);
+
+        assert_eq!(secrets_path(), path);
+        store_secret("supermgr/test/isolation", b"x").await.unwrap();
+        assert!(path.exists(), "secret went somewhere else entirely");
     }
 }

@@ -7170,6 +7170,7 @@ dependencies = [
  "chrono",
  "ipnet",
  "keyring",
+ "proptest",
  "rand 0.9.4",
  "secret-service",
  "security-framework 3.7.0",

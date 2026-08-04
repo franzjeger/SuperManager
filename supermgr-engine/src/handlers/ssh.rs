@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use supermgr_core::host::{Host, HostSummary};
+// The one definition of "which secrets does this entity own", shared with
+// the daemon and covered by the invariant tests in `supermgr-core`.
+use supermgr_core::secret_lifecycle::SecretOwner;
 use supermgr_core::ssh::audit::{AuditAction, AuditEntry};
 use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
@@ -137,15 +140,12 @@ impl EngineServer {
             // The private key itself outlived every delete until now, so
             // the store accumulated PEMs for keys the UI no longer showed
             // — and the backup archive tars that store whole. Taken from
-            // the record's own `private_key_ref` rather than a rebuilt
-            // label, so an imported key with a non-default label is
-            // cleaned too.
-            match self.secrets.delete(removed.private_key_ref.label()).await {
-                Ok(()) => {}
-                Err(e) => tracing::warn!(
-                    "deleting key {key_id}: secret {} not removed: {e}",
-                    removed.private_key_ref.label()
-                ),
+            // the record's own `SecretRef` rather than a rebuilt label, so
+            // an imported key with a non-default label is cleaned too.
+            for label in removed.secret_labels() {
+                if let Err(e) = self.secrets.delete(&label).await {
+                    tracing::warn!("deleting key {key_id}: secret {label} not removed: {e}");
+                }
             }
             // Recorded from the removed key, since after this point the
             // name and fingerprint exist nowhere else.
@@ -369,13 +369,7 @@ impl EngineServer {
         // the host owns is cleared, not just the password — a FortiGate
         // or UniFi API token is just as much a credential.
         if let Some(host) = removed {
-            let refs = [
-                host.auth_password_ref.as_ref(),
-                host.auth_cert_ref.as_ref(),
-                host.api_token_ref.as_ref(),
-                host.unifi_api_token_ref.as_ref(),
-            ];
-            for label in refs.into_iter().flatten().map(|r| r.label().to_owned()) {
+            for label in host.secret_labels() {
                 if let Err(e) = self.secrets.delete(&label).await {
                     tracing::warn!("deleting host {host_id}: secret {label} not removed: {e}");
                 }

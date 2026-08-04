@@ -61,6 +61,10 @@ privileged.
 - Auto-refresh (30s / 60s / 5m), search, filter tabs (All / FortiGate / UniFi)
 - Offline devices sorted first with device count summary
 - Quick-action buttons: backup config, compare config diffs, view details
+- **UniFi device actions** from the controller pane — adopt a pending device,
+  flash the locate LED, restart, or forget. Restart and forget confirm first and
+  state the consequence (a minute offline / factory default, re-adoption usually
+  needs physical access)
 - Click any card to navigate to host detail
 
 ### SSH Management
@@ -86,6 +90,13 @@ privileged.
 - Import profiles from `.conf`, `.ovpn`, `.toml`, or Azure XML configs
 - Connection timer in sidebar showing elapsed time
 - **Auto-reconnect** on unexpected disconnect (for auto-connect profiles)
+- **IKEv2 failure diagnosis** — a failed connect names the cause (EAP rejection,
+  no proposal chosen, unacceptable traffic selectors, no route to host, and so on)
+  instead of printing the raw swanctl negotiation log
+- **Always-on reports armed vs enrolled.** A profile can be enrolled for
+  auto-reconnect while the watchdog still lacks the connect args it needs to
+  replay — captured on the first successful manual connect. The toggle shows that
+  state rather than claiming protection it cannot yet deliver
 
 ### Remote Desktop
 - RDP and VNC with one-click launch from host detail
@@ -155,8 +166,9 @@ methods are refused rather than allowed. Install
 `contrib/polkit/org.supermgr.Daemon.policy` (see the install steps above) —
 without it, polkit has no rule for the action and denies by default.
 
-The remaining methods are not yet gated; see the tracking issue for the rest
-of the surface.
+The remaining methods are not yet gated — including `SshConnectCommand`, which
+writes the same credentials to `/tmp` and so currently routes around this. See
+issues #109 and #131.
 
 #### SSH host keys
 
@@ -188,8 +200,16 @@ starting with an empty store and re-trusting the whole fleet.
 ### Other
 - Desktop notifications for VPN and host health changes
 - Full config backup and restore (including secrets)
+- **Verify Backup** — dress-rehearses an archive without touching live data:
+  extracts to a 0700 scratch directory removed before returning, then checks the
+  tar extracts, `secrets.json` parses, every referenced profile and daemon-store
+  secret is present, and no `.ovpn` is zero-byte. Keychain-held credentials are
+  expected to be absent on macOS and are not flagged
 - Keyboard shortcuts (Ctrl+1-6 tabs, Ctrl+F search, Ctrl+L lock)
-- System tray with VPN status and quick actions
+- System tray with VPN status and quick actions; on macOS the menu bar icon's
+  tooltip names which tunnel is up, keeps connecting tunnels on their own line so
+  a negotiating tunnel is never reported as carrying traffic, and warns when the
+  daemon is down and the reading is a stale cache
 - Systemd service with D-Bus activation
 
 ## Architecture
@@ -368,6 +388,21 @@ For a smoother dev loop, pre-authorise the specific commands the install script 
 ```
 
 (Disable with `disable_nopasswd.sh` when done.)
+
+#### VPN DNS cleanup package
+
+`installer/pkg/` builds a small signed `.pkg` — not an app installer. It ships
+one file, the `no.sybr.supermanager.vpn-dns-cleanup` LaunchDaemon, which cleans
+up VPN DNS state; the app and privileged helper are installed separately by the
+steps above.
+
+```bash
+./installer/pkg/build-pkg.sh <version>
+./installer/pkg/build-pkg.sh <version> --sign "Developer ID Installer: ..."
+# → dist/SuperManager-vpn-dns-cleanup-<version>.pkg
+
+./installer/pkg/uninstall.sh   # unloads and removes that LaunchDaemon only
+```
 
 ### Windows
 

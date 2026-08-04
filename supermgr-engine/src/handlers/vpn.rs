@@ -4,6 +4,13 @@
 //! toggles, rename/duplicate. Lives on `EngineServer` so the dispatch
 //! table in `server.rs` reaches it via the same `self.handle_*` calls.
 
+// `SecretOwner::secret_labels` answers "what does this profile own". It
+// used to be a private copy in this file, which is how the daemon's delete
+// path came to be missing one entirely — two implementations of a rule
+// only one of them was enforcing. It now lives in `supermgr-core` next to
+// the invariant tests, and the exhaustive match there makes a new
+// `ProfileConfig` variant a compile error rather than a silent leak.
+use supermgr_core::secret_lifecycle::SecretOwner;
 use supermgr_core::vpn::profile::{
     FortiGateConfig, Profile, ProfileConfig, ProfileSummary, SecretRef,
 };
@@ -11,41 +18,6 @@ use tracing::warn;
 
 use crate::protocol::{self, Response};
 use crate::server::{parse_ip_list, parse_ipnet_list, EngineServer};
-
-/// Every secret label a profile owns.
-///
-/// The single source of truth for "what belongs to this profile", used
-/// both when deleting one and when reasoning about what a duplicate has
-/// to carry. Add a variant here the day a new `ProfileConfig` gains a
-/// `SecretRef`, or its secret becomes an orphan that nothing can reach
-/// and nothing cleans up.
-fn profile_secret_labels(profile: &Profile) -> Vec<String> {
-    let mut labels = Vec::new();
-    match &profile.config {
-        ProfileConfig::WireGuard(wg) => {
-            labels.push(wg.private_key.label().to_owned());
-            for peer in &wg.peers {
-                if let Some(psk) = &peer.preshared_key {
-                    labels.push(psk.label().to_owned());
-                }
-            }
-        }
-        ProfileConfig::FortiGate(fg) => {
-            labels.push(fg.password.label().to_owned());
-            labels.push(fg.psk.label().to_owned());
-        }
-        ProfileConfig::ForticlientSslvpn(fc) => labels.push(fc.password.label().to_owned()),
-        ProfileConfig::OpenVpn(ov) => {
-            if let Some(pw) = &ov.password {
-                labels.push(pw.label().to_owned());
-            }
-        }
-        // Azure authenticates interactively and Generic holds no
-        // credentials of its own.
-        ProfileConfig::AzureVpn(_) | ProfileConfig::Generic(_) => {}
-    }
-    labels
-}
 
 impl EngineServer {
     pub(crate) async fn handle_list_profiles(&self, id: u64) -> Response {
@@ -236,8 +208,9 @@ impl EngineServer {
         // forever — and the backup archive tars that store whole. Not
         // finding a label is normal rather than an error: on macOS the
         // GUI keeps IKEv2 and OpenVPN credentials in the Keychain and
-        // deletes them itself, so only WireGuard material is ours here.
-        for label in profile_secret_labels(&profile) {
+        // deletes them itself, and `secret_labels` also names the Azure
+        // refresh-token slot, which only the Linux daemon ever writes.
+        for label in profile.secret_labels() {
             match self.secrets.delete(&label).await {
                 Ok(()) => tracing::debug!("deleted secret {label} with profile {pid}"),
                 Err(e) => tracing::debug!("no secret to delete for {label}: {e}"),

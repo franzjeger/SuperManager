@@ -27,9 +27,33 @@ use serde_json::{json, Value};
 use tracing::warn;
 
 use supermgr_core::protocol::{PipeRequest, PipeResponse, RpcError, PROTOCOL_VERSION};
+use supermgr_core::secret_lifecycle::SecretOwner;
 
 use super::daemon::DaemonState;
 use super::{appliance, ssh_exec};
+
+/// Clear every credential an entity owned, after its record is gone.
+///
+/// Windows keeps these in Credential Manager, so a label that outlives its
+/// record is a credential that survives uninstalling the profile it belonged
+/// to. `secret_labels` is the shared definition of what an entity owns, so
+/// this daemon cannot drift from the Linux and macOS ones the way it had.
+///
+/// Best-effort by design: a missing label is normal (the operator may have
+/// cleared it by hand, or the record predates the field), while a label that
+/// fails to delete is worth a line in the log because the credential is
+/// still readable.
+async fn clear_owned_secrets<T: SecretOwner>(
+    state: &Arc<DaemonState>,
+    owner: &T,
+    what: &str,
+) {
+    for label in owner.secret_labels() {
+        if let Err(e) = state.secret_store.delete(&label).await {
+            warn!("{what}: credential {label} not removed: {e}");
+        }
+    }
+}
 
 /// Route a single request to the appropriate handler and produce the
 /// matching response envelope.
@@ -327,6 +351,20 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
     let id_str = arg_str(args, "profile_id")?;
     let id = uuid::Uuid::parse_str(id_str)
         .map_err(|e| RpcError::Other(format!("invalid profile_id uuid: {e}")))?;
+
+    // Read the record before destroying it: removing the TOML was all this
+    // did, so the interface key, every peer PSK, and any FortiGate or
+    // OpenVPN password stayed in Credential Manager for good. `get` also
+    // makes deleting a profile that isn't there a `NotFound` — `delete`
+    // treats a missing file as success, so the arm below never fired and
+    // the Windows daemon answered `null` where Linux answers "no such
+    // profile".
+    let profile = state
+        .profile_store
+        .get(id)
+        .await
+        .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
+
     state
         .profile_store
         .delete(id)
@@ -337,6 +375,8 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
             }
             other => RpcError::Other(other.to_string()),
         })?;
+
+    clear_owned_secrets(state, &profile, &format!("profile {id}")).await;
     Ok(Value::Null)
 }
 
@@ -677,12 +717,29 @@ async fn handle_ssh_delete_key(state: &Arc<DaemonState>, args: &Value) -> Result
     if !path.exists() {
         return Err(RpcError::NotFound(format!("ssh key {key_id}")));
     }
+
+    // Take the label from the record's own `private_key_ref`, not from a
+    // rebuilt `supermgr/ssh/<id>/privkey`. An imported key keeps whatever
+    // label it was stored under, so the guessed form missed it entirely and
+    // the PEM stayed in Credential Manager.
+    let key: Option<supermgr_core::ssh::key::SshKey> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+
     std::fs::remove_file(&path)
         .map_err(|e| RpcError::Other(format!("delete key metadata: {e}")))?;
-    let label = format!("supermgr/ssh/{key_id}/privkey");
-    // Best-effort: the secret may have been deleted manually; don't fail the
-    // whole operation if it's missing.
-    let _ = state.secret_store.delete(&label).await;
+
+    if let Some(key) = key {
+        clear_owned_secrets(state, &key, &format!("ssh key {key_id}")).await;
+    } else {
+        // Unreadable record: fall back to the conventional label rather
+        // than leaving a private key behind for certain.
+        warn!("ssh key {key_id}: record unreadable, trying the default label");
+        let _ = state
+            .secret_store
+            .delete(&format!("supermgr/ssh/{key_id}/privkey"))
+            .await;
+    }
     Ok(Value::Null)
 }
 
@@ -762,8 +819,30 @@ async fn handle_delete_host(state: &Arc<DaemonState>, args: &Value) -> Result<Va
     if !path.exists() {
         return Err(RpcError::NotFound(format!("host {host_id}")));
     }
+
+    // Parse before unlinking: the record is the only thing that knows which
+    // credentials this host owns, and deleting the file used to be the whole
+    // operation — leaving the SSH password, the OpenSSH certificate, the
+    // firewall API token and the UniFi credentials in Credential Manager
+    // with nothing left pointing at them.
+    //
+    // A record that will not parse still gets deleted. Refusing would leave
+    // the operator unable to remove a host at all, and the credentials are
+    // no more reachable either way — but say so, because they are the ones
+    // this cannot clean up.
+    let host: Option<supermgr_core::host::Host> = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    if host.is_none() {
+        warn!("host {host_id}: record unreadable, deleting it without clearing its credentials");
+    }
+
     std::fs::remove_file(&path)
         .map_err(|e| RpcError::Other(format!("delete host: {e}")))?;
+
+    if let Some(host) = host {
+        clear_owned_secrets(state, &host, &format!("host {host_id}")).await;
+    }
     Ok(Value::Null)
 }
 

@@ -13,6 +13,7 @@
 //! | [`client`]   | Platform-selected re-export of the daemon client type |
 //! | [`error`]    | Unified error hierarchy (VPN + SSH) |
 //! | [`keyring`]  | Secret store trait and platform implementations |
+//! | [`secret_lifecycle`] | Which secret labels an entity owns, and which are orphaned |
 
 #![warn(missing_docs)]
 
@@ -26,12 +27,14 @@ pub mod client;
 pub mod error;
 pub mod host;
 pub mod keyring;
+pub mod secret_lifecycle;
 pub mod ssh;
 pub mod vpn;
 
 // Re-export commonly used items at crate root.
 pub use error::{BackendError, CoreError, ProfileError, SecretError, SshError};
 pub use host::{AuthMethod, Host, HostSummary};
+pub use secret_lifecycle::{LiveSecrets, SecretOwner};
 pub use ssh::device_type::DeviceType;
 pub use ssh::key::{SshKey, SshKeySummary, SshKeyType};
 pub use ssh::known_hosts::{HostKeyCheck, KnownHostsStore};

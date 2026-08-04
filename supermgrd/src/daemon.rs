@@ -33,6 +33,7 @@ use supermgr_core::{
     vpn::state::{state_to_json, stats_to_json, VpnState},
 };
 
+use supermgr_core::secret_lifecycle::{LiveSecrets, SecretOwner};
 use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::known_hosts::KnownHostsStore;
@@ -300,6 +301,80 @@ impl DaemonState {
             std::fs::remove_file(path)?;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secret lifetime
+// ---------------------------------------------------------------------------
+
+/// Delete every secret an entity owned, after its record has been removed.
+///
+/// Every delete path goes through here rather than naming labels itself, so
+/// "what does this entity own" is answered in exactly one place —
+/// `supermgr_core::secret_lifecycle` — and adding a credential field to a
+/// type cannot quietly skip a delete path that was written before it existed.
+///
+/// A label that is already gone is normal, not an error: the entity may have
+/// been imported before the field existed, or the operator may have cleared
+/// the secret by hand. A label that *fails* to delete is not normal — it
+/// means the credential is still readable — so that is logged at warn.
+///
+/// Call this with the state lock released: the secrets file is separate I/O
+/// and holding the mutex across it serialises every other D-Bus method.
+async fn delete_owned_secrets<T: SecretOwner>(owner: &T, what: &str) {
+    for label in owner.secret_labels() {
+        match crate::secrets::delete_secret(&label).await {
+            Ok(()) => debug!("{what}: cleared secret {label}"),
+            Err(e) => warn!("{what}: secret {label} NOT removed: {e}"),
+        }
+    }
+}
+
+/// Log any secret in the store that no surviving profile, host, or SSH key
+/// owns.
+///
+/// Read-only and advisory. Deletes before this release removed the record
+/// and left the credential behind, so installs that predate it are carrying
+/// private keys and API tokens for things their operator deleted months ago
+/// — and `export_all` includes them in the backup archive. Reporting at
+/// startup puts that in front of someone without this having to guess which
+/// ones are safe to remove; `LiveSecrets::is_orphan` documents why it will
+/// under-report rather than name a live secret.
+pub async fn audit_orphaned_secrets(state: &DaemonState) {
+    let mut live = LiveSecrets::new();
+    for profile in state.profiles.values() {
+        live.add_profile(profile);
+    }
+    for host in state.hosts.values() {
+        live.add_host(host);
+    }
+    for key in state.ssh_keys.values() {
+        live.add_ssh_key(key);
+    }
+
+    let stored = match crate::secrets::read_all_secrets().await {
+        Ok(map) => map,
+        Err(e) => {
+            debug!("secret audit skipped: {e}");
+            return;
+        }
+    };
+
+    let orphans = live.find_orphans(stored.keys());
+    if orphans.is_empty() {
+        debug!("secret audit: {} stored, none orphaned", stored.len());
+        return;
+    }
+
+    warn!(
+        "secret audit: {} stored secret(s) belong to no profile, host, or key — \
+         left behind by a delete path that removed the record only. They are \
+         included in `export_all` backups until removed:",
+        orphans.len()
+    );
+    for label in &orphans {
+        warn!("  orphaned secret: {label}");
     }
 }
 
@@ -1527,13 +1602,21 @@ impl DaemonService {
             ));
         }
 
-        if state.profiles.remove(&id).is_none() {
+        let Some(profile) = state.profiles.remove(&id) else {
             return Err(fdo::Error::UnknownObject(format!("profile {id} not found")));
-        }
+        };
 
         state
             .delete_profile_file(id)
             .map_err(|e| fdo::Error::Failed(format!("delete file: {e}")))?;
+
+        // Removing the record used to be the whole of it, which left the
+        // interface private key, every peer PSK, the FortiGate password and
+        // group PSK, and any cached Azure refresh token sitting in the
+        // secrets file forever — and `export_all` tars that file whole.
+        // `secret_labels` is the one place that knows what a profile owns.
+        drop(state);
+        delete_owned_secrets(&profile, &format!("profile {id}")).await;
 
         info!("deleted profile {}", id);
         Ok(())
@@ -1761,9 +1844,14 @@ impl DaemonService {
     async fn ssh_delete_key(&self, key_id: &str) -> fdo::Result<()> {
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
-        if let Some(key) = state.ssh_keys.remove(&id) {
-            let _ = crate::secrets::delete_secret(key.private_key_ref.label()).await;
+        let key = state.ssh_keys.remove(&id);
+        if key.is_some() {
             let _ = state.delete_ssh_key_file(id);
+        }
+        drop(state);
+
+        if let Some(key) = key {
+            delete_owned_secrets(&key, &format!("ssh key {id}")).await;
         }
         Ok(())
     }
@@ -2030,8 +2118,17 @@ impl DaemonService {
     async fn delete_host(&self, host_id: &str) -> fdo::Result<()> {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
-        state.hosts.remove(&id);
+        let host = state.hosts.remove(&id);
         let _ = state.delete_host_file(id);
+        drop(state);
+
+        // Same omission the profile path had. A host can hold four separate
+        // credentials — SSH password, OpenSSH certificate, a FortiGate /
+        // OPNsense / Sophos API token, and UniFi controller credentials —
+        // and every one of them outlived the host record until now.
+        if let Some(host) = host {
+            delete_owned_secrets(&host, &format!("host {id}")).await;
+        }
         Ok(())
     }
 
@@ -6286,5 +6383,227 @@ mod tests {
         assert!(parse_dns_server_list("").is_empty());
         assert!(parse_dns_server_list("   ").is_empty());
         assert!(parse_dns_server_list(",,,").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Secret lifetime
+    // -----------------------------------------------------------------------
+    //
+    // `supermgr-core` proves the ownership map is right — that a profile owns
+    // its peer PSKs, that a host owns all four of its credentials. These
+    // prove the D-Bus delete methods actually consult it. The map being
+    // correct is no use if `delete_profile` never calls it, which is exactly
+    // the state this codebase was in.
+
+    mod secret_lifetime {
+        use super::*;
+        use supermgr_core::vpn::profile::{WireGuardConfig, WireGuardPeer};
+
+        fn service(state: DaemonState) -> DaemonService {
+            let (shutdown_tx, _rx) = watch::channel(false);
+            DaemonService {
+                state: Arc::new(tokio::sync::Mutex::new(state)),
+                shutdown_tx,
+                log_buffer: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+                set_log_level: Arc::new(|_| Ok(())),
+            }
+        }
+
+        fn wg_profile(id: Uuid, peers: usize) -> Profile {
+            Profile {
+                id,
+                name: "wg".into(),
+                auto_connect: false,
+                full_tunnel: true,
+                last_connected_at: None,
+                kill_switch: false,
+                customer: String::new(),
+                config: ProfileConfig::WireGuard(WireGuardConfig {
+                    private_key: SecretRef::new(format!("supermgr/wg/{}/privkey", id.simple())),
+                    addresses: Vec::new(),
+                    dns: Vec::new(),
+                    dns_search: Vec::new(),
+                    mtu: None,
+                    listen_port: None,
+                    peers: (0..peers)
+                        .map(|n| WireGuardPeer {
+                            public_key: format!("pub{n}"),
+                            endpoint: None,
+                            allowed_ips: Vec::new(),
+                            preshared_key: Some(SecretRef::new(format!(
+                                "supermgr/wg/{}/psk/{n}",
+                                id.simple()
+                            ))),
+                            persistent_keepalive: None,
+                        })
+                        .collect(),
+                    interface_name: None,
+                    split_routes: Vec::new(),
+                }),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        fn host_with_all_credentials(id: Uuid) -> Host {
+            Host {
+                id,
+                label: "fw".into(),
+                hostname: "10.0.0.1".into(),
+                port: 22,
+                username: "admin".into(),
+                group: String::new(),
+                device_type: supermgr_core::DeviceType::default(),
+                auth_method: AuthMethod::Password,
+                auth_key_id: None,
+                auth_password_ref: Some(SecretRef::new(format!(
+                    "supermgr/ssh/host/{}/password",
+                    id.simple()
+                ))),
+                auth_cert_ref: Some(SecretRef::new(format!(
+                    "supermgr/ssh/host/{}/certificate",
+                    id.simple()
+                ))),
+                vpn_profile_id: None,
+                api_port: None,
+                api_token_ref: Some(SecretRef::new(format!(
+                    "supermgr/fg/{}/api_token",
+                    id.simple()
+                ))),
+                api_verify_tls: true,
+                unifi_controller_url: None,
+                unifi_api_token_ref: Some(SecretRef::new(format!(
+                    "supermgr/unifi/{}/credentials",
+                    id.simple()
+                ))),
+                rdp_port: None,
+                vnc_port: None,
+                port_forwards: Vec::new(),
+                proxy_jump: None,
+                pinned: false,
+                customer: String::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        fn ssh_key(id: Uuid) -> SshKey {
+            SshKey {
+                id,
+                name: "key".into(),
+                description: String::new(),
+                key_type: SshKeyType::Ed25519,
+                public_key: "ssh-ed25519 AAAA".into(),
+                private_key_ref: SecretRef::new(format!("supermgr/ssh/{}/privkey", id.simple())),
+                fingerprint: "SHA256:x".into(),
+                tags: Vec::new(),
+                deployed_to: Vec::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        /// Delete a profile, a host, and an SSH key over the real D-Bus
+        /// methods, and the secret store is left empty.
+        ///
+        /// Every stored label is written first, so a delete path that
+        /// removes the record and stops leaves something behind and this
+        /// fails. One test rather than three because it repoints
+        /// `XDG_DATA_HOME`, which is process-global.
+        #[tokio::test]
+        async fn deleting_records_clears_their_secrets() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let _store = crate::secrets::test_store(&tmp.path().join("secrets.json"));
+
+            let profile_id = Uuid::new_v4();
+            let host_id = Uuid::new_v4();
+            let key_id = Uuid::new_v4();
+
+            let profile = wg_profile(profile_id, 2);
+            let host = host_with_all_credentials(host_id);
+            let key = ssh_key(key_id);
+
+            // Fill the store the way the import paths would.
+            let mut expected = 0;
+            for label in profile
+                .secret_labels()
+                .into_iter()
+                .chain(host.secret_labels())
+                .chain(key.secret_labels())
+            {
+                crate::secrets::store_secret(&label, b"secret").await.unwrap();
+                expected += 1;
+            }
+            assert_eq!(expected, 8, "1 privkey + 2 PSKs + 4 host creds + 1 key");
+            assert_eq!(
+                crate::secrets::read_all_secrets().await.unwrap().len(),
+                expected
+            );
+
+            let mut state = DaemonState::new(tmp.path().join("profiles")).unwrap();
+            state.profiles.insert(profile_id, profile);
+            state.hosts.insert(host_id, host);
+            state.ssh_keys.insert(key_id, key);
+            let svc = service(state);
+
+            svc.delete_profile(&profile_id.to_string()).await.unwrap();
+            svc.delete_host(&host_id.to_string()).await.unwrap();
+            svc.ssh_delete_key(&key_id.to_string()).await.unwrap();
+
+            let left = crate::secrets::read_all_secrets().await.unwrap();
+            assert!(
+                left.is_empty(),
+                "secrets outlived the records that owned them: {:?}",
+                left.keys().collect::<Vec<_>>()
+            );
+
+            // And the audit agrees, over the same state the daemon would
+            // report on at startup.
+            let state = svc.state.lock().await;
+            let mut live = LiveSecrets::new();
+            for p in state.profiles.values() {
+                live.add_profile(p);
+            }
+            for h in state.hosts.values() {
+                live.add_host(h);
+            }
+            for k in state.ssh_keys.values() {
+                live.add_ssh_key(k);
+            }
+            assert!(live.find_orphans(left.keys()).is_empty());
+        }
+
+        /// A profile that is still connected keeps its secrets.
+        ///
+        /// `delete_profile` refuses while the tunnel is up; the refusal must
+        /// happen before anything is destroyed, or a rejected delete still
+        /// costs the operator their credentials.
+        #[tokio::test]
+        async fn refusing_to_delete_an_active_profile_keeps_its_secrets() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let _store = crate::secrets::test_store(&tmp.path().join("secrets.json"));
+
+            let profile_id = Uuid::new_v4();
+            let profile = wg_profile(profile_id, 1);
+            for label in profile.secret_labels() {
+                crate::secrets::store_secret(&label, b"secret").await.unwrap();
+            }
+
+            let mut state = DaemonState::new(tmp.path().join("profiles")).unwrap();
+            state.profiles.insert(profile_id, profile);
+            state.vpn_state = VpnState::Connected {
+                profile_id,
+                since: chrono::Utc::now(),
+                interface: "wg0".into(),
+            };
+            let svc = service(state);
+
+            let err = svc.delete_profile(&profile_id.to_string()).await;
+            assert!(err.is_err(), "expected refusal while connected");
+            assert_eq!(
+                crate::secrets::read_all_secrets().await.unwrap().len(),
+                2,
+                "a refused delete destroyed secrets anyway"
+            );
+        }
     }
 }
