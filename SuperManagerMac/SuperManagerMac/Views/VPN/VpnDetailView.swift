@@ -111,7 +111,15 @@ struct VpnDetailView: View {
                 } else if let profile {
                     header(profile)
                     Divider()
-                    if strongswanMissing { strongswanBanner }
+                    // The tool this profile needs, with an Install
+                    // button — replaces the old copy-a-brew-line banner.
+                    if let dep = requiredDependencyId {
+                        DependencyCard(only: [dep]) {
+                            // Re-read the profile so the connect bar
+                            // stops reporting the tool as missing.
+                            Task { await load() }
+                        }
+                    }
                     connectionBar(profile)
                     Divider()
                     details(profile)
@@ -311,6 +319,22 @@ struct VpnDetailView: View {
             : "Reconnect automatically if the tunnel drops."
     }
 
+    /// The external tool this profile's backend needs, or nil when it
+    /// needs none (or already has it). Keyed off the profile so an
+    /// IKEv2 profile never nags about WireGuard.
+    private var requiredDependencyId: String? {
+        guard let profile else { return nil }
+        let id: String
+        switch profile.config {
+        case .wireguard:  id = "wireguard-tools"
+        case .ikev2:      id = "strongswan"
+        case .openvpn:    id = "openvpn"
+        case .azure:      id = "openvpn3"
+        case .unsupported: return nil
+        }
+        return Dependencies.missing.contains { $0.id == id } ? id : nil
+    }
+
     private var alwaysOnBinding: Binding<Bool> {
         Binding(
             get: { appState.autoReconnectEnabled.contains(profileId) },
@@ -323,51 +347,6 @@ struct VpnDetailView: View {
         )
     }
 
-    private var strongswanBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text("strongSwan is not installed")
-                    .font(.headline)
-            }
-            Text("SuperManager controls the VPN tunnel through a bundled-with-Homebrew copy of strongSwan. Run the command below in Terminal — it installs Homebrew (if missing) and strongSwan in one shot. About 30 seconds on a fast Mac. Once it's done, this banner disappears on its own.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(installCommand)
-                .font(.system(size: 11, design: .monospaced))
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.black.opacity(0.05), in: RoundedRectangle(cornerRadius: 4))
-                .textSelection(.enabled)
-
-            HStack(spacing: 8) {
-                Button("Copy Command") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(installCommand, forType: .string)
-                }
-                .controlSize(.small)
-                Button("Open Terminal") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(installCommand, forType: .string)
-                    NSWorkspace.shared.launchApplication("Terminal")
-                }
-                .controlSize(.small)
-                .buttonStyle(.borderedProminent)
-                Spacer()
-            }
-        }
-        .padding(12)
-        .background(.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var installCommand: String {
-        // Same one-liner from the original install session: brew (if
-        // missing) + strongswan + a sentinel echo.
-        "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\" " +
-        "&& /opt/homebrew/bin/brew install strongswan && echo SM_DONE_INSTALLING"
-    }
 
     /// Sheet presenting the helper's recent log lines. Pulled lazily so
     /// `tail_log` only runs when the user explicitly asks for it.
