@@ -652,26 +652,35 @@ impl VpnBackend for AzureBackend {
             std::env::temp_dir().join(format!("supermgrd-azure-{}", profile.id.simple()))
         };
 
-        tokio::fs::create_dir_all(&tmp_dir).await.map_err(BackendError::Io)?;
+        // 0700: only this daemon and the `openvpn` it spawns as itself need
+        // to get in. The directory used to come from `create_dir_all`, which
+        // gives 0755 under the usual umask and succeeds just as happily on a
+        // directory somebody else created first.
+        crate::secure_file::ensure_private_dir(&tmp_dir, 0o700).map_err(BackendError::Io)?;
 
         let key_path = tmp_dir.join("tls-auth.key");
         let auth_path = tmp_dir.join("auth.txt");
         let ovpn_path = tmp_dir.join("client.ovpn");
 
-        // tls-auth static key (direction 1, SHA256)
-        tokio::fs::write(&key_path, hex_to_openvpn_key(&cfg.server_secret_hex))
-            .await
-            .map_err(BackendError::Io)?;
-
-        // auth-user-pass: <upn>\n<access_token>  (mode 0600)
-        tokio::fs::write(&auth_path, format!("{upn}\n{access_token}\n"))
-            .await
-            .map_err(BackendError::Io)?;
-        tokio::fs::set_permissions(
-            &auth_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        // tls-auth static key (direction 1, SHA256). A shared secret: with it
+        // the TLS control channel can be forged. It was written at the umask
+        // — 0644 — and kept private only by the mode of the directory above
+        // it, whose profile-UUID name is listable over the bus.
+        crate::secure_file::write_private(
+            &key_path,
+            hex_to_openvpn_key(&cfg.server_secret_hex).as_bytes(),
+            None,
         )
-        .await
+        .map_err(BackendError::Io)?;
+
+        // auth-user-pass: <upn>\n<access_token>. This was chmod'd to 0600,
+        // but only after the write had finished — the Entra access token was
+        // world-readable for the length of it.
+        crate::secure_file::write_private(
+            &auth_path,
+            format!("{upn}\n{access_token}\n").as_bytes(),
+            None,
+        )
         .map_err(BackendError::Io)?;
 
         // openvpn config
@@ -682,7 +691,11 @@ impl VpnBackend for AzureBackend {
             &auth_path.to_string_lossy(),
             profile.full_tunnel,
         );
-        tokio::fs::write(&ovpn_path, &ovpn_text).await.map_err(BackendError::Io)?;
+        // No secret of its own — the CA cert it inlines is public and the
+        // credentials are referenced by path — but it names those paths, and
+        // there is no reason for it to be the one file here anyone can read.
+        crate::secure_file::write_private(&ovpn_path, ovpn_text.as_bytes(), None)
+            .map_err(BackendError::Io)?;
 
         info!(
             "Azure: temp files written to {}",

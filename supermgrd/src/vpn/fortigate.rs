@@ -723,7 +723,11 @@ impl VpnBackend for FortiGateBackend {
         let config_path = PathBuf::from(swanctl_conf_dir()).join(format!("{conn_name}.conf"));
 
         info!("writing swanctl config to {}", config_path.display());
-        tokio::fs::write(&config_path, &config_text).await.map_err(|e| {
+        // The fragment embeds the EAP password and the group PSK in clear.
+        // It was written at the umask — 0644 — and kept private only by the
+        // mode strongSwan's packaging happens to give conf.d, which is a
+        // distribution decision rather than something this daemon controls.
+        crate::secure_file::write_private(&config_path, config_text.as_bytes(), None).map_err(|e| {
             let dir = swanctl_conf_dir();
             let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
                 format!(" — the daemon must run as root to write to {dir}/")
