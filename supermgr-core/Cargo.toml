@@ -44,6 +44,12 @@ keyring        = { version = "3.6", default-features = false, features = ["windo
 
 [dev-dependencies]
 tempfile       = "3"
+# `secret_lifecycle` states its guarantee as an invariant over arbitrary
+# installs — build any mix of profiles/hosts/keys, delete any one of them,
+# assert nothing is left unowned. Enumerating those combinations by hand
+# would cover exactly the shapes we already thought of, which is how the
+# three shipped leaks got shipped.
+proptest       = "1.5"
 
 [lints]
 workspace = true

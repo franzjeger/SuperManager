@@ -156,6 +156,12 @@ async fn main() -> anyhow::Result<()> {
     let ssh_host_count = daemon_state.hosts.len();
     info!("loaded {} SSH key(s), {} SSH host(s)", ssh_key_count, ssh_host_count);
 
+    // Report credentials whose owning profile/host/key is gone. Deletes
+    // before this release removed the record only, so an install of any age
+    // is likely carrying some — and `export_all` puts them in the backup
+    // archive. Advisory: it logs, it does not delete.
+    daemon::audit_orphaned_secrets(&daemon_state).await;
+
     // -----------------------------------------------------------------------
     // 3. Stale interface cleanup + kill-switch teardown from any previous crash
     // -----------------------------------------------------------------------

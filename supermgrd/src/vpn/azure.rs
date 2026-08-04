@@ -111,9 +111,12 @@ impl AzureBackend {
 // Using the audience GUID as the client_id resolves this.
 
 /// Label used to cache the refresh token in the secrets store.
-fn refresh_token_label(profile_id: &uuid::Uuid) -> String {
-    format!("supermgr/azure/{}/refresh_token", profile_id.simple())
-}
+///
+/// Defined in `supermgr_core::secret_lifecycle` rather than here because
+/// nothing points a `SecretRef` at it: the profile delete path can only
+/// clear this credential if it can derive the label, so the definition has
+/// to live where deletion can see it.
+use supermgr_core::secret_lifecycle::azure_refresh_token_label as refresh_token_label;
 
 /// Percent-encode a single OAuth2 query-parameter value.
 ///
