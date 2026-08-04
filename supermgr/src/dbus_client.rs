@@ -606,6 +606,37 @@ pub async fn dbus_ssh_connect_command(host_id: String) -> anyhow::Result<String>
     Ok(proxy.ssh_connect_command(&host_id).await?)
 }
 
+/// Turn a failed daemon call into something worth showing a person.
+///
+/// Opening an SSH session needs polkit authorization, so the most likely
+/// failure is now the operator dismissing the prompt — a decision, not a
+/// fault. Reported raw it arrives as
+/// `org.freedesktop.DBus.Error.AccessDenied: '…' needs administrator
+/// authentication, which was not completed`, under a "Failed to…" heading.
+/// That reads as a broken application, and an application that looks broken
+/// when it is working is how a security control ends up switched off.
+///
+/// Matched on the D-Bus error name rather than the message text, since the
+/// message is the daemon's to reword.
+#[must_use]
+pub fn describe_daemon_error(err: &anyhow::Error, doing: &str) -> String {
+    let text = format!("{err:#}");
+    if !text.contains("AccessDenied") {
+        return format!("{doing}: {text}");
+    }
+
+    // The daemon distinguishes the two cases in its own message; keep that
+    // distinction, because the remedies differ — authenticate, versus ask
+    // whoever administers this machine.
+    if text.contains("not completed") {
+        "Authentication was cancelled, so the session was not opened.".to_owned()
+    } else {
+        "You are not permitted to open SSH sessions with SuperManager's \
+         stored credentials on this machine."
+            .to_owned()
+    }
+}
+
 pub async fn dbus_ssh_execute_command(host_id: String, command: String) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
@@ -1143,4 +1174,75 @@ pub async fn generate_ssh_config() -> anyhow::Result<usize> {
 
     info!("wrote {count} hosts to {}", config_path.display());
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact text zbus produces for a denial from `polkit::authorize`,
+    /// which is what the operator sees if this mapping is wrong.
+    fn denial(reason: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "org.freedesktop.DBus.Error.AccessDenied: {reason}"
+        )
+    }
+
+    #[test]
+    fn a_cancelled_prompt_is_not_reported_as_a_failure() {
+        // Dismissing the polkit dialog is a decision. Showing it under
+        // "Failed to build SSH command" with a D-Bus error name attached
+        // makes a working application look broken.
+        let err = denial(
+            "'org.supermgr.daemon.ssh-connect' needs administrator \
+             authentication, which was not completed",
+        );
+
+        let msg = describe_daemon_error(&err, "Failed to build SSH command");
+
+        assert!(!msg.contains("Failed to"), "{msg}");
+        assert!(!msg.contains("org.freedesktop"), "{msg}");
+        assert!(!msg.contains("org.supermgr"), "{msg}");
+        assert!(msg.contains("cancelled"), "{msg}");
+    }
+
+    #[test]
+    fn a_refusal_says_so_rather_than_inviting_a_retry() {
+        // Not authorised at all is a different remedy from cancelling:
+        // there is nobody to authenticate as, so telling the operator to
+        // try again would send them in circles.
+        let err = denial("'org.supermgr.daemon.ssh-connect' is not permitted for this user");
+
+        let msg = describe_daemon_error(&err, "SSH connect failed");
+
+        assert!(msg.contains("not permitted"), "{msg}");
+        assert!(!msg.contains("cancelled"), "{msg}");
+        assert!(!msg.contains("org.freedesktop"), "{msg}");
+    }
+
+    #[test]
+    fn every_other_failure_keeps_its_detail() {
+        // A real fault must not be flattened into a friendly sentence —
+        // the daemon's message is the only diagnostic the operator gets.
+        let err = anyhow::anyhow!("host not found");
+
+        let msg = describe_daemon_error(&err, "SSH connect failed");
+
+        assert_eq!(msg, "SSH connect failed: host not found");
+    }
+
+    #[test]
+    fn the_daemons_own_wording_drives_the_distinction() {
+        // Guards the coupling: `polkit::authorize` writes "which was not
+        // completed" for a dismissed prompt and "is not permitted" for a
+        // refusal. If that wording changes, both cases collapse into the
+        // refusal branch and cancelling the dialog starts telling people
+        // they lack permission.
+        let daemon_source = include_str!("../../supermgrd/src/polkit.rs");
+        assert!(
+            daemon_source.contains("which was not completed"),
+            "the daemon no longer says 'which was not completed' — \
+             describe_daemon_error cannot tell a cancelled prompt from a refusal"
+        );
+    }
 }

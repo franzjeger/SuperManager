@@ -202,7 +202,7 @@ installer asks for `sudo` to place system files and start the daemon.
 - **SSH host-key verification** on every platform — trust-on-first-use, then
   a fingerprint mismatch refuses the connection (see below)
 - **Polkit authorization** on the Linux daemon's credential-reading methods
-  (see below)
+  and on opening an SSH session (see below)
 
 #### Who may talk to the daemon (Linux)
 
@@ -210,21 +210,40 @@ installer asks for `sudo` to place system files and start the daemon.
 local user send it messages — that is how the unprivileged GUI reaches it.
 Authorization is therefore the daemon's job, not the bus's.
 
-The methods that hand back credentials — `SshExportPrivateKey`,
-`SshGetPassword` and `ExportAll`, the last of which bundles the entire secret
-store — require the `org.supermgr.daemon.secrets` polkit action, held at
-`auth_admin`. That means administrator authentication **every time**, with no
-session-wide grace period, and no access at all from inactive or remote
-sessions.
+Two actions, at different levels, because the risk and the frequency differ:
 
-This **fails closed**: if polkit is not installed or cannot be reached, those
-methods are refused rather than allowed. Install
-`contrib/polkit/org.supermgr.Daemon.policy` (see the install steps above) —
-without it, polkit has no rule for the action and denies by default.
+| Action | Methods | Default |
+|---|---|---|
+| `org.supermgr.daemon.secrets` | `SshExportPrivateKey`, `SshGetPassword`, `ExportProfile`, `ExportAll` (the whole secret store), `GetWebhookConfig` | `auth_admin` |
+| `org.supermgr.daemon.ssh-connect` | `SshConnectCommand` | `auth_admin_keep` |
 
-The remaining methods are not yet gated — including `SshConnectCommand`, which
-writes the same credentials to `/tmp` and so currently routes around this. See
-issues #109 and #131.
+`auth_admin` means administrator authentication **every time**, with no
+session-wide grace period. `auth_admin_keep` asks once and then holds the
+grant for the rest of the session. Neither is reachable from an inactive or
+remote session.
+
+`SshConnectCommand` gets its own action because it discloses the same material
+as `SshExportPrivateKey` — it stages the host's password or private key on
+disk for your `ssh` to read — but it is also the Connect button. At
+`auth_admin` that is a password prompt for every SSH session you open, and a
+control that makes the tool unusable gets switched off. Raise it to
+`auth_admin` in the policy file if your threat model calls for it; nothing in
+the daemon depends on the weaker setting.
+
+Those staged credential files are mode 0600 and owned by the calling user, in
+a directory nobody else can create entries in. Every secret the daemon writes
+— VPN keys and passwords included — gets its mode in the same syscall that
+creates the file, rather than being narrowed afterwards.
+
+This **fails closed**: if polkit is not installed or cannot be reached, the
+gated methods are refused rather than allowed. Install
+`contrib/polkit/org.supermgr.Daemon.policy` (the installer does this for you)
+— without it, polkit has no rule for the action and denies by default. That
+is also why `polkit` is a hard dependency and not an optional one.
+
+The remaining methods are not yet gated. See issue #109 for the shape of the
+rest, and for the caveat that none of this has yet been exercised against a
+live polkit daemon.
 
 #### SSH host keys
 

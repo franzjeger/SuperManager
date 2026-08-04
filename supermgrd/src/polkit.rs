@@ -38,6 +38,32 @@ use zbus::{fdo, Connection};
 /// because each grant discloses long-lived credentials.
 pub const ACTION_SECRETS: &str = "org.supermgr.daemon.secrets";
 
+/// Open an SSH session to a managed host.
+///
+/// Held at `auth_admin_keep`: one authentication, then a grace period
+/// covering the rest of the session.
+///
+/// # Why not `ACTION_SECRETS`
+///
+/// `SshConnectCommand` discloses the same material `SshExportPrivateKey`
+/// does — it stages the host's password or private key on disk for the
+/// caller's `ssh` to read. By that measure it belongs behind the same
+/// action, and for a while it was behind nothing at all, which is how a
+/// caller refused by `SshExportPrivateKey` could get the key anyway.
+///
+/// But it is also the Connect button. `auth_admin` means a password
+/// prompt for every SSH session an operator opens, all day. A control
+/// that makes the tool unusable gets switched off, and a policy file
+/// deleted in irritation protects nothing — so the honest classification
+/// by disclosure loses to the one people will actually keep.
+///
+/// `auth_admin_keep` is the compromise, and it is a real one: within the
+/// grace period a second caller on the same session is not asked again.
+/// What it buys is that an unprivileged account cannot silently harvest
+/// credentials for every managed host — somebody has to authenticate
+/// once, and the prompt names what is being asked for.
+pub const ACTION_SSH_CONNECT: &str = "org.supermgr.daemon.ssh-connect";
+
 #[zbus::proxy(
     interface = "org.freedesktop.PolicyKit1.Authority",
     default_service = "org.freedesktop.PolicyKit1",
@@ -127,16 +153,37 @@ pub async fn authorize(
 mod tests {
     use super::*;
 
+    const POLICY: &str = include_str!("../../contrib/polkit/org.supermgr.Daemon.policy");
+
+    /// Every action the daemon can ask polkit about.
+    ///
+    /// Adding a constant above without adding it here leaves the new action
+    /// unchecked, so keep the two in step — the assertions below are the
+    /// only thing standing between a typo and a method that denies
+    /// everybody for a reason nobody can see.
+    const ALL_ACTIONS: &[&str] = &[ACTION_SECRETS, ACTION_SSH_CONNECT];
+
     #[test]
-    fn secrets_action_matches_the_shipped_policy_file() {
+    fn every_action_the_daemon_uses_is_declared_in_the_policy_file() {
         // The daemon and the .policy file have to agree on the action id
         // or polkit silently has no rule to apply — and a missing rule is
         // an implicit deny that looks like a bug, not a policy.
-        let policy = include_str!("../../contrib/polkit/org.supermgr.Daemon.policy");
-        assert!(
-            policy.contains(&format!("action id=\"{ACTION_SECRETS}\"")),
-            "{ACTION_SECRETS} is not declared in the polkit policy file"
-        );
+        for action in ALL_ACTIONS {
+            assert!(
+                POLICY.contains(&format!("action id=\"{action}\"")),
+                "{action} is not declared in the polkit policy file"
+            );
+        }
+    }
+
+    #[test]
+    fn the_actions_are_distinct() {
+        // Two constants resolving to one id would silently apply one
+        // action's authentication level to the other's methods.
+        let mut seen = std::collections::HashSet::new();
+        for action in ALL_ACTIONS {
+            assert!(seen.insert(*action), "duplicate action id: {action}");
+        }
     }
 
     /// The `<defaults>` block for `action`, with surrounding prose and
@@ -163,8 +210,7 @@ mod tests {
         // `auth_admin_keep` would cache the grant for the rest of the
         // session. For credential disclosure we want a prompt each time,
         // so a single authorization can't be replayed silently.
-        let policy = include_str!("../../contrib/polkit/org.supermgr.Daemon.policy");
-        let defaults = defaults_block(policy, ACTION_SECRETS);
+        let defaults = defaults_block(POLICY, ACTION_SECRETS);
         assert!(
             defaults.contains("<allow_active>auth_admin</allow_active>"),
             "expected auth_admin for the secrets action, got: {defaults}"
@@ -176,13 +222,117 @@ mod tests {
     }
 
     #[test]
-    fn inactive_and_remote_sessions_are_refused_outright() {
-        let policy = include_str!("../../contrib/polkit/org.supermgr.Daemon.policy");
-        let defaults = defaults_block(policy, ACTION_SECRETS);
+    fn ssh_connect_asks_once_per_session_rather_than_never_or_every_time() {
+        // The deliberate compromise, so it should fail if someone drifts it
+        // either way: `yes` would be no authentication at all, `auth_admin`
+        // would put a password prompt on the Connect button and get the
+        // policy file deleted.
+        let defaults = defaults_block(POLICY, ACTION_SSH_CONNECT);
         assert!(
-            defaults.contains("<allow_any>no</allow_any>"),
-            "a remote or inactive session must not be able to read secrets"
+            defaults.contains("<allow_active>auth_admin_keep</allow_active>"),
+            "expected auth_admin_keep for the ssh-connect action, got: {defaults}"
         );
-        assert!(defaults.contains("<allow_inactive>no</allow_inactive>"));
+    }
+
+    #[test]
+    fn no_action_is_granted_without_authentication() {
+        // `yes` anywhere in a defaults block means that method is open to
+        // whoever can reach the bus, which is every local account.
+        for action in ALL_ACTIONS {
+            let defaults = defaults_block(POLICY, action);
+            for line in defaults.lines() {
+                let line = line.trim();
+                assert!(
+                    !line.contains(">yes<"),
+                    "{action} grants without authentication: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_and_remote_sessions_are_refused_outright() {
+        // Neither reading a stored credential nor opening a session with
+        // one is for a remote or switched-away seat.
+        for action in ALL_ACTIONS {
+            let defaults = defaults_block(POLICY, action);
+            assert!(
+                defaults.contains("<allow_any>no</allow_any>"),
+                "{action} is reachable from a remote session: {defaults}"
+            );
+            assert!(
+                defaults.contains("<allow_inactive>no</allow_inactive>"),
+                "{action} is reachable from an inactive session: {defaults}"
+            );
+        }
+    }
+
+    /// `ssh_connect_command` consults polkit.
+    ///
+    /// The policy file being right is no use if the method never asks — and
+    /// "the rule exists but the call site ignores it" is the shape of the
+    /// bug this whole action was added to fix. There is no way to exercise
+    /// the real path here: it needs a system bus, a polkit daemon, and a
+    /// host to connect to. So this reads the source, bounded to the
+    /// function, and checks the guard is still in it.
+    ///
+    /// Comments are stripped before searching. The guard carries a comment
+    /// naming the action, so a search over the raw text passes just as
+    /// happily with the code deleted and the explanation left behind —
+    /// verified by removing the line and watching the first version of this
+    /// test stay green.
+    #[test]
+    fn ssh_connect_command_is_gated() {
+        let daemon = include_str!("daemon.rs");
+        let body: String = daemon
+            .split("async fn ssh_connect_command")
+            .nth(1)
+            .expect("ssh_connect_command exists")
+            // The next method's doc comment ends this one's body. Bounding
+            // it matters: without it the search would happily find some
+            // other method's guard and pass.
+            .split("\n    /// ")
+            .next()
+            .expect("something follows ssh_connect_command")
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            body.contains("authorize(conn, &hdr, crate::polkit::ACTION_SSH_CONNECT)"),
+            "ssh_connect_command no longer authorizes against {ACTION_SSH_CONNECT}. \
+             It stages the host's password or private key on disk; ungated, a caller \
+             refused by {ACTION_SECRETS} can come here for the same material instead."
+        );
+    }
+
+    /// The guard runs before anything with a side effect.
+    ///
+    /// `ssh_connect_command` brings up a mapped VPN profile before building
+    /// the command. If the authorization check sat after that, an
+    /// unauthorised caller could still raise a tunnel on its way to being
+    /// refused — a denial that changes the state of the machine is not much
+    /// of a denial.
+    #[test]
+    fn ssh_connect_authorizes_before_the_auto_vpn_connect() {
+        let daemon = include_str!("daemon.rs");
+        let body = daemon
+            .split("async fn ssh_connect_command")
+            .nth(1)
+            .expect("ssh_connect_command exists");
+
+        let guard = body
+            .find("authorize(conn, &hdr, crate::polkit::ACTION_SSH_CONNECT)")
+            .expect("the guard is present");
+        let auto_vpn = body
+            .find("connect_profile(")
+            .expect("the auto-VPN connect is present");
+
+        assert!(
+            guard < auto_vpn,
+            "the polkit check runs after the auto-VPN connect, so an \
+             unauthorised caller can bring up a tunnel before being refused"
+        );
     }
 }

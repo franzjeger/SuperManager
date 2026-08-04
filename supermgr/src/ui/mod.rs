@@ -2313,7 +2313,10 @@ pub fn build_ui(
                         }
                         Err(e) => {
                             let _ = tx.send(AppMsg::OperationFailed(
-                                format!("Failed to build SSH command: {e}"),
+                                crate::dbus_client::describe_daemon_error(
+                                    &e,
+                                    "Failed to build SSH command",
+                                ),
                             ));
                         }
                     }
