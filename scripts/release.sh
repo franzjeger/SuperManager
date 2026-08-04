@@ -252,7 +252,6 @@ esac
 echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
 
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
-LENGTH="$(stat -f%z "$DIST_ZIP")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
 
 cat > "$APPCAST" <<EOF
@@ -270,7 +269,12 @@ cat > "$APPCAST" <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DOWNLOAD_URL"
-                length="$LENGTH"
+                <!-- length + sparkle:edSignature come from sign_update's
+                     output line. Do NOT add a length attribute here: it
+                     duplicated the one in $SPARKLE_SIG_LINE, produced
+                     invalid XML, and Sparkle failed the whole feed with
+                     "An error occurred while parsing the update feed"
+                     (seen live on 1.6.0's first check). -->
                 type="application/octet-stream"
                 $SPARKLE_SIG_LINE />
         </item>
@@ -278,7 +282,27 @@ cat > "$APPCAST" <<EOF
 </rss>
 EOF
 
-echo "→ Wrote appcast: $APPCAST"
+# The 1.6.0 feed shipped as invalid XML (duplicate length attribute)
+# and Sparkle failed the whole feed at first live check. Reachable and
+# content-correct is not the same as parseable — validate for real.
+if ! xmllint --noout "$APPCAST"; then
+    echo "error: generated appcast is not valid XML — refusing to continue" >&2
+    exit 1
+fi
+echo "→ Wrote appcast: $APPCAST (xmllint: valid)"
+
+# The feed the app polls is the appcast COMMITTED TO MAIN
+# (raw.githubusercontent.com/…/main/appcast.xml), not a release asset.
+# The old feed URL pointed at `releases/latest/download/appcast.xml`,
+# and the moment a Windows-only release became "latest" (v1.4.0 was
+# exactly that) the URL 404'd and every Mac silently stopped seeing
+# updates. A repo-committed appcast is immune to release ordering.
+# Stable channel only — the beta appcast stays a release asset so a
+# stray beta never reaches main.
+if [ "$CHANNEL_LABEL" = "stable" ]; then
+    cp "$APPCAST" "$REPO_ROOT/appcast.xml"
+    echo "→ Copied appcast to repo root (commit it with the release)"
+fi
 
 # ---- 10. Next steps ---------------------------------------------------------
 
@@ -293,7 +317,10 @@ cat <<EOF
     $APPCAST
 
   Next steps (manual):
-    1. \`git commit -am "chore: release v$VERSION"\`
+    1. \`git add -A && git commit -m "chore: release v$VERSION"\`
+       (includes the updated appcast.xml at the repo root —
+        that IS the update feed; forgetting it means no Mac
+        ever sees this release)
     2. \`git tag v$VERSION && git push origin main v$VERSION\`
     3. \`gh release create v$VERSION \\
             "$DIST_ZIP" \\

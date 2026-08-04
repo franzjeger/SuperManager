@@ -97,8 +97,8 @@ targets:
       properties:
         CFBundleName: SuperManager
         CFBundleIdentifier: com.sybr.supermanager
-        CFBundleVersion: "1.0.0"
-        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1.6.0"
+        CFBundleShortVersionString: "1.6.0"
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSSupportsAutomaticTermination: false
@@ -161,11 +161,16 @@ targets:
 
         # Sparkle auto-update config.
         # `SUFeedURL`: where Sparkle fetches the appcast.xml from.
-        # We host the feed on GitHub Releases — the release script
-        # uploads `appcast.xml` to the latest Release alongside the
-        # signed .dmg/.zip. Update this URL once the first signed
-        # release is published.
-        SUFeedURL: https://github.com/franzjeger/SuperManager/releases/latest/download/appcast.xml
+        # The feed is the appcast COMMITTED TO MAIN, not a release
+        # asset. The old `releases/latest/download/…` URL broke the
+        # moment a Windows-only release became "latest" (v1.1.0
+        # through v1.5.0 all were), and Macs silently stopped seeing
+        # updates for months. NOTE: this value is duplicated in
+        # SuperManagerMac/Info.plist — xcodegen regenerates from
+        # HERE, so this is the one that ships; keep both in sync.
+        # v1.6.0 shipped with the old URL, so every release must ALSO
+        # attach appcast.xml as an asset until 1.6.0 is extinct.
+        SUFeedURL: https://raw.githubusercontent.com/franzjeger/SuperManager/main/appcast.xml
         # `SUPublicEDKey`: Base64-encoded EdDSA Ed25519 public key.
         # The release script signs each appcast item with the
         # matching private key. Sparkle refuses to install any

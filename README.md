@@ -10,6 +10,47 @@ SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiG
 
 All three share `supermgr-core` (types, traits, secret-store abstraction, RPC protocol) and `supermgr-engine` (renderers, scan logic).
 
+## Install (macOS)
+
+One command — downloads the newest signed + notarized release into
+`/Applications` and launches it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh | bash
+```
+
+Or grab `SuperManager-<version>.zip` (drag-and-drop) from the
+[releases page](https://github.com/franzjeger/SuperManager/releases)
+yourself. (The `.pkg` asset is NOT the app — it is a small standalone
+VPN/DNS cleanup payload for MDM remediation.) On first use the app asks for admin rights to install its
+privileged helper, and offers the strongSwan install command if you add
+an IKEv2 profile — the install script itself does nothing privileged.
+
+Updates after that are in-app: the app checks the committed
+[appcast](appcast.xml) daily (Sparkle), or on demand via
+**Check for Updates…**.
+
+### What works out of the box, and what needs a tool
+
+SuperManager drives the real VPN clients rather than reimplementing
+them, so each VPN type needs its client present. Install only the ones
+you use — the installer reports which are missing, and the app tells
+you again if you try to connect a profile whose tool isn't there.
+
+| Feature | Needs |
+|---|---|
+| SSH, key management, network scan, compliance, UniFi, FortiGate API | nothing |
+| Tailscale | nothing — `tailscaled` is bundled and installed on first use |
+| WireGuard | `brew install wireguard-tools` |
+| IKEv2 / FortiGate IPsec | `brew install strongswan` |
+| OpenVPN 2.x | `brew install openvpn` |
+| Azure VPN (Entra ID) | `./contrib/build-openvpn3-mac.sh` — no Homebrew formula; Microsoft's gateway rejects OpenVPN 2.x |
+
+The app asks for admin rights once, on first launch, to install its
+privileged helper (`/Library/PrivilegedHelperTools`). Nothing else
+requires elevation, and the install script itself does nothing
+privileged.
+
 ## Features
 
 ### Dashboard

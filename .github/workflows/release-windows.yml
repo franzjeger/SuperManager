@@ -112,6 +112,20 @@ jobs:
           "MSI_SHA256_PATH=$msi.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
           "EXE_SHA256_PATH=$exe.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # Macs on v1.6.0 poll `releases/latest/download/appcast.xml` (the
+      # URL baked into that build). A Windows-only release taking
+      # "latest" without an appcast is exactly how Mac updates died for
+      # months (v1.1.0-v1.5.0), so every release carries the current
+      # Mac appcast from main until the 1.6.0 fleet is extinct. Newer
+      # Macs read the repo-committed appcast directly and don't care.
+      - name: Fetch current Mac appcast
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/${{ github.repository }}/main/appcast.xml" `
+            -OutFile appcast.xml
+          "APPCAST_PATH=appcast.xml" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Attach artifacts to GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
@@ -120,5 +134,6 @@ jobs:
             ${{ env.EXE_SHA256_PATH }}
             ${{ env.MSI_PATH }}
             ${{ env.MSI_SHA256_PATH }}
+            ${{ env.APPCAST_PATH }}
           generate_release_notes: false
           fail_on_unmatched_files: true
