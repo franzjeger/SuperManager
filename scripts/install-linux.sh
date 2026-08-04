@@ -147,7 +147,8 @@ done
 case "$FAMILY" in
 arch)
     INSTALL_CMD=(sudo pacman -S --needed --noconfirm)
-    PKGS_BUILD=(rust pkgconf gcc git)
+    PKGS_RUST=(rust)
+    PKGS_BUILD=(pkgconf gcc git)
     PKGS_GUI=(gtk4 libadwaita vte4 openssl)
     # polkit is not optional: the daemon's credential-reading methods
     # fail closed without it, so a missing polkit looks like a broken
@@ -158,7 +159,8 @@ arch)
     ;;
 debian)
     INSTALL_CMD=(sudo apt-get install -y)
-    PKGS_BUILD=(rustc cargo build-essential pkg-config)
+    PKGS_RUST=(rustc cargo)
+    PKGS_BUILD=(build-essential pkg-config)
     PKGS_GUI=(libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libssl-dev libdbus-1-dev libglib2.0-dev)
     PKGS_CORE=(polkitd openssh-client sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan strongswan-swanctl openvpn)
@@ -166,7 +168,8 @@ debian)
     ;;
 fedora)
     INSTALL_CMD=(sudo dnf install -y)
-    PKGS_BUILD=(rust cargo gcc pkg-config)
+    PKGS_RUST=(rust cargo)
+    PKGS_BUILD=(gcc pkg-config)
     PKGS_GUI=(gtk4-devel libadwaita-devel vte291-gtk4-devel openssl-devel dbus-devel glib2-devel)
     PKGS_CORE=(polkit openssh-clients sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
@@ -174,7 +177,8 @@ fedora)
     ;;
 suse)
     INSTALL_CMD=(sudo zypper install -y)
-    PKGS_BUILD=(rust cargo gcc pkg-config)
+    PKGS_RUST=(rust cargo)
+    PKGS_BUILD=(gcc pkg-config)
     PKGS_GUI=(gtk4-devel libadwaita-devel vte-devel libopenssl-devel dbus-1-devel glib2-devel)
     PKGS_CORE=(polkit openssh sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
@@ -182,9 +186,30 @@ suse)
     ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Rust may already be managed outside the package manager.
+#
+# rustup is the usual case, and on Arch the `rust` package actively
+# conflicts with it — pacman offers to remove rustup to make room, which
+# would take the user's whole toolchain setup with it. That is not a trade
+# an installer gets to make on somebody's behalf, and it is not needed:
+# any working cargo builds this just as well.
+#
+# Checked by running `cargo --version`, not by looking for the binary. A
+# rustup shim exists on PATH even when no toolchain is installed behind
+# it, and reports the difference only when run.
+# ---------------------------------------------------------------------------
+
+RUST_NOTE=""
+if CARGO_VERSION="$(cargo --version 2>/dev/null)"; then
+    RUST_NOTE="already installed: $CARGO_VERSION"
+    PKGS_RUST=()
+fi
+
 if [ "$PRINT_DEPS" = 1 ]; then
     printf 'distribution   %s (%s family)\n' "${PRETTY_NAME:-$ID}" "$FAMILY"
     printf 'installs with  %s\n\n' "${INSTALL_CMD[*]}"
+    printf 'rust           %s\n' "${RUST_NOTE:-${PKGS_RUST[*]}}"
     printf 'build          %s\n' "${PKGS_BUILD[*]}"
     printf 'gui            %s\n' "${PKGS_GUI[*]}"
     printf 'core           %s\n' "${PKGS_CORE[*]}"
@@ -198,10 +223,14 @@ fi
 # ---------------------------------------------------------------------------
 
 if [ "$DO_DEPS" = 1 ]; then
-    REQUIRED=("${PKGS_BUILD[@]}" "${PKGS_GUI[@]}" "${PKGS_CORE[@]}" "${PKGS_VPN[@]}")
+    REQUIRED=(
+        ${PKGS_RUST[@]+"${PKGS_RUST[@]}"}
+        "${PKGS_BUILD[@]}" "${PKGS_GUI[@]}" "${PKGS_CORE[@]}" "${PKGS_VPN[@]}"
+    )
 
     say "Installing dependencies (${#REQUIRED[@]} packages, $FAMILY)"
     note "${REQUIRED[*]}"
+    [ -z "$RUST_NOTE" ] || note "Rust $RUST_NOTE — leaving your toolchain alone"
     if [ "$ASSUME_YES" != 1 ]; then
         printf '\n  Proceed? [Y/n] '
         read -r reply </dev/tty || reply=y
@@ -213,17 +242,34 @@ if [ "$DO_DEPS" = 1 ]; then
     fi
 
     # One invocation is the whole point. When it fails it is almost
-    # always a single package renamed between distro releases
-    # (policykit-1 -> polkitd, freerdp2 -> freerdp3), which takes the
-    # other thirty down with it — so fall back to one-at-a-time and say
-    # which ones are actually unavailable, instead of printing the
-    # package manager's error and giving up.
+    # always a single package that is renamed between distro releases
+    # (policykit-1 -> polkitd, freerdp2 -> freerdp3) or that conflicts
+    # with something already installed, and it takes the other thirty
+    # down with it — so fall back to one-at-a-time rather than printing
+    # the package manager's error and giving up.
     if ! "${INSTALL_CMD[@]}" "${REQUIRED[@]}"; then
         warn "the combined install failed — retrying package by package"
         FAILED=()
+        CONFLICTED=()
         for pkg in "${REQUIRED[@]}"; do
-            "${INSTALL_CMD[@]}" "$pkg" >/dev/null 2>&1 || FAILED+=("$pkg")
+            if ! out="$("${INSTALL_CMD[@]}" "$pkg" 2>&1)"; then
+                # A conflict means something else on the system already
+                # provides this, and resolving it would mean removing that
+                # something. Reporting it as "not available" would be a
+                # lie, and acting on it uninvited would be worse.
+                if printf '%s' "$out" | grep -qi conflict; then
+                    CONFLICTED+=("$pkg")
+                else
+                    FAILED+=("$pkg")
+                fi
+            fi
         done
+        if [ ${#CONFLICTED[@]} -gt 0 ]; then
+            warn "left alone because they conflict with something you already have:"
+            warn "  ${CONFLICTED[*]}"
+            warn "whatever provides them is presumably doing the job; the check below"
+            warn "will say if it isn't."
+        fi
         if [ ${#FAILED[@]} -gt 0 ]; then
             warn "not available under these names: ${FAILED[*]}"
             warn "your distro version may call them something else; the check below"
