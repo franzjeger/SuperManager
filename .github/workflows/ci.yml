@@ -131,14 +131,34 @@ jobs:
       # only ever syntax-checked. Run it for real in every shell people
       # actually pipe it into; dry-run stops before the download and the
       # /Applications replacement.
-      - name: install.sh smoke test (bash, sh, zsh)
+      # The install script's only test used to be "someone ran it once".
+      # A user hit `unbound variable` in the wild: bash 5.x parses the
+      # bytes of a multibyte character as part of an identifier, so
+      # `$REPO…` became the variable `REPO…`. Apple's /bin/bash 3.2 does
+      # not, so every local test on a stock Mac passed. Both are tested
+      # here, in every shell people actually pipe installers into.
+      - name: install.sh smoke test (bash 3.2 + 5.x, sh, zsh, piped)
         run: |
-          for shell in bash sh zsh; do
-            echo "── $shell ──"
-            SUPERMGR_INSTALL_DRY_RUN=1 "$shell" scripts/install.sh
-            echo "── piped into $shell ──"
-            cat scripts/install.sh | SUPERMGR_INSTALL_DRY_RUN=1 "$shell"
+          set -e
+          BASHES="/bin/bash"
+          if [ -x /opt/homebrew/bin/bash ]; then BASHES="$BASHES /opt/homebrew/bin/bash"; fi
+          for b in $BASHES sh zsh; do
+            echo "── $b ──"
+            SUPERMGR_INSTALL_DRY_RUN=1 "$b" scripts/install.sh
+            echo "── piped into $b ──"
+            cat scripts/install.sh | SUPERMGR_INSTALL_DRY_RUN=1 "$b"
           done
+
+      # Guard the class, not just the instance: an unbraced expansion
+      # touching non-ASCII is a latent bash-5 abort in any shell script.
+      - name: No unbraced expansion before a multibyte character
+        run: |
+          # Strip comments first: the explanation of this very bug
+          # contains the pattern on purpose.
+          if grep -rnP '^\s*[^#].*\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]' --include='*.sh' .; then
+            echo "error: brace these expansions — bash 5.x folds the multibyte bytes into the variable name" >&2
+            exit 1
+          fi
 
       - name: xcodegen
         run: |

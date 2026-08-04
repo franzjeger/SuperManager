@@ -44,7 +44,13 @@ command -v curl >/dev/null || { echo "error: curl not found" >&2; exit 1; }
 # Newest release tag that actually has a Mac zip among its assets.
 # The GitHub API returns releases newest-first; grab the first
 # SuperManager-<version>.zip browser_download_url we see.
-say "Looking up the newest Mac release of $REPO…"
+# Braces are load-bearing: bash 5.x treats the bytes of a multibyte
+# character as part of an identifier, so `$REPO…` parses as the variable
+# `REPO…` and `set -u` aborts with "unbound variable" — on line 32, as a
+# user hit for real. Apple's /bin/bash 3.2 does not, which is why every
+# test on a stock Mac passed. Always brace an expansion that touches
+# non-ASCII.
+say "Looking up the newest Mac release of ${REPO}…"
 ZIP_URL="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=15" \
     | grep -o '"browser_download_url": *"[^"]*SuperManager-[0-9][^"]*\.zip"' \
     | grep -v notarize \
