@@ -15,6 +15,6 @@ fi
 # active, `rm` is in our allow-list, so this completes silently. If
 # the user has already taken `rm` out of the list, sudo will prompt
 # normally.
-echo "→ Removing $SUDOERS_FILE…"
+echo "→ Removing ${SUDOERS_FILE}…"
 sudo rm "$SUDOERS_FILE"
 echo "✓ NOPASSWD disabled. sudo will now prompt for password again."
