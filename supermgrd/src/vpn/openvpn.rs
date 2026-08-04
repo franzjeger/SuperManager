@@ -174,10 +174,13 @@ impl VpnBackend for OpenVpnBackend {
 
         info!("OpenVPN3: starting session for '{}'", profile.name);
 
-        let run_dir = runtime_dir();
-        tokio::fs::create_dir_all(&run_dir)
-            .await
-            .map_err(BackendError::Io)?;
+        // A subdirectory of the runtime directory rather than the runtime
+        // directory itself: systemd creates and re-applies the mode of the
+        // latter on every service start (`RuntimeDirectoryMode=0750`), so
+        // narrowing it here would just be the two fighting. This one belongs
+        // to us, and the temp config below carries the VPN password inline.
+        let run_dir = runtime_dir().join("openvpn");
+        crate::secure_file::ensure_private_dir(&run_dir, 0o700).map_err(BackendError::Io)?;
 
         // Build temp config file, applying full_tunnel override and credentials.
         //
@@ -217,8 +220,12 @@ impl VpnBackend for OpenVpnBackend {
                     );
                     let id_prefix = profile.id.simple().to_string();
                     let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
-                    tokio::fs::write(&tmp, with_creds.as_bytes())
-                        .await
+                    // `with_creds` is the .ovpn plus an inline
+                    // <auth-user-pass> block holding the username and
+                    // password in clear. It was written at the umask, so on
+                    // the non-root path — where the directory is under /tmp —
+                    // it was a world-readable VPN password.
+                    crate::secure_file::write_private(&tmp, with_creds.as_bytes(), None)
                         .map_err(BackendError::Io)?;
                     (tmp.to_string_lossy().into_owned(), Some(tmp))
                 }
@@ -245,8 +252,10 @@ impl VpnBackend for OpenVpnBackend {
             } else {
                 let id_prefix = profile.id.simple().to_string();
                 let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
-                tokio::fs::write(&tmp, modified.as_bytes())
-                    .await
+                // No inline credentials on this branch, but the source .ovpn
+                // may carry its own embedded keys, and it costs nothing to
+                // treat every copy the same way.
+                crate::secure_file::write_private(&tmp, modified.as_bytes(), None)
                     .map_err(BackendError::Io)?;
                 (tmp.to_string_lossy().into_owned(), Some(tmp))
             }

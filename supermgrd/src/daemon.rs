@@ -390,40 +390,10 @@ fn credential_dir_path() -> std::io::Result<PathBuf> {
 /// refused rather than used. Writing a private key into a directory another
 /// account controls is worse than failing to connect.
 fn ensure_credential_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-
-    if let Some(parent) = dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    match std::fs::DirBuilder::new().mode(0o711).create(dir) {
-        Ok(()) => return Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
-
-    let meta = std::fs::symlink_metadata(dir)?;
-    if !meta.is_dir() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("{} exists and is not a directory", dir.display()),
-        ));
-    }
-    if meta.uid() != nix::unistd::getuid().as_raw() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "{} is owned by uid {}, not by this daemon — refusing to write credentials into it",
-                dir.display(),
-                meta.uid()
-            ),
-        ));
-    }
-    // Narrow the mode if an earlier version, or anything else, left it wider.
-    if meta.permissions().mode() & 0o777 != 0o711 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))?;
-    }
-    Ok(())
+    // 0711, not the 0700 the VPN backends use: the caller has to traverse in
+    // to open a file it was told the path of, but must never be able to list
+    // what else is staged there.
+    crate::secure_file::ensure_private_dir(dir, 0o711)
 }
 
 /// Write `bytes` to a fresh file that only `uid` can read, and return its path.
@@ -467,21 +437,10 @@ fn credential_name(prefix: &str) -> String {
 /// The write itself, split out so the refusal to follow a planted path can be
 /// exercised against a path a test controls.
 fn write_credential_at(path: &std::path::Path, bytes: &[u8], uid: u32) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
-
-    // Given to the caller while it is still 0600, so it goes straight from
-    // root-only to caller-only with no readable-by-others moment in between.
-    std::os::unix::fs::fchown(&file, Some(uid), None)?;
-    Ok(())
+    // `create_private`, not `write_private`: the name carries 128 random bits,
+    // so anything already at the path is a surprise worth failing on rather
+    // than a stale file to replace.
+    crate::secure_file::create_private(path, bytes, Some(uid))
 }
 
 /// Build the shell command the GUI runs in a terminal.

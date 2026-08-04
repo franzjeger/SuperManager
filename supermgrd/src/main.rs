@@ -31,6 +31,7 @@ mod vpn;
 mod ssh;
 mod daemon;
 mod secrets;
+mod secure_file;
 mod backup_retention;
 mod docs;
 mod opnsense;
