@@ -10,6 +10,26 @@ SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiG
 
 All three share `supermgr-core` (types, traits, secret-store abstraction, RPC protocol) and `supermgr-engine` (renderers, scan logic).
 
+## Install (macOS)
+
+One command — downloads the newest signed + notarized release into
+`/Applications` and launches it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh | bash
+```
+
+Or grab `SuperManager-<version>.zip` (drag-and-drop) from the
+[releases page](https://github.com/franzjeger/SuperManager/releases)
+yourself. (The `.pkg` asset is NOT the app — it is a small standalone
+VPN/DNS cleanup payload for MDM remediation.) On first use the app asks for admin rights to install its
+privileged helper, and offers the strongSwan install command if you add
+an IKEv2 profile — the install script itself does nothing privileged.
+
+Updates after that are in-app: the app checks the committed
+[appcast](appcast.xml) daily (Sparkle), or on demand via
+**Check for Updates…**.
+
 ## Features
 
 ### Dashboard
