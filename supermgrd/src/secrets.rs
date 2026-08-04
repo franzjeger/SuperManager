@@ -177,16 +177,30 @@ pub async fn delete_secret(label: &str) -> Result<()> {
 /// every other test hides the one that actually broke.
 #[cfg(test)]
 pub(crate) fn test_store(path: &std::path::Path) -> TestStoreGuard {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let lock = LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = env_lock();
     let previous = std::env::var("SUPERMGRD_TEST_SECRETS_PATH").ok();
     std::env::set_var("SUPERMGRD_TEST_SECRETS_PATH", path);
     TestStoreGuard {
         _lock: lock,
         previous,
     }
+}
+
+/// The process-wide lock any test must hold while it mutates the environment.
+///
+/// Cargo runs tests as threads of one process, so a test that sets a variable
+/// another test reads is a race whatever the variables are — hence one lock
+/// rather than one per variable. Held by [`test_store`], and by any test that
+/// repoints `XDG_RUNTIME_DIR` or similar.
+///
+/// Poisoning is ignored deliberately: a panic in one test leaves a variable
+/// pointing somewhere harmless, and turning that into a cascade of failures in
+/// every other test hides the one that actually broke.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Guard returned by [`test_store`]. See its docs.

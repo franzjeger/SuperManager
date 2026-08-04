@@ -11,9 +11,22 @@ Restart=on-failure
 RestartSec=5
 
 # State directories — systemd creates and manages these on start
-# (auto-creates /run/supermgrd, /etc/supermgrd, /var/log/supermgrd with the
-# correct mode/owner; also implicitly ReadWrite under ProtectSystem=strict)
-RuntimeDirectory=supermgrd
+# (auto-creates /run/supermgrd, /run/supermgrd-ssh, /etc/supermgrd,
+# /var/log/supermgrd with the correct mode/owner; also implicitly ReadWrite
+# under ProtectSystem=strict, which would otherwise leave /run read-only)
+#
+# /run/supermgrd-ssh holds the short-lived password and private-key files
+# `SshConnectCommand` hands to the calling user's ssh client. It is a
+# separate directory rather than a subdirectory of /run/supermgrd because
+# the two need opposite things: the calling user must be able to traverse
+# into this one, and must not be able to traverse into the other, which
+# holds VPN material kept private by its 0750 alone.
+#
+# RuntimeDirectoryMode applies to every directory listed, so both are made
+# 0750 here and the daemon narrows /run/supermgrd-ssh to 0711 itself — the
+# mode is the daemon's to enforce anyway, since it also has to work when
+# started outside systemd.
+RuntimeDirectory=supermgrd supermgrd-ssh
 RuntimeDirectoryMode=0750
 ConfigurationDirectory=supermgrd
 ConfigurationDirectoryMode=0750
@@ -25,7 +38,9 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=-/tmp/supermgrd -/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
+# /tmp/supermgrd is gone: SSH credential files moved to /run/supermgrd-ssh,
+# which RuntimeDirectory= already makes writable. Nothing writes to /tmp.
+ReadWritePaths=-/etc/swanctl/conf.d -/etc/strongswan/swanctl/conf.d
 PrivateTmp=false
 NoNewPrivileges=false
 
