@@ -753,15 +753,6 @@ impl EngineServer {
         };
         drop(state);
 
-        // Whether this profile routes ALL traffic through the tunnel. Captured
-        // before `profile.config` is moved below. Used to gate the `DNS =` line:
-        // wg-quick on macOS applies `DNS =` by hijacking the ENTIRE system
-        // resolver via networksetup — correct for a full tunnel (avoids DNS
-        // leak), but wrong for a split tunnel (esp. a VPN on the same subnet),
-        // where it breaks local name resolution. So we only emit DNS for full
-        // tunnels.
-        let full_tunnel = profile.full_tunnel;
-
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
                 id,
@@ -806,25 +797,19 @@ impl EngineServer {
             let _ = writeln!(out, "Address = {addrs}");
         }
         if !wg.dns.is_empty() {
-            if full_tunnel {
-                let dns = wg
-                    .dns
-                    .iter()
-                    .map(std::string::ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = writeln!(out, "DNS = {dns}");
-            } else {
-                // Split tunnel: deliberately OMIT the DNS line. wg-quick would
-                // otherwise point the whole system resolver at the tunnel's DNS
-                // via networksetup, hijacking local name resolution (the
-                // reported "connects to a same-subnet VPN and it sets static
-                // DNS" bug). Split tunnels keep the existing system DNS.
-                tracing::info!(
-                    profile = %pid_str,
-                    "wireguard render: split tunnel — omitting DNS line (no system resolver hijack)"
-                );
-            }
+            // The DNS line is ALWAYS omitted, full tunnel included. With it
+            // present, wg-quick points the whole system resolver at the
+            // tunnel's DNS, hijacking local name resolution — the operator's
+            // local resolver (ad-blocking, split-horizon customer zones) goes
+            // dark the moment any WireGuard profile connects. Split tunnels
+            // have omitted it since the first report of this; full tunnel kept
+            // it and hijacked the resolver just the same. Operator verdict on
+            // 2026-08-04, verbatim: "OVERSTYRER LOKAL DNS, IKKE AKTUELT!"
+            // The parsed servers stay on the profile for display only.
+            tracing::info!(
+                profile = %pid_str,
+                "wireguard render: omitting DNS line — WireGuard never touches system DNS"
+            );
         }
         if let Some(mtu) = wg.mtu {
             let _ = writeln!(out, "MTU = {mtu}");
