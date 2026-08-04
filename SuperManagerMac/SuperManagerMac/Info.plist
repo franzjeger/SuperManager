@@ -60,7 +60,7 @@
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://github.com/franzjeger/SuperManager/releases/latest/download/appcast.xml</string>
+	<string>https://raw.githubusercontent.com/franzjeger/SuperManager/main/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>VNxZ8z12484X73mOJHRC3qxaDoOxl7M4UEYMeZ+Oxh0=</string>
 	<key>SUScheduledCheckInterval</key>
