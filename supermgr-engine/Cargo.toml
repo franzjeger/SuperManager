@@ -43,7 +43,7 @@ tempfile        = "3"
 # to the calling app's cdhash.
 security-framework = { version = "2.11", features = ["OSX_10_15"] }
 security-framework-sys = "2.11"
-core-foundation = "0.9"
+core-foundation = "0.10"
 core-foundation-sys = "0.8"
 
 # `secrets::default_data_dir` has a Linux branch that checks for root via
