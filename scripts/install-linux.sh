@@ -78,6 +78,13 @@ FILES=(
     "contrib/polkit/org.supermgr.Daemon.policy|/usr/share/polkit-1/actions/org.supermgr.Daemon.policy|644"
     "contrib/desktop/org.supermgr.SuperManager.desktop|/usr/share/applications/org.supermgr.SuperManager.desktop|644"
     "contrib/icons/org.supermgr.SuperManager.svg|/usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg|644"
+    "contrib/icons/hicolor/16.png|/usr/share/icons/hicolor/16x16/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/24.png|/usr/share/icons/hicolor/24x24/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/32.png|/usr/share/icons/hicolor/32x32/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/48.png|/usr/share/icons/hicolor/48x48/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/64.png|/usr/share/icons/hicolor/64x64/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/128.png|/usr/share/icons/hicolor/128x128/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/256.png|/usr/share/icons/hicolor/256x256/apps/org.supermgr.SuperManager.png|644"
     "contrib/man/supermgr.1|/usr/share/man/man1/supermgr.1|644"
     "contrib/man/supermgrd.8|/usr/share/man/man8/supermgrd.8|644"
 )
@@ -367,6 +374,16 @@ fi
 if command -v gtk-update-icon-cache >/dev/null; then
     sudo gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 fi
+# Plasma keeps its own cache of desktop entries and icons, and it is per-user
+# rather than system-wide — so this one runs as you, not under sudo. Without
+# it the task manager and the system tray keep showing whatever icon they saw
+# first, which makes a corrected icon look like it did not install.
+for sycoca in kbuildsycoca6 kbuildsycoca5; do
+    if command -v "$sycoca" >/dev/null; then
+        "$sycoca" >/dev/null 2>&1 || true
+        break
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 5. Start the daemon

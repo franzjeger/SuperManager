@@ -67,6 +67,44 @@ use dbus_client::{fetch_initial_state, fetch_initial_ssh_state};
 use settings::AppSettings;
 use ui::build_ui;
 
+/// Report what the desktop's colour scheme resolves to, and exit.
+fn print_palette() {
+    println!(
+        "XDG_CURRENT_DESKTOP = {:?}",
+        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default()
+    );
+    match ui::palette::kdeglobals_path() {
+        Some(path) => {
+            println!("kdeglobals          = {} ({})", path.display(),
+                if path.exists() { "exists" } else { "MISSING" });
+            if let Ok(ini) = std::fs::read_to_string(&path) {
+                println!("  inline colours    = {}",
+                    if ui::palette::parse(&ini).is_some() { "yes" } else { "no" });
+                match ui::palette::scheme_name(&ini) {
+                    Some(name) => {
+                        println!("  ColorScheme       = {name}");
+                        for candidate in ui::palette::scheme_file_candidates(&name) {
+                            if candidate.exists() {
+                                println!("  scheme file       = {}", candidate.display());
+                            }
+                        }
+                    }
+                    None => println!("  ColorScheme       = (none)"),
+                }
+            }
+        }
+        None => println!("kdeglobals          = (no HOME or XDG_CONFIG_HOME)"),
+    }
+
+    match ui::palette::desktop_palette() {
+        Some(palette) => {
+            println!("\nresolved: {} scheme", if palette.is_dark() { "dark" } else { "light" });
+            print!("{}", palette.to_css());
+        }
+        None => println!("\nresolved: nothing — the stock stylesheet will be used"),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     fmt()
         .with_env_filter(
@@ -76,6 +114,16 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     info!(version = env!("CARGO_PKG_VERSION"), "supermgr starting");
+
+    // `--print-palette` reports what the application makes of the desktop's
+    // colour scheme and stops. When the window comes up looking like the
+    // wrong desktop there is otherwise nothing to look at: the failure is
+    // silent by construction, since "no palette" and "palette applied badly"
+    // produce the same complaint.
+    if std::env::args().any(|a| a == "--print-palette") {
+        print_palette();
+        return Ok(());
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

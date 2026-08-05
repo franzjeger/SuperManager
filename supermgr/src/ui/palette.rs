@@ -290,6 +290,64 @@ fn split_sections(ini: &str) -> HashMap<String, HashMap<String, String>> {
     sections
 }
 
+/// The colour scheme `kdeglobals` names, if it names one.
+///
+/// `[General] ColorScheme=BreezeDark` is a *reference*. Plasma writes the
+/// resolved `[Colors:*]` sections into `kdeglobals` when a scheme is applied
+/// through System Settings, but a machine whose scheme has never been
+/// switched — or one set up by copying a config, or by a distribution
+/// default — carries the name and nothing else. Reading only the inline
+/// sections works on the first kind of machine and silently does nothing on
+/// the second, which is the difference between "it follows Breeze" and "it
+/// still looks like GNOME".
+#[must_use]
+pub fn scheme_name(ini: &str) -> Option<String> {
+    split_sections(ini)
+        .get("General")?
+        .get("ColorScheme")
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+}
+
+/// Candidate paths for a named scheme's `.colors` file.
+///
+/// The file name has the scheme's spaces removed — "Breeze Dark" lives in
+/// `BreezeDark.colors` — but both spellings are tried, because a
+/// hand-written scheme can be named anything its author liked.
+#[must_use]
+pub fn scheme_file_candidates(name: &str) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            dirs.push(Path::new(&xdg).join("color-schemes"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            dirs.push(Path::new(&home).join(".local/share/color-schemes"));
+        }
+    }
+    for extra in std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_owned())
+        .split(':')
+        .filter(|d| !d.is_empty())
+    {
+        dirs.push(Path::new(extra).join("color-schemes"));
+    }
+
+    let squashed = name.replace(' ', "");
+    let mut out = Vec::new();
+    for dir in dirs {
+        for stem in [squashed.as_str(), name] {
+            let candidate = dir.join(format!("{stem}.colors"));
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+    }
+    out
+}
+
 /// Where `kdeglobals` lives, honouring `XDG_CONFIG_HOME`.
 #[must_use]
 pub fn kdeglobals_path() -> Option<PathBuf> {
@@ -317,18 +375,83 @@ pub fn is_plasma_session(current_desktop: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case("KDE"))
 }
 
+/// Override a palette's accent with the user's, if they have set one.
+///
+/// The accent lives in `kdeglobals` even when the colours come from a scheme
+/// file, because Plasma 6 lets it be changed without editing the scheme. Read
+/// only the scheme file and every user who picked their own accent gets
+/// Breeze's blue instead.
+fn apply_accent_override(mut palette: Palette, kdeglobals: &str) -> Palette {
+    if let Some(accent) = split_sections(kdeglobals)
+        .get("General")
+        .and_then(|g| g.get("AccentColor"))
+        .and_then(|v| Rgb::parse(v))
+    {
+        palette.accent_bg = accent;
+    }
+    palette
+}
+
 /// The desktop's palette, if this desktop has one worth following.
+///
+/// Logs why it gave up when it does, because a palette that silently does
+/// nothing is indistinguishable from one that is not there — and the symptom
+/// is "the application still looks like GNOME", which says nothing about the
+/// cause. `RUST_LOG=supermgr=debug` prints the whole decision.
 #[must_use]
 pub fn desktop_palette() -> Option<Palette> {
     if std::env::var_os("SUPERMGR_NO_DESKTOP_COLORS").is_some() {
+        tracing::debug!("desktop colours disabled by SUPERMGR_NO_DESKTOP_COLORS");
         return None;
     }
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     if !is_plasma_session(&desktop) {
+        tracing::debug!(
+            xdg_current_desktop = %desktop,
+            "not a Plasma session; keeping the stock stylesheet"
+        );
         return None;
     }
-    let ini = std::fs::read_to_string(kdeglobals_path()?).ok()?;
-    parse(&ini)
+
+    let Some(path) = kdeglobals_path() else {
+        tracing::debug!("no HOME or XDG_CONFIG_HOME; cannot locate kdeglobals");
+        return None;
+    };
+    let Ok(ini) = std::fs::read_to_string(&path) else {
+        tracing::debug!(path = %path.display(), "kdeglobals is not readable");
+        return None;
+    };
+
+    // The colours are inline when Plasma has written them there.
+    if let Some(palette) = parse(&ini) {
+        tracing::debug!(path = %path.display(), "colour scheme read from kdeglobals");
+        return Some(palette);
+    }
+
+    // Otherwise kdeglobals only names the scheme, and the colours are in the
+    // file it names.
+    let Some(name) = scheme_name(&ini) else {
+        tracing::debug!(
+            path = %path.display(),
+            "kdeglobals carries neither colours nor a scheme name"
+        );
+        return None;
+    };
+    for candidate in scheme_file_candidates(&name) {
+        let Ok(scheme) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        if let Some(palette) = parse(&scheme) {
+            tracing::debug!(
+                scheme = %name,
+                path = %candidate.display(),
+                "colour scheme read from its scheme file"
+            );
+            return Some(apply_accent_override(palette, &ini));
+        }
+    }
+    tracing::debug!(scheme = %name, "named colour scheme could not be found on disk");
+    None
 }
 
 #[cfg(test)]
@@ -535,6 +658,63 @@ BackgroundNormal=5,5,5
         assert!(css.contains("@define-color warning_color #f67400;"), "{css}");
         assert!(css.contains("@define-color error_color #da4453;"), "{css}");
         assert!(css.contains("@define-color accent_color #3daee9;"), "{css}");
+    }
+
+    #[test]
+    fn a_kdeglobals_that_only_names_a_scheme_still_names_it() {
+        // The case that made the whole module do nothing on a real machine:
+        // Plasma writes the resolved `[Colors:*]` sections into kdeglobals
+        // when a scheme is applied through System Settings, but a desktop
+        // whose scheme has never been switched carries the name alone. The
+        // colours are in the file it points at.
+        let ini = "[General]\nColorScheme=Breeze Dark\n";
+        assert!(parse(ini).is_none(), "there are no colours here to read");
+        assert_eq!(scheme_name(ini).as_deref(), Some("Breeze Dark"));
+    }
+
+    #[test]
+    fn a_scheme_name_is_looked_for_under_both_spellings() {
+        // "Breeze Dark" lives in `BreezeDark.colors`. A scheme somebody
+        // wrote themselves may well keep its spaces.
+        let candidates = scheme_file_candidates("Breeze Dark");
+        let names: Vec<String> = candidates
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str().map(str::to_owned))
+            .collect();
+        assert!(names.iter().any(|n| n == "BreezeDark.colors"), "{names:?}");
+        assert!(names.iter().any(|n| n == "Breeze Dark.colors"), "{names:?}");
+        // And it looks in the system directories, not only the user's.
+        assert!(
+            candidates.iter().any(|p| p.starts_with("/usr/share")),
+            "{candidates:?}"
+        );
+    }
+
+    #[test]
+    fn no_scheme_name_is_not_an_empty_scheme_name() {
+        assert_eq!(scheme_name(""), None);
+        assert_eq!(scheme_name("[General]\nName=x\n"), None);
+        // An empty value is not a scheme to go looking for on disk.
+        assert_eq!(scheme_name("[General]\nColorScheme=\n"), None);
+    }
+
+    #[test]
+    fn the_accent_survives_coming_from_a_different_file() {
+        // The colours come from the scheme file, but Plasma 6 keeps the
+        // accent in kdeglobals — so reading only the scheme file gives every
+        // user who picked their own accent Breeze's blue instead of it.
+        let from_scheme = parse(BREEZE_DARK).expect("a palette");
+        let merged = apply_accent_override(from_scheme, "[General]\nAccentColor=201,63,152\n");
+        assert_eq!(merged.accent_bg, Rgb { r: 201, g: 63, b: 152 });
+        // Everything else still comes from the scheme.
+        assert_eq!(merged.window_bg, Rgb { r: 49, g: 54, b: 59 });
+    }
+
+    #[test]
+    fn a_kdeglobals_with_no_accent_leaves_the_schemes_own() {
+        let from_scheme = parse(BREEZE_DARK).expect("a palette");
+        let merged = apply_accent_override(from_scheme, "[General]\nColorScheme=Breeze Dark\n");
+        assert_eq!(merged.accent_bg, Rgb { r: 61, g: 174, b: 233 });
     }
 
     #[test]

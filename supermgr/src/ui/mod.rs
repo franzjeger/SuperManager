@@ -25,7 +25,7 @@ pub mod console;
 pub mod design;
 pub mod navigation;
 mod lock;
-mod palette;
+pub mod palette;
 mod preferences;
 pub mod shell;
 pub mod provisioning;

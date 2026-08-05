@@ -8,3 +8,8 @@ Type=Application
 Categories=Network;System;
 Keywords=SSH;VPN;WireGuard;FortiGate;IPsec;Keys;
 StartupNotify=true
+# Ties the running window back to this launcher. GTK sets the Wayland app_id
+# and the X11 WM_CLASS from the application id, and without this line an X11
+# session has to guess — which is how a task manager ends up showing a
+# generic icon beside a correctly-iconed window.
+StartupWMClass=org.supermgr.SuperManager
