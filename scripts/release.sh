@@ -174,6 +174,23 @@ sed "s|\$(AppIdentifierPrefix)|${TEAM_ID}.|g" \
     > "$APP_ENTITLEMENTS"
 echo "→ Resolved app entitlements (team ${TEAM_ID})"
 
+# The bundled Tailscale CLI. The build phase signs these with whatever
+# identity Xcode used — Apple Development — and without a timestamp,
+# which notarization rejects outright:
+#   "The binary is not signed with a valid Developer ID certificate"
+#   "The signature does not include a secure timestamp"
+# Re-sign them here with Developer ID like every other nested binary.
+# Missed on the first attempt because the inside-out list covered
+# Frameworks and Contents/MacOS but not Contents/Resources.
+for ts_bin in tailscale tailscaled; do
+    ts_path="$APP/Contents/Resources/tailscale-bin/$ts_bin"
+    [ -f "$ts_path" ] || continue
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" \
+        --identifier "com.sybr.supermanager.$ts_bin" \
+        "$ts_path"
+done
+
 # Sign inside-out, explicitly. NOT `--deep`: it re-signs every nested
 # binary with the OUTER options, which silently stripped the
 # entitlements just applied to the helper and daemon above. Apple
@@ -235,7 +252,14 @@ for ts_bin in tailscale tailscaled; do
         exit 1
     fi
 done
-echo "  tailscale + tailscaled bundled"
+for ts_bin in tailscale tailscaled; do
+    if ! codesign -dv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 \
+         | grep -q "Developer ID Application"; then
+        echo "error: bundled $ts_bin is not Developer ID-signed — notarization will reject it" >&2
+        exit 1
+    fi
+done
+echo "  tailscale + tailscaled bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
