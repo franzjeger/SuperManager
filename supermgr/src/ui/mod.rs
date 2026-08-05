@@ -558,7 +558,9 @@ pub fn build_ui(
     let (dashboard_flow_box, dashboard_widget) =
         ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
-    view_stack.add_titled(&dashboard_widget, Some("dashboard"), "Dashboard");
+    // "fleet" is the id the navigation sidebar addresses this page by. The
+    // two must agree: a mismatch is a nav row that silently does nothing.
+    view_stack.add_titled(&dashboard_widget, Some("fleet"), "Fleet");
     let dashboard_page_ref = view_stack.page(&dashboard_widget);
     dashboard_page_ref.set_icon_name(Some("utilities-system-monitor-symbolic"));
 
@@ -670,11 +672,11 @@ pub fn build_ui(
     let (ssh_host_detail, ssh_host_detail_widget) = ssh::host_detail::build_ssh_host_detail();
 
     let hosts_content_stack = gtk4::Stack::new();
-    let hosts_empty_status = adw::StatusPage::builder()
-        .title("Hosts")
-        .description("Select a host from the sidebar to view details.")
-        .icon_name("computer-symbolic")
-        .build();
+    let hosts_empty_status = design::empty_state(
+        "computer-symbolic",
+        "No host selected",
+        "Pick a host from the list to see how it connects, or use + to add one.",
+    );
     hosts_content_stack.add_named(&hosts_empty_status, Some("empty"));
     hosts_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
     hosts_content_stack.set_visible_child_name("empty");
@@ -746,11 +748,11 @@ pub fn build_ui(
     let (ssh_key_detail, ssh_key_detail_widget) = ssh::key_detail::build_ssh_key_detail();
 
     let keys_content_stack = gtk4::Stack::new();
-    let keys_empty_status = adw::StatusPage::builder()
-        .title("Keys")
-        .description("Select a key from the sidebar to view details.")
-        .icon_name("dialog-password-symbolic")
-        .build();
+    let keys_empty_status = design::empty_state(
+        "dialog-password-symbolic",
+        "No key selected",
+        "Pick a key from the list to see its fingerprint and where it is deployed.",
+    );
     keys_content_stack.add_named(&keys_empty_status, Some("empty"));
     keys_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
     keys_content_stack.set_visible_child_name("empty");
@@ -3565,7 +3567,7 @@ pub fn build_ui(
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_2 => {
-                        view_stack.set_visible_child_name("dashboard");
+                        view_stack.set_visible_child_name("fleet");
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_3 => {

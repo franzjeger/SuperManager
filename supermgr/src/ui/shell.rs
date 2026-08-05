@@ -170,10 +170,53 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         });
     }
 
-    // Start on VPN, which is where the old window started too.
-    if let Some((list, _)) = rows.first() {
-        if let Some(row) = list.row_at_index(3) {
-            list.select_row(Some(&row));
+    // Anything else that switches the stack — the Ctrl+N shortcuts, an
+    // action, a toast button — has to move the sidebar with it. The old view
+    // switcher was bound to the stack and did this for free; a `ListBox` is
+    // not, so without this a Ctrl+2 changes the page and leaves the sidebar
+    // highlighting the section you just left.
+    {
+        let rows = rows.clone();
+        stack.connect_visible_child_name_notify(move |stack| {
+            let Some(name) = stack.visible_child_name() else { return };
+            for (list, group) in &rows {
+                let Some(index) = group.iter().position(|s| s.id == name) else {
+                    list.select_row(None::<&gtk4::ListBoxRow>);
+                    continue;
+                };
+                let Ok(index) = i32::try_from(index) else { continue };
+                if let Some(row) = list.row_at_index(index) {
+                    // Re-selecting the current row would bounce back through
+                    // the handler above for no reason.
+                    if !row.is_selected() {
+                        list.select_row(Some(&row));
+                    }
+                }
+            }
+        });
+    }
+
+    // Every section has to resolve to a page. A nav row that does nothing
+    // when clicked is worse than a crash during development, because it
+    // looks like the application is merely slow.
+    for section in all_sections() {
+        if stack.child_by_name(section.id).is_none() {
+            tracing::error!(
+                section = section.id,
+                "navigation section has no page in the view stack; the row will do nothing"
+            );
+            debug_assert!(false, "section '{}' has no page in the view stack", section.id);
+        }
+    }
+
+    // Start on VPN, which is where the old window started too. By id rather
+    // than by position, so reordering the group cannot silently change which
+    // section the application opens on.
+    if let Some((list, group)) = rows.first() {
+        if let Some(index) = group.iter().position(|s| s.id == "vpn") {
+            if let Some(row) = i32::try_from(index).ok().and_then(|i| list.row_at_index(i)) {
+                list.select_row(Some(&row));
+            }
         }
     }
 
@@ -298,6 +341,34 @@ mod tests {
             .collect();
         for id in ["fleet", "hosts", "keys", "vpn", "provisioning", "console"] {
             assert!(built.contains(&id), "'{id}' exists but is marked unbuilt");
+        }
+    }
+
+    #[test]
+    fn every_built_section_has_a_page_under_the_same_id() {
+        // This module addresses pages by id; `ui/mod.rs` registers them by
+        // id. They are string literals in two different files, and when they
+        // disagreed — "dashboard" there, "fleet" here — the result was a nav
+        // row that did nothing whatsoever when clicked. No error, no empty
+        // page, no clue.
+        //
+        // Comments are stripped before searching, because a scan that prose
+        // can satisfy is satisfied by the comment explaining the scan.
+        let source = include_str!("mod.rs");
+        let registrations: String = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .filter(|line| line.contains("view_stack.add_titled("))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for section in all_sections().iter().filter(|s| s.built) {
+            assert!(
+                registrations.contains(&format!("Some(\"{}\")", section.id)),
+                "'{}' is marked built, but ui/mod.rs adds no view-stack page \
+                 with that id — its sidebar row would do nothing",
+                section.id
+            );
         }
     }
 

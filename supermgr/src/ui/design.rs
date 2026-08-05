@@ -204,6 +204,10 @@ pub fn reflowing_columns() -> gtk4::FlowBox {
 /// and the remaining cards close the gap.
 pub fn add_card(flow: &gtk4::FlowBox, card: &impl IsA<gtk4::Widget>) {
     let card = card.as_ref();
+    // The `minmax(340px, …)` half of the brief's rule. Without a floor the
+    // column count follows whatever the widest label happens to be, which
+    // means the layout changes shape when a hostname gets longer.
+    card.set_size_request(340, -1);
     flow.append(card);
     if let Some(slot) = card.parent() {
         card.bind_property("visible", &slot, "visible")
