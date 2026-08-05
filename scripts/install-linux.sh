@@ -386,24 +386,46 @@ fi
 # ---------------------------------------------------------------------------
 
 say "Kernel modules"
-for mod in wireguard tun nf_tables; do
-    if [ -d "/sys/module/$mod" ]; then
-        note "$mod already loaded"
-    elif sudo modprobe "$mod" 2>/dev/null; then
-        note "loaded $mod"
-    elif sudo modprobe -n "$mod" 2>/dev/null; then
-        warn "$mod exists but would not load — check 'sudo dmesg | tail'"
+
+# Before blaming any individual module: if the running kernel has no module
+# tree at all, every modprobe below fails for one reason and the remedy is a
+# reboot, not a kernel rebuild. On a rolling distribution this is the common
+# case — an update replaces /lib/modules and deletes the running kernel's,
+# so `modprobe wireguard` says "not found in directory /lib/modules/<running>"
+# on a kernel that was built with CONFIG_WIREGUARD=m all along.
+RUNNING_KERNEL="$(uname -r)"
+if [ ! -d "/lib/modules/$RUNNING_KERNEL" ]; then
+    warn "no /lib/modules/$RUNNING_KERNEL — the running kernel has no modules to load."
+    OTHER=""
+    for d in /lib/modules/*/; do
+        d="${d%/}"; d="${d##*/}"
+        [ "$d" = "$RUNNING_KERNEL" ] || [ "$d" = "*" ] || OTHER="$d"
+    done
+    if [ -n "$OTHER" ]; then
+        warn "  $OTHER is installed instead: the kernel was updated and not rebooted into."
+        warn "  Reboot, then re-run this script. Nothing below can succeed until you do."
     else
-        case "$mod" in
-            wireguard)
-                warn "no $mod module in this kernel — WireGuard profiles cannot connect"
-                warn "  a stock kernel has had it since 5.6; a custom one may not"
-                ;;
-            tun)     warn "no $mod module — OpenVPN and Azure VPN profiles cannot connect" ;;
-            nf_tables) warn "no $mod module — the kill switch cannot block traffic" ;;
-        esac
+        warn "  and nothing else is installed either. Reinstall your kernel package."
     fi
-done
+else
+    for mod in wireguard tun nf_tables; do
+        if [ -d "/sys/module/$mod" ]; then
+            note "$mod already loaded"
+        elif sudo modprobe "$mod" 2>/dev/null; then
+            note "loaded $mod"
+        else
+            case "$mod" in
+                wireguard)
+                    warn "cannot load $mod — WireGuard profiles will not connect"
+                    warn "  a stock kernel has had it since 5.6; a custom one may not"
+                    ;;
+                tun)       warn "cannot load $mod — OpenVPN and Azure VPN will not connect" ;;
+                nf_tables) warn "cannot load $mod — the kill switch cannot block traffic" ;;
+            esac
+            warn "  sudo modprobe $mod   # for the actual reason"
+        fi
+    done
+fi
 
 say "Starting the daemon"
 sudo systemctl daemon-reload
