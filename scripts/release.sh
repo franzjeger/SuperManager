@@ -180,11 +180,44 @@ if [ -z "$TEAM_ID" ]; then
     echo "error: could not parse team id out of \$DEVELOPER_ID_APP" >&2
     exit 1
 fi
-APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-resolved.entitlements"
-sed "s|\$(AppIdentifierPrefix)|${TEAM_ID}.|g" \
-    "$REPO_ROOT/SuperManagerMac/Signing/SuperManagerMac.entitlements" \
-    > "$APP_ENTITLEMENTS"
-echo "→ Resolved app entitlements (team ${TEAM_ID})"
+# `keychain-access-groups` is a RESTRICTED entitlement: it must be
+# authorised by a provisioning profile matching the signing identity.
+# Xcode's development profile matches its Apple Development signature,
+# so dev builds are fine — but a Developer ID re-sign has no matching
+# profile, and AMFI then refuses to launch the app at all ("Launchd job
+# spawn failed", no crash report). Bisected on the 1.6.1 artifact:
+#
+#   no entitlements            -> launches
+#   keychain-access-groups     -> does not launch
+#   keychain-access-groups + embedded profile -> does not launch
+#
+# So distribution builds ship WITHOUT it. VPNKeychain never sets
+# kSecAttrAccessGroup explicitly, so items land in the app's default
+# data-protection group, derived from the signature — which works for a
+# stable Developer ID identity. The cost is one-time: credentials stored
+# by a locally-signed dev build are not visible to a released build, and
+# must be re-entered once.
+#
+# Doing this properly instead would mean a Developer ID provisioning
+# profile with keychain sharing from the Apple Developer portal, then
+# embedding it here. That is the upgrade path if credential continuity
+# across identities ever matters.
+APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-distribution.entitlements"
+cat > "$APP_ENTITLEMENTS" <<'ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+</dict>
+</plist>
+ENTITLEMENTS
+echo "→ Distribution entitlements written (team ${TEAM_ID}, no restricted keys)"
+
+# A development provisioning profile does not belong in a Developer
+# ID-distributed app; Xcode embeds one and it is meaningless here.
+rm -f "$APP/Contents/embedded.provisionprofile"
 
 # The bundled Tailscale CLI. The build phase signs these with whatever
 # identity Xcode used — Apple Development — and without a timestamp,
@@ -233,10 +266,10 @@ spctl --assess --type execute --verbose=2 "$APP" || true
 echo "→ Verifying signed app kept its keychain access group"
 app_entitlements="$(codesign -d --entitlements - "$APP" 2>&1 || true)"
 case "$app_entitlements" in
-    *"${TEAM_ID}.com.sybr.supermanager"*) ;;
-    *)
-        echo "error: signed app is missing keychain-access-groups" >&2
-        echo "       Stored VPN credentials would be invisible to this build." >&2
+    *keychain-access-groups*)
+        echo "error: signed app carries keychain-access-groups." >&2
+        echo "       That entitlement needs a matching provisioning profile;" >&2
+        echo "       without one AMFI refuses to launch the app at all." >&2
         exit 1
         ;;
 esac
@@ -252,7 +285,32 @@ for nested in "$APP/Contents/MacOS/supermgrd-mac" \
         exit 1
     fi
 done
-echo "  entitlements intact (app), nested binaries validly signed"
+echo "  entitlements sane (app), nested binaries validly signed"
+
+# THE gate that was missing all along: does the signed app actually
+# LAUNCH? Every other check verified a property of the artifact —
+# signature valid, notarization accepted, ticket stapled, entitlements
+# present — and 1.6.1 passed all of them and could not start. AMFI
+# rejects at exec time, so nothing short of running it finds that.
+echo "→ Launch test on the signed app"
+launch_probe="$RELEASE_DIR/launch-probe"
+rm -rf "$launch_probe" && mkdir -p "$launch_probe"
+ditto "$APP" "$launch_probe/SuperManagerMac.app"
+"$launch_probe/SuperManagerMac.app/Contents/MacOS/SuperManagerMac" >/dev/null 2>&1 &
+probe_pid=$!
+sleep 6
+if kill -0 "$probe_pid" 2>/dev/null; then
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    rm -rf "$launch_probe"
+    echo "  app launches"
+else
+    rm -rf "$launch_probe"
+    echo "error: the signed app does not launch." >&2
+    echo "       Usually a restricted entitlement with no matching profile —" >&2
+    echo "       check 'log show --predicate \"process == \\\"amfid\\\"\"'." >&2
+    exit 1
+fi
 
 # The Tailscale CLI must be in the shipped bundle. The build phase that
 # puts it there skips silently when the Homebrew formula is absent (so
