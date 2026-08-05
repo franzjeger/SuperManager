@@ -250,6 +250,17 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
         Ok(()) => {
             info!("restored {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
         }
+        // EEXIST means a default route is already back — NetworkManager or
+        // dhcpcd reinstalled it when the tunnel interface went away, which is
+        // the common case on a desktop and races us every time. The route we
+        // wanted is present, so this is the goal state, not a failure; it was
+        // being logged as one on every single disconnect.
+        Err(e) if e.to_string().contains("File exists") => {
+            info!(
+                "{} default route already restored by the system — nothing to do",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
+        }
         Err(e) => {
             warn!("restore {} default route failed: {e}", if ipv6 { "IPv6" } else { "IPv4" });
         }
@@ -378,6 +389,107 @@ fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel module preflight
+// ---------------------------------------------------------------------------
+
+/// Present once the module is in the kernel, whether it was loaded on demand
+/// or built in.
+const SYS_MODULE_WIREGUARD: &str = "/sys/module/wireguard";
+
+/// Directory modprobe searches, one subdirectory per installed kernel.
+const MODULE_ROOT: &str = "/lib/modules";
+
+/// Load the WireGuard module if the kernel does not already have it.
+///
+/// Every mainstream distro ships WireGuard as `CONFIG_WIREGUARD=m` rather than
+/// built in, so on a freshly booted machine that has never run a tunnel the
+/// module is usually absent. Creating the interface through the generic-netlink
+/// `wireguard` family does not autoload it the way creating a `wireguard`-type
+/// link would — the family simply is not registered, and the netlink call comes
+/// back `ENOTSUP`. Without this the daemon reported that as a kernel that
+/// cannot do WireGuard at all.
+///
+/// Best-effort by design: a failure here is not returned. The module may be
+/// built in (nothing to load), and if it genuinely is unavailable the apply
+/// below fails anyway, with [`diagnose_missing_module`] to explain it.
+async fn ensure_module_loaded() {
+    if std::path::Path::new(SYS_MODULE_WIREGUARD).exists() {
+        debug!("WireGuard module already in the kernel");
+        return;
+    }
+
+    match tokio::process::Command::new("modprobe")
+        .arg("wireguard")
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => info!("loaded the WireGuard kernel module"),
+        Ok(out) => debug!(
+            "modprobe wireguard: exit={} stderr={:?}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => debug!("modprobe not available: {e}"),
+    }
+}
+
+/// Explain an unavailable WireGuard netlink family, given the running kernel
+/// release and the kernel versions that have a module tree installed.
+///
+/// The interesting case is the third one. A kernel upgrade removes the running
+/// kernel's module tree and installs the new one, so until the machine reboots
+/// every module that was not already loaded is unloadable — `modprobe` reports
+/// only "module not found", and the old message read that as a kernel built
+/// without WireGuard and sent the user to check `CONFIG_WIREGUARD`, which is
+/// both set and irrelevant. The fix is a reboot, so say so.
+fn describe_missing_module(running: &str, installed: &[String]) -> String {
+    if installed.iter().any(|k| k == running) {
+        return format!(
+            "the WireGuard kernel module could not be loaded on kernel {running} — \
+             check that your kernel provides it (CONFIG_WIREGUARD), or install the \
+             module package for this kernel (e.g. wireguard-dkms, \
+             linux-modules-extra-{running})"
+        );
+    }
+
+    if installed.is_empty() {
+        return format!(
+            "the WireGuard kernel module could not be loaded: no module tree is \
+             installed for the running kernel {running} ({MODULE_ROOT}/{running} \
+             does not exist)"
+        );
+    }
+
+    format!(
+        "the running kernel {running} has no module tree — {MODULE_ROOT}/{running} \
+         does not exist, so no kernel module can be loaded at all. This is what a \
+         kernel upgrade leaves behind until the machine is rebooted; the installed \
+         kernel is now {}. Reboot and connect again.",
+        installed.join(", ")
+    )
+}
+
+/// [`describe_missing_module`] applied to this machine.
+fn diagnose_missing_module() -> String {
+    // /proc rather than uname(2): `unsafe_code` is forbidden workspace-wide,
+    // and this is the same string modprobe resolves its search path from.
+    let running = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+
+    let mut installed: Vec<String> = std::fs::read_dir(MODULE_ROOT)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    installed.sort();
+
+    describe_missing_module(&running, &installed)
+}
+
+// ---------------------------------------------------------------------------
 // Backend struct
 // ---------------------------------------------------------------------------
 
@@ -453,6 +565,9 @@ impl WireGuardBackend {
         let iface: InterfaceName = iface_name
             .parse()
             .map_err(|e| BackendError::Interface(format!("invalid interface name '{iface_name}': {e}")))?;
+
+        // The netlink call below needs the wireguard family registered.
+        ensure_module_loaded().await;
 
         // Build the device update.
         let mut update = DeviceUpdate::new().set_private_key(private_key);
@@ -537,10 +652,10 @@ impl WireGuardBackend {
                          the daemon must run as root (or with CAP_NET_ADMIN) — {e}"
                     ))
                 } else if msg.contains("not supported") || msg.contains("ENOTSUP") || msg.contains("No such device") {
-                    BackendError::Interface(format!(
-                        "WireGuard kernel module not loaded or not available: \
-                         ensure CONFIG_WIREGUARD is enabled in your kernel — {e}"
-                    ))
+                    // Reached only after ensure_module_loaded() has already
+                    // tried, so the module really is unavailable — the
+                    // diagnosis says which of the reasons it is.
+                    BackendError::Prerequisite(diagnose_missing_module())
                 } else {
                     BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
                 }
@@ -1344,5 +1459,42 @@ impl VpnBackend for WireGuardBackend {
 
     fn name(&self) -> &'static str {
         "WireGuard"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_tree_for_running_kernel_says_reboot() {
+        // The state a kernel upgrade leaves behind: the running kernel's
+        // modules are gone, the successor's are installed, nothing loads
+        // until the reboot.
+        let msg = describe_missing_module(
+            "7.1.5-1-cachyos",
+            &["6.18.42-1-cachyos-lts".into(), "7.1.6-1-cachyos".into()],
+        );
+        assert!(msg.contains("Reboot"), "{msg}");
+        assert!(msg.contains("7.1.6-1-cachyos"), "{msg}");
+        // The old message sent the user here, and it is the wrong place to
+        // look when the kernel does have WireGuard.
+        assert!(!msg.contains("CONFIG_WIREGUARD"), "{msg}");
+    }
+
+    #[test]
+    fn tree_present_points_at_the_module_itself() {
+        let msg = describe_missing_module("7.1.6-1-cachyos", &["7.1.6-1-cachyos".into()]);
+        assert!(msg.contains("CONFIG_WIREGUARD"), "{msg}");
+        assert!(!msg.contains("Reboot"), "{msg}");
+    }
+
+    #[test]
+    fn no_module_trees_at_all_is_not_reported_as_an_upgrade() {
+        // A container or a fully built-in kernel: /lib/modules is empty, so
+        // there is no successor kernel to name and no reboot to suggest.
+        let msg = describe_missing_module("7.1.6-1-cachyos", &[]);
+        assert!(msg.contains("no module tree is installed"), "{msg}");
+        assert!(!msg.contains("Reboot"), "{msg}");
     }
 }

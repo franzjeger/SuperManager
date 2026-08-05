@@ -51,6 +51,18 @@ pub enum BackendError {
     #[error("permission denied: {0}")]
     Permission(String),
 
+    /// Something the backend depends on is missing or not running, and no
+    /// amount of retrying will change that — a kernel module that cannot be
+    /// loaded, a service that is installed but stopped.
+    ///
+    /// Kept separate from [`Self::Config`] (which is about the *profile*) and
+    /// from [`Self::Subprocess`] (which is about a command that ran and
+    /// failed) because the caller must not retry it, and because the message
+    /// is written for the user: it names what is missing and the command that
+    /// fixes it.
+    #[error("{0}")]
+    Prerequisite(String),
+
     /// A timeout waiting for a state transition.
     #[error("operation timed out after {seconds}s")]
     Timeout {
