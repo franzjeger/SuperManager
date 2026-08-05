@@ -221,6 +221,22 @@ for nested in "$APP/Contents/MacOS/supermgrd-mac" \
 done
 echo "  entitlements intact (app), nested binaries validly signed"
 
+# The Tailscale CLI must be in the shipped bundle. The build phase that
+# puts it there skips silently when the Homebrew formula is absent (so
+# CI can build without it), which means a release machine missing the
+# formula would otherwise ship an app that cannot offer to start the
+# daemon — precisely the dead end reported from the field on 1.6.0.
+echo "→ Verifying bundled Tailscale CLI"
+for ts_bin in tailscale tailscaled; do
+    if [ ! -x "$APP/Contents/Resources/tailscale-bin/$ts_bin" ]; then
+        echo "error: $ts_bin missing from the bundle." >&2
+        echo "       Run 'brew install tailscale' and rebuild — without it the" >&2
+        echo "       app cannot install or start the Tailscale daemon." >&2
+        exit 1
+    fi
+done
+echo "  tailscale + tailscaled bundled"
+
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
 # The package installs:
