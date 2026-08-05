@@ -152,13 +152,74 @@ codesign --force --options runtime --timestamp \
     --entitlements "$REPO_ROOT/SuperManagerMac/Signing/supermanager-helper.entitlements" \
     "$APP/Contents/MacOS/com.sybr.supermanager.helper"
 
-codesign --force --options runtime --timestamp --deep \
+# The app's OWN entitlements. Omitting these shipped v1.6.0 with no
+# keychain-access-groups at all: the data-protection keychain scopes
+# items by access group, so the release build could not read a single
+# VPN password it had written as a development build — every profile
+# failed to connect with errSecItemNotFound (-25300). `codesign
+# --verify` passes happily on an entitlement-less app; it validates the
+# signature, not what is in it.
+#
+# `$(AppIdentifierPrefix)` is an XCODE build-setting placeholder.
+# codesign does NOT expand it, so a resolved copy is generated here
+# with the real team prefix substituted.
+TEAM_ID="$(echo "$DEVELOPER_ID_APP" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+if [ -z "$TEAM_ID" ]; then
+    echo "error: could not parse team id out of \$DEVELOPER_ID_APP" >&2
+    exit 1
+fi
+APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-resolved.entitlements"
+sed "s|\$(AppIdentifierPrefix)|${TEAM_ID}.|g" \
+    "$REPO_ROOT/SuperManagerMac/Signing/SuperManagerMac.entitlements" \
+    > "$APP_ENTITLEMENTS"
+echo "→ Resolved app entitlements (team ${TEAM_ID})"
+
+# Sign inside-out, explicitly. NOT `--deep`: it re-signs every nested
+# binary with the OUTER options, which silently stripped the
+# entitlements just applied to the helper and daemon above. Apple
+# deprecates it for exactly this reason.
+find "$APP/Contents/Frameworks" \
+     -name "*.xpc" -o -name "Updater.app" -o -name "Autoupdate" 2>/dev/null \
+| while read -r nested; do
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" "$nested"
+done
+if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" "$APP/Contents/Frameworks/Sparkle.framework"
+fi
+
+codesign --force --options runtime --timestamp \
     --sign "$DEVELOPER_ID_APP" \
+    --entitlements "$APP_ENTITLEMENTS" \
     "$APP"
 
 # Verify before notarization.
 codesign --verify --verbose=2 "$APP"
 spctl --assess --type execute --verbose=2 "$APP" || true
+
+# Entitlements gate. The signature being valid says nothing about the
+# app being able to reach its own keychain items — v1.6.0 passed
+# --verify and shipped broken. Assert the group is actually present.
+echo "→ Verifying signed app kept its keychain access group"
+if ! codesign -d --entitlements - "$APP" 2>&1 | grep -q "${TEAM_ID}.com.sybr.supermanager"; then
+    echo "error: signed app is missing keychain-access-groups" >&2
+    echo "       Stored VPN credentials would be invisible to this build." >&2
+    exit 1
+fi
+# The nested entitlement plists are deliberately EMPTY — the helper's
+# own comment explains it needs no keychain access, since secrets reach
+# it as RPC arguments. So there is nothing to assert about their
+# contents; what matters is that each is still validly signed after the
+# outer signature, which is what `--deep` used to break.
+for nested in "$APP/Contents/MacOS/supermgrd-mac" \
+              "$APP/Contents/MacOS/com.sybr.supermanager.helper"; do
+    if ! codesign --verify --strict "$nested" 2>/dev/null; then
+        echo "error: $(basename "$nested") is not validly signed" >&2
+        exit 1
+    fi
+done
+echo "  entitlements intact (app), nested binaries validly signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
