@@ -382,6 +382,36 @@ fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
 // ---------------------------------------------------------------------------
 
 /// WireGuard backend — creates and manages a WireGuard kernel interface.
+/// Explain an `EOPNOTSUPP` from interface creation in terms of what to do
+/// about it.
+///
+/// The kernel gives the same answer whether the module is missing from the
+/// build or merely not inserted, and the old message picked the rarer one:
+/// it told the operator to check `CONFIG_WIREGUARD`, which on a stock kernel
+/// is already `=m` and sends them reading kernel configs when the fix is one
+/// `modprobe`. Every kernel since 5.6 ships the module, so "not loaded" is
+/// the overwhelmingly likely case and goes first.
+///
+/// `/sys/module/<name>` is the cheapest way to tell the two apart: present
+/// means loaded, and if it is loaded then the failure is something else and
+/// saying "modprobe it" would be actively misleading.
+fn wireguard_unsupported_hint(err: &str) -> String {
+    if std::path::Path::new("/sys/module/wireguard").exists() {
+        return format!(
+            "the kernel refused to create a WireGuard interface even though the \
+             wireguard module is loaded — {err}"
+        );
+    }
+    format!(
+        "the WireGuard kernel module is not loaded. Load it with \
+         `sudo modprobe wireguard`, and install \
+         contrib/modules-load.d/supermgr.conf to /etc/modules-load.d/ so it \
+         comes back after a reboot — `scripts/install-linux.sh` does both. \
+         If modprobe reports the module does not exist, this kernel was built \
+         without CONFIG_WIREGUARD, which is unusual since 5.6 — {err}"
+    )
+}
+
 pub struct WireGuardBackend {
     state: Arc<Mutex<WgState>>,
 }
@@ -537,10 +567,7 @@ impl WireGuardBackend {
                          the daemon must run as root (or with CAP_NET_ADMIN) — {e}"
                     ))
                 } else if msg.contains("not supported") || msg.contains("ENOTSUP") || msg.contains("No such device") {
-                    BackendError::Interface(format!(
-                        "WireGuard kernel module not loaded or not available: \
-                         ensure CONFIG_WIREGUARD is enabled in your kernel — {e}"
-                    ))
+                    BackendError::Interface(wireguard_unsupported_hint(&e.to_string()))
                 } else {
                     BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
                 }
@@ -1344,5 +1371,50 @@ impl VpnBackend for WireGuardBackend {
 
     fn name(&self) -> &'static str {
         "WireGuard"
+    }
+}
+
+#[cfg(test)]
+mod module_hint_tests {
+    use super::wireguard_unsupported_hint;
+
+    /// The message an operator actually sees when the module is not loaded.
+    ///
+    /// This exists because the previous wording — "ensure CONFIG_WIREGUARD is
+    /// enabled in your kernel" — was reported from a real Arch desktop where
+    /// the kernel had it all along and the module simply was not inserted.
+    /// It sent the reader to rebuild a kernel instead of running one command.
+    #[test]
+    fn the_not_loaded_case_leads_with_the_command_that_fixes_it() {
+        // Only meaningful where the module is genuinely absent, which is the
+        // case in CI and in any container. Where it is loaded, the function
+        // takes the other branch by design.
+        if std::path::Path::new("/sys/module/wireguard").exists() {
+            return;
+        }
+
+        let msg = wireguard_unsupported_hint("Operation not supported (os error 95)");
+
+        assert!(msg.contains("modprobe wireguard"), "no remedy given: {msg}");
+        let modprobe = msg.find("modprobe").expect("mentions modprobe");
+        let config = msg.find("CONFIG_WIREGUARD").expect("still mentions the rare case");
+        assert!(
+            modprobe < config,
+            "the rare cause is stated before the likely one: {msg}"
+        );
+        // The underlying error is what a bug report gets pasted with.
+        assert!(msg.contains("os error 95"), "dropped the original error: {msg}");
+    }
+
+    #[test]
+    fn a_loaded_module_is_not_told_to_load_it_again() {
+        if !std::path::Path::new("/sys/module/wireguard").exists() {
+            return;
+        }
+        let msg = wireguard_unsupported_hint("Operation not supported (os error 95)");
+        assert!(
+            !msg.contains("modprobe"),
+            "tells you to load a module that is already loaded: {msg}"
+        );
     }
 }

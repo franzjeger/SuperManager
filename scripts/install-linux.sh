@@ -72,6 +72,7 @@ FILES=(
     "target/release/supermgr|/usr/bin/supermgr|755"
     "target/release/supermgr-mcp|/usr/bin/supermgr-mcp|755"
     "contrib/systemd/supermgrd.service|/etc/systemd/system/supermgrd.service|644"
+    "contrib/modules-load.d/supermgr.conf|/etc/modules-load.d/supermgr.conf|644"
     "contrib/dbus/org.supermgr.Daemon.conf|/usr/share/dbus-1/system.d/org.supermgr.Daemon.conf|644"
     "contrib/dbus/org.supermgr.Daemon.service|/usr/share/dbus-1/system-services/org.supermgr.Daemon.service|644"
     "contrib/polkit/org.supermgr.Daemon.policy|/usr/share/polkit-1/actions/org.supermgr.Daemon.policy|644"
@@ -370,6 +371,39 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Start the daemon
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Kernel modules
+#
+# The file installed above handles every boot after this one. This handles
+# the first one, so the first VPN connect does not fail on a module that is
+# on disk but not loaded — which surfaces as EOPNOTSUPP from netlink and
+# reads like the kernel has no WireGuard support at all.
+#
+# The daemon cannot do this itself: its bounding set has no CAP_SYS_MODULE,
+# and giving a VPN manager the ability to load kernel modules to save an
+# install step is not a trade worth making.
+# ---------------------------------------------------------------------------
+
+say "Kernel modules"
+for mod in wireguard tun nf_tables; do
+    if [ -d "/sys/module/$mod" ]; then
+        note "$mod already loaded"
+    elif sudo modprobe "$mod" 2>/dev/null; then
+        note "loaded $mod"
+    elif sudo modprobe -n "$mod" 2>/dev/null; then
+        warn "$mod exists but would not load — check 'sudo dmesg | tail'"
+    else
+        case "$mod" in
+            wireguard)
+                warn "no $mod module in this kernel — WireGuard profiles cannot connect"
+                warn "  a stock kernel has had it since 5.6; a custom one may not"
+                ;;
+            tun)     warn "no $mod module — OpenVPN and Azure VPN profiles cannot connect" ;;
+            nf_tables) warn "no $mod module — the kill switch cannot block traffic" ;;
+        esac
+    fi
+done
 
 say "Starting the daemon"
 sudo systemctl daemon-reload
