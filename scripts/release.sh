@@ -253,8 +253,12 @@ for ts_bin in tailscale tailscaled; do
     fi
 done
 for ts_bin in tailscale tailscaled; do
-    if ! codesign -dv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 \
-         | grep -q "Developer ID Application"; then
+    # -dvv, not -dv: `Authority=` lines only appear at verbosity 2 and
+    # above. With -dv the gate matched nothing and failed a release
+    # whose binaries were correctly Developer ID-signed all along — a
+    # false alarm, but one that cost a full rebuild to diagnose.
+    if ! codesign -dvv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 \
+         | grep -q "Authority=Developer ID Application"; then
         echo "error: bundled $ts_bin is not Developer ID-signed — notarization will reject it" >&2
         exit 1
     fi
