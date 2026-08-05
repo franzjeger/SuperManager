@@ -22,7 +22,9 @@
 #![allow(missing_docs)]
 
 pub mod console;
+pub mod design;
 pub mod navigation;
+pub mod shell;
 pub mod provisioning;
 pub mod ssh;
 pub mod vpn;
@@ -226,6 +228,11 @@ pub fn build_ui(
         adw::StyleManager::default().set_color_scheme(s.adw_color_scheme());
     }
 
+    // Shape and spacing for the two widgets libadwaita has no equivalent of.
+    // No colours — those come from the theme, so the same build looks native
+    // on Breeze and on Adwaita.
+    design::install_stylesheet();
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SuperManager")
@@ -422,7 +429,6 @@ pub fn build_ui(
     // View stack: VPN + SSH pages
     // =========================================================================
     let view_stack = navigation::build_view_stack();
-    let view_switcher = navigation::build_view_switcher(&view_stack);
 
     // Notification bell button + popover.
     let notif_btn = gtk4::MenuButton::builder()
@@ -495,13 +501,6 @@ pub fn build_ui(
         .build();
     notif_btn.set_popover(Some(&notif_popover));
 
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&view_switcher));
-    header.pack_end(&hamburger_btn);
-    header.pack_end(&add_menu_btn);
-    header.pack_end(&notif_btn);
-    header.pack_end(&logs_btn);
-    header.pack_end(&settings_btn);
 
     // -- Daemon-unavailable banner -------------------------------------------
     let banner = adw::Banner::new("Daemon not running");
@@ -541,7 +540,7 @@ pub fn build_ui(
             app_state.lock().unwrap_or_else(|e| e.into_inner()).vpn_filter = text;
         });
     }
-    let (vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
+    let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
     vpn_split.set_min_sidebar_width(280.0);
@@ -559,7 +558,9 @@ pub fn build_ui(
     let (dashboard_flow_box, dashboard_widget) =
         ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
-    view_stack.add_titled(&dashboard_widget, Some("dashboard"), "Dashboard");
+    // "fleet" is the id the navigation sidebar addresses this page by. The
+    // two must agree: a mismatch is a nav row that silently does nothing.
+    view_stack.add_titled(&dashboard_widget, Some("fleet"), "Fleet");
     let dashboard_page_ref = view_stack.page(&dashboard_widget);
     dashboard_page_ref.set_icon_name(Some("utilities-system-monitor-symbolic"));
 
@@ -671,11 +672,11 @@ pub fn build_ui(
     let (ssh_host_detail, ssh_host_detail_widget) = ssh::host_detail::build_ssh_host_detail();
 
     let hosts_content_stack = gtk4::Stack::new();
-    let hosts_empty_status = adw::StatusPage::builder()
-        .title("Hosts")
-        .description("Select a host from the sidebar to view details.")
-        .icon_name("computer-symbolic")
-        .build();
+    let hosts_empty_status = design::empty_state(
+        "computer-symbolic",
+        "No host selected",
+        "Pick a host from the list to see how it connects, or use + to add one.",
+    );
     hosts_content_stack.add_named(&hosts_empty_status, Some("empty"));
     hosts_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
     hosts_content_stack.set_visible_child_name("empty");
@@ -747,11 +748,11 @@ pub fn build_ui(
     let (ssh_key_detail, ssh_key_detail_widget) = ssh::key_detail::build_ssh_key_detail();
 
     let keys_content_stack = gtk4::Stack::new();
-    let keys_empty_status = adw::StatusPage::builder()
-        .title("Keys")
-        .description("Select a key from the sidebar to view details.")
-        .icon_name("dialog-password-symbolic")
-        .build();
+    let keys_empty_status = design::empty_state(
+        "dialog-password-symbolic",
+        "No key selected",
+        "Pick a key from the list to see its fingerprint and where it is deployed.",
+    );
     keys_content_stack.add_named(&keys_empty_status, Some("empty"));
     keys_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
     keys_content_stack.set_visible_child_name("empty");
@@ -941,6 +942,21 @@ pub fn build_ui(
     provisioning_page_ref.set_icon_name(Some("emblem-system-symbolic"));
 
     // =========================================================================
+    // Sections the redesign adds that have no implementation yet
+    //
+    // Registered as real stack children so the sidebar can reach them and
+    // say what they are, rather than having the nav row do nothing when
+    // clicked. `shell::placeholder` names what *is* built so nobody
+    // concludes the application is broken.
+    // =========================================================================
+    for section in shell::all_sections() {
+        if !section.built {
+            let page = shell::placeholder(section);
+            view_stack.add_titled(&page, Some(section.id), section.title);
+        }
+    }
+
+    // =========================================================================
     // Assemble the window
     // =========================================================================
     let root_box = gtk4::Box::builder()
@@ -988,9 +1004,24 @@ pub fn build_ui(
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root_box));
 
-    let main_toolbar = adw::ToolbarView::new();
-    main_toolbar.add_top_bar(&header);
-    main_toolbar.set_content(Some(&toast_overlay));
+    // The sidebar replaces the header bar's view switcher. Everything that
+    // was packed into that header moves to the shell's own, so the buttons
+    // are unchanged — only what carries them differs.
+    let shell = shell::build(&view_stack, &toast_overlay);
+    // The toolbar pill is painted by the same code that paints the VPN detail
+    // pane, because they answer to the same events; it just answers a
+    // different question — the daemon's state rather than the selected
+    // profile's. It can only be handed over here, since the pane is built
+    // long before the shell that carries the toolbar.
+    vpn_detail.status.toolbar_slot = shell.vpn_status.clone();
+
+    shell.header_end.append(&settings_btn);
+    shell.header_end.append(&logs_btn);
+    shell.header_end.append(&notif_btn);
+    shell.header_end.append(&add_menu_btn);
+    shell.header_end.append(&hamburger_btn);
+
+    let main_toolbar = shell.widget.clone();
 
     // =========================================================================
     // Lock screen (overlays entire app content via a GtkStack)
@@ -1086,13 +1117,7 @@ pub fn build_ui(
         if s.selected_profile.is_some() {
             vpn_detail.detail_stack.set_visible_child_name("detail");
         }
-        apply_vpn_state(
-            &vpn_detail.connect_btn,
-            &vpn_detail.rename_btn,
-            &vpn_detail.status_label,
-            &vpn_detail.stats_box,
-            &s,
-        );
+        apply_vpn_state(&vpn_detail.status, &s);
     }
 
     // =========================================================================
@@ -1291,11 +1316,9 @@ pub fn build_ui(
     // --- VPN profile row activated (sidebar selection) -----------------------
     {
         let app_state = Arc::clone(&app_state);
-        let connect_btn = vpn_detail.connect_btn.clone();
+        let vpn_status = vpn_detail.status.clone();
         let rename_btn = vpn_detail.rename_btn.clone();
         let edit_creds_btn = vpn_detail.edit_creds_btn.clone();
-        let status_label = vpn_detail.status_label.clone();
-        let stats_box = vpn_detail.stats_box.clone();
         let detail_stack = vpn_detail.detail_stack.clone();
         let vpn_content_page = vpn_content_page.clone();
         let profile_name_label = vpn_detail.profile_name_label.clone();
@@ -1371,7 +1394,7 @@ pub fn build_ui(
 
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             rename_btn.set_sensitive(s.selected_profile.is_some());
-            apply_vpn_state(&connect_btn, &rename_btn, &status_label, &stats_box, &s);
+            apply_vpn_state(&vpn_status, &s);
         });
     }
 
@@ -1398,21 +1421,27 @@ pub fn build_ui(
                 key_name_label.set_label(&key.name);
                 key_type_badge.set_label(&format!("{:?}", key.key_type));
                 fingerprint_label.set_label(&key.fingerprint);
-                if key.tags.is_empty() {
-                    tags_label.set_visible(false);
-                } else {
-                    tags_label.set_label(&format!("Tags: {}", key.tags.join(", ")));
-                    tags_label.set_visible(true);
-                }
+                // The row carries the "Tags" label; this is only the values,
+                // and an empty one hides its own row.
+                tags_label.set_label(&key.tags.join(", "));
+                tags_label.set_visible(!key.tags.is_empty());
 
                 // Clear deployed-to list
                 while let Some(child) = deployed_list.first_child() {
                     deployed_list.remove(&child);
                 }
-                let deployed_row = adw::ActionRow::builder()
-                    .title(format!("Deployed to {} host(s)", key.deployed_count))
-                    .activatable(false)
-                    .build();
+                let deployed_row = if key.deployed_count == 0 {
+                    adw::ActionRow::builder()
+                        .title("Not deployed anywhere")
+                        .subtitle("Use Push to Hosts to install it")
+                        .activatable(false)
+                        .build()
+                } else {
+                    adw::ActionRow::builder()
+                        .title(format!("{} host(s)", key.deployed_count))
+                        .activatable(false)
+                        .build()
+                };
                 deployed_list.append(&deployed_row);
 
                 key_detail_stack.set_visible_child_name("detail");
@@ -2833,11 +2862,8 @@ pub fn build_ui(
     // =========================================================================
     let rx_app_state = Arc::clone(&app_state);
     let rx_profile_list = vpn_profile_list.clone();
-    let rx_connect_btn = vpn_detail.connect_btn.clone();
-    let rx_rename_btn = vpn_detail.rename_btn.clone();
-    let rx_status_label = vpn_detail.status_label.clone();
+    let rx_vpn_status = vpn_detail.status.clone();
     let rx_profile_name_label = vpn_detail.profile_name_label.clone();
-    let rx_stats_box = vpn_detail.stats_box.clone();
     let rx_stats_sent = vpn_detail.stats_sent.clone();
     let rx_stats_recv = vpn_detail.stats_recv.clone();
     let rx_stats_uptime = vpn_detail.stats_uptime.clone();
@@ -2892,13 +2918,7 @@ pub fn build_ui(
                         &rx_tx,
                         &s.vpn_filter,
                     );
-                    apply_vpn_state(
-                        &rx_connect_btn,
-                        &rx_rename_btn,
-                        &rx_status_label,
-                        &rx_stats_box,
-                        &s,
-                    );
+                    apply_vpn_state(&rx_vpn_status, &s);
                     push_tray_update(
                         &rx_tray_handle,
                         s.vpn_state.clone(),
@@ -3019,13 +3039,7 @@ pub fn build_ui(
                     // Re-lock briefly for apply_vpn_state (reads multiple fields).
                     {
                         let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                        apply_vpn_state(
-                            &rx_connect_btn,
-                            &rx_rename_btn,
-                            &rx_status_label,
-                            &rx_stats_box,
-                            &s,
-                        );
+                        apply_vpn_state(&rx_vpn_status, &s);
                     }
                     push_tray_update(
                         &rx_tray_handle,
@@ -3042,20 +3056,21 @@ pub fn build_ui(
                     active_routes,
                     uptime_secs,
                 } => {
-                    rx_stats_sent.set_label(&format!("Sent: {}", format_bytes(bytes_sent)));
-                    rx_stats_recv
-                        .set_label(&format!("Received: {}", format_bytes(bytes_received)));
+                    // The rows carry their own titles now, so these are bare
+                    // values — "1.20 MiB", not "Sent: 1.20 MiB".
+                    rx_stats_sent.set_label(&format_bytes(bytes_sent));
+                    rx_stats_recv.set_label(&format_bytes(bytes_received));
 
                     if uptime_secs > 0 {
                         let h = uptime_secs / 3600;
                         let m = (uptime_secs % 3600) / 60;
                         let s = uptime_secs % 60;
                         let uptime_text = if h > 0 {
-                            format!("Connected: {h}h {m:02}m")
+                            format!("{h}h {m:02}m")
                         } else if m > 0 {
-                            format!("Connected: {m}m {s:02}s")
+                            format!("{m}m {s:02}s")
                         } else {
-                            format!("Connected: {s}s")
+                            format!("{s}s")
                         };
                         rx_stats_uptime.set_label(&uptime_text);
                         rx_stats_uptime.set_visible(true);
@@ -3064,28 +3079,27 @@ pub fn build_ui(
                     }
 
                     let hs_text = if last_handshake_secs == 0 {
-                        "Last handshake: \u{2014}".to_owned()
+                        "\u{2014}".to_owned()
                     } else {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
                         let elapsed = now.saturating_sub(last_handshake_secs);
-                        format!("Last handshake: {}", format_ago(elapsed))
+                        format_ago(elapsed)
                     };
                     rx_stats_handshake.set_label(&hs_text);
 
                     if virtual_ip.is_empty() {
                         rx_stats_virtual_ip.set_visible(false);
                     } else {
-                        rx_stats_virtual_ip.set_label(&format!("VPN IP: {virtual_ip}"));
+                        rx_stats_virtual_ip.set_label(&virtual_ip);
                         rx_stats_virtual_ip.set_visible(true);
                     }
                     if active_routes.is_empty() {
                         rx_stats_routes.set_visible(false);
                     } else {
-                        rx_stats_routes
-                            .set_label(&format!("Routes: {}", active_routes.join(", ")));
+                        rx_stats_routes.set_label(&active_routes.join(", "));
                         rx_stats_routes.set_visible(true);
                     }
                 }
@@ -3112,13 +3126,7 @@ pub fn build_ui(
                         rx_vpn_detail_stack.set_visible_child_name("empty");
                         rx_profile_name_label.set_label("");
                     }
-                    apply_vpn_state(
-                        &rx_connect_btn,
-                        &rx_rename_btn,
-                        &rx_status_label,
-                        &rx_stats_box,
-                        &s,
-                    );
+                    apply_vpn_state(&rx_vpn_status, &s);
                     rx_toast_overlay.add_toast(adw::Toast::new("Profile deleted"));
                     push_tray_update(
                         &rx_tray_handle,
@@ -3559,7 +3567,7 @@ pub fn build_ui(
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_2 => {
-                        view_stack.set_visible_child_name("dashboard");
+                        view_stack.set_visible_child_name("fleet");
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_3 => {

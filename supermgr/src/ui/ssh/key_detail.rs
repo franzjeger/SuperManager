@@ -1,15 +1,26 @@
 //! SSH key detail panel.
 //!
 //! Shows the selected key's metadata, public key, tags, and deployed hosts.
-//! Provides action buttons for pushing keys and deleting.
+//!
+//! # What changed
+//!
+//! This pane used to be a single narrow column: an oversized name, a dim
+//! type caption, a fingerprint, a text view, a tag line, a "Deployed To"
+//! heading, and finally two buttons centred at the bottom. On a wide window
+//! all of it sat in a strip down the left with nothing beside it — the
+//! brief's *"dead space"* complaint, exactly.
+//!
+//! It is now the same [`design`] grammar as everything else: a header with
+//! the name and the primary action, and cards that reflow into as many
+//! columns as fit. Nothing was removed; it stopped being a single column.
 
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use supermgr_core::ssh::key::SshKeySummary;
+use crate::ui::design;
 use supermgr_core::host::HostSummary;
-
+use supermgr_core::ssh::key::SshKeySummary;
 
 // ---------------------------------------------------------------------------
 // Widget bundle
@@ -36,55 +47,52 @@ pub struct SshKeyDetail {
 
 /// Build the SSH key detail panel.
 ///
-/// Returns the widget bundle and the enclosing [`adw::NavigationPage`].
+/// Returns the widget bundle and the enclosing scrollable content widget.
+#[must_use]
 pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
     let detail_stack = gtk4::Stack::new();
 
-    // Empty state.
-    let empty_status = adw::StatusPage::builder()
-        .title("No Key Selected")
-        .description("Select a key from the list to view its details.")
-        .icon_name("dialog-password-symbolic")
-        .build();
+    // Empty state. Names the next action rather than restating the obvious.
+    let empty_status = design::empty_state(
+        "dialog-password-symbolic",
+        "No key selected",
+        "Pick a key from the list to see its fingerprint and where it is deployed.",
+    );
     detail_stack.add_named(&empty_status, Some("empty"));
 
-    // Detail view.
-    let key_name_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["title-1"])
-        .halign(gtk4::Align::Start)
-        .wrap(true)
-        .build();
+    // --- Header -------------------------------------------------------------
 
-    let key_type_badge = gtk4::Label::builder()
-        .label("")
-        .css_classes(["caption", "dim-label"])
-        .halign(gtk4::Align::Start)
-        .build();
+    let header = design::DetailHeader::new();
+    let key_name_label = header.title.clone();
 
-    // Fingerprint row with copy button.
-    let fingerprint_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
+    // The key type sits where a status pill sits elsewhere: under the name,
+    // left-aligned. A key has no state to report, so the slot carries the one
+    // fact that classifies it.
+    let key_type_badge = design::badge("");
+    header.status_slot.set_child(Some(&key_type_badge));
+
+    let push_btn = gtk4::Button::builder()
+        .label("Push to Hosts\u{2026}")
+        .css_classes(["suggested-action", "pill"])
         .build();
-    let fingerprint_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["monospace", "caption"])
-        .halign(gtk4::Align::Start)
-        .hexpand(true)
-        .selectable(true)
-        .wrap(true)
-        .build();
+    header.actions.append(&push_btn);
+
+    // --- Identity card ------------------------------------------------------
+
+    let identity = design::card("Identity");
+    let (fingerprint_row, fingerprint_label) = design::live_detail_row("Fingerprint", true);
+    fingerprint_label.set_wrap(true);
+    fingerprint_label.set_max_width_chars(26);
+
     let fp_copy_btn = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Copy fingerprint")
         .css_classes(["flat"])
         .valign(gtk4::Align::Center)
         .build();
-    fingerprint_box.append(&fingerprint_label);
-    fingerprint_box.append(&fp_copy_btn);
+    fingerprint_row.add_suffix(&fp_copy_btn);
+    identity.add(&fingerprint_row);
 
-    // Copy fingerprint to clipboard.
     {
         let fingerprint_label = fingerprint_label.clone();
         fp_copy_btn.connect_clicked(move |_btn| {
@@ -95,29 +103,40 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
         });
     }
 
-    // Public key viewer.
-    let _pubkey_group = adw::PreferencesGroup::builder()
-        .title("Public Key")
-        .margin_top(12)
-        .build();
-    let public_key_view = gtk4::TextView::builder()
-        .editable(false)
-        .monospace(true)
-        .wrap_mode(gtk4::WrapMode::Char)
-        .css_classes(["card"])
-        .build();
-    let pubkey_scroll = gtk4::ScrolledWindow::builder()
-        .min_content_height(80)
-        .max_content_height(120)
-        .child(&public_key_view)
-        .build();
+    let (tags_row, tags_label) = design::live_detail_row("Tags", false);
+    tags_label.set_wrap(true);
+    tags_label.set_max_width_chars(26);
+    tags_label.set_visible(false);
+    identity.add(&tags_row);
 
+    // --- Public key card ----------------------------------------------------
+
+    let pubkey_card = design::card("Public key");
     let pubkey_copy_btn = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")
         .tooltip_text("Copy public key")
         .css_classes(["flat"])
         .valign(gtk4::Align::Center)
         .build();
+    pubkey_card.set_header_suffix(Some(&pubkey_copy_btn));
+
+    let public_key_view = gtk4::TextView::builder()
+        .editable(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::Char)
+        .left_margin(8)
+        .right_margin(8)
+        .top_margin(8)
+        .bottom_margin(8)
+        .build();
+    let pubkey_scroll = gtk4::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk4::PolicyType::Never)
+        .min_content_height(96)
+        .max_content_height(160)
+        .css_classes(["card"])
+        .child(&public_key_view)
+        .build();
+    pubkey_card.add(&pubkey_scroll);
 
     {
         let public_key_view = public_key_view.clone();
@@ -130,91 +149,49 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
         });
     }
 
-    let pubkey_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(4)
-        .build();
-    let pubkey_header = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .build();
-    let pubkey_title = gtk4::Label::builder()
-        .label("Public Key")
-        .css_classes(["heading"])
-        .halign(gtk4::Align::Start)
-        .hexpand(true)
-        .build();
-    pubkey_header.append(&pubkey_title);
-    pubkey_header.append(&pubkey_copy_btn);
-    pubkey_box.append(&pubkey_header);
-    pubkey_box.append(&pubkey_scroll);
+    // --- Deployment card ----------------------------------------------------
 
-    // Tags.
-    let tags_label = gtk4::Label::builder()
-        .label("")
-        .halign(gtk4::Align::Start)
-        .css_classes(["caption", "dim-label"])
-        .wrap(true)
-        .visible(false)
-        .build();
-
-    // Deployed-to section.
-    let deployed_title = gtk4::Label::builder()
-        .label("Deployed To")
-        .css_classes(["heading"])
-        .halign(gtk4::Align::Start)
-        .margin_top(12)
-        .build();
+    let deployed_card = design::card("Deployed to");
     let deployed_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
+    deployed_card.add(&deployed_list);
 
-    // Action buttons.
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .halign(gtk4::Align::Center)
-        .margin_top(16)
-        .build();
-    let push_btn = gtk4::Button::builder()
-        .label("Push to Hosts\u{2026}")
-        .css_classes(["suggested-action"])
-        .build();
-    let delete_btn = gtk4::Button::builder()
-        .label("Delete Key")
-        .css_classes(["destructive-action"])
-        .build();
-    btn_box.append(&push_btn);
-    btn_box.append(&delete_btn);
+    // --- Manage card --------------------------------------------------------
+    //
+    // One destructive action, in its own card, as a row rather than as a red
+    // button sitting next to the primary one. A red button beside a green one
+    // is a misclick waiting to happen.
 
-    // Assemble detail box.
-    let detail_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(24)
-        .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
-        .valign(gtk4::Align::Start)
-        .build();
-    detail_box.append(&key_name_label);
-    detail_box.append(&key_type_badge);
-    detail_box.append(&fingerprint_box);
-    detail_box.append(&pubkey_box);
-    detail_box.append(&tags_label);
-    detail_box.append(&deployed_title);
-    detail_box.append(&deployed_list);
-    detail_box.append(&btn_box);
+    let manage = design::card("Manage");
+    let delete_btn = gtk4::Button::new();
+    manage.add(&design::destructive_button_row(
+        &delete_btn,
+        "Delete key",
+        "Removes the private key from this machine. Hosts keep their copy.",
+        "user-trash-symbolic",
+    ));
 
-    detail_stack.add_named(&detail_box, Some("detail"));
+    // --- Assemble -----------------------------------------------------------
+
+    let (scroller, content) = design::detail_body();
+    content.append(&header.widget);
+
+    let columns = design::reflowing_columns();
+    design::add_card(&columns, &identity);
+    design::add_card(&columns, &pubkey_card);
+    design::add_card(&columns, &deployed_card);
+    design::add_card(&columns, &manage);
+    content.append(&columns);
+
+    detail_stack.add_named(&scroller, Some("detail"));
     detail_stack.set_visible_child_name("empty");
 
-    let content_scroll = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .child(&detail_stack)
-        .build();
+    // The scrolling lives inside the detail page rather than around the whole
+    // stack, so the empty state fills the pane instead of being pinned to the
+    // top of a scroller.
+    let widget: gtk4::Widget = detail_stack.clone().upcast();
 
     let bundle = SshKeyDetail {
         detail_stack,
@@ -228,7 +205,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
         delete_btn,
     };
 
-    (bundle, content_scroll.upcast())
+    (bundle, widget)
 }
 
 // ---------------------------------------------------------------------------
@@ -249,12 +226,10 @@ pub fn update_ssh_key_detail(
     detail.fingerprint_label.set_label(&key.fingerprint);
     detail.public_key_view.buffer().set_text(public_key_text);
 
-    if key.tags.is_empty() {
-        detail.tags_label.set_visible(false);
-    } else {
-        detail.tags_label.set_label(&format!("Tags: {}", key.tags.join(", ")));
-        detail.tags_label.set_visible(true);
-    }
+    // The row carries the "Tags" label, so this is just the values — and an
+    // empty label takes its own row away with it.
+    detail.tags_label.set_label(&key.tags.join(", "));
+    detail.tags_label.set_visible(!key.tags.is_empty());
 
     // Rebuild deployed-to list.
     while let Some(child) = detail.deployed_list.first_child() {
@@ -263,7 +238,8 @@ pub fn update_ssh_key_detail(
 
     if deployed_host_ids.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("Not deployed to any hosts")
+            .title("Not deployed anywhere")
+            .subtitle("Use Push to Hosts to install it")
             .activatable(false)
             .build();
         detail.deployed_list.append(&row);
@@ -272,12 +248,8 @@ pub fn update_ssh_key_detail(
             let label = hosts
                 .iter()
                 .find(|h| h.id.to_string() == *host_id)
-                .map(|h| h.label.as_str())
-                .unwrap_or(host_id.as_str());
-            let row = adw::ActionRow::builder()
-                .title(label)
-                .activatable(false)
-                .build();
+                .map_or(host_id.as_str(), |h| h.label.as_str());
+            let row = adw::ActionRow::builder().title(label).activatable(false).build();
             row.add_prefix(&gtk4::Image::from_icon_name("computer-symbolic"));
             detail.deployed_list.append(&row);
         }

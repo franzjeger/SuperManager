@@ -16,6 +16,7 @@ use supermgr_core::host::{AuthMethod, PortForward, HostSummary};
 use supermgr_core::ssh::DeviceType;
 
 use crate::app::AppMsg;
+use crate::ui::design;
 
 // ---------------------------------------------------------------------------
 // Widget bundle
@@ -94,34 +95,29 @@ pub struct SshHostDetail {
 pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     let detail_stack = gtk4::Stack::new();
 
-    // Empty state.
-    let empty_status = adw::StatusPage::builder()
-        .title("No Host Selected")
-        .description("Select a host from the list to view its details.")
-        .icon_name("computer-symbolic")
-        .build();
+    // Empty state. Says what to do next rather than restating what the
+    // operator can already see.
+    let empty_status = design::empty_state(
+        "computer-symbolic",
+        "No host selected",
+        "Pick a host from the list to see how it connects and what is deployed on it.",
+    );
     detail_stack.add_named(&empty_status, Some("empty"));
 
-    // Detail view.
-    let host_label_lbl = gtk4::Label::builder()
-        .label("")
-        .css_classes(["title-1"])
-        .halign(gtk4::Align::Start)
-        .wrap(true)
-        .build();
+    // --- Header -------------------------------------------------------------
 
-    let group_badge = gtk4::Label::builder()
-        .label("")
-        .css_classes(["caption", "dim-label"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
+    let header = design::DetailHeader::new();
+    let host_label_lbl = header.title.clone();
+
+    // The group sits where a status pill sits in the VPN pane: under the
+    // name, left-aligned. A host has no live state to report here — its
+    // reachability belongs to the list, where it can be compared.
+    let group_badge = design::badge("");
+    group_badge.set_visible(false);
+    header.status_slot.set_child(Some(&group_badge));
 
     // Connection details as AdwActionRows in a boxed list.
-    let details_group = adw::PreferencesGroup::builder()
-        .title("Connection Details")
-        .margin_top(12)
-        .build();
+    let details_group = design::card("Connection");
 
     let hostname_row = adw::ActionRow::builder()
         .title("Hostname")
@@ -182,22 +178,17 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     details_group.add(&host_key_row);
 
     // FortiGate dashboard (hidden by default).
-    let fg_dashboard_group = adw::PreferencesGroup::builder()
-        .title("Dashboard")
-        .margin_top(12)
-        .visible(false)
-        .build();
+    let fg_dashboard_group = design::card("FortiGate");
+    fg_dashboard_group.set_visible(false);
 
     let fg_firmware_row = adw::ActionRow::builder()
         .title("Firmware")
         .subtitle("--")
         .activatable(false)
         .build();
-    let fg_update_badge = gtk4::Label::builder()
-        .label("Update available")
-        .css_classes(["caption", "accent"])
-        .visible(false)
-        .build();
+    let fg_update_badge = design::badge("Update available");
+    fg_update_badge.add_css_class("warning");
+    fg_update_badge.set_visible(false);
     fg_firmware_row.add_suffix(&fg_update_badge);
     fg_dashboard_group.add(&fg_firmware_row);
 
@@ -285,80 +276,106 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     fg_btn_box.append(&fg_show_token_btn);
     fg_dashboard_group.set_header_suffix(Some(&fg_btn_box));
 
-    // Action buttons.
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .halign(gtk4::Align::Center)
-        .margin_top(16)
-        .build();
-    let connect_btn = gtk4::Button::builder()
-        .label("Connect")
-        .css_classes(["suggested-action"])
-        .tooltip_text("Open SSH session in terminal")
-        .build();
-    let test_btn = gtk4::Button::builder()
-        .label("Test")
-        .css_classes(["flat"])
-        .tooltip_text("Test SSH and API connectivity")
-        .build();
-    let push_key_btn = gtk4::Button::builder()
-        .label("Push Key\u{2026}")
-        .css_classes(["flat"])
-        .build();
-    let push_key_api_btn = gtk4::Button::builder()
-        .label("Push Key via API\u{2026}")
-        .css_classes(["flat"])
-        .tooltip_text("Push SSH key to FortiGate admin via REST API")
-        .visible(false)
-        .build();
-    let rdp_btn = gtk4::Button::builder()
-        .label("RDP")
-        .css_classes(["flat"])
-        .tooltip_text("Open Remote Desktop connection")
-        .visible(false)
-        .build();
-    let vnc_btn = gtk4::Button::builder()
-        .label("VNC")
-        .css_classes(["flat"])
-        .tooltip_text("Open VNC connection")
-        .visible(false)
-        .build();
-    let set_inform_btn = gtk4::Button::builder()
-        .label("Set Inform\u{2026}")
-        .css_classes(["flat"])
-        .tooltip_text("Adopt this UniFi device to a controller")
-        .visible(false)
-        .build();
-    let edit_btn = gtk4::Button::builder()
-        .label("Edit\u{2026}")
-        .css_classes(["flat"])
-        .build();
-    let delete_btn = gtk4::Button::builder()
-        .label("Delete")
-        .css_classes(["destructive-action"])
-        .build();
+    // --- Actions ------------------------------------------------------------
+    //
+    // These used to be ten buttons in a centred row: one suggested, one
+    // destructive, and eight flat ones of assorted widths that read as a
+    // toolbar with no toolbar around it. The brief's *"inconsistent primary
+    // actions"* complaint is precisely this — you could not tell by looking
+    // which of the ten was the thing you normally do.
+    //
+    // Now there is one primary action, in the header, in the same place it
+    // sits in every other pane; and the rest are rows in cards grouped by
+    // what they are for. `design::button_row` keeps each button alive as the
+    // thing that carries the handler, and binds the row's visibility and
+    // sensitivity to it, so `set_visible(host.rdp_port.is_some())` and its
+    // like keep working untouched.
+
     let pin_btn = gtk4::ToggleButton::builder()
         .icon_name("starred-symbolic")
         .tooltip_text("Pin / unpin this host")
         .css_classes(["flat"])
         .build();
-    btn_box.append(&pin_btn);
-    btn_box.append(&connect_btn);
-    btn_box.append(&rdp_btn);
-    btn_box.append(&vnc_btn);
-    btn_box.append(&test_btn);
-    btn_box.append(&push_key_btn);
-    btn_box.append(&push_key_api_btn);
-    btn_box.append(&set_inform_btn);
-    btn_box.append(&edit_btn);
-    btn_box.append(&delete_btn);
+    let connect_btn = gtk4::Button::builder()
+        .label("Connect")
+        .css_classes(["suggested-action", "pill"])
+        .tooltip_text("Open SSH session in terminal")
+        .build();
+    header.actions.append(&pin_btn);
+    header.actions.append(&connect_btn);
+
+    let session_card = design::card("Session");
+
+    let rdp_btn = gtk4::Button::builder().visible(false).build();
+    session_card.add(&design::button_row(
+        &rdp_btn,
+        "Remote Desktop",
+        "Open an RDP session on the configured port",
+        "video-display-symbolic",
+    ));
+
+    let vnc_btn = gtk4::Button::builder().visible(false).build();
+    session_card.add(&design::button_row(
+        &vnc_btn,
+        "VNC",
+        "Open a VNC session on the configured port",
+        "video-display-symbolic",
+    ));
+
+    let test_btn = gtk4::Button::new();
+    session_card.add(&design::button_row(
+        &test_btn,
+        "Test connection",
+        "Check SSH, and the API where the device has one",
+        "network-transmit-receive-symbolic",
+    ));
+
+    let set_inform_btn = gtk4::Button::builder().visible(false).build();
+    session_card.add(&design::button_row(
+        &set_inform_btn,
+        "Set inform\u{2026}",
+        "Adopt this UniFi device to a controller",
+        "network-workgroup-symbolic",
+    ));
+
+    let access_card = design::card("Access");
+
+    let push_key_btn = gtk4::Button::new();
+    access_card.add(&design::button_row(
+        &push_key_btn,
+        "Push key\u{2026}",
+        "Append a public key to authorized_keys over SSH",
+        "dialog-password-symbolic",
+    ));
+
+    let push_key_api_btn = gtk4::Button::builder().visible(false).build();
+    access_card.add(&design::button_row(
+        &push_key_api_btn,
+        "Push key via API\u{2026}",
+        "Install the key on a FortiGate admin through the REST API",
+        "dialog-password-symbolic",
+    ));
+
+    let manage_card = design::card("Manage");
+
+    let edit_btn = gtk4::Button::new();
+    manage_card.add(&design::button_row(
+        &edit_btn,
+        "Edit\u{2026}",
+        "Change the address, credentials or device type",
+        "document-edit-symbolic",
+    ));
+
+    let delete_btn = gtk4::Button::new();
+    manage_card.add(&design::destructive_button_row(
+        &delete_btn,
+        "Delete host",
+        "Removes it from SuperManager. The machine itself is untouched.",
+        "user-trash-symbolic",
+    ));
 
     // Port Forwards section.
-    let pf_group = adw::PreferencesGroup::builder()
-        .title("Port Forwards")
-        .margin_top(12)
-        .build();
+    let pf_group = design::card("Port forwards");
     let pf_add_btn = gtk4::Button::builder()
         .icon_name("list-add-symbolic")
         .tooltip_text("Add port forward")
@@ -372,31 +389,30 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     pf_group.add(&pf_listbox);
 
-    // Assemble.
-    let detail_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(8)
-        .margin_top(24)
-        .margin_bottom(24)
-        .margin_start(24)
-        .margin_end(24)
-        .valign(gtk4::Align::Start)
-        .build();
-    detail_box.append(&host_label_lbl);
-    detail_box.append(&group_badge);
-    detail_box.append(&details_group);
-    detail_box.append(&btn_box);
-    detail_box.append(&fg_dashboard_group);
-    detail_box.append(&pf_group);
+    // --- Assemble -----------------------------------------------------------
+    //
+    // Six cards reflowing into as many columns as the window is wide. This is
+    // the pane where the old single-column layout hurt most: a FortiGate host
+    // has connection details, a dashboard, port forwards and three groups of
+    // actions, and stacking all of it vertically meant scrolling past four
+    // screens of content while two-thirds of the window stayed empty.
 
-    detail_stack.add_named(&detail_box, Some("detail"));
+    let (scroller, content) = design::detail_body();
+    content.append(&header.widget);
+
+    let columns = design::reflowing_columns();
+    design::add_card(&columns, &details_group);
+    design::add_card(&columns, &fg_dashboard_group);
+    design::add_card(&columns, &session_card);
+    design::add_card(&columns, &access_card);
+    design::add_card(&columns, &pf_group);
+    design::add_card(&columns, &manage_card);
+    content.append(&columns);
+
+    detail_stack.add_named(&scroller, Some("detail"));
     detail_stack.set_visible_child_name("empty");
 
-    let content_scroll = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .child(&detail_stack)
-        .build();
+    let content_widget: gtk4::Widget = detail_stack.clone().upcast();
 
     let bundle = SshHostDetail {
         detail_stack,
@@ -440,7 +456,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         pf_add_btn,
     };
 
-    (bundle, content_scroll.upcast())
+    (bundle, content_widget)
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +470,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
     if host.group.is_empty() {
         detail.group_badge.set_visible(false);
     } else {
-        detail.group_badge.set_label(&format!("Group: {}", host.group));
+        detail.group_badge.set_label(&host.group);
         detail.group_badge.set_visible(true);
     }
 

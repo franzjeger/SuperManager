@@ -16,6 +16,53 @@ use supermgr_core::{host::HostSummary, ssh::DeviceType};
 
 use crate::app::AppMsg;
 use crate::dbus_client::{dbus_ssh_delete_host, dbus_ssh_toggle_pin};
+use crate::ui::design::{self, Status};
+
+// ---------------------------------------------------------------------------
+// What a host row says
+// ---------------------------------------------------------------------------
+
+/// One host row's content, decided without reference to any widget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRowView {
+    /// Reachability, in the shared vocabulary.
+    pub status: Status,
+    /// The secondary line: where this host is and who we log in as.
+    pub meta: String,
+    /// Whether this row is worth marking with a pill.
+    pub show_pill: bool,
+}
+
+/// Decide what a host row says.
+///
+/// `health` is what the reachability probe last found: `Some(true)` reachable,
+/// `Some(false)` unreachable, `None` never probed.
+#[must_use]
+pub fn host_row_view(host: &HostSummary, health: Option<bool>) -> HostRowView {
+    let status = match health {
+        Some(true) => Status::Connected,
+        Some(false) => Status::Error,
+        // Not "disconnected" — nothing has been tried, so nothing is known.
+        None => Status::Unknown,
+    };
+
+    // The address as you would type it into ssh(1). The old line built
+    // `"{hostname}{port}  ·  {username}@"` and stopped there, so every row
+    // ended in a dangling `@` with the target it belonged to on the wrong
+    // side of a separator.
+    let mut meta = format!("{}@{}", host.username, host.hostname);
+    if host.port != 22 {
+        meta.push_str(&format!(":{}", host.port));
+    }
+
+    HostRowView {
+        status,
+        meta,
+        // Reachable is the normal case; marking it marks everything. What an
+        // operator scans this list for is the one host that is not answering.
+        show_pill: status.is_notable(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Device-type-aware menu construction
@@ -195,52 +242,31 @@ pub fn populate_ssh_host_list(
             .selectable(false)
             .activatable(false)
             .build();
-        let header_label = gtk4::Label::builder()
-            .label(group_name)
-            .css_classes(["heading"])
-            .halign(gtk4::Align::Start)
-            .margin_top(8)
-            .margin_bottom(4)
-            .margin_start(12)
-            .build();
+        let header_label = design::section_caps(group_name);
+        header_label.set_margin_top(8);
+        header_label.set_margin_bottom(4);
+        header_label.set_margin_start(12);
         header_row.set_child(Some(&header_label));
         list_box.append(&header_row);
         host_row_map.push(None);
         _row_idx += 1;
 
         for host in hosts_in_group {
-            let port_str = if host.port == 22 {
-                String::new()
-            } else {
-                format!(":{}", host.port)
-            };
-            let subtitle = format!(
-                "{}{}  \u{b7}  {}@",
-                host.hostname, port_str, host.username
-            );
+            let view = host_row_view(host, health.get(&host.id.to_string()).copied());
 
-            let display_title = if host.pinned {
-                format!("\u{2605} {}", host.label)
-            } else {
-                host.label.clone()
-            };
             let row = adw::ActionRow::builder()
-                .title(&display_title)
-                .subtitle(&subtitle)
+                .title(host.label.as_str())
+                .subtitle(view.meta.as_str())
                 .activatable(true)
                 .build();
 
-            // Health indicator: green = reachable, red = unreachable, grey = unknown.
-            let (health_char, health_color) = match health.get(&host.id.to_string()) {
-                Some(true) => ("●", "success"),   // green
-                Some(false) => ("●", "error"),     // red
-                None => ("●", "dim-label"),        // grey
-            };
-            let health_label = gtk4::Label::builder()
-                .label(health_char)
-                .css_classes([health_color])
-                .build();
-            row.add_prefix(&health_label);
+            // Reachability, in the shared vocabulary rather than as a
+            // bullet character with a colour class hung on it.
+            let health_icon = gtk4::Image::from_icon_name(view.status.icon_name());
+            health_icon.set_pixel_size(12);
+            health_icon.add_css_class(view.status.style_class());
+            health_icon.set_tooltip_text(Some(view.status.label()));
+            row.add_prefix(&health_icon);
 
             let icon = match host.device_type {
                 supermgr_core::ssh::DeviceType::Linux => "computer-symbolic",
@@ -254,6 +280,24 @@ pub fn populate_ssh_host_list(
                 supermgr_core::ssh::DeviceType::Custom => "computer-symbolic",
             };
             row.add_prefix(&gtk4::Image::from_icon_name(icon));
+
+            // Pinned hosts used to be marked by prefixing a star to the
+            // title, which made the star part of the name — it sorted, it
+            // searched, and it copied. It is a property of the row, so it
+            // lives in the row's furniture.
+            if host.pinned {
+                let star = gtk4::Image::from_icon_name("starred-symbolic");
+                star.set_pixel_size(12);
+                star.add_css_class("accent");
+                star.set_tooltip_text(Some("Pinned"));
+                row.add_suffix(&star);
+            }
+
+            // Only the hosts that need attention are marked. A pill on every
+            // reachable host would be wallpaper.
+            if view.show_pill {
+                row.add_suffix(&design::status_pill(view.status, "Unreachable"));
+            }
 
             // Delete button.
             let delete_btn = gtk4::Button::builder()
@@ -609,5 +653,73 @@ pub fn populate_ssh_host_list(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use supermgr_core::host::AuthMethod;
+    use uuid::Uuid;
+
+    fn host() -> HostSummary {
+        HostSummary {
+            id: Uuid::new_v4(),
+            label: "fw-oslo".into(),
+            hostname: "10.20.0.1".into(),
+            port: 22,
+            username: "admin".into(),
+            group: "Sybr".into(),
+            device_type: DeviceType::Fortigate,
+            auth_method: AuthMethod::Key,
+            auth_key_id: None,
+            vpn_profile_id: None,
+            has_password: false,
+            has_api: false,
+            api_port: None,
+            has_certificate: false,
+            has_unifi_controller: false,
+            unifi_controller_url: None,
+            rdp_port: None,
+            vnc_port: None,
+            port_forwards: Vec::new(),
+            proxy_jump: None,
+            pinned: false,
+            customer: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_subtitle_is_something_you_could_paste_into_ssh() {
+        // The old line was `format!("{hostname}{port}  ·  {username}@")`,
+        // which rendered as "10.20.0.1  ·  admin@" — the username's target
+        // was on the far side of a separator and the line ended in a
+        // dangling @.
+        let mut h = host();
+        assert_eq!(host_row_view(&h, None).meta, "admin@10.20.0.1");
+
+        h.port = 2222;
+        assert_eq!(host_row_view(&h, None).meta, "admin@10.20.0.1:2222");
+    }
+
+    #[test]
+    fn a_host_that_has_never_been_probed_is_unknown_not_unreachable() {
+        // The distinction matters at 08:00 when the probe has not run yet:
+        // "unreachable" would have every host in the fleet showing red.
+        assert_eq!(host_row_view(&host(), None).status, Status::Unknown);
+        assert!(!host_row_view(&host(), None).show_pill);
+    }
+
+    #[test]
+    fn only_the_hosts_that_are_not_answering_are_marked() {
+        // Reachable is the normal case. Marking it marks everything, and a
+        // list where every row is decorated has no signal left.
+        let reachable = host_row_view(&host(), Some(true));
+        assert_eq!(reachable.status, Status::Connected);
+        assert!(!reachable.show_pill);
+
+        let unreachable = host_row_view(&host(), Some(false));
+        assert_eq!(unreachable.status, Status::Error);
+        assert!(unreachable.show_pill);
     }
 }
