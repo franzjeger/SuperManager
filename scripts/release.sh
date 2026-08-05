@@ -221,6 +221,22 @@ for nested in "$APP/Contents/MacOS/supermgrd-mac" \
 done
 echo "  entitlements intact (app), nested binaries validly signed"
 
+# The Tailscale CLI must be in the shipped bundle. The build phase that
+# puts it there skips silently when the Homebrew formula is absent (so
+# CI can build without it), which means a release machine missing the
+# formula would otherwise ship an app that cannot offer to start the
+# daemon — precisely the dead end reported from the field on 1.6.0.
+echo "→ Verifying bundled Tailscale CLI"
+for ts_bin in tailscale tailscaled; do
+    if [ ! -x "$APP/Contents/Resources/tailscale-bin/$ts_bin" ]; then
+        echo "error: $ts_bin missing from the bundle." >&2
+        echo "       Run 'brew install tailscale' and rebuild — without it the" >&2
+        echo "       app cannot install or start the Tailscale daemon." >&2
+        exit 1
+    fi
+done
+echo "  tailscale + tailscaled bundled"
+
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
 # The package installs:
@@ -312,6 +328,13 @@ case "$VERSION" in
 esac
 echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
 
+# NOTE on the enclosure below: length AND sparkle:edSignature both come
+# from $SPARKLE_SIG_LINE, which is sign_update's output verbatim. Do not
+# add a `length=` attribute of your own — duplicating it is invalid XML,
+# and it shipped in 1.6.0's feed, where Sparkle rejected the whole thing
+# with "An error occurred while parsing the update feed". The comment
+# lives out here because a comment inside a start-tag is itself invalid
+# XML — which is how this very gate caught the first attempt at the fix.
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
 
@@ -330,12 +353,6 @@ cat > "$APPCAST" <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DOWNLOAD_URL"
-                <!-- length + sparkle:edSignature come from sign_update's
-                     output line. Do NOT add a length attribute here: it
-                     duplicated the one in $SPARKLE_SIG_LINE, produced
-                     invalid XML, and Sparkle failed the whole feed with
-                     "An error occurred while parsing the update feed"
-                     (seen live on 1.6.0's first check). -->
                 type="application/octet-stream"
                 $SPARKLE_SIG_LINE />
         </item>
