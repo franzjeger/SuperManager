@@ -312,6 +312,13 @@ case "$VERSION" in
 esac
 echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
 
+# NOTE on the enclosure below: length AND sparkle:edSignature both come
+# from $SPARKLE_SIG_LINE, which is sign_update's output verbatim. Do not
+# add a `length=` attribute of your own — duplicating it is invalid XML,
+# and it shipped in 1.6.0's feed, where Sparkle rejected the whole thing
+# with "An error occurred while parsing the update feed". The comment
+# lives out here because a comment inside a start-tag is itself invalid
+# XML — which is how this very gate caught the first attempt at the fix.
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
 
@@ -330,12 +337,6 @@ cat > "$APPCAST" <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DOWNLOAD_URL"
-                <!-- length + sparkle:edSignature come from sign_update's
-                     output line. Do NOT add a length attribute here: it
-                     duplicated the one in $SPARKLE_SIG_LINE, produced
-                     invalid XML, and Sparkle failed the whole feed with
-                     "An error occurred while parsing the update feed"
-                     (seen live on 1.6.0's first check). -->
                 type="application/octet-stream"
                 $SPARKLE_SIG_LINE />
         </item>
