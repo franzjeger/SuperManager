@@ -97,10 +97,13 @@ pub fn status_view(vpn: &VpnState, selected_profile: Option<&str>) -> StatusView
     }
 
     match vpn {
-        VpnState::Connected { interface, .. } => StatusView {
+        VpnState::Connected { .. } => StatusView {
             status: Status::Connected,
             headline: "Connected",
-            detail: format!("Interface {interface}"),
+            // Nothing to add: the interface name is a fact about the tunnel
+            // and goes in the Tunnel card with the other facts, rather than
+            // as a coloured line under the header.
+            detail: String::new(),
             action: "Disconnect",
             destructive: true,
             action_enabled: true,
@@ -208,6 +211,8 @@ pub struct VpnStatusWidgets {
     pub status_slot: adw::Bin,
     /// The wrapped line under the header, for anything too long for the pill.
     pub status_detail: gtk4::Label,
+    /// The kernel interface the tunnel is running on, once there is one.
+    pub stats_interface: gtk4::Label,
     /// The statistics card, shown only while a tunnel is up.
     pub stats_box: gtk4::Box,
     /// The toolbar pill, which reports the daemon's state rather than the
@@ -293,10 +298,18 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         .build();
     header.actions.append(&connect_btn);
 
+    // A driver message is a paragraph, not a line, and it has to stay
+    // readable at any window width. Wrapping is what makes that work: the
+    // label fills the pane and breaks where it runs out, and — because a
+    // wrapping label's *minimum* width is only its longest word — the window
+    // can still be made narrow without the pane demanding to be wider than
+    // the screen. The scroller above has no horizontal bar to fall back on,
+    // so that part matters.
     let status_detail = gtk4::Label::builder()
         .label("")
         .xalign(0.0)
         .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .selectable(true)
         .visible(false)
         .margin_bottom(18)
@@ -309,6 +322,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // is meaningless without a tunnel, so the whole card comes and goes as
     // one.
     let stats_card = design::card("Tunnel");
+    let stats_interface = stat_row(&stats_card, "Interface", true);
     let stats_virtual_ip = stat_row(&stats_card, "VPN IP", true);
     let stats_routes = stat_row(&stats_card, "Routes", true);
     let stats_sent = stat_row(&stats_card, "Sent", false);
@@ -456,6 +470,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         rename_btn: rename_btn.clone(),
         status_slot: header.status_slot.clone(),
         status_detail,
+        stats_interface,
         stats_box,
         toolbar_slot: adw::Bin::new(),
     };
@@ -527,6 +542,10 @@ pub fn apply_vpn_state(w: &VpnStatusWidgets, state: &AppState) {
     });
     w.connect_btn.set_sensitive(view.action_enabled);
 
+    match &state.vpn_state {
+        VpnState::Connected { interface, .. } => w.stats_interface.set_label(interface),
+        _ => w.stats_interface.set_label("\u{2014}"),
+    }
     w.stats_box.set_visible(view.show_stats);
     w.rename_btn.set_sensitive(state.selected_profile.is_some());
 }

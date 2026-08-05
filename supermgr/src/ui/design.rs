@@ -182,6 +182,13 @@ pub fn badge(text: &str) -> gtk4::Label {
 /// `FlowBox` rather than a `Grid` because the column count has to follow the
 /// width, not be decided up front. Selection is off — these are cards, not
 /// choices.
+///
+/// Not homogeneous, though the name suggests it should be. `FlowBox`'s
+/// homogeneous mode equalises *height* as well as width, so every card in a
+/// row grows to match the tallest one — and in the single-column layout a
+/// narrow window falls back to, that means every card is as tall as the
+/// longest, separated by bands of empty space. Which is the dead space this
+/// whole arrangement exists to remove.
 #[must_use]
 pub fn reflowing_columns() -> gtk4::FlowBox {
     let flow = gtk4::FlowBox::new();
@@ -191,7 +198,7 @@ pub fn reflowing_columns() -> gtk4::FlowBox {
     flow.set_min_children_per_line(1);
     flow.set_column_spacing(24);
     flow.set_row_spacing(24);
-    flow.set_homogeneous(true);
+    flow.set_homogeneous(false);
     flow
 }
 
@@ -204,9 +211,12 @@ pub fn reflowing_columns() -> gtk4::FlowBox {
 /// and the remaining cards close the gap.
 pub fn add_card(flow: &gtk4::FlowBox, card: &impl IsA<gtk4::Widget>) {
     let card = card.as_ref();
-    // The `minmax(340px, …)` half of the brief's rule. Without a floor the
-    // column count follows whatever the widest label happens to be, which
-    // means the layout changes shape when a hostname gets longer.
+    // The `minmax(340px, …)` floor. `FlowBox` decides the column count from
+    // the widest card's natural width and then, being homogeneous, stretches
+    // every column to fill — so cards always reach the edges of their column
+    // and the count follows the window. An `AdwClamp` would pin the natural
+    // width and get more columns, but it centres its child inside the cell,
+    // which puts the gaps back where the columns used to be.
     card.set_size_request(340, -1);
     flow.append(card);
     if let Some(slot) = card.parent() {
@@ -394,7 +404,13 @@ impl DetailHeader {
         title.set_xalign(0.0);
         title.add_css_class("title-1");
         title.set_wrap(true);
+        // Selectable so a hostname or profile name can be copied, but not
+        // focusable: a selectable label that takes focus selects all of its
+        // text, and this one is the first focusable widget in the pane — so
+        // every key you opened came up with its name highlighted blue, as
+        // though you had dragged across it.
         title.set_selectable(true);
+        title.set_can_focus(false);
         left.append(&title);
 
         let status_slot = adw::Bin::new();
