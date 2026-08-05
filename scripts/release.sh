@@ -77,11 +77,23 @@ if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
 fi
 
 # Developer ID cert must be in Keychain.
-if ! security find-identity -p codesigning -v | grep -q "Developer ID Application"; then
-    echo "error: no Developer ID Application certificate in Keychain." >&2
-    echo "       Get one from developer.apple.com → Certificates." >&2
-    exit 1
-fi
+# NOTE on the checks below: never `cmd | grep -q` under `set -o
+# pipefail`. `grep -q` exits at the FIRST match, closing the pipe; the
+# producer then dies of SIGPIPE, and pipefail turns that non-zero exit
+# into a failed pipeline — so a MATCH reports failure. It cost two
+# rebuilds here: the Tailscale gate failed on correctly-signed binaries,
+# and the entitlements gate above only passed because its producer
+# happened to finish writing first, i.e. by luck. Capture the output
+# first, then match it.
+identities="$(security find-identity -p codesigning -v 2>&1 || true)"
+case "$identities" in
+    *"Developer ID Application"*) ;;
+    *)
+        echo "error: no Developer ID Application certificate in Keychain." >&2
+        echo "       Get one from developer.apple.com → Certificates." >&2
+        exit 1
+        ;;
+esac
 
 # Sparkle's sign_update tool.
 SIGN_UPDATE=""
@@ -219,11 +231,15 @@ spctl --assess --type execute --verbose=2 "$APP" || true
 # app being able to reach its own keychain items — v1.6.0 passed
 # --verify and shipped broken. Assert the group is actually present.
 echo "→ Verifying signed app kept its keychain access group"
-if ! codesign -d --entitlements - "$APP" 2>&1 | grep -q "${TEAM_ID}.com.sybr.supermanager"; then
-    echo "error: signed app is missing keychain-access-groups" >&2
-    echo "       Stored VPN credentials would be invisible to this build." >&2
-    exit 1
-fi
+app_entitlements="$(codesign -d --entitlements - "$APP" 2>&1 || true)"
+case "$app_entitlements" in
+    *"${TEAM_ID}.com.sybr.supermanager"*) ;;
+    *)
+        echo "error: signed app is missing keychain-access-groups" >&2
+        echo "       Stored VPN credentials would be invisible to this build." >&2
+        exit 1
+        ;;
+esac
 # The nested entitlement plists are deliberately EMPTY — the helper's
 # own comment explains it needs no keychain access, since secrets reach
 # it as RPC arguments. So there is nothing to assert about their
@@ -257,11 +273,14 @@ for ts_bin in tailscale tailscaled; do
     # above. With -dv the gate matched nothing and failed a release
     # whose binaries were correctly Developer ID-signed all along — a
     # false alarm, but one that cost a full rebuild to diagnose.
-    if ! codesign -dvv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 \
-         | grep -q "Authority=Developer ID Application"; then
-        echo "error: bundled $ts_bin is not Developer ID-signed — notarization will reject it" >&2
-        exit 1
-    fi
+    ts_sig="$(codesign -dvv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 || true)"
+    case "$ts_sig" in
+        *"Authority=Developer ID Application"*) ;;
+        *)
+            echo "error: bundled $ts_bin is not Developer ID-signed — notarization will reject it" >&2
+            exit 1
+            ;;
+    esac
 done
 echo "  tailscale + tailscaled bundled and Developer ID-signed"
 
