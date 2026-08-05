@@ -1,26 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!--
+    The SuperManager mark, matching the macOS application icon.
+
+    Linux used to ship a different mark entirely — a dark shield with three
+    network nodes — so the same application had one identity in the Dock and
+    another in the Plasma task manager and tray. This is the macOS artwork
+    rebuilt as vector; the desktop entry, the task switcher and the tray all
+    draw from it.
+  -->
   <defs>
-    <linearGradient id="shieldGrad" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="#2a4a7f"/>
-      <stop offset="100%" stop-color="#1a365d"/>
+    <linearGradient id="bg" x1="0.1" y1="0" x2="0.55" y2="1">
+      <stop offset="0%"   stop-color="#2b3f6b"/>
+      <stop offset="45%"  stop-color="#3070c8"/>
+      <stop offset="100%" stop-color="#3f8ae8"/>
     </linearGradient>
+    <clipPath id="rounded">
+      <rect x="0" y="0" width="128" height="128" rx="28" ry="28"/>
+    </clipPath>
   </defs>
-  <!-- Shield shape -->
-  <path d="M64 8 L112 28 C112 28 116 72 98 96 C86 112 64 120 64 120 C64 120 42 112 30 96 C12 72 16 28 16 28 Z"
-        fill="url(#shieldGrad)" stroke="#0f2440" stroke-width="2" stroke-linejoin="round"/>
-  <!-- Network nodes: three circles connected by lines -->
-  <!-- Central node -->
-  <circle cx="64" cy="62" r="8" fill="#ffffff" opacity="0.95"/>
-  <!-- Top node -->
-  <circle cx="64" cy="38" r="6" fill="#ffffff" opacity="0.85"/>
-  <!-- Bottom-left node -->
-  <circle cx="42" cy="84" r="6" fill="#ffffff" opacity="0.85"/>
-  <!-- Bottom-right node -->
-  <circle cx="86" cy="84" r="6" fill="#ffffff" opacity="0.85"/>
-  <!-- Connection lines -->
-  <line x1="64" y1="44" x2="64" y2="54" stroke="#ffffff" stroke-width="2.5" opacity="0.7"/>
-  <line x1="48" y1="80" x2="58" y2="68" stroke="#ffffff" stroke-width="2.5" opacity="0.7"/>
-  <line x1="80" y1="80" x2="70" y2="68" stroke="#ffffff" stroke-width="2.5" opacity="0.7"/>
-  <!-- Horizontal link between bottom nodes through center -->
-  <line x1="48" y1="84" x2="80" y2="84" stroke="#ffffff" stroke-width="1.5" opacity="0.4"/>
+
+  <rect x="0" y="0" width="128" height="128" rx="28" ry="28" fill="url(#bg)"/>
+
+  <g clip-path="url(#rounded)">
+    <!-- The two nodes either side of the marker. -->
+    <circle cx="24" cy="67" r="4" fill="#a9c3e8"/>
+    <circle cx="104" cy="67" r="4" fill="#a9c3e8"/>
+
+    <!-- The arc beneath, suggesting the link between them. -->
+    <path d="M17 91 A 47 47 0 0 0 111 91"
+          fill="none" stroke="#8fb6ea" stroke-width="4" stroke-linecap="round"
+          opacity="0.75"/>
+
+    <!-- The marker: rounded shoulders, tapering to a point. -->
+    <path d="M36 34 A 18 18 0 0 1 54 16 L74 16 A 18 18 0 0 1 92 34 L92 52 L64 86 L36 52 Z"
+          fill="#f9fafc"/>
+
+    <!-- The upward arrow inside it. -->
+    <path d="M64 24 L83 45 L73 45 L73 67 L55 67 L55 45 L45 45 Z" fill="#1f6fc7"/>
+  </g>
 </svg>

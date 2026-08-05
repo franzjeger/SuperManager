@@ -24,12 +24,18 @@
 //!
 //! That instruction applies here even though the toolkit is GTK rather than
 //! Qt. Every colour below is a libadwaita style class — `.success`,
-//! `.warning`, `.error`, `.accent`, `.dim-label` — which resolve against the
-//! running theme and the user's accent colour. On a Plasma desktop with a
-//! GTK theme following Breeze, that lands on Breeze's own palette; on GNOME
-//! it lands on Adwaita's. Hardcoding `#3daee9` would look right on exactly
-//! one configuration and wrong on every other, and would stop tracking the
-//! user's own accent choice.
+//! `.warning`, `.error`, `.accent`, `.dim-label` — which resolves to a named
+//! colour rather than to a literal. Hardcoding `#3daee9` would look right on
+//! exactly one configuration and wrong on every other, and would stop
+//! tracking the user's own accent choice.
+//!
+//! Naming the colour is only half of it, though, and the half that is easy to
+//! get wrong: **libadwaita does not follow the GTK theme.** It ships the
+//! Adwaita stylesheet and renders with it whatever `gtk-theme-name` says, so
+//! on Plasma these classes resolve to Adwaita's palette and the application
+//! looks like GNOME sitting in the middle of Breeze. [`super::palette`] is
+//! what closes that gap: it reads the desktop's own colour scheme and
+//! redefines the named colours these classes resolve through.
 //!
 //! # The dead-space fix
 //!
@@ -514,17 +520,36 @@ pub const STYLESHEET: &str = "
 }
 ";
 
-/// Install [`STYLESHEET`] for the default display.
+/// Install [`STYLESHEET`], and the desktop's palette where there is one.
+///
+/// Both go in at `APPLICATION` priority, which is above the theme's — that is
+/// what lets the palette's `@define-color` lines replace libadwaita's own
+/// values rather than being ignored by them.
 ///
 /// # Panics
 ///
 /// If there is no default display, which means there is no GUI to style and
 /// nothing this function could usefully do instead.
 pub fn install_stylesheet() {
+    let display =
+        gtk4::gdk::Display::default().expect("a display, since a window is being built");
+
+    // The desktop's colours first, so the shapes below are layered on a
+    // palette that already matches the surrounding desktop.
+    if let Some(palette) = super::palette::desktop_palette() {
+        let colours = gtk4::CssProvider::new();
+        colours.load_from_string(&palette.to_css());
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &colours,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
     let provider = gtk4::CssProvider::new();
     provider.load_from_string(STYLESHEET);
     gtk4::style_context_add_provider_for_display(
-        &gtk4::gdk::Display::default().expect("a display, since a window is being built"),
+        &display,
         &provider,
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
