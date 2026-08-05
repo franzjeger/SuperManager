@@ -47,9 +47,8 @@ mkdir -p "${DEST_DIR}"
 # app checks `tailscaleIsBundled` and hides the "Start daemon" button
 # when the binaries are absent. Releases are protected separately —
 # scripts/release.sh refuses to ship a build without them.
-if ! command -v brew >/dev/null 2>&1 || ! brew --prefix tailscale >/dev/null 2>&1; then
-    echo "note: Homebrew tailscale formula not found — skipping Tailscale bundling."
-    echo "      Install it with 'brew install tailscale' to bundle the CLI."
+if ! command -v brew >/dev/null 2>&1; then
+    echo "note: Homebrew not found — skipping Tailscale bundling."
     exit 0
 fi
 
@@ -57,10 +56,21 @@ BREW_PREFIX="$(brew --prefix tailscale)"
 SRC_TS="${BREW_PREFIX}/bin/tailscale"
 SRC_TSD="${BREW_PREFIX}/bin/tailscaled"
 
+# `brew --prefix <formula>` prints a would-be path and exits 0 even
+# when the formula is NOT installed — it answers "where would this
+# live", not "is it here". Testing the prefix therefore proves nothing;
+# only the binaries do. This is what actually failed mac CI twice: the
+# prefix check passed on a runner with no tailscale, and the script then
+# hit its own hard error.
+#
+# Missing binaries are a SKIP, not an error. It degrades a feature (the
+# app hides "Start daemon" when unbundled), not correctness, and
+# scripts/release.sh refuses to ship a release without them — so the
+# only build that may quietly lack them is one nobody distributes.
 if [[ ! -x "${SRC_TS}" || ! -x "${SRC_TSD}" ]]; then
-    echo "ERROR: Expected tailscale binaries not found at ${BREW_PREFIX}/bin/" >&2
-    echo "       Run 'brew reinstall tailscale' to fix." >&2
-    exit 1
+    echo "note: tailscale CLI not installed via Homebrew — skipping bundling."
+    echo "      Run 'brew install tailscale' to include it."
+    exit 0
 fi
 
 # 2. Skip the copy if the cached version stamp matches — keeps clean
