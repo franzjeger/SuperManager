@@ -405,11 +405,31 @@ note "Uninstall:   ./scripts/install-linux.sh --uninstall"
 note ""
 note "Working now: SSH, key management, network scan, compliance,"
 note "             UniFi/FortiGate/OPNsense/Sophos APIs, WireGuard,"
-note "             IKEv2, FortiGate SSL VPN, OpenVPN, Azure VPN."
+note "             IKEv2 / FortiGate IPsec, Azure VPN."
+note ""
+# Said plainly because the alternative is finding out at connect time.
+# `vpn::backend_for_profile` returns an error for this variant on Linux;
+# the backend exists only in the Windows daemon.
+note "Not on Linux: FortiGate SSL VPN. That backend is Windows-only, and a"
+note "              profile of that type fails when you try to connect it."
+note "              Use the FortiGate (IPsec/IKEv2) profile type instead."
+
+# The OpenVPN backend drives the `openvpn3` CLI, not the `openvpn` binary
+# installed above — so an OpenVPN profile does not work until this is
+# present. Azure VPN is unaffected: that backend spawns `openvpn` itself.
 if ! command -v openvpn3 >/dev/null 2>&1; then
     note ""
-    note "Not installed: openvpn3, which no distro but Arch packages."
-    note "               Only needed for OpenVPN profiles driven through the"
-    note "               openvpn3 CLI; Azure VPN uses it too. Everything else"
-    note "               works without it."
+    note "Not installed: openvpn3. OpenVPN profiles are driven through that"
+    note "               CLI, so they will not connect until it is present."
+    case "$FAMILY" in
+        arch)
+            note "               On Arch it is in the AUR, which pacman does not"
+            note "               reach:  paru -S openvpn3    (or yay, or makepkg)"
+            ;;
+        *)
+            note "               No distribution but Arch packages it; build from"
+            note "               https://github.com/OpenVPN/openvpn3-linux"
+            ;;
+    esac
+    note "               Everything else above works without it."
 fi
