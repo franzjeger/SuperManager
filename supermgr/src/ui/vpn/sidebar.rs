@@ -56,9 +56,11 @@ pub fn row_view(profile: &ProfileSummary, vpn: &VpnState, now_secs: u64) -> RowV
     let id = profile.id;
     let (status, timing) = match vpn {
         VpnState::Connected { profile_id, since, .. } if *profile_id == id => {
-            let elapsed =
-                u64::try_from(now_secs.cast_signed().saturating_sub(since.timestamp()))
-                    .unwrap_or(0);
+            // A clock that has gone backwards — or a `since` from the
+            // future after an NTP step — must not produce a nonsense
+            // duration, so the difference is clamped rather than wrapped.
+            let now = i64::try_from(now_secs).unwrap_or(i64::MAX);
+            let elapsed = u64::try_from(now.saturating_sub(since.timestamp())).unwrap_or(0);
             let (h, m) = (elapsed / 3600, (elapsed % 3600) / 60);
             let text = if h > 0 {
                 format!("Up {h}h {m:02}m")
@@ -524,6 +526,7 @@ mod tests {
     use uuid::Uuid;
 
     const NOW: u64 = 1_700_000_000;
+    const NOW_I64: i64 = 1_700_000_000;
 
     fn profile(id: Uuid) -> ProfileSummary {
         ProfileSummary {
@@ -546,7 +549,7 @@ mod tests {
         VpnState::Connected {
             profile_id: id,
             since: Utc
-                .timestamp_opt(NOW.cast_signed() - seconds_ago, 0)
+                .timestamp_opt(NOW_I64 - seconds_ago, 0)
                 .single()
                 .expect("a valid timestamp"),
             interface: "wg0".into(),
@@ -615,7 +618,7 @@ mod tests {
             connected(theirs, 300),
             VpnState::Connecting {
                 profile_id: theirs,
-                since: Utc.timestamp_opt(NOW.cast_signed(), 0).single().expect("valid"),
+                since: Utc.timestamp_opt(NOW_I64, 0).single().expect("valid"),
                 phase: "handshake".into(),
             },
             VpnState::Disconnecting { profile_id: theirs },
@@ -675,7 +678,7 @@ mod tests {
         // connection from the next. An empty one must not leave "· Auto"
         // dangling off the front of the line.
         let id = Uuid::new_v4();
-        let since = Utc.timestamp_opt(NOW.cast_signed(), 0).single().expect("valid");
+        let since = Utc.timestamp_opt(NOW_I64, 0).single().expect("valid");
         let mut p = profile(id);
         p.auto_connect = true;
 
