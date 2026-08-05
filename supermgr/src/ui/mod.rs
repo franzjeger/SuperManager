@@ -24,6 +24,9 @@
 pub mod console;
 pub mod design;
 pub mod navigation;
+mod lock;
+mod palette;
+mod preferences;
 pub mod shell;
 pub mod provisioning;
 pub mod ssh;
@@ -117,101 +120,6 @@ fn push_tray_update(
 }
 
 // ---------------------------------------------------------------------------
-// Lock screen page
-// ---------------------------------------------------------------------------
-
-/// Widgets composing the lock / set-password page.
-#[derive(Clone)]
-struct LockPage {
-    container: gtk4::Box,
-    password_row: adw::PasswordEntryRow,
-    confirm_row: adw::PasswordEntryRow,
-    unlock_btn: gtk4::Button,
-    set_btn: gtk4::Button,
-    quit_btn: gtk4::Button,
-    status_label: gtk4::Label,
-}
-
-/// Build the lock screen page (password entry + unlock / set-password buttons).
-fn build_lock_page() -> LockPage {
-    let container = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .halign(gtk4::Align::Center)
-        .valign(gtk4::Align::Center)
-        .spacing(24)
-        .margin_start(48)
-        .margin_end(48)
-        .build();
-
-    let icon = gtk4::Image::builder()
-        .icon_name("system-lock-screen-symbolic")
-        .pixel_size(64)
-        .build();
-    container.append(&icon);
-
-    let title = gtk4::Label::builder()
-        .label("SuperManager")
-        .css_classes(["title-1"])
-        .build();
-    container.append(&title);
-
-    let status_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["dim-label"])
-        .wrap(true)
-        .build();
-    container.append(&status_label);
-
-    let prefs_group = adw::PreferencesGroup::new();
-
-    let password_row = adw::PasswordEntryRow::builder()
-        .title("Master Password")
-        .build();
-    prefs_group.add(&password_row);
-
-    let confirm_row = adw::PasswordEntryRow::builder()
-        .title("Confirm Password")
-        .build();
-    prefs_group.add(&confirm_row);
-    container.append(&prefs_group);
-
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .halign(gtk4::Align::Center)
-        .spacing(12)
-        .build();
-
-    let unlock_btn = gtk4::Button::builder()
-        .label("Unlock")
-        .css_classes(["suggested-action", "pill"])
-        .build();
-    btn_box.append(&unlock_btn);
-
-    let set_btn = gtk4::Button::builder()
-        .label("Set Password")
-        .css_classes(["suggested-action", "pill"])
-        .build();
-    btn_box.append(&set_btn);
-
-    let quit_btn = gtk4::Button::builder()
-        .label("Quit")
-        .css_classes(["destructive-action", "pill"])
-        .build();
-    btn_box.append(&quit_btn);
-    container.append(&btn_box);
-
-    LockPage {
-        container,
-        password_row,
-        confirm_row,
-        unlock_btn,
-        set_btn,
-        quit_btn,
-        status_label,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -222,16 +130,27 @@ pub fn build_ui(
     app_settings: Arc<Mutex<AppSettings>>,
     rt: tokio::runtime::Handle,
 ) {
-    // Apply persisted colour scheme.
+    // The desktop's palette, then the two shapes libadwaita has no
+    // equivalent of. Nothing here names a colour of its own.
+    let desktop = palette::desktop_palette();
+    design::install_stylesheet();
+
+    // Apply the colour scheme.
+    //
+    // "Follow System" used to mean "follow libadwaita", which on Plasma means
+    // following nothing at all — libadwaita has no idea the desktop is dark.
+    // With a desktop palette in hand it can mean what it says.
     {
         let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-        adw::StyleManager::default().set_color_scheme(s.adw_color_scheme());
+        let scheme = match (&s.color_scheme, desktop.as_ref()) {
+            (crate::settings::ColorScheme::Default, Some(p)) if p.is_dark() => {
+                adw::ColorScheme::ForceDark
+            }
+            (crate::settings::ColorScheme::Default, Some(_)) => adw::ColorScheme::ForceLight,
+            _ => s.adw_color_scheme(),
+        };
+        adw::StyleManager::default().set_color_scheme(scheme);
     }
-
-    // Shape and spacing for the two widgets libadwaita has no equivalent of.
-    // No colours — those come from the theme, so the same build looks native
-    // on Breeze and on Adwaita.
-    design::install_stylesheet();
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -1026,7 +945,7 @@ pub fn build_ui(
     // =========================================================================
     // Lock screen (overlays entire app content via a GtkStack)
     // =========================================================================
-    let lock_page = build_lock_page();
+    let lock_page = lock::build();
     let outer_stack = gtk4::Stack::builder()
         .transition_type(gtk4::StackTransitionType::Crossfade)
         .transition_duration(200)
@@ -1038,9 +957,7 @@ pub fn build_ui(
     {
         if crate::master_password::is_set() {
             outer_stack.set_visible_child_name("lock");
-            lock_page.status_label.set_text("Enter your master password to unlock.");
-            lock_page.set_btn.set_visible(false);
-            lock_page.confirm_row.set_visible(false);
+            lock_page.present(lock::LOCKED);
             lock_page.password_row.grab_focus();
         } else {
             // No password yet — go straight to the app.
@@ -1131,7 +1048,7 @@ pub fn build_ui(
         let tx = tx.clone();
         let rt = rt.clone();
         settings_btn.connect_clicked(move |_| {
-            vpn::dialogs::show_settings_dialog(
+            preferences::show_settings_dialog(
                 &window,
                 Arc::clone(&app_settings),
                 &tx,
@@ -3630,7 +3547,7 @@ pub fn build_ui(
                 // Reset inactivity counter on unlock.
                 inactivity_counter.set(0);
             } else {
-                lock_page.status_label.set_text("Incorrect password.");
+                lock_page.status_label.set_text(lock::WRONG);
             }
         });
     }
@@ -3643,40 +3560,11 @@ pub fn build_ui(
         });
     }
 
-    // --- Set Password button (first-time setup, also accessible from lock) ----
-    {
-        let _app_settings = Arc::clone(&app_settings);
-        let outer_stack = outer_stack.clone();
-        let lock_page = lock_page.clone();
-        let inactivity_counter = inactivity_counter.clone();
-        lock_page.set_btn.connect_clicked(move |_| {
-            let pw = lock_page.password_row.text().to_string();
-            let confirm = lock_page.confirm_row.text().to_string();
-            if pw.is_empty() {
-                lock_page.status_label.set_text("Password cannot be empty.");
-                return;
-            }
-            if pw != confirm {
-                lock_page.status_label.set_text("Passwords do not match.");
-                return;
-            }
-            {
-                let _ = crate::master_password::set(&pw);
-            }
-            lock_page.password_row.set_text("");
-            lock_page.confirm_row.set_text("");
-            lock_page.status_label.set_text("");
-            outer_stack.set_visible_child_name("app");
-            inactivity_counter.set(0);
-        });
-    }
-
-    // Allow pressing Enter anywhere to trigger unlock/set when the lock page
-    // is visible.  Attach to the *window* so the event is caught even if
+    // Allow pressing Enter anywhere to unlock when the lock page is visible.
+    // Attach to the *window* so the event is caught even if
     // PasswordEntryRow consumes it at the widget level.
     {
         let unlock_btn = lock_page.unlock_btn.clone();
-        let set_btn = lock_page.set_btn.clone();
         let outer_stack_enter = outer_stack.clone();
         let key_ctrl = gtk4::EventControllerKey::builder()
             .propagation_phase(gtk4::PropagationPhase::Capture)
@@ -3685,13 +3573,8 @@ pub fn build_ui(
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
             if outer_stack_enter.visible_child_name().as_deref() == Some("lock") {
                 if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
-                    if unlock_btn.is_visible() {
-                        unlock_btn.emit_clicked();
-                        return glib::Propagation::Stop;
-                    } else if set_btn.is_visible() {
-                        set_btn.emit_clicked();
-                        return glib::Propagation::Stop;
-                    }
+                    unlock_btn.emit_clicked();
+                    return glib::Propagation::Stop;
                 } else if key == gtk4::gdk::Key::Escape {
                     quit_btn.emit_clicked();
                     return glib::Propagation::Stop;
@@ -3936,48 +3819,35 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
 
 /// Switch the outer stack to the lock page and prepare it for unlock.
 /// Build one popover row from a stored notification.
-fn notification_row(notification: &crate::app::Notification) -> gtk4::Box {
-    let row_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(8)
-        .margin_end(8)
+fn notification_row(notification: &crate::app::Notification) -> adw::ActionRow {
+    // A hand-rolled box until now, which is why this list was the one place
+    // in the application whose rows had their own spacing, their own icon
+    // size and their own idea of where a timestamp goes. It is a list of
+    // things that happened; it looks like every other list.
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(&notification.message))
+        .activatable(false)
+        // Long messages wrap rather than being cut off at the popover's
+        // edge — a truncated VPN error is no use to anybody.
+        .title_lines(0)
         .build();
-    row_box.append(&gtk4::Image::from_icon_name(notification.icon));
+    row.add_prefix(&gtk4::Image::from_icon_name(notification.icon));
 
-    let text_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(2)
-        .hexpand(true)
-        .build();
-    text_box.append(
-        &gtk4::Label::builder()
-            .label(&notification.message)
-            .halign(gtk4::Align::Start)
-            .wrap(true)
-            .wrap_mode(gtk4::pango::WrapMode::WordChar)
-            .build(),
-    );
-    // The stored instant, shown in local time — not a second clock read
-    // at render time. Re-rendering an old notification now gives the
-    // time it happened rather than the time it was redrawn.
-    text_box.append(
-        &gtk4::Label::builder()
-            .label(
-                notification
-                    .timestamp
-                    .with_timezone(&chrono::Local)
-                    .format("%H:%M:%S")
-                    .to_string(),
-            )
-            .halign(gtk4::Align::Start)
-            .css_classes(["caption", "dim-label"])
-            .build(),
-    );
-    row_box.append(&text_box);
-    row_box
+    // The stored instant, shown in local time — not a second clock read at
+    // render time. Re-rendering an old notification now gives the time it
+    // happened rather than the time it was redrawn.
+    let when = gtk4::Label::new(Some(
+        &notification
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+    ));
+    when.add_css_class("caption");
+    when.add_css_class("dim-label");
+    when.set_valign(gtk4::Align::Center);
+    row.add_suffix(&when);
+    row
 }
 
 /// Redraw the popover list from `AppState::notifications`.
@@ -4004,7 +3874,8 @@ fn render_notifications(
     if notifications.is_empty() {
         notif_list.append(
             &adw::ActionRow::builder()
-                .title("No notifications")
+                .title("Nothing to report")
+                .subtitle("Connections, failures and key pushes show up here")
                 .activatable(false)
                 .build(),
         );
@@ -4033,13 +3904,8 @@ fn push_notification(
     render_notifications(app_state, notif_list, notif_btn);
 }
 
-fn lock_session(outer_stack: &gtk4::Stack, lock_page: &LockPage) {
-    lock_page.password_row.set_text("");
-    lock_page.confirm_row.set_text("");
-    lock_page.status_label.set_text("Session locked. Enter your password.");
-    lock_page.unlock_btn.set_visible(true);
-    lock_page.set_btn.set_visible(false);
-    lock_page.confirm_row.set_visible(false);
+fn lock_session(outer_stack: &gtk4::Stack, lock_page: &lock::LockPage) {
+    lock_page.present(lock::AUTO_LOCKED);
     outer_stack.set_visible_child_name("lock");
     lock_page.password_row.grab_focus();
 }
