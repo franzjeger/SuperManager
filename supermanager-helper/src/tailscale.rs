@@ -1332,6 +1332,47 @@ fn detect_active_interface() -> Option<String> {
 ///
 /// `KeepAlive=true` restarts the daemon on crash. `RunAtLoad=true`
 /// starts it at boot.
+///
+/// ## Why `TS_BIND_TO_INTERFACE_BY_ROUTE=1`
+///
+/// This is what lets Tailscale and a full-tunnel VPN coexist. Without
+/// it, a WireGuard/IKEv2 full tunnel breaks *all* DNS on the machine,
+/// and the only workaround is pinning a public resolver by hand.
+///
+/// The mechanism, which is not obvious:
+///
+/// 1. tailscaled takes over system DNS. It sets the OS nameserver to
+///    `100.100.100.100` (itself) and forwards everything that isn't a
+///    tailnet name on to whatever the system resolver *was*:
+///    `dns: Resolvercfg: {Routes:{.:[<system resolver>] ...}}`. So
+///    every query on the box goes through tailscaled once Tailscale
+///    is up — including queries that have nothing to do with the
+///    tailnet.
+/// 2. On macOS, tailscaled binds each outbound socket to an interface
+///    with `IP_BOUND_IF` (`netns.bindConnToInterface`) rather than
+///    letting the routing table decide. By default it binds to the
+///    interface of the **literal** default route — `netmon`'s
+///    `DefaultRouteInterfaceIndex` matches only `0.0.0.0/0`, so the
+///    `0.0.0.0/1` + `128.0.0.0/1` pair a full tunnel installs never
+///    wins that lookup. tailscaled keeps binding to the physical NIC.
+/// 3. Put those together with a tunnel that pushes its own resolver.
+///    The system resolver becomes e.g. the customer firewall's
+///    `192.168.4.1`, tailscaled dutifully forwards every query there
+///    — over a socket bound to `en0`. That address only exists inside
+///    the tunnel, so the packets leave the physical NIC and die. DNS
+///    stops, and the machine looks like it has no internet.
+///
+/// That explains the workaround too: a *public* resolver like
+/// `1.1.1.1` is reachable from `en0`, which is why hand-setting one
+/// "fixes" it while tunnel-internal names stay broken.
+///
+/// With this knob set, tailscaled looks up the route per destination
+/// and binds to whatever interface actually reaches it — the tunnel
+/// for `192.168.4.1`, the NIC for the rest. It is the same switch the
+/// Tailscale macOS GUI sets for exactly this reason. Note it does not
+/// make routes govern Tailscale's *own* underlay traffic in a way we
+/// have to manage here: `netns` already refuses to bind to a
+/// Tailscale-owned utun and falls back to the default route.
 fn render_launchd_plist() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1348,6 +1389,10 @@ fn render_launchd_plist() -> String {
         <string>--socket=/var/run/tailscaled.socket</string>
         <string>--port=41641</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TS_BIND_TO_INTERFACE_BY_ROUTE</key><string>1</string>
+    </dict>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
     <key>UserName</key><string>root</string>
@@ -1361,4 +1406,92 @@ fn render_launchd_plist() -> String {
         daemon = DAEMON_INSTALL_PATH,
         state = STATE_DIR,
     )
+}
+
+/// Bring an already-installed LaunchDaemon plist up to date with the
+/// template above, restarting the daemon if it changed.
+///
+/// `install` rewrites the plist, but nothing re-runs `install` on a
+/// machine where Tailscale is already working — so without this, a
+/// plist fix (the `TS_BIND_TO_INTERFACE_BY_ROUTE` knob, say) would
+/// only ever reach *new* installs, and every existing machine would
+/// keep the bug. Called at helper startup.
+///
+/// Deliberately content-addressed rather than versioned: any future
+/// change to the template propagates on the next helper start, with
+/// no version constant to remember to bump.
+///
+/// No-ops when Tailscale was never installed here — an absent plist
+/// means the user hasn't asked for the daemon, and writing one would
+/// install it behind their back.
+pub fn ensure_plist_current() {
+    let path = Path::new(LAUNCH_DAEMON_PLIST);
+    let Ok(existing) = fs::read_to_string(path) else {
+        return; // not installed — nothing to bring up to date
+    };
+    let wanted = render_launchd_plist();
+    if existing == wanted {
+        return;
+    }
+    if let Err(e) = fs::write(path, &wanted) {
+        tracing::warn!("tailscaled plist refresh: write failed: {e}");
+        return;
+    }
+    let _ = Command::new("/bin/chmod").args(["0644", LAUNCH_DAEMON_PLIST]).status();
+    let _ = Command::new("/usr/sbin/chown")
+        .args(["root:wheel", LAUNCH_DAEMON_PLIST])
+        .status();
+
+    // A plain `kickstart -k` restarts the binary but launchd keeps the
+    // job's cached environment from the old plist, so the new
+    // EnvironmentVariables would not take effect. Re-bootstrap.
+    let _ = Command::new("/bin/launchctl")
+        .args(["bootout", "system", LAUNCH_DAEMON_PLIST])
+        .output();
+    let out = Command::new("/bin/launchctl")
+        .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            tracing::info!("tailscaled plist refreshed and daemon re-bootstrapped");
+        }
+        Ok(o) => tracing::warn!(
+            "tailscaled plist refreshed but re-bootstrap failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => tracing::warn!("tailscaled plist refreshed but re-bootstrap spawn failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The knob that lets Tailscale coexist with a full-tunnel VPN.
+    /// Without it every DNS query on the machine is forwarded to a
+    /// resolver the socket cannot reach — see `render_launchd_plist`.
+    /// Easy to drop by accident in a future plist edit, hence a test.
+    #[test]
+    fn plist_binds_tailscaled_by_route() {
+        let plist = render_launchd_plist();
+        assert!(
+            plist.contains("TS_BIND_TO_INTERFACE_BY_ROUTE"),
+            "plist lost the bind-by-route knob:\n{plist}"
+        );
+        assert!(
+            plist.contains("<key>EnvironmentVariables</key>"),
+            "env var present but not inside an EnvironmentVariables dict:\n{plist}"
+        );
+    }
+
+    /// launchd rejects a malformed plist silently enough to be worth
+    /// asserting the shape we hand it.
+    #[test]
+    fn plist_is_well_formed() {
+        let plist = render_launchd_plist();
+        assert!(plist.starts_with("<?xml"));
+        assert!(plist.contains(LAUNCH_LABEL));
+        assert!(plist.contains(DAEMON_INSTALL_PATH));
+        assert_eq!(plist.matches("<dict>").count(), plist.matches("</dict>").count());
+    }
 }
