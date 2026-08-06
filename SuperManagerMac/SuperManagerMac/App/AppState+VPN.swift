@@ -338,6 +338,26 @@ extension AppState {
         }
     }
 
+    /// Opt this profile in or out of pushing its DNS servers to the
+    /// system resolver.
+    ///
+    /// Takes effect on the next connect — the daemon re-renders the conf
+    /// each time, so an already-up tunnel keeps what it started with.
+    @discardableResult
+    func setPushDns(profileId: String, enabled: Bool) async -> Bool {
+        do {
+            let _: VpnProfile = try await client.call(
+                "vpn_set_push_dns",
+                params: ["profile_id": profileId, "enabled": enabled]
+            )
+            await refreshProfiles()
+            return true
+        } catch {
+            handleError(error)
+            return false
+        }
+    }
+
     /// Set the `kill_switch` flag on a profile. Persisted in the
     /// daemon's profile state; takes effect on next connect (the
     /// connect path inspects the profile and asks the helper to

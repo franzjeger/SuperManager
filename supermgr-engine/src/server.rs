@@ -161,6 +161,7 @@ impl EngineServer {
             "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id).await,
             "vpn_set_routing" => self.handle_vpn_set_routing(id, req.params).await,
             "vpn_set_kill_switch" => self.handle_vpn_set_kill_switch(id, req.params).await,
+            "vpn_set_push_dns" => self.handle_vpn_set_push_dns(id, req.params).await,
             "vpn_rename_profile" => self.handle_vpn_rename_profile(id, req.params).await,
             "vpn_duplicate_profile" => self.handle_vpn_duplicate_profile(id, req.params).await,
 

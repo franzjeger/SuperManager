@@ -51,6 +51,11 @@ struct VpnProfile: Decodable, Identifiable, Hashable {
     let autoConnect: Bool
     let fullTunnel: Bool
     let killSwitch: Bool
+    /// Whether this profile replaces the system resolver with its own
+    /// DNS servers on connect. Off unless the operator opted in —
+    /// pushing DNS takes over resolution for the whole machine, not
+    /// just the tunnel.
+    let pushDns: Bool
     let config: VpnProfileConfig
     let lastConnectedAt: String?
 
@@ -59,7 +64,22 @@ struct VpnProfile: Decodable, Identifiable, Hashable {
         case autoConnect = "auto_connect"
         case fullTunnel = "full_tunnel"
         case killSwitch = "kill_switch"
+        case pushDns = "push_dns"
         case lastConnectedAt = "last_connected_at"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        autoConnect = try c.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
+        fullTunnel = try c.decodeIfPresent(Bool.self, forKey: .fullTunnel) ?? true
+        killSwitch = try c.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? false
+        // Absent on profiles written before the toggle existed, and on a
+        // daemon too old to send it — false matches what those builds do.
+        pushDns = try c.decodeIfPresent(Bool.self, forKey: .pushDns) ?? false
+        config = try c.decode(VpnProfileConfig.self, forKey: .config)
+        lastConnectedAt = try c.decodeIfPresent(String.self, forKey: .lastConnectedAt)
     }
 }
 

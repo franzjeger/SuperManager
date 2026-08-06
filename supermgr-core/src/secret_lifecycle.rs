@@ -101,6 +101,9 @@ impl SecretOwner for Profile {
             full_tunnel: _,
             last_connected_at: _,
             kill_switch: _,
+            // Carries no secret: a boolean saying whether to apply the
+            // DNS servers already held in `config`.
+            push_dns: _,
             customer: _,
             config,
             updated_at: _,
@@ -495,6 +498,7 @@ mod tests {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            push_dns: false,
             customer: String::new(),
             config,
             updated_at: Utc::now(),
