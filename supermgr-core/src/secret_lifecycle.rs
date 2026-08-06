@@ -498,6 +498,7 @@ mod tests {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            push_dns: false,
             customer: String::new(),
             config,
             updated_at: Utc::now(),
