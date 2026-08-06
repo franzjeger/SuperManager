@@ -10,6 +10,7 @@
 // only one of them was enforcing. It now lives in `supermgr-core` next to
 // the invariant tests, and the exhaustive match there makes a new
 // `ProfileConfig` variant a compile error rather than a silent leak.
+use ipnet::IpNet;
 use supermgr_core::secret_lifecycle::SecretOwner;
 use supermgr_core::vpn::profile::{
     FortiGateConfig, Profile, ProfileConfig, ProfileSummary, SecretRef,
@@ -733,6 +734,7 @@ impl EngineServer {
 
         // Captured before `profile.config` is moved below.
         let push_dns = profile.push_dns;
+        let full_tunnel = profile.full_tunnel;
 
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
@@ -826,9 +828,17 @@ impl EngineServer {
             if let Some(ref ep) = peer.endpoint {
                 let _ = writeln!(out, "Endpoint = {ep}");
             }
-            if !peer.allowed_ips.is_empty() {
-                let ips = peer
-                    .allowed_ips
+            let allowed = match effective_allowed_ips(
+                &peer.allowed_ips,
+                &wg.split_routes,
+                full_tunnel,
+                pid_str,
+            ) {
+                Ok(v) => v,
+                Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
+            };
+            if !allowed.is_empty() {
+                let ips = allowed
                     .iter()
                     .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
@@ -1216,5 +1226,133 @@ impl EngineServer {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
+    }
+
+}
+
+/// Resolve what a peer's `AllowedIPs` should actually be, reconciling
+/// `Profile.full_tunnel` with the peer's stored list.
+///
+/// These are two descriptions of the same thing and nothing kept them
+/// in step. Flipping a profile to split tunnel set the flag but left
+/// `AllowedIPs = 0.0.0.0/0, ::/0` in place, so `wg-quick` happily
+/// built a full tunnel regardless — the flag was decorative.
+///
+/// The IPv6 half of that is worse than merely ineffective. A tunnel
+/// whose only v6 address is a ULA cannot source traffic to a global
+/// destination, so `::/0` routed into it does not fail cleanly: the
+/// route exists, the kernel returns EHOSTUNREACH, and anything that
+/// probes v6 reachability concludes v6 is *present but flaky* rather
+/// than absent. That is what took Tailscale down — it kept choosing
+/// IPv6 DERP relays and reconnect-looping instead of falling back to
+/// IPv4, which worked the whole time.
+///
+/// So in split-tunnel mode the catch-alls are stripped and
+/// `split_routes` takes their place, exactly as `WireGuardConfig`
+/// documents. A split-tunnel profile that ends up with nothing left
+/// is a contradiction the operator has to see: it would carry no
+/// traffic at all, so it is an error rather than a silent empty
+/// tunnel.
+fn effective_allowed_ips(
+    peer_allowed: &[IpNet],
+    split_routes: &[IpNet],
+    full_tunnel: bool,
+    profile_id: &str,
+) -> Result<Vec<IpNet>, String> {
+    if full_tunnel {
+        return Ok(peer_allowed.to_vec());
+    }
+
+    let is_catch_all = |n: &IpNet| n.prefix_len() == 0;
+    let specific: Vec<IpNet> = peer_allowed
+        .iter()
+        .filter(|n| !is_catch_all(n))
+        .copied()
+        .collect();
+
+    // `split_routes` is the operator's explicit statement of intent and
+    // replaces the catch-all; peer-level specifics are kept alongside
+    // it, since those were never the thing making the tunnel global.
+    let mut out = split_routes.to_vec();
+    for n in specific {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(format!(
+            "profile {profile_id} is set to split tunnel but has no routes: \
+             its AllowedIPs are catch-all only and split_routes is empty. \
+             Add the prefixes the tunnel should carry, or switch it back \
+             to full tunnel."
+        ));
+    }
+
+    if out.len() != peer_allowed.len() {
+        tracing::info!(
+            profile = %profile_id,
+            "wireguard render: split tunnel — AllowedIPs {:?} replaces catch-all",
+            out.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod allowed_ips_tests {
+    use super::*;
+
+    fn net(s: &str) -> IpNet { s.parse().unwrap() }
+
+    /// Full tunnel is passed through untouched — the catch-all is the
+    /// whole point there.
+    #[test]
+    fn full_tunnel_keeps_catch_all() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let got = effective_allowed_ips(&peer, &[], true, "p").unwrap();
+        assert_eq!(got, peer);
+    }
+
+    /// The regression that took Tailscale down: profile flipped to
+    /// split tunnel, but AllowedIPs still catch-all, so wg-quick built
+    /// a full tunnel and blackholed IPv6 into a ULA-only tunnel.
+    #[test]
+    fn split_tunnel_replaces_catch_all_with_split_routes() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let split = vec![net("10.0.0.0/8")];
+        let got = effective_allowed_ips(&peer, &split, false, "p").unwrap();
+        assert_eq!(got, split, "catch-all must not survive split tunnel");
+        assert!(!got.iter().any(|n| n.prefix_len() == 0));
+    }
+
+    /// A split-tunnel profile with nothing to route is a contradiction
+    /// the operator must be told about, not a silently empty tunnel.
+    #[test]
+    fn split_tunnel_without_routes_is_an_error() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let err = effective_allowed_ips(&peer, &[], false, "abc").unwrap_err();
+        assert!(err.contains("abc"), "{err}");
+        assert!(err.contains("split tunnel"), "{err}");
+    }
+
+    /// Specific prefixes already on the peer were never what made the
+    /// tunnel global, so they survive alongside split_routes.
+    #[test]
+    fn split_tunnel_keeps_specific_peer_prefixes() {
+        let peer = vec![net("0.0.0.0/0"), net("192.168.4.0/24")];
+        let got = effective_allowed_ips(&peer, &[net("10.0.0.0/8")], false, "p").unwrap();
+        assert!(got.contains(&net("192.168.4.0/24")));
+        assert!(got.contains(&net("10.0.0.0/8")));
+        assert!(!got.contains(&net("0.0.0.0/0")));
+    }
+
+    /// Split tunnel with only specific prefixes and no split_routes is
+    /// already well-formed — don't reject it.
+    #[test]
+    fn split_tunnel_with_only_specific_prefixes_is_fine() {
+        let peer = vec![net("192.168.4.0/24")];
+        let got = effective_allowed_ips(&peer, &[], false, "p").unwrap();
+        assert_eq!(got, peer);
     }
 }
