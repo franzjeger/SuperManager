@@ -38,72 +38,73 @@
 use std::io::Write as _;
 use std::process::Command;
 
+/// The one State-store key SuperManager ever writes DNS to.
+///
+/// Scoped to our own service name on purpose: the physical interface's
+/// `State:/Network/Service/<uuid>/DNS` is where DHCP puts the router's
+/// resolvers, and removing that is what broke name resolution after
+/// every teardown.
+const SUPERMGR_DNS_KEY: &str = "State:/Network/Service/com.sybr.supermanager.vpn/DNS";
+
 /// Remove any VPN-pushed DNS from both the Setup and State stores.
 ///
 /// Safe to call on every disconnect regardless of backend or whether
 /// DNS was actually set — all operations are idempotent and best-effort.
 pub fn clear_vpn_dns() {
-    let service = detect_active_network_service().unwrap_or_else(|| "Wi-Fi".to_string());
-    tracing::info!(service = %service, "clear_vpn_dns: starting cleanup");
+    tracing::info!("clear_vpn_dns: starting cleanup");
 
-    // ── Step 1: Setup store via networksetup ─────────────────────────
-    // Covers DNS set by wg-quick and openvpn --up scripts.
-    // Try the active service first, then the most common fallbacks so
-    // we catch whichever interface was in use at connect time.
-    let candidates = {
-        let mut v = vec![service.clone()];
-        for fallback in &["Wi-Fi", "Ethernet", "USB 10/100/1000 LAN"] {
-            if !v.iter().any(|s| s == fallback) {
-                v.push((*fallback).to_string());
-            }
-        }
-        v
-    };
-    for svc in &candidates {
-        let out = Command::new("/usr/sbin/networksetup")
-            .args(["-setdnsservers", svc, "Empty"])
-            .output();
-        match out {
-            Ok(o) if o.status.success() =>
-                tracing::info!("clear_vpn_dns: cleared Setup DNS on '{svc}'"),
-            Ok(o) => {
-                // Service may not exist on this machine — not an error.
-                let msg = String::from_utf8_lossy(&o.stderr);
-                tracing::debug!("clear_vpn_dns: networksetup '{svc}' -> {msg}");
-            }
-            Err(e) => tracing::warn!("clear_vpn_dns: networksetup '{svc}' failed: {e}"),
-        }
-    }
+    // ── Step 1: Setup store ──────────────────────────────────────────
+    //
+    // Deliberately does NOTHING now.
+    //
+    // This used to run `networksetup -setdnsservers <svc> Empty` across
+    // Wi-Fi, Ethernet and USB LAN, to catch DNS a VPN had written to the
+    // persistent Setup store. Nothing in SuperManager writes there any
+    // more: the WireGuard renderer stopped emitting a `DNS =` line (it
+    // hijacked the system resolver), and the only remaining writer is
+    // the user-initiated `tailscale_set_dns_servers` RPC.
+    //
+    // So the blanket clear had exactly one effect left: wiping the
+    // operator's own saved DNS on every disconnect, sleep and wake —
+    // including the static resolver they had set to work around the
+    // State-store bug fixed below, and any DNS set through the app's own
+    // Tailscale settings.
+    //
+    // Trade-off, stated plainly: if a backend is ever taught to push
+    // Setup DNS again, it must restore it itself. Teardown will not
+    // guess on its behalf, because it cannot tell VPN DNS from the
+    // user's.
 
     // ── Step 2: State store via scutil ───────────────────────────────
-    // Covers DNS set via scutil (our own future writes, tailscaled, etc.)
-    // We remove the State entry for the primary service UUID so configd
-    // immediately reverts to whatever DHCP pushed.
-    if let Some(uuid) = find_service_uuid() {
-        let script = format!(
-            "open\nremove State:/Network/Service/{uuid}/DNS\nquit\n"
-        );
-        match std::process::Command::new("/usr/sbin/scutil")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(mut child) => {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(script.as_bytes());
-                }
-                match child.wait() {
-                    Ok(_) => tracing::info!(
-                        "clear_vpn_dns: removed State DNS for service {uuid}"
-                    ),
-                    Err(e) => tracing::warn!("clear_vpn_dns: scutil wait: {e}"),
-                }
+    //
+    // ONLY our own key. The previous version removed
+    // `State:/Network/Service/<primary-uuid>/DNS`, believing configd
+    // would then "revert to whatever DHCP pushed". It does not — that
+    // entry IS what DHCP pushed. Removing it left the Mac with no
+    // resolver at all after every disconnect, sleep and wake, until the
+    // lease renewed. On the reporting machine it produced 15 651
+    // "DNS probe miss" warnings against the router at 10.10.110.1, and
+    // the only way to browse was to set a static resolver by hand.
+    //
+    // A VPN that writes State DNS writes it under its OWN service key,
+    // never the physical interface's, so scoping the removal to ours
+    // loses nothing. `SUPERMGR_DNS_KEY` is also what the updown script
+    // writes to when a gateway pushes INTERNAL_IP4_DNS.
+    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nquit\n");
+    match std::process::Command::new("/usr/sbin/scutil")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(script.as_bytes());
             }
-            Err(e) => tracing::warn!("clear_vpn_dns: spawn scutil: {e}"),
+            let _ = child.wait();
+            tracing::info!("clear_vpn_dns: removed {SUPERMGR_DNS_KEY} (if present)");
         }
-    } else {
-        tracing::debug!("clear_vpn_dns: no service UUID found, skipping State removal");
+        Err(e) => tracing::warn!("clear_vpn_dns: spawn scutil: {e}"),
     }
 
     // ── Step 3: flush resolver caches ────────────────────────────────
