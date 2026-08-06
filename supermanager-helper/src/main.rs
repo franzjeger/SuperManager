@@ -138,6 +138,29 @@ async fn main() -> anyhow::Result<()> {
     // perform the cleanup and exit immediately — we do NOT start the
     // full daemon socket loop. This is intentional: the plist has
     // `KeepAlive false`, so launchd expects a short-lived process.
+    // `--version` lets a binary that is NOT running answer for itself.
+    //
+    // The GUI needs the bundled helper's build timestamp to decide
+    // whether deploying it over the live one is an upgrade or a
+    // downgrade. It cannot ask over the socket — the bundled copy has
+    // no socket; only the deployed one does. Reading the timestamp out
+    // of the file with `strings` would work until the day it doesn't,
+    // so the binary reports its own vintage instead.
+    //
+    // Deliberately before the root check and before any daemon setup:
+    // this prints and exits, needs no privileges, and must stay cheap
+    // enough to call on every launch.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
+            })
+        );
+        return Ok(());
+    }
+
     if std::env::args().nth(1).as_deref() == Some("vpn-dns-cleanup") {
         info!("vpn-dns-cleanup: boot-time DNS teardown guard starting");
         let uid = unsafe { libc::geteuid() };
