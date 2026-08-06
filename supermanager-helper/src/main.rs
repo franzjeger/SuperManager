@@ -131,13 +131,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // Boot-time DNS cleanup subcommand.
-    //
-    // The LaunchDaemon `no.sybr.supermanager.vpn-dns-cleanup` runs this
-    // binary at boot with `vpn-dns-cleanup` as the first argument. We
-    // perform the cleanup and exit immediately — we do NOT start the
-    // full daemon socket loop. This is intentional: the plist has
-    // `KeepAlive false`, so launchd expects a short-lived process.
     // `--version` lets a binary that is NOT running answer for itself.
     //
     // The GUI needs the bundled helper's build timestamp to decide
@@ -161,6 +154,13 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Boot-time DNS cleanup subcommand.
+    //
+    // The LaunchDaemon `no.sybr.supermanager.vpn-dns-cleanup` runs this
+    // binary at boot with `vpn-dns-cleanup` as the first argument. We
+    // perform the cleanup and exit immediately — we do NOT start the
+    // full daemon socket loop. This is intentional: the plist has
+    // `KeepAlive false`, so launchd expects a short-lived process.
     if std::env::args().nth(1).as_deref() == Some("vpn-dns-cleanup") {
         info!("vpn-dns-cleanup: boot-time DNS teardown guard starting");
         let uid = unsafe { libc::geteuid() };
