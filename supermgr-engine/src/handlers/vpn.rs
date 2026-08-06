@@ -96,6 +96,7 @@ impl EngineServer {
             name: name.to_owned(),
             auto_connect: false,
             full_tunnel,
+            push_dns: false,
             last_connected_at: None,
             customer: String::new(),
             kill_switch,
@@ -164,6 +165,7 @@ impl EngineServer {
             name,
             auto_connect: existing.auto_connect,
             full_tunnel,
+            push_dns: false,
             last_connected_at: existing.last_connected_at,
             customer: existing.customer.clone(),
             kill_switch,
@@ -279,6 +281,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::WireGuard(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -375,6 +378,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::OpenVpn(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -456,6 +460,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::AzureVpn(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -726,6 +731,9 @@ impl EngineServer {
         };
         drop(state);
 
+        // Captured before `profile.config` is moved below.
+        let push_dns = profile.push_dns;
+
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
                 id,
@@ -769,20 +777,37 @@ impl EngineServer {
                 .join(", ");
             let _ = writeln!(out, "Address = {addrs}");
         }
+        // `wg-quick` applies a `DNS =` line by pointing the ENTIRE system
+        // resolver at the tunnel, so this is opt-in per profile.
+        //
+        // Right for a customer profile whose internal names only the
+        // gateway knows. Wrong for a personal full-tunnel, where it takes
+        // out the operator's local resolver — ad-blocking, split-horizon
+        // zones — the moment it connects.
+        //
+        // It was emitted unconditionally, then removed outright, and
+        // neither extreme was correct: removing it meant falling back to
+        // whatever DHCP hands out, which on a network with a
+        // non-answering router resolver is no DNS at all.
         if !wg.dns.is_empty() {
-            // The DNS line is ALWAYS omitted, full tunnel included. With it
-            // present, wg-quick points the whole system resolver at the
-            // tunnel's DNS, hijacking local name resolution — the operator's
-            // local resolver (ad-blocking, split-horizon customer zones) goes
-            // dark the moment any WireGuard profile connects. Split tunnels
-            // have omitted it since the first report of this; full tunnel kept
-            // it and hijacked the resolver just the same. Operator verdict on
-            // 2026-08-04, verbatim: "OVERSTYRER LOKAL DNS, IKKE AKTUELT!"
-            // The parsed servers stay on the profile for display only.
-            tracing::info!(
-                profile = %pid_str,
-                "wireguard render: omitting DNS line — WireGuard never touches system DNS"
-            );
+            if push_dns {
+                let dns = wg
+                    .dns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "DNS = {dns}");
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: pushing DNS ({dns}) — profile opted in"
+                );
+            } else {
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: omitting DNS line — profile keeps system DNS"
+                );
+            }
         }
         if let Some(mtu) = wg.mtu {
             let _ = writeln!(out, "MTU = {mtu}");
@@ -1122,6 +1147,39 @@ impl EngineServer {
         }
         state.profiles.insert(new_profile.id, new_profile.clone());
         match serde_json::to_value(&new_profile) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
+    /// Set the `push_dns` flag on a profile.
+    ///
+    /// Takes effect on the next connect: the conf is re-rendered each
+    /// time, so an already-up tunnel keeps whatever it was started with.
+    pub(crate) async fn handle_vpn_set_push_dns(&self, id: u64, params: serde_json::Value) -> Response {
+        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+        };
+        let pid = match uuid::Uuid::parse_str(pid_str) {
+            Ok(u) => u,
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
+        };
+        let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
+            Some(b) => b,
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned()),
+        };
+        let mut state = self.state.lock().await;
+        let Some(mut profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
+        };
+        profile.push_dns = enabled;
+        profile.updated_at = chrono::Utc::now();
+        if let Err(e) = state.save_profile(&profile) {
+            return Response::err(id, protocol::INTERNAL_ERROR, format!("save: {e}"));
+        }
+        state.profiles.insert(profile.id, profile.clone());
+        match serde_json::to_value(&profile) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }

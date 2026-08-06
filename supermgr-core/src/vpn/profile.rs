@@ -377,6 +377,23 @@ pub struct Profile {
     #[serde(default)]
     pub kill_switch: bool,
 
+    /// Push this profile's DNS servers to the system resolver.
+    ///
+    /// Off by default, and that default is deliberate. On macOS
+    /// `wg-quick` applies a `DNS =` line by pointing the ENTIRE system
+    /// resolver at the tunnel — an operator's local resolver, with its
+    /// ad-blocking and split-horizon customer zones, goes dark the
+    /// moment any profile connects. That is right for a customer
+    /// profile whose internal names only the gateway knows, and wrong
+    /// for a personal full-tunnel, so it is a per-profile choice rather
+    /// than a global one.
+    ///
+    /// Profiles written by older builds deserialise as `false`, which
+    /// matches the behaviour they have had since the DNS line was
+    /// removed outright.
+    #[serde(default)]
+    pub push_dns: bool,
+
     /// Customer / tenant tag for grouping in the GUI. Free-form display
     /// label (e.g. "Sybr", "Elteco", "Autostrada"). Empty = no group.
     /// Profiles written by older builds deserialise with the default
@@ -404,6 +421,10 @@ impl Profile {
             name: name.into(),
             auto_connect: false,
             full_tunnel: true,
+            // Off by default: pushing DNS replaces the whole system
+            // resolver, which is a choice the operator makes per
+            // profile, not something a new import assumes.
+            push_dns: false,
             last_connected_at: None,
             kill_switch: false,
             customer: String::new(),
