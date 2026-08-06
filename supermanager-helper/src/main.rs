@@ -178,6 +178,12 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn route guardian: {e:#}");
     }
 
+    // Bring an already-installed tailscaled LaunchDaemon up to date
+    // with our plist template. No-op unless the template changed (or
+    // Tailscale isn't installed), so this costs one file read at
+    // startup on the common path.
+    tailscale::ensure_plist_current();
+
     // Spawn the connectivity watchdog — the dead-man switch.
     // Probes internet every 2s, escalates recovery (force route
     // restore at 4s, panic_reset at 6s). Catches anything the
