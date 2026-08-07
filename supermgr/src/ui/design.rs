@@ -50,6 +50,105 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 
 // ---------------------------------------------------------------------------
+// Icon names
+// ---------------------------------------------------------------------------
+
+/// Icon names, as fallback chains rather than as single names.
+///
+/// # Why a chain and not a name
+///
+/// Adwaita and Breeze barely overlap on these. Measured against both themes,
+/// Adwaita has `network-vpn-symbolic` and not `network-vpn`; Breeze has
+/// `network-vpn` and not `network-vpn-symbolic`. The same holds for the
+/// terminal, the display, the shield, the notification bell and half a dozen
+/// others: Breeze ships the plain names from the icon-naming spec, Adwaita
+/// ships the `-symbolic` variants.
+///
+/// Asking for one name therefore works on one desktop and renders GTK's
+/// broken-image placeholder on the other — a red-bordered box, which is what
+/// the VPN list and the notification button looked like on Plasma. Asking for
+/// a chain works on both.
+pub mod icons {
+    /// A tunnel, up.
+    pub const VPN: &[&str] = &["network-vpn-symbolic", "network-vpn"];
+    /// A tunnel, down.
+    pub const VPN_OFF: &[&str] = &["network-vpn-disabled-symbolic", "network-disconnect"];
+    /// The notification bell.
+    pub const NOTIFICATIONS: &[&str] =
+        &["preferences-system-notifications-symbolic", "notifications"];
+    /// A terminal.
+    pub const TERMINAL: &[&str] = &["utilities-terminal-symbolic", "utilities-terminal"];
+    /// A screen, for RDP and VNC.
+    pub const DISPLAY: &[&str] = &["video-display-symbolic", "video-display"];
+    /// Security and compliance.
+    pub const SHIELD: &[&str] = &["security-high-symbolic", "security-high"];
+    /// Reachability, for a connection test.
+    pub const CONNECTIVITY: &[&str] =
+        &["network-transmit-receive-symbolic", "network-connect"];
+    /// A plug-in or third-party integration.
+    pub const INTEGRATION: &[&str] = &["application-x-addon-symbolic", "applications-other"];
+    /// A host.
+    pub const HOST: &[&str] = &["computer-symbolic", "computer"];
+    /// An appliance.
+    pub const APPLIANCE: &[&str] = &["network-server-symbolic", "network-server"];
+    /// A wireless device.
+    pub const WIRELESS: &[&str] = &["network-wireless-symbolic", "network-wireless"];
+    /// A Tailscale-style mesh.
+    pub const MESH: &[&str] = &["network-workgroup-symbolic", "network-workgroup"];
+    /// Search and discovery.
+    pub const SEARCH: &[&str] = &["system-search-symbolic", "system-search"];
+    /// The fleet grid.
+    pub const GRID: &[&str] = &["view-grid-symbolic", "view-grid"];
+    /// A key or secret.
+    pub const KEY: &[&str] = &["dialog-password-symbolic", "dialog-password"];
+
+    /// Every chain, for the test that guards them.
+    #[cfg(test)]
+    pub const ALL: &[&[&str]] = &[
+        VPN,
+        VPN_OFF,
+        NOTIFICATIONS,
+        TERMINAL,
+        DISPLAY,
+        SHIELD,
+        CONNECTIVITY,
+        INTEGRATION,
+        HOST,
+        APPLIANCE,
+        WIRELESS,
+        MESH,
+        SEARCH,
+        GRID,
+        KEY,
+    ];
+}
+
+/// The first name in `candidates` the running icon theme actually has.
+///
+/// Falls back to the last entry, so the result is always a name rather than
+/// an empty string — a missing icon should look like the wrong picture, not
+/// like a layout fault.
+#[must_use]
+pub fn icon_name(candidates: &[&'static str]) -> &'static str {
+    let last = candidates.last().copied().unwrap_or("image-missing");
+    let Some(display) = gtk4::gdk::Display::default() else {
+        return last;
+    };
+    let theme = gtk4::IconTheme::for_display(&display);
+    candidates
+        .iter()
+        .copied()
+        .find(|name| theme.has_icon(name))
+        .unwrap_or(last)
+}
+
+/// An image showing the first icon in `candidates` the theme has.
+#[must_use]
+pub fn icon(candidates: &[&'static str]) -> gtk4::Image {
+    gtk4::Image::from_icon_name(icon_name(candidates))
+}
+
+// ---------------------------------------------------------------------------
 // The status vocabulary
 // ---------------------------------------------------------------------------
 
@@ -120,17 +219,26 @@ impl Status {
         matches!(self, Self::Error | Self::Degraded | Self::Connecting)
     }
 
-    /// A symbolic icon name for this state.
+    /// The icon-name candidates for this state.
+    ///
+    /// Chains rather than names, for the reason [`icons`] gives: the two
+    /// themes this application meets do not agree on which spelling exists.
+    #[must_use]
+    pub fn icon_candidates(self) -> &'static [&'static str] {
+        match self {
+            Self::Connected => &["emblem-ok-symbolic", "dialog-ok", "emblem-ok"],
+            Self::Disconnected => &["media-playback-stop-symbolic", "media-playback-stop"],
+            Self::Connecting => &["content-loading-symbolic", "view-refresh"],
+            Self::Error => &["dialog-error-symbolic", "dialog-error"],
+            Self::Degraded => &["dialog-warning-symbolic", "dialog-warning"],
+            Self::Unknown => &["dialog-question-symbolic", "dialog-question"],
+        }
+    }
+
+    /// The icon name to draw for this state in the running theme.
     #[must_use]
     pub fn icon_name(self) -> &'static str {
-        match self {
-            Self::Connected => "emblem-ok-symbolic",
-            Self::Disconnected => "media-playback-stop-symbolic",
-            Self::Connecting => "content-loading-symbolic",
-            Self::Error => "dialog-error-symbolic",
-            Self::Degraded => "dialog-warning-symbolic",
-            Self::Unknown => "dialog-question-symbolic",
-        }
+        icon_name(self.icon_candidates())
     }
 }
 
@@ -616,6 +724,57 @@ mod tests {
         assert!(!Status::Connected.is_notable());
         assert!(!Status::Disconnected.is_notable());
         assert!(!Status::Unknown.is_notable());
+    }
+
+    #[test]
+    fn every_icon_has_somewhere_to_fall_back_to() {
+        // Measured, not assumed: with the Breeze and Adwaita icon themes
+        // both installed, ten of the names this application asked for were
+        // absent from Breeze — `network-vpn-symbolic` among them, which is
+        // why every VPN profile row showed GTK's broken-image placeholder on
+        // Plasma. The two themes split almost cleanly: Breeze ships the plain
+        // icon-naming-spec names, Adwaita ships the `-symbolic` variants.
+        //
+        // So a single name is the bug. Every chain needs both spellings.
+        for chain in icons::ALL {
+            assert!(chain.len() >= 2, "{chain:?} has no fallback");
+            assert!(
+                chain.iter().any(|n| n.ends_with("-symbolic")),
+                "{chain:?} has no symbolic name, which Adwaita will want"
+            );
+            assert!(
+                chain.iter().any(|n| !n.ends_with("-symbolic")),
+                "{chain:?} has no plain name, which Breeze will want"
+            );
+        }
+    }
+
+    #[test]
+    fn the_status_icons_have_fallbacks_too() {
+        // The pills are drawn on every list row and in the toolbar, so a
+        // missing one is the most-repeated broken image in the window.
+        for status in [
+            Status::Connected,
+            Status::Disconnected,
+            Status::Connecting,
+            Status::Error,
+            Status::Degraded,
+            Status::Unknown,
+        ] {
+            let chain = status.icon_candidates();
+            assert!(chain.len() >= 2, "{status:?}: {chain:?} has no fallback");
+            assert!(chain.iter().any(|n| !n.ends_with("-symbolic")), "{chain:?}");
+        }
+    }
+
+    #[test]
+    fn an_unresolvable_icon_still_yields_a_name() {
+        // Without a display there is no theme to ask, and the last candidate
+        // is the answer. An empty string here would be a widget with no
+        // content rather than a widget with the wrong picture, and those look
+        // very different when something goes wrong.
+        assert_eq!(icon_name(&["definitely-not-an-icon", "fallback-name"]), "fallback-name");
+        assert!(!icon_name(&[]).is_empty());
     }
 
     #[test]

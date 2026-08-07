@@ -36,7 +36,7 @@ pub fn build_ssh_dashboard(
     // full of hosts is otherwise baffling: the Fleet view shows the ones that
     // can be polled, which is a smaller set than the ones you can SSH into.
     let empty_status = crate::ui::design::empty_state(
-        "network-server-symbolic",
+        crate::ui::design::icon_name(crate::ui::design::icons::APPLIANCE),
         "Nothing to monitor yet",
         "This view shows devices that can report their own status. Add an API \
          token to a FortiGate host, or a UI.com API key in Settings.",

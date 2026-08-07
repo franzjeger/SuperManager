@@ -50,7 +50,7 @@ pub struct Section {
     /// What the operator sees.
     pub title: &'static str,
     /// Symbolic icon name.
-    pub icon: &'static str,
+    pub icon: &'static [&'static str],
     /// Whether this section has real content behind it yet.
     pub built: bool,
 }
@@ -61,20 +61,20 @@ pub struct Section {
 /// run against them. The split is not decoration — it is what keeps a list
 /// of ten from reading as a list of ten.
 pub const MANAGE: &[Section] = &[
-    Section { id: "fleet",     title: "Fleet",     icon: "view-grid-symbolic",              built: true },
-    Section { id: "hosts",     title: "SSH",       icon: "computer-symbolic",               built: true },
-    Section { id: "keys",      title: "Keys",      icon: "dialog-password-symbolic",        built: true },
-    Section { id: "vpn",       title: "VPN",       icon: "network-vpn-symbolic",            built: true },
-    Section { id: "tailscale", title: "Tailscale", icon: "network-workgroup-symbolic",      built: false },
+    Section { id: "fleet",     title: "Fleet",     icon: design::icons::GRID,              built: true },
+    Section { id: "hosts",     title: "SSH",       icon: design::icons::HOST,               built: true },
+    Section { id: "keys",      title: "Keys",      icon: design::icons::KEY,        built: true },
+    Section { id: "vpn",       title: "VPN",       icon: design::icons::VPN,            built: true },
+    Section { id: "tailscale", title: "Tailscale", icon: design::icons::MESH,      built: false },
 ];
 
 /// The operational group.
 pub const OPERATE: &[Section] = &[
-    Section { id: "provisioning", title: "Provisioning", icon: "document-edit-symbolic",     built: true },
-    Section { id: "console",      title: "Console",      icon: "utilities-terminal-symbolic", built: true },
-    Section { id: "compliance",   title: "Compliance",   icon: "emblem-ok-symbolic",         built: false },
-    Section { id: "security",     title: "Security",     icon: "security-high-symbolic",     built: false },
-    Section { id: "recon",        title: "Recon",        icon: "system-search-symbolic",     built: false },
+    Section { id: "provisioning", title: "Provisioning", icon: &["document-edit-symbolic", "document-edit"],     built: true },
+    Section { id: "console",      title: "Console",      icon: design::icons::TERMINAL, built: true },
+    Section { id: "compliance",   title: "Compliance",   icon: &["emblem-ok-symbolic", "dialog-ok"],         built: false },
+    Section { id: "security",     title: "Security",     icon: design::icons::SHIELD,     built: false },
+    Section { id: "recon",        title: "Recon",        icon: design::icons::SEARCH,     built: false },
 ];
 
 /// Every section, both groups.
@@ -132,7 +132,7 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         for section in group {
             let row = adw::ActionRow::new();
             row.set_title(section.title);
-            let icon = gtk4::Image::from_icon_name(section.icon);
+            let icon = design::icon(section.icon);
             row.add_prefix(&icon);
             // A section with nothing behind it says so here rather than
             // after the operator has clicked it and found an empty page.
@@ -278,7 +278,7 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
 #[must_use]
 pub fn placeholder(section: Section) -> gtk4::Widget {
     let page = design::empty_state(
-        section.icon,
+        design::icon_name(section.icon),
         section.title,
         "This section is not built yet. SSH, Keys, VPN, Fleet, Provisioning \
          and Console are — pick one of those from the sidebar.",
