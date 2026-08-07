@@ -254,13 +254,103 @@ class AppState {
             return
         }
         DebugLog.write("[helper] missing methods: \(missing) — redeploying")
-        await redeployBundledHelper()
+        // Pass what the live helper reported so the redeploy can refuse
+        // to go backwards. A string here: the RPC returns the timestamp
+        // as text (it is an env! at compile time), so parse rather than
+        // assume a number and silently get nil.
+        let deployedTs = (deployed["build_timestamp"] as? String).flatMap(Int.init)
+        await redeployBundledHelper(deployedBuildTimestamp: deployedTs)
+    }
+
+    /// Whether pushing the bundled helper over the deployed one is an
+    /// upgrade. Pure, so the rule is testable without a helper socket
+    /// or a signed bundle to run.
+    ///
+    /// `deploy_self` overwrites the live helper with whatever it is
+    /// pointed at, so it downgrades exactly as readily as it upgrades.
+    /// A helper deployed by hand from a fresh build is newer than the
+    /// copy embedded in an older installed app, and without this the
+    /// app would quietly undo it on the next launch — leaving a correct
+    /// file in `/Library/PrivilegedHelperTools` while the *running*
+    /// process came from the bundle. That failure is close to invisible:
+    /// inspecting the file on disk confirms the fix is there.
+    ///
+    /// Either timestamp being unknown means deploy. A live helper too
+    /// old to report one, or a bundled binary predating `--version`,
+    /// both point at the deployed side being the stale one — and the
+    /// caller only reaches here because the live helper was missing
+    /// methods or unreachable in the first place.
+    /// `nonisolated` because it touches no actor state — it is a
+    /// comparison of two integers, and saying so keeps it callable from
+    /// tests without hopping to the main actor.
+    nonisolated static func shouldRedeploy(bundled: Int?, deployed: Int?) -> Bool {
+        guard let bundled, let deployed else { return true }
+        return bundled > deployed
+    }
+
+    /// Ask a helper binary that isn't running what vintage it is, via
+    /// its `--version` flag. Returns nil if it can't be asked — an old
+    /// binary predating the flag, or one that won't execute.
+    ///
+    /// Runs the bundled copy, never the deployed one: the deployed
+    /// helper answers over the socket, and running a second instance
+    /// of a LaunchDaemon binary is not something to do casually. The
+    /// flag path prints and exits without touching root or the socket.
+    private func bundledHelperBuildTimestamp(at url: URL) -> Int? {
+        let proc = Process()
+        proc.executableURL = url
+        proc.arguments = ["--version"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        do {
+            try proc.run()
+        } catch {
+            DebugLog.write("[helper] bundled --version failed to run: \(error)")
+            return nil
+        }
+        // Wait for exit BEFORE reading, with a deadline.
+        //
+        // A helper old enough to predate `--version` does not recognise
+        // the argument and falls through to normal daemon startup
+        // instead of printing and exiting. Reading to EOF against that
+        // never returns, and this runs during app launch — so the
+        // failure mode is a hung window, not a missing timestamp.
+        //
+        // Safe to wait first: the output is a few dozen bytes, far
+        // under the pipe buffer, so a well-behaved child never blocks
+        // on the write and EOF arrives the moment it exits.
+        let deadline = Date().addingTimeInterval(2)
+        while proc.isRunning && Date() < deadline {
+            usleep(20_000)
+        }
+        if proc.isRunning {
+            proc.terminate()
+            DebugLog.write("[helper] bundled --version did not exit in 2s — "
+                + "treating as too old to report a timestamp")
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard proc.terminationStatus == 0,
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let ts = obj["build_timestamp"] as? String,
+              let n = Int(ts)
+        else {
+            DebugLog.write("[helper] bundled --version gave no usable timestamp")
+            return nil
+        }
+        return n
     }
 
     /// Fire `deploy_self` against the deployed helper, pointing it
     /// at the bundled helper inside our app's Contents/MacOS/.
     /// Then poll for the daemon to respawn.
-    private func redeployBundledHelper() async {
+    ///
+    /// - Parameter deployedBuildTimestamp: what the live helper reports,
+    ///   or nil when it could not be asked (unreachable, or too old to
+    ///   answer). Guards against pushing an *older* helper over a newer
+    ///   one — see the discussion below.
+    private func redeployBundledHelper(deployedBuildTimestamp: Int? = nil) async {
         // Bundled helper sits next to the GUI executable. We know
         // the file name because the embed-rust phase pins it.
         guard let exec = Bundle.main.executableURL else {
@@ -274,6 +364,36 @@ class AppState {
             DebugLog.write("[helper] bundled helper not at \(bundledHelper.path)")
             return
         }
+
+        // Never deploy backwards.
+        //
+        // `deploy_self` copies whatever we point it at over the live
+        // helper, so this method is just as capable of a downgrade as an
+        // upgrade. That is not hypothetical: a helper deployed by hand
+        // from a fresh build is newer than the one embedded in an older
+        // installed app, and on the next launch the app would quietly
+        // undo it. The symptom is vicious — the file in
+        // /Library/PrivilegedHelperTools is correct, `strings` confirms
+        // the fix is in it, and the fix still isn't running, because the
+        // process launchd respawned came from the bundle.
+        //
+        // `build.rs` has documented this comparison as the intended
+        // behaviour since the timestamp was introduced; it just never
+        // had an implementation on this side.
+        //
+        // Unknowns deploy: a live helper too old to report a timestamp,
+        // or a bundled binary predating `--version`, are both cases
+        // where the deployed one is almost certainly the stale one.
+        let bundledTs = bundledHelperBuildTimestamp(at: bundledHelper)
+        guard Self.shouldRedeploy(bundled: bundledTs, deployed: deployedBuildTimestamp) else {
+            DebugLog.write(
+                "[helper] bundled helper (build \(bundledTs.map(String.init) ?? "?")) is not "
+                + "newer than deployed (build \(deployedBuildTimestamp.map(String.init) ?? "?")) "
+                + "— refusing to redeploy. The deployed helper is missing methods this app "
+                + "wants, so it was likely built from a different branch.")
+            return
+        }
+
         do {
             _ = try await HelperClient.shared.deploySelf(sourcePath: bundledHelper.path)
             DebugLog.write("[helper] deploy_self issued, waiting for respawn")
