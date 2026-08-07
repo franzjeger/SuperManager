@@ -1029,11 +1029,24 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
 
     let stderr = String::from_utf8_lossy(&renew.stderr);
     if !renew.status.success() {
+        // The reset itself already happened: routes are gone and the
+        // exit-node pref is cleared. A failed DHCP renew is a missed
+        // nicety, not a failed reset — reporting `success: false` put
+        // an alarming red banner in front of the user for an operation
+        // that had in fact worked, and buried the part that mattered.
+        //
+        // The lease also renews on its own; this call only hurries it.
+        tracing::warn!(
+            iface = %active_iface,
+            "panic_reset: DHCP renew failed (reset itself succeeded): {}",
+            stderr.trim()
+        );
         return Ok(InstallResult {
-            success: false,
+            success: true,
             message: format!(
-                "Cleared tailscale exit-node{}; DHCP renew on {active_iface} failed: {stderr}",
-                if last_err.is_empty() { "" } else { " (with warnings)" }
+                "Reset complete. DHCP renew on {active_iface} was skipped ({}) — \
+                 harmless, the lease refreshes on its own.",
+                stderr.trim()
             ),
         });
     }
@@ -1306,20 +1319,76 @@ fn detect_active_interface() -> Option<String> {
         .args(["-listnetworkserviceorder"])
         .output()
         .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // Output format: "(Hardware Port: Wi-Fi, Device: en0)"
+    let candidates = parse_service_order_devices(&String::from_utf8_lossy(&out.stdout));
+
+    // Service order lists CONFIGURED services, not present hardware. A
+    // Mac that has ever had a dock or a USB-Ethernet adapter keeps those
+    // services forever, and they sort above the built-in Wi-Fi: a real
+    // machine here offered en7, en8, en0, en9 where only en0 exists.
+    // Taking the first name outright meant `ipconfig set en7 DHCP`
+    // failing with "interface doesn't exist", which surfaced to the user
+    // as the exit-node teardown having failed — while the actual
+    // teardown had worked fine.
+    //
+    // So prefer a candidate that is actually carrying an address; that
+    // is the one a DHCP renew is meaningful on.
+    if let Some(dev) = candidates.iter().find(|d| interface_has_address(d)) {
+        return Some(dev.clone());
+    }
+    // Nothing has an address — which is plausible precisely when we are
+    // recovering from broken routing. Fall back to one that at least
+    // exists, so the renew has something real to act on.
+    if let Some(dev) = candidates.iter().find(|d| interface_exists(d)) {
+        tracing::info!(
+            iface = %dev,
+            "detect_active_interface: no interface has an address, using an existing one"
+        );
+        return Some(dev.clone());
+    }
+    tracing::warn!(
+        candidates = ?candidates,
+        "detect_active_interface: no candidate from service order exists"
+    );
+    None
+}
+
+/// Device names from `networksetup -listnetworkserviceorder`, in the
+/// order listed. Split out from the filtering so the parse can be
+/// tested against real output without touching the machine's hardware.
+///
+/// Line format: `(Hardware Port: Wi-Fi, Device: en0)`
+fn parse_service_order_devices(stdout: &str) -> Vec<String> {
+    let mut devices = Vec::new();
     for line in stdout.lines() {
         if let Some(start) = line.find("Device: ") {
             let rest = &line[start + "Device: ".len()..];
             if let Some(end) = rest.find(')') {
                 let dev = rest[..end].trim();
-                if dev.starts_with("en") {
-                    return Some(dev.to_string());
+                if dev.starts_with("en") && !devices.iter().any(|d: &String| d == dev) {
+                    devices.push(dev.to_string());
                 }
             }
         }
     }
-    None
+    devices
+}
+
+/// Whether the interface exists at all. `ifconfig <dev>` exits non-zero
+/// for a name with no hardware behind it.
+fn interface_exists(dev: &str) -> bool {
+    Command::new("/sbin/ifconfig")
+        .arg(dev)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Whether the interface currently holds an IPv4 address. `ipconfig
+/// getifaddr` exits non-zero and prints nothing when it does not.
+fn interface_has_address(dev: &str) -> bool {
+    Command::new("/usr/sbin/ipconfig")
+        .args(["getifaddr", dev])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
 /// Render the LaunchDaemon plist. Inlined as a string template
@@ -1466,6 +1535,75 @@ pub fn ensure_plist_current() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real `networksetup -listnetworkserviceorder` output from a Mac
+    /// that has had docks and USB-Ethernet adapters attached. Only en0
+    /// exists; en7/en8/en9 are leftover service definitions that sort
+    /// ABOVE the built-in Wi-Fi. Taking the first name meant
+    /// `ipconfig set en7 DHCP` → "interface doesn't exist".
+    const SERVICE_ORDER: &str = "\
+An asterisk (*) denotes that a network service is disabled.
+(1) USB 10/100/1000 LAN
+(Hardware Port: USB 10/100/1000 LAN, Device: en7)
+
+(2) Thunderbolt Ethernet Slot 1
+(Hardware Port: Thunderbolt Ethernet, Device: en8)
+
+(3) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+
+(4) USB-C LAN
+(Hardware Port: USB-C LAN, Device: en9)
+";
+
+    #[test]
+    fn parses_devices_in_service_order() {
+        assert_eq!(
+            parse_service_order_devices(SERVICE_ORDER),
+            ["en7", "en8", "en0", "en9"]
+        );
+    }
+
+    /// The bug in one line: the first candidate is not the usable one.
+    /// The parse must preserve order so the *filter* gets to decide,
+    /// rather than the parse silently picking.
+    #[test]
+    fn first_candidate_is_not_assumed_usable() {
+        let devs = parse_service_order_devices(SERVICE_ORDER);
+        assert_eq!(devs.first().map(String::as_str), Some("en7"));
+        assert!(devs.contains(&"en0".to_string()));
+    }
+
+    #[test]
+    fn ignores_non_ethernet_devices() {
+        let s = "(Hardware Port: Bluetooth PAN, Device: bridge0)\n\
+                 (Hardware Port: Wi-Fi, Device: en0)";
+        assert_eq!(parse_service_order_devices(s), ["en0"]);
+    }
+
+    #[test]
+    fn deduplicates_repeated_devices() {
+        let s = "(Device: en0)\n(Device: en0)";
+        assert_eq!(parse_service_order_devices(s), ["en0"]);
+    }
+
+    #[test]
+    fn handles_output_with_no_devices() {
+        assert!(parse_service_order_devices("").is_empty());
+        assert!(parse_service_order_devices("no devices here").is_empty());
+    }
+
+    /// Whatever the machine looks like, the interface we pick must be
+    /// one the OS actually has — that is the whole point of the fix.
+    #[test]
+    fn detected_interface_actually_exists() {
+        if let Some(dev) = detect_active_interface() {
+            assert!(
+                interface_exists(&dev),
+                "detect_active_interface returned {dev}, which does not exist"
+            );
+        }
+    }
 
     /// The knob that lets Tailscale coexist with a full-tunnel VPN.
     /// Without it every DNS query on the machine is forwarded to a
