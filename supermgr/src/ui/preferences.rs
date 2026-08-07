@@ -589,15 +589,15 @@ pub fn show_settings_dialog(
             "preferences-system-symbolic",
             vec![&appearance_group, &rdp_group],
         ),
-        ("Security", "security-high-symbolic", vec![&security_group]),
+        ("Security", crate::ui::design::icon_name(crate::ui::design::icons::SHIELD), vec![&security_group]),
         (
             "Notifications",
-            "preferences-system-notifications-symbolic",
+            crate::ui::design::icon_name(crate::ui::design::icons::NOTIFICATIONS),
             vec![&notify_group],
         ),
         (
             "Integrations",
-            "application-x-addon-symbolic",
+            crate::ui::design::icon_name(crate::ui::design::icons::INTEGRATION),
             vec![&console_group, &unifi_group],
         ),
         (

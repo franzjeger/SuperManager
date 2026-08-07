@@ -269,17 +269,17 @@ pub fn populate_ssh_host_list(
             row.add_prefix(&health_icon);
 
             let icon = match host.device_type {
-                supermgr_core::ssh::DeviceType::Linux => "computer-symbolic",
-                supermgr_core::ssh::DeviceType::Windows => "computer-symbolic",
+                supermgr_core::ssh::DeviceType::Linux
+                | supermgr_core::ssh::DeviceType::Windows
+                | supermgr_core::ssh::DeviceType::Custom => design::icons::HOST,
                 supermgr_core::ssh::DeviceType::OpenWrt
                 | supermgr_core::ssh::DeviceType::PfSense
-                | supermgr_core::ssh::DeviceType::OpnSense => "network-server-symbolic",
+                | supermgr_core::ssh::DeviceType::OpnSense => design::icons::APPLIANCE,
                 supermgr_core::ssh::DeviceType::Fortigate
-                | supermgr_core::ssh::DeviceType::Sophos => "security-high-symbolic",
-                supermgr_core::ssh::DeviceType::UniFi => "network-wireless-symbolic",
-                supermgr_core::ssh::DeviceType::Custom => "computer-symbolic",
+                | supermgr_core::ssh::DeviceType::Sophos => design::icons::SHIELD,
+                supermgr_core::ssh::DeviceType::UniFi => design::icons::WIRELESS,
             };
-            row.add_prefix(&gtk4::Image::from_icon_name(icon));
+            row.add_prefix(&design::icon(icon));
 
             // Pinned hosts used to be marked by prefixing a star to the
             // title, which made the star part of the name — it sorted, it

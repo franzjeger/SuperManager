@@ -98,7 +98,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
     // Empty state. Says what to do next rather than restating what the
     // operator can already see.
     let empty_status = design::empty_state(
-        "computer-symbolic",
+        design::icon_name(design::icons::HOST),
         "No host selected",
         "Pick a host from the list to see how it connects and what is deployed on it.",
     );
@@ -254,7 +254,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .css_classes(["flat"])
         .build();
     let fg_compliance_btn = gtk4::Button::builder()
-        .icon_name("shield-safe-symbolic")
+        .icon_name(design::icon_name(design::icons::SHIELD))
         .tooltip_text("CIS compliance check")
         .css_classes(["flat"])
         .build();
@@ -311,7 +311,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &rdp_btn,
         "Remote Desktop",
         "Open an RDP session on the configured port",
-        "video-display-symbolic",
+        design::icon_name(design::icons::DISPLAY),
     ));
 
     let vnc_btn = gtk4::Button::builder().visible(false).build();
@@ -319,7 +319,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &vnc_btn,
         "VNC",
         "Open a VNC session on the configured port",
-        "video-display-symbolic",
+        design::icon_name(design::icons::DISPLAY),
     ));
 
     let test_btn = gtk4::Button::new();
@@ -327,7 +327,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &test_btn,
         "Test connection",
         "Check SSH, and the API where the device has one",
-        "network-transmit-receive-symbolic",
+        design::icon_name(design::icons::CONNECTIVITY),
     ));
 
     let set_inform_btn = gtk4::Button::builder().visible(false).build();
@@ -335,7 +335,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &set_inform_btn,
         "Set inform\u{2026}",
         "Adopt this UniFi device to a controller",
-        "network-workgroup-symbolic",
+        design::icon_name(design::icons::MESH),
     ));
 
     let access_card = design::card("Access");
@@ -345,7 +345,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &push_key_btn,
         "Push key\u{2026}",
         "Append a public key to authorized_keys over SSH",
-        "dialog-password-symbolic",
+        design::icon_name(design::icons::KEY),
     ));
 
     let push_key_api_btn = gtk4::Button::builder().visible(false).build();
@@ -353,7 +353,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         &push_key_api_btn,
         "Push key via API\u{2026}",
         "Install the key on a FortiGate admin through the REST API",
-        "dialog-password-symbolic",
+        design::icon_name(design::icons::KEY),
     ));
 
     let manage_card = design::card("Manage");

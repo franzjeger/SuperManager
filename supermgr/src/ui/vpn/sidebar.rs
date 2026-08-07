@@ -273,10 +273,10 @@ pub fn populate_vpn_sidebar(
             spinner.set_valign(gtk4::Align::Center);
             row.add_prefix(&spinner);
         } else {
-            let icon = gtk4::Image::from_icon_name(if view.status == Status::Connected {
-                "network-vpn-symbolic"
+            let icon = design::icon(if view.status == Status::Connected {
+                design::icons::VPN
             } else {
-                "network-vpn-disabled-symbolic"
+                design::icons::VPN_OFF
             });
             icon.add_css_class(view.status.style_class());
             row.add_prefix(&icon);

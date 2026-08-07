@@ -324,7 +324,7 @@ pub fn build_ui(
         .build();
 
     let logs_btn = gtk4::Button::builder()
-        .icon_name("utilities-terminal-symbolic")
+        .icon_name(design::icon_name(design::icons::TERMINAL))
         .tooltip_text("View daemon logs")
         .build();
 
@@ -351,7 +351,7 @@ pub fn build_ui(
 
     // Notification bell button + popover.
     let notif_btn = gtk4::MenuButton::builder()
-        .icon_name("bell-outline-symbolic")
+        .icon_name(design::icon_name(design::icons::NOTIFICATIONS))
         .tooltip_text("Notifications")
         .css_classes(["flat"])
         .build();
@@ -469,7 +469,7 @@ pub fn build_ui(
 
     view_stack.add_titled(&vpn_split, Some("vpn"), "VPN");
     let vpn_page = view_stack.page(&vpn_split);
-    vpn_page.set_icon_name(Some("network-vpn-symbolic"));
+    vpn_page.set_icon_name(Some(design::icon_name(design::icons::VPN)));
 
     // =========================================================================
     // Dashboard page (standalone, full-width)
@@ -481,7 +481,7 @@ pub fn build_ui(
     // two must agree: a mismatch is a nav row that silently does nothing.
     view_stack.add_titled(&dashboard_widget, Some("fleet"), "Fleet");
     let dashboard_page_ref = view_stack.page(&dashboard_widget);
-    dashboard_page_ref.set_icon_name(Some("utilities-system-monitor-symbolic"));
+    dashboard_page_ref.set_icon_name(Some(design::icon_name(design::icons::GRID)));
 
     // =========================================================================
     // Hosts page
@@ -537,7 +537,7 @@ pub fn build_ui(
     ssh_host_search.set_hexpand(true);
     // Batch command button.
     let ssh_batch_btn = gtk4::Button::builder()
-        .icon_name("utilities-terminal-symbolic")
+        .icon_name(design::icon_name(design::icons::TERMINAL))
         .tooltip_text("Run command on multiple hosts")
         .css_classes(["flat"])
         .build();
@@ -846,7 +846,7 @@ pub fn build_ui(
 
     view_stack.add_titled(&console_widget, Some("console"), "Console");
     let console_page_ref = view_stack.page(&console_widget);
-    console_page_ref.set_icon_name(Some("utilities-terminal-symbolic"));
+    console_page_ref.set_icon_name(Some(design::icon_name(design::icons::TERMINAL)));
 
     // Console setup page is already handled internally by the stack.
 
@@ -2897,7 +2897,7 @@ pub fn build_ui(
                                 rx_app.send_notification(Some("vpn-state"), &notif);
                                 push_notification(
                                     &rx_app_state, &rx_notif_list, &rx_notif_btn,
-                                    "network-vpn-symbolic",
+                                    design::icon_name(design::icons::VPN),
                                     &format!("VPN Connected: {body}"),
                                 );
                             }
@@ -2924,7 +2924,7 @@ pub fn build_ui(
                                 rx_app.send_notification(Some("vpn-state"), &notif);
                                 push_notification(
                                     &rx_app_state, &rx_notif_list, &rx_notif_btn,
-                                    "network-vpn-disabled-symbolic",
+                                    design::icon_name(design::icons::VPN_OFF),
                                     &format!("VPN Disconnected: {body}"),
                                 );
                             }
@@ -3831,7 +3831,7 @@ fn notification_row(notification: &crate::app::Notification) -> adw::ActionRow {
         // edge — a truncated VPN error is no use to anybody.
         .title_lines(0)
         .build();
-    row.add_prefix(&gtk4::Image::from_icon_name(notification.icon));
+    row.add_prefix(&design::icon(&[notification.icon, "dialog-information"]));
 
     // The stored instant, shown in local time — not a second clock read at
     // render time. Re-rendering an old notification now gives the time it
@@ -3879,14 +3879,14 @@ fn render_notifications(
                 .activatable(false)
                 .build(),
         );
-        notif_btn.set_icon_name("bell-outline-symbolic");
+        notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
         return;
     }
 
     for notification in &notifications {
         notif_list.append(&notification_row(notification));
     }
-    notif_btn.set_icon_name("bell-symbolic");
+    notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
 }
 
 /// Push a notification into the store and redraw the popover from it.

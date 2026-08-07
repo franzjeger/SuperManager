@@ -279,7 +279,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // profile selected" tells an operator what they already know; naming the
     // next action does not.
     let empty_status = design::empty_state(
-        "network-vpn-symbolic",
+        design::icon_name(design::icons::VPN),
         "No profile selected",
         "Pick a profile from the list to see its status, or use + to add one.",
     );
@@ -418,7 +418,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         &edit_creds_btn,
         "Edit credentials\u{2026}",
         "Username, password and certificates",
-        "dialog-password-symbolic",
+        design::icon_name(design::icons::KEY),
     ));
 
     let rotate_key_btn = gtk4::Button::builder().visible(false).build();

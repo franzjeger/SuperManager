@@ -54,7 +54,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
 
     // Empty state. Names the next action rather than restating the obvious.
     let empty_status = design::empty_state(
-        "dialog-password-symbolic",
+        design::icon_name(design::icons::KEY),
         "No key selected",
         "Pick a key from the list to see its fingerprint and where it is deployed.",
     );
@@ -250,7 +250,7 @@ pub fn update_ssh_key_detail(
                 .find(|h| h.id.to_string() == *host_id)
                 .map_or(host_id.as_str(), |h| h.label.as_str());
             let row = adw::ActionRow::builder().title(label).activatable(false).build();
-            row.add_prefix(&gtk4::Image::from_icon_name("computer-symbolic"));
+            row.add_prefix(&design::icon(design::icons::HOST));
             detail.deployed_list.append(&row);
         }
     }

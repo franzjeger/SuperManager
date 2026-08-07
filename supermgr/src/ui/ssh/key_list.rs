@@ -113,7 +113,7 @@ pub fn populate_ssh_key_list(
             .subtitle(&short_fingerprint(&key.fingerprint))
             .activatable(true)
             .build();
-        row.add_prefix(&gtk4::Image::from_icon_name("dialog-password-symbolic"));
+        row.add_prefix(&design::icon(design::icons::KEY));
 
         // Key type as a badge, as backends are in the VPN list — the same
         // fact in the same shape, so the two lists read the same way.
