@@ -846,8 +846,24 @@ pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     })
 }
 
-#[derive(Deserialize, Debug)]
-pub struct ExitRoutesArgs {}
+#[derive(Deserialize, Debug, Default)]
+pub struct ExitRoutesArgs {
+    /// True when the caller selected `auto:any` rather than naming a peer.
+    ///
+    /// Stated by the caller rather than derived here on purpose. The GUI just
+    /// ran `tailscale set --exit-node=auto:any`, so it knows the user's intent
+    /// first-hand; tailscaled's prefs, by contrast, report the peer it
+    /// *resolved* to, and reading intent back out of that would mean depending
+    /// on a prefs field whose name and shape this codebase has never observed.
+    /// An observation is not an intent, and guessing at a schema to recover one
+    /// is how you get a pin the user never asked for.
+    ///
+    /// `#[serde(default)]` keeps the RPC backward-compatible: an older GUI that
+    /// omits the field lands on `false`, which is exactly the pinned behaviour
+    /// it has always got.
+    #[serde(default)]
+    pub auto_exit_node: bool,
+}
 
 /// Find the `utunN` interface tailscaled installed for the tailnet.
 /// We look for the route to the standard CGNAT range (100.64/10) —
@@ -974,7 +990,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // again immediately — ipconfig DHCP renew below is belt-
     // and-braces. Removing routes is always FAIL OPEN (egress
     // falls back to the local uplink); it can never black-hole.
-    let _ = remove_exit_routes(ExitRoutesArgs {});
+    let _ = remove_exit_routes(ExitRoutesArgs::default());
 
     // 1. Optionally tell the daemon to drop exit-node + accept-routes.
     //
@@ -1264,28 +1280,52 @@ pub fn reconcile_exit_node() {
     // Belt-and-braces: re-assert the exit-node pref in tailscaled. panic_reset
     // with clear_pref=false keeps it, but a hard-cleared or freshly-restarted
     // daemon may have lost it; without it test_exit_reachability would probe a
-    // tunnel with no exit and fail forever. We need the peer's IP to re-assert —
-    // resolve it from the stable ID when intent recorded only the ID (the common
-    // case: tailscaled prefs expose ExitNodeID with a blank ExitNodeIP).
-    let eff_ip = if !desired.exit_node_ip.is_empty() {
-        Some(desired.exit_node_ip.clone())
-    } else {
-        resolve_exit_node_ip(&desired.exit_node_id)
-    };
-    if let Some(ip) = eff_ip.as_deref() {
+    // tunnel with no exit and fail forever.
+    //
+    // What we re-assert has to match what the user asked for. Re-asserting a
+    // concrete IP for someone who chose `auto:any` would silently downgrade
+    // their selection to a pin — and worse, strand self-heal permanently the
+    // first time that one peer went offline, even with other exit nodes
+    // available. `auto:any` means "any", so say that.
+    if desired.auto {
         if let Some(cli) = tailscale_cli() {
             let _ = Command::new(cli)
                 .args([
                     "--socket=/var/run/tailscaled.socket",
                     "set",
-                    &format!("--exit-node={ip}"),
+                    "--exit-node=auto:any",
                 ])
                 .output();
         }
-        // Persist the resolved IP so subsequent ticks skip the status lookup
-        // and so the intent file is self-describing.
-        if desired.exit_node_ip.is_empty() {
-            crate::tailscale_state::set_desired(&desired.exit_node_id, ip);
+        tracing::info!("reconcile: re-asserted auto:any exit node (tailscaled picks the peer)");
+        // Deliberately no set_desired* write here. The observed peer may well
+        // differ from the one recorded at install time — that is auto selection
+        // working as intended, not new intent, and rewriting the file every
+        // tick would churn it for no gain.
+    } else {
+        // Pinned selection. We need the peer's IP to re-assert — resolve it
+        // from the stable ID when intent recorded only the ID (the common case:
+        // tailscaled prefs expose ExitNodeID with a blank ExitNodeIP).
+        let eff_ip = if desired.exit_node_ip.is_empty() {
+            resolve_exit_node_ip(&desired.exit_node_id)
+        } else {
+            Some(desired.exit_node_ip.clone())
+        };
+        if let Some(ip) = eff_ip.as_deref() {
+            if let Some(cli) = tailscale_cli() {
+                let _ = Command::new(cli)
+                    .args([
+                        "--socket=/var/run/tailscaled.socket",
+                        "set",
+                        &format!("--exit-node={ip}"),
+                    ])
+                    .output();
+            }
+            // Persist the resolved IP so subsequent ticks skip the status
+            // lookup and so the intent file is self-describing.
+            if desired.exit_node_ip.is_empty() {
+                crate::tailscale_state::set_desired(&desired.exit_node_id, ip);
+            }
         }
     }
 
@@ -1297,7 +1337,7 @@ pub fn reconcile_exit_node() {
             // Pause the connectivity watchdog so the reinstall's brief
             // disruption can't itself trip panic_reset.
             crate::connectivity_watchdog::pause_for(20);
-            match install_exit_routes(ExitRoutesArgs {}) {
+            match install_exit_routes(ExitRoutesArgs::default()) {
                 Ok(_) => tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established"),
                 Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
             }

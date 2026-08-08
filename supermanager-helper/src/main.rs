@@ -797,16 +797,30 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // pairs install with the existing internet probe so
         // we can auto-revert if traffic dies.
         "tailscale_install_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-            Ok(args) => match tailscale::install_exit_routes(args) {
+            Ok(args) => {
+                // Read the caller's intent before `args` is consumed below.
+                let auto = args.auto_exit_node;
+                match tailscale::install_exit_routes(args) {
                 Ok(s) => {
                     // Routes are up — record the user's intent so the reconciler
                     // can re-establish them after sleep/wake or a blip.
+                    //
+                    // `current_exit_node` reports the peer tailscaled resolved
+                    // to. For a pinned selection that IS the intent. For
+                    // `auto:any` it is only an observation, so it gets recorded
+                    // as such and the reconciler re-asserts `auto:any` rather
+                    // than pinning this particular peer.
                     let (node_id, node_ip) = tailscale::current_exit_node();
-                    tailscale_state::set_desired(&node_id, &node_ip);
+                    if auto {
+                        tailscale_state::set_desired_auto(&node_id, &node_ip);
+                    } else {
+                        tailscale_state::set_desired(&node_id, &node_ip);
+                    }
                     Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                 }
                 Err(e) => Response::err(id, -32000, format!("install_exit_routes failed: {e:#}")),
-            },
+                }
+            }
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
         },
 
