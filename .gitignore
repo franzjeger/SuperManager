@@ -1,5 +1,9 @@
 # Rust
 /target/
+# LLVM coverage artifacts. Dropped in whatever directory the
+# instrumented binary ran from, so they are not confined to target/.
+*.profraw
+*.profdata
 
 # Python
 __pycache__/
