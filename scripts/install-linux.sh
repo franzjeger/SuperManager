@@ -24,7 +24,10 @@
 #
 #   --yes, -y        Don't ask before installing packages.
 #   --no-deps        Skip step 1 — you manage the dependencies yourself.
-#   --no-build       Skip step 3 — install what is already in target/release.
+#   --no-build       Skip step 3 — install what is already built. Looks in
+#                    cargo's target directory, so CARGO_TARGET_DIR is honoured
+#                    (needed on checkouts that cannot build in-tree — see the
+#                    exec-bit note in the README).
 #   --print-deps     Print the detected distro and the packages that would
 #                    be installed, then stop. Changes nothing.
 #   --uninstall      Remove everything this script installs, then stop.
@@ -59,6 +62,35 @@ warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Where cargo puts the binaries.
+#
+# NOT hardcoded to `target/`. A checkout on a filesystem that cannot hold the
+# exec bit — a OneDrive/Dropbox FUSE mount, exFAT/NTFS, some network shares —
+# cannot build in-tree at all: cargo writes build-script binaries without +x
+# and then cannot execute them ("Permission denied (os error 13)"). The fix,
+# documented under "Checkouts on filesystems that don't preserve the exec bit"
+# in the README, is to point CARGO_TARGET_DIR at a native filesystem. Before
+# this, doing that left the installer looking in the wrong place: the build
+# succeeded and then step 3's own check died on a missing
+# `target/release/supermgrd`. Honour the setting instead of fighting it.
+#
+# `cargo metadata` is asked rather than reading CARGO_TARGET_DIR directly,
+# because that variable is only one of three ways to move the directory —
+# CARGO_BUILD_TARGET_DIR and `build.target-dir` in .cargo/config.toml do the
+# same thing, and cargo is the only thing that knows which one won. It costs
+# ~20ms and needs no network.
+#
+# The fallback chain matters for the `--no-build` path, which is allowed to run
+# without a usable cargo: env var first, then plain `target`.
+# ---------------------------------------------------------------------------
+BUILD_DIR=""
+if command -v cargo >/dev/null 2>&1; then
+    BUILD_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+fi
+[ -n "$BUILD_DIR" ] || BUILD_DIR="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}"
+
+# ---------------------------------------------------------------------------
 # What gets installed where.
 #
 # One table, used by both the install and the uninstall path, so the two
@@ -68,9 +100,9 @@ die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # <source>|<destination>|<mode>
 FILES=(
-    "target/release/supermgrd|/usr/bin/supermgrd|755"
-    "target/release/supermgr|/usr/bin/supermgr|755"
-    "target/release/supermgr-mcp|/usr/bin/supermgr-mcp|755"
+    "$BUILD_DIR/release/supermgrd|/usr/bin/supermgrd|755"
+    "$BUILD_DIR/release/supermgr|/usr/bin/supermgr|755"
+    "$BUILD_DIR/release/supermgr-mcp|/usr/bin/supermgr-mcp|755"
     "contrib/systemd/supermgrd.service|/etc/systemd/system/supermgrd.service|644"
     "contrib/modules-load.d/supermgr.conf|/etc/modules-load.d/supermgr.conf|644"
     "contrib/dbus/org.supermgr.Daemon.conf|/usr/share/dbus-1/system.d/org.supermgr.Daemon.conf|644"
@@ -343,11 +375,48 @@ fi
 for entry in "${FILES[@]}"; do
     src="${entry%%|*}"
     case "$src" in
-        target/release/*)
+        # `$BUILD_DIR` quoted so a path with glob characters in it stays
+        # literal; only the trailing `*` is meant as a pattern.
+        "$BUILD_DIR"/release/*)
             [ -f "$src" ] || die "$src not found. Drop --no-build, or build with:
-       cargo build --release -p supermgrd -p supermgr -p supermgr-mcp" ;;
+       cargo build --release -p supermgrd -p supermgr -p supermgr-mcp
+
+       Binaries are expected under $BUILD_DIR — set CARGO_TARGET_DIR to
+       change that, and build with the same setting." ;;
     esac
 done
+
+# ---------------------------------------------------------------------------
+# Can root read this checkout at all?
+#
+# Every install below is `sudo install`, i.e. root reading a file out of the
+# working tree. A FUSE mount — OneDrive, Dropbox, sshfs, rclone — is private to
+# the user who mounted it unless it was given `allow_other`, so root cannot see
+# into it no matter what the file modes say. Without this check the run gets as
+# far as `→ Installing`, puts the three binaries in /usr/bin (they come from
+# cargo's target directory, which is usually elsewhere), and then dies on the
+# first contrib file with a bare "install: cannot stat ...: Permission denied"
+# — a half-installed system and an error that names the symptom, not the cause.
+#
+# Asked as a real `sudo test -r` rather than by parsing mount options, because
+# the only question that matters is whether root can read the file.
+# ---------------------------------------------------------------------------
+readable_probe="contrib/systemd/supermgrd.service"
+if ! sudo test -r "$readable_probe"; then
+    die "root cannot read $readable_probe in this checkout.
+
+       Almost always a FUSE mount without \`allow_other\` — OneDrive, Dropbox,
+       sshfs. The files are fine; root simply cannot see into the mount, and
+       every step below is \`sudo install\` reading from here.
+
+       Work from a checkout on a normal filesystem:
+
+           git clone https://github.com/franzjeger/SuperManager ~/SuperManager
+           cd ~/SuperManager && ./scripts/install-linux.sh
+
+       (The same mount is why in-tree builds fail with \"Permission denied
+       (os error 13)\" — see the exec-bit note in the README.)"
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Install
