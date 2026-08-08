@@ -1,7 +1,7 @@
 //! VPN profile list sidebar widget.
 //!
 //! Builds a [`gtk4::ListBox`] where each row is an [`adw::ActionRow`] displaying
-//! the profile name, backend type, and a delete button.  The list is rebuilt
+//! the profile name, backend type, and a delete button. The list is rebuilt
 //! from scratch via [`populate_vpn_sidebar`] whenever the profile list changes.
 //!
 //! # Undifferentiated rows
@@ -13,11 +13,12 @@
 //! and one that had never been tried looked the same at a glance, separated
 //! only by a small monochrome prefix icon.
 //!
-//! Now the backend is a badge, the state is a coloured pill, and the pill
-//! appears **only on rows worth looking at** ([`Status::is_notable`], plus
-//! connected). A list where every row is decorated has no signal left in the
-//! decoration; a list where three rows out of twenty are marked is scannable
-//! from across the desk.
+//! Now the backend shares the secondary line with timing metadata, while the
+//! state is a coloured pill that appears **only on rows worth looking at**
+//! ([`Status::is_notable`], plus connected). Keeping the backend out of the
+//! suffix area is important: a long backend name, status pill and delete
+//! button otherwise leave the title no width and make GTK wrap it one letter
+//! per line.
 
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -113,6 +114,14 @@ fn last_connected(profile: &ProfileSummary, now_secs: u64) -> String {
     match profile.last_connected_secs {
         Some(ts) => format!("Last {}", crate::ui::format_ago(now_secs.saturating_sub(ts))),
         None => "Never connected".to_owned(),
+    }
+}
+
+fn row_subtitle(backend: &str, meta: &str) -> String {
+    if meta.is_empty() {
+        backend.to_owned()
+    } else {
+        format!("{backend} \u{b7} {meta}")
     }
 }
 
@@ -257,10 +266,13 @@ pub fn populate_vpn_sidebar(
 
     for profile in &sorted {
         let view = row_view(profile, vpn_state, now_secs);
+        let subtitle = row_subtitle(profile.backend.as_str(), &view.meta);
 
         let row = adw::ActionRow::builder()
             .title(profile.name.as_str())
-            .subtitle(view.meta.as_str())
+            .title_lines(1)
+            .subtitle(subtitle)
+            .subtitle_lines(1)
             .activatable(true)
             .build();
 
@@ -282,71 +294,13 @@ pub fn populate_vpn_sidebar(
             row.add_prefix(&icon);
         }
 
-        // Backend as a neutral badge rather than the first word of the
-        // subtitle, so the subtitle is free to say something that changes.
-        row.add_suffix(&design::badge(profile.backend.as_str()));
-
         if view.show_pill {
             row.add_suffix(&design::status_pill(view.status, view.status.label()));
         }
 
-        // Delete button.
-        let delete_btn = gtk4::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text("Delete profile")
-            .css_classes(["flat"])
-            .valign(gtk4::Align::Center)
-            .build();
-        row.add_suffix(&delete_btn);
-
-        let profile_id = profile.id.to_string();
-        let profile_name = profile.name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        {
-        let profile_id = profile_id.clone();
-        let profile_name = profile_name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        delete_btn.connect_clicked(move |_btn| {
-            let dialog = adw::AlertDialog::new(
-                Some(&format!("Delete \"{}\"?", profile_name)),
-                Some("This cannot be undone."),
-            );
-            dialog.add_response("cancel", "Cancel");
-            dialog.add_response("delete", "Delete");
-            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-            dialog.set_default_response(Some("cancel"));
-            dialog.set_close_response("cancel");
-
-            let profile_id = profile_id.clone();
-            let rt = rt.clone();
-            let tx = tx.clone();
-            dialog.connect_response(Some("delete"), move |_dlg, _response| {
-                let profile_id = profile_id.clone();
-                let tx = tx.clone();
-                rt.spawn(async move {
-                    let msg = match dbus_delete_profile(profile_id.clone()).await {
-                        Ok(()) => {
-                            info!("deleted profile {}", profile_id);
-                            AppMsg::ProfileDeleted(profile_id)
-                        }
-                        Err(e) => {
-                            error!("delete_profile failed: {:#}", e);
-                            AppMsg::OperationFailed(e.to_string())
-                        }
-                    };
-                    tx.send(msg).ok();
-                });
-            });
-
-            dialog.present(Some(&window));
-        });
-        }
-
-        // ----- Right-click context menu -----
+        // All secondary actions live in one discoverable menu. Keeping a
+        // permanent trash button on every row made deletion visually equal
+        // to selection and consumed scarce title width.
         {
             let profile_id = profile.id.to_string();
             let profile_name = profile.name.clone();
@@ -370,13 +324,6 @@ pub fn populate_vpn_sidebar(
 
             let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
             popover.set_has_arrow(true);
-            popover.set_parent(&row);
-            {
-                let popover = popover.clone();
-                row.connect_destroy(move |_| {
-                    popover.unparent();
-                });
-            }
 
             let action_group = gio::SimpleActionGroup::new();
 
@@ -488,6 +435,17 @@ pub fn populate_vpn_sidebar(
 
             row.insert_action_group("vpn-ctx", Some(&action_group));
 
+            let menu_btn = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Profile actions")
+                .css_classes(["flat"])
+                .valign(gtk4::Align::Center)
+                .build();
+            menu_btn.set_popover(Some(&popover));
+            row.add_suffix(&menu_btn);
+
+            // Preserve the existing right-click shortcut, pointing the same
+            // menu at the pointer rather than maintaining a second menu.
             let gesture = gtk4::GestureClick::builder()
                 .button(3)
                 .build();
@@ -692,5 +650,14 @@ mod tests {
         let no_phase =
             VpnState::Connecting { profile_id: id, since, phase: "  ".into() };
         assert_eq!(row_view(&p, &no_phase, NOW).meta, "Auto");
+    }
+
+    #[test]
+    fn backend_and_timing_share_one_compact_secondary_line() {
+        assert_eq!(
+            row_subtitle("FortiGate (IPsec/IKEv2)", "Never connected"),
+            "FortiGate (IPsec/IKEv2) \u{b7} Never connected"
+        );
+        assert_eq!(row_subtitle("WireGuard", ""), "WireGuard");
     }
 }

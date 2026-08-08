@@ -462,8 +462,8 @@ pub fn build_ui(
     let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
-    vpn_split.set_min_sidebar_width(280.0);
-    vpn_split.set_max_sidebar_width(400.0);
+    vpn_split.set_min_sidebar_width(260.0);
+    vpn_split.set_max_sidebar_width(340.0);
     vpn_split.set_sidebar(Some(&vpn_sidebar_page));
     vpn_split.set_content(Some(&vpn_content_page));
 
