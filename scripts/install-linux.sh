@@ -527,10 +527,29 @@ if systemctl list-unit-files 2>/dev/null | grep -qE '^strongswan(-starter)?\.ser
         || warn "could not start strongswan — IKEv2 profiles will not connect until it runs"
 fi
 
-sudo systemctl enable --now supermgrd
+# `enable` then `restart`, NOT `enable --now`.
+#
+# `--now` starts a stopped unit and does nothing at all to a running one. On a
+# first install those are the same thing; on every upgrade after that they are
+# not. The new binary lands in /usr/bin, the old one keeps running from memory,
+# and the script cheerfully reports "supermgrd is running" — which is true, and
+# not what the operator asked for. Reinstalling twice today put a daemon from
+# 14:34 in front of a binary from 21:04, and every daemon-side fix in between
+# was invisible until it was restarted by hand.
+#
+# `restart` covers both cases: it starts a stopped unit and replaces a running
+# one, so the process serving D-Bus after this line is always the binary just
+# installed.
+#
+# It does mean an upgrade interrupts the daemon while a VPN is connected. The
+# tunnels themselves live in the kernel (WireGuard) or in separate processes
+# (charon, openvpn3) and survive, but in-flight daemon state does not — so an
+# install is a deliberate act, not something to run mid-session.
+sudo systemctl enable supermgrd
+sudo systemctl restart supermgrd
 
 if systemctl is-active --quiet supermgrd; then
-    note "supermgrd is running"
+    note "supermgrd is running ($(systemctl show supermgrd -p MainPID --value 2>/dev/null | sed 's/^/pid /'))"
 else
     warn "supermgrd did not start. Logs:  sudo journalctl -u supermgrd -n 50"
 fi
