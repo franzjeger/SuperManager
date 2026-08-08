@@ -135,8 +135,61 @@ pub enum ErrorCode {
     ConfigError,
     /// A required secret was not found in the keyring.
     SecretMissing,
+    /// A VPN key or preshared key was malformed.
+    InvalidKey,
+    /// A required service, executable, or kernel facility is unavailable.
+    PrerequisiteMissing,
+    /// The operation lacked the required OS privileges.
+    PermissionDenied,
     /// An unclassified internal error.
     Internal,
+}
+
+impl From<&crate::error::BackendError> for ErrorCode {
+    fn from(error: &crate::error::BackendError) -> Self {
+        use crate::error::BackendError;
+
+        match error {
+            BackendError::ConnectionFailed(_) => Self::Unreachable,
+            BackendError::Interface(_) => Self::KernelError,
+            BackendError::Key(_) => Self::InvalidKey,
+            BackendError::SecretMissing(_) => Self::SecretMissing,
+            BackendError::Config(_) => Self::ConfigError,
+            BackendError::Subprocess { .. } => Self::SubprocessError,
+            BackendError::Permission(_) => Self::PermissionDenied,
+            BackendError::Prerequisite(_) => Self::PrerequisiteMissing,
+            BackendError::Timeout { .. } => Self::Timeout,
+            BackendError::NotConnected
+            | BackendError::AlreadyConnected
+            | BackendError::Io(_) => Self::Internal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::ErrorCode;
+    use crate::error::BackendError;
+
+    #[test]
+    fn backend_errors_keep_their_machine_readable_category() {
+        let cases = [
+            (
+                BackendError::Prerequisite("charon is stopped".into()),
+                ErrorCode::PrerequisiteMissing,
+            ),
+            (
+                BackendError::Permission("CAP_NET_ADMIN is missing".into()),
+                ErrorCode::PermissionDenied,
+            ),
+            (BackendError::Config("bad profile".into()), ErrorCode::ConfigError),
+            (BackendError::Timeout { seconds: 30 }, ErrorCode::Timeout),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(ErrorCode::from(&error), expected, "{error}");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

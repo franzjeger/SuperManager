@@ -156,7 +156,7 @@ impl Default for FortiGateBackend {
 /// without the daemon enabled — that is the state a machine is in until
 /// somebody starts the unit, so it is the first thing a FortiGate connect
 /// hits.
-fn charon_unreachable(stderr: &str) -> bool {
+pub(crate) fn charon_unreachable(stderr: &str) -> bool {
     stderr.contains("charon.vici") || stderr.contains("connecting to 'default' URI failed")
 }
 
@@ -166,7 +166,7 @@ fn charon_unreachable(stderr: &str) -> bool {
 /// text after the one line that says what actually went wrong. That block was
 /// being handed to the GUI verbatim as the connection error, which buried the
 /// real message under a wall of option documentation.
-fn strip_usage_block(stderr: &str) -> String {
+pub(crate) fn strip_usage_block(stderr: &str) -> String {
     stderr
         .lines()
         .take_while(|l| !l.starts_with("strongSwan ") && !l.starts_with("usage:"))
@@ -731,7 +731,7 @@ impl VpnBackend for FortiGateBackend {
                      (label '{}': {e})",
                     fg_cfg.password.label()
                 );
-                BackendError::Key(format!(
+                BackendError::SecretMissing(format!(
                     "credential not found in keyring — please re-import the profile \
                      (label '{}')",
                     fg_cfg.password.label()
@@ -743,7 +743,7 @@ impl VpnBackend for FortiGateBackend {
                  (label '{}': {e})",
                 fg_cfg.psk.label()
             );
-            BackendError::Key(format!(
+            BackendError::SecretMissing(format!(
                 "credential not found in keyring — please re-import the profile \
                  (label '{}')",
                 fg_cfg.psk.label()

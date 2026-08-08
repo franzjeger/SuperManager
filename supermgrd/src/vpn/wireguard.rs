@@ -136,6 +136,18 @@ fn route_gateway_and_oif(msg: &RouteMessage) -> Option<(IpAddr, u32)> {
     }
 }
 
+/// True when rtnetlink returned the specified kernel errno.
+///
+/// Matching the numeric code avoids depending on the host locale or on the
+/// wording chosen by rtnetlink's `Display` implementation.
+fn rtnetlink_has_errno(error: &rtnetlink::Error, errno: nix::errno::Errno) -> bool {
+    matches!(
+        error,
+        rtnetlink::Error::NetlinkError(message)
+            if message.to_io().raw_os_error() == Some(errno as i32)
+    )
+}
+
 /// Resolve an interface name to its index via rtnetlink.
 async fn ifname_to_index(name: &str) -> Result<u32, BackendError> {
     let (conn, handle, _) = rtnetlink::new_connection()
@@ -255,7 +267,7 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
         // the common case on a desktop and races us every time. The route we
         // wanted is present, so this is the goal state, not a failure; it was
         // being logged as one on every single disconnect.
-        Err(e) if e.to_string().contains("File exists") => {
+        Err(e) if rtnetlink_has_errno(&e, nix::errno::Errno::EEXIST) => {
             info!(
                 "{} default route already restored by the system — nothing to do",
                 if ipv6 { "IPv6" } else { "IPv4" }
@@ -367,17 +379,18 @@ async fn add_allowed_ip_route(cidr: &str, iface_index: u32, metric: Option<u32>)
     };
 
     result.map_err(|e| {
-        let msg = e.to_string();
-        let hint = if msg.contains("Permission denied") || msg.contains("Operation not permitted") {
+        let hint = if rtnetlink_has_errno(&e, nix::errno::Errno::EACCES)
+            || rtnetlink_has_errno(&e, nix::errno::Errno::EPERM)
+        {
             " — the daemon must run as root to manage routes"
-        } else if msg.contains("File exists") {
+        } else if rtnetlink_has_errno(&e, nix::errno::Errno::EEXIST) {
             " — a conflicting route already exists; disconnect any other VPN first"
-        } else if msg.contains("No such device") {
+        } else if rtnetlink_has_errno(&e, nix::errno::Errno::ENODEV) {
             " — the WireGuard interface disappeared unexpectedly"
         } else {
             ""
         };
-        BackendError::Interface(format!("failed to add route {cidr}: {msg}{hint}"))
+        BackendError::Interface(format!("failed to add route {cidr}: {e}{hint}"))
     })
 }
 
@@ -566,7 +579,7 @@ impl WireGuardBackend {
                      (label '{}': {e})",
                     secret_ref.label()
                 );
-                BackendError::Key(format!(
+                BackendError::SecretMissing(format!(
                     "credential not found in keyring — please re-import the profile \
                      (label '{}')",
                     secret_ref.label()

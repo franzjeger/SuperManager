@@ -34,6 +34,10 @@ pub enum BackendError {
     #[error("key error: {0}")]
     Key(String),
 
+    /// A required credential was not found in the system secret store.
+    #[error("secret missing: {0}")]
+    SecretMissing(String),
+
     /// Profile configuration is invalid or incomplete.
     #[error("configuration error: {0}")]
     Config(String),
