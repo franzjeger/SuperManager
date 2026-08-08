@@ -1,7 +1,8 @@
 //! Async SSH client wrapper using `russh`.
 //!
-//! Provides password and public-key authentication, command execution, and
-//! SFTP session creation over a single TCP connection.
+//! Provides password, public-key and OpenSSH-certificate authentication,
+//! command execution, and SFTP session creation over a single TCP
+//! connection.
 
 use std::sync::Arc;
 
@@ -163,6 +164,66 @@ impl SshSession {
         timeout_secs: u64,
         known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
+        Self::connect_key_with_cert(
+            hostname,
+            port,
+            username,
+            private_key_pem,
+            None,
+            timeout_secs,
+            known_hosts,
+        )
+        .await
+    }
+
+    /// Connect to a remote host using OpenSSH certificate authentication.
+    ///
+    /// `cert_pem` must be the CA-signed certificate matching
+    /// `private_key_pem` (the `*-cert.pub` OpenSSH produces). If the
+    /// certificate is unparseable or the server rejects it, this falls
+    /// back to plain public-key auth with the same key rather than
+    /// failing outright — a host that trusts the bare key still
+    /// connects, and the server keeps the final say.
+    ///
+    /// See `connect_password` for the host-key verification semantics —
+    /// it's the same handler.
+    pub async fn connect_certificate(
+        hostname: &str,
+        port: u16,
+        username: &str,
+        private_key_pem: &str,
+        cert_pem: &str,
+        timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
+    ) -> Result<Self, SshError> {
+        Self::connect_key_with_cert(
+            hostname,
+            port,
+            username,
+            private_key_pem,
+            Some(cert_pem),
+            timeout_secs,
+            known_hosts,
+        )
+        .await
+    }
+
+    /// Shared implementation behind `connect_key` / `connect_certificate`.
+    ///
+    /// Ported from the Linux daemon's `ssh::connection` so both platforms
+    /// authenticate identically — including the cert-then-pubkey fallback
+    /// order, which matters because a CA-signed cert that has expired
+    /// should not lock an operator out of a host that also trusts the
+    /// underlying key.
+    async fn connect_key_with_cert(
+        hostname: &str,
+        port: u16,
+        username: &str,
+        private_key_pem: &str,
+        cert_pem: Option<&str>,
+        timeout_secs: u64,
+        known_hosts: Arc<KnownHostsStore>,
+    ) -> Result<Self, SshError> {
         let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
@@ -188,8 +249,43 @@ impl SshSession {
             reason: e.to_string(),
         })?;
 
+        let key_pair = Arc::new(key_pair);
+
+        // Certificate auth first when we have one. Every failure mode
+        // here is non-fatal on purpose — see `connect_certificate`.
+        if let Some(cert_data) = cert_pem {
+            match ssh_key::Certificate::from_openssh(cert_data) {
+                Ok(cert) => match handle
+                    .authenticate_openssh_cert(username, Arc::clone(&key_pair), cert)
+                    .await
+                {
+                    Ok(true) => return Ok(Self { handle }),
+                    Ok(false) => {
+                        tracing::warn!(
+                            host = %hostname,
+                            "server rejected SSH certificate, trying plain pubkey"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            host = %hostname,
+                            error = %e,
+                            "certificate auth errored, trying plain pubkey"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        host = %hostname,
+                        error = %e,
+                        "could not parse SSH certificate, trying plain pubkey"
+                    );
+                }
+            }
+        }
+
         let auth_ok = handle
-            .authenticate_publickey(username, Arc::new(key_pair))
+            .authenticate_publickey(username, key_pair)
             .await
             .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
