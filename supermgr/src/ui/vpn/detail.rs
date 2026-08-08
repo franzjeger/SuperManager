@@ -293,7 +293,6 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     let connect_btn = gtk4::Button::builder()
         .label("Connect")
         .css_classes(["suggested-action", "pill"])
-        .width_request(160)
         .sensitive(false)
         .build();
     header.actions.append(&connect_btn);
@@ -448,6 +447,14 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // --- Assemble -----------------------------------------------------------
 
     let (scroller, content) = design::detail_body();
+    // Two 340px cards plus their gap are useful; stretching them across an
+    // ultrawide pane is not. Centre the working area and leave the spare
+    // width as calm margin instead of turning row labels into a long-distance
+    // reading exercise.
+    scroller.set_child(None::<&gtk4::Widget>);
+    let content_clamp = adw::Clamp::builder().maximum_size(1040).build();
+    content_clamp.set_child(Some(&content));
+    scroller.set_child(Some(&content_clamp));
     content.append(&header.widget);
     content.append(&status_detail);
 

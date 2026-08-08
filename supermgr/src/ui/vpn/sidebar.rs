@@ -298,63 +298,9 @@ pub fn populate_vpn_sidebar(
             row.add_suffix(&design::status_pill(view.status, view.status.label()));
         }
 
-        // Delete button.
-        let delete_btn = gtk4::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text("Delete profile")
-            .css_classes(["flat"])
-            .valign(gtk4::Align::Center)
-            .build();
-        row.add_suffix(&delete_btn);
-
-        let profile_id = profile.id.to_string();
-        let profile_name = profile.name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        {
-        let profile_id = profile_id.clone();
-        let profile_name = profile_name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        delete_btn.connect_clicked(move |_btn| {
-            let dialog = adw::AlertDialog::new(
-                Some(&format!("Delete \"{}\"?", profile_name)),
-                Some("This cannot be undone."),
-            );
-            dialog.add_response("cancel", "Cancel");
-            dialog.add_response("delete", "Delete");
-            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-            dialog.set_default_response(Some("cancel"));
-            dialog.set_close_response("cancel");
-
-            let profile_id = profile_id.clone();
-            let rt = rt.clone();
-            let tx = tx.clone();
-            dialog.connect_response(Some("delete"), move |_dlg, _response| {
-                let profile_id = profile_id.clone();
-                let tx = tx.clone();
-                rt.spawn(async move {
-                    let msg = match dbus_delete_profile(profile_id.clone()).await {
-                        Ok(()) => {
-                            info!("deleted profile {}", profile_id);
-                            AppMsg::ProfileDeleted(profile_id)
-                        }
-                        Err(e) => {
-                            error!("delete_profile failed: {:#}", e);
-                            AppMsg::OperationFailed(e.to_string())
-                        }
-                    };
-                    tx.send(msg).ok();
-                });
-            });
-
-            dialog.present(Some(&window));
-        });
-        }
-
-        // ----- Right-click context menu -----
+        // All secondary actions live in one discoverable menu. Keeping a
+        // permanent trash button on every row made deletion visually equal
+        // to selection and consumed scarce title width.
         {
             let profile_id = profile.id.to_string();
             let profile_name = profile.name.clone();
@@ -378,13 +324,6 @@ pub fn populate_vpn_sidebar(
 
             let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
             popover.set_has_arrow(true);
-            popover.set_parent(&row);
-            {
-                let popover = popover.clone();
-                row.connect_destroy(move |_| {
-                    popover.unparent();
-                });
-            }
 
             let action_group = gio::SimpleActionGroup::new();
 
@@ -496,6 +435,17 @@ pub fn populate_vpn_sidebar(
 
             row.insert_action_group("vpn-ctx", Some(&action_group));
 
+            let menu_btn = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Profile actions")
+                .css_classes(["flat"])
+                .valign(gtk4::Align::Center)
+                .build();
+            menu_btn.set_popover(Some(&popover));
+            row.add_suffix(&menu_btn);
+
+            // Preserve the existing right-click shortcut, pointing the same
+            // menu at the pointer rather than maintaining a second menu.
             let gesture = gtk4::GestureClick::builder()
                 .button(3)
                 .build();
