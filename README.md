@@ -537,7 +537,32 @@ note above.
 Extra system packages the tests need beyond the build dependencies:
 
 - **Linux:** `tcpdump` — the engine's traffic-sniff analysis shells out to it, and
-  its tests do too.
+  its tests do too. Without it, two `traffic_sniff` tests fail with
+  `spawn tcpdump: No such file or directory`; nothing else in the suite needs it.
+
+### Checkouts on filesystems that don't preserve the exec bit
+
+Cloud-sync and foreign filesystems — OneDrive/Dropbox FUSE mounts, exFAT/NTFS,
+some network shares — report every file as mode `644` and silently ignore
+`chmod`. Two things break, both fixable from outside the tree:
+
+```bash
+# 1. Builds. Cargo writes build-script binaries without +x, then cannot run
+#    them: "Permission denied (os error 13)" on proc-macro2, serde, libc…
+#    Point the target dir at a native filesystem. Nothing in target/ is
+#    source, so it does not need to live in the synced tree — and keeping
+#    the multi-GB build cache out of the sync client is a win regardless.
+export CARGO_TARGET_DIR="$HOME/.cache/supermanager-target"
+
+# 2. Git. Every committed 755 file shows as a phantom "mode change
+#    100755 => 100644" modification. Left alone, `git commit -a` strips the
+#    exec bit from all of them, including install.sh, build-pkg.sh and the
+#    pkg maintainer scripts — which ships broken installers.
+git config core.fileMode false
+```
+
+`core.fileMode false` is per-clone and does not affect what is committed: the
+modes already recorded in the index stay `755`.
 
 ### CI
 
