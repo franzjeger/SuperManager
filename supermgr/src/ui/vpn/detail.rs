@@ -133,6 +133,7 @@ pub fn status_view(vpn: &VpnState, selected_profile: Option<&str>) -> StatusView
                 ErrorCode::AuthFailed => "Authentication failed",
                 ErrorCode::Unreachable => "Gateway unreachable",
                 ErrorCode::Timeout => "Connection timed out",
+                ErrorCode::NegotiationFailed => "VPN negotiation failed",
                 ErrorCode::KernelError => "Kernel error",
                 ErrorCode::SubprocessError => "VPN helper failed",
                 ErrorCode::ConfigError => "Invalid profile",
@@ -199,7 +200,10 @@ pub fn toolbar_status(
         VpnState::Disconnecting { .. } => {
             (Status::Connecting, "Disconnecting\u{2026}".to_owned())
         }
-        VpnState::Error { .. } => (Status::Error, "VPN error".to_owned()),
+        VpnState::Error { .. } => (
+            Status::Error,
+            active_name.unwrap_or("VPN error").to_owned(),
+        ),
         VpnState::Disconnected => (Status::Disconnected, "No VPN".to_owned()),
     }
 }

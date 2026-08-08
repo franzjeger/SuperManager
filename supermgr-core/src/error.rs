@@ -14,9 +14,17 @@ use thiserror::Error;
 /// Errors that can originate inside a VPN backend implementation.
 #[derive(Debug, Error)]
 pub enum BackendError {
+    /// The remote VPN gateway rejected the supplied credentials.
+    #[error("authentication failed: {0}")]
+    AuthenticationFailed(String),
+
     /// The connection attempt failed for a protocol-level reason.
     #[error("connection failed: {0}")]
     ConnectionFailed(String),
+
+    /// The gateway was reached, but VPN protocol negotiation did not complete.
+    #[error("negotiation failed: {0}")]
+    NegotiationFailed(String),
 
     /// An operation that requires an active tunnel was called while disconnected.
     #[error("not connected")]

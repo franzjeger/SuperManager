@@ -127,6 +127,8 @@ pub enum ErrorCode {
     Unreachable,
     /// The connection attempt timed out.
     Timeout,
+    /// The gateway answered, but VPN protocol negotiation failed.
+    NegotiationFailed,
     /// The kernel refused to create or configure the interface.
     KernelError,
     /// The strongSwan helper returned an unexpected error.
@@ -150,7 +152,9 @@ impl From<&crate::error::BackendError> for ErrorCode {
         use crate::error::BackendError;
 
         match error {
+            BackendError::AuthenticationFailed(_) => Self::AuthFailed,
             BackendError::ConnectionFailed(_) => Self::Unreachable,
+            BackendError::NegotiationFailed(_) => Self::NegotiationFailed,
             BackendError::Interface(_) => Self::KernelError,
             BackendError::Key(_) => Self::InvalidKey,
             BackendError::SecretMissing(_) => Self::SecretMissing,

@@ -194,6 +194,55 @@ fn swanctl_failure(command: &str, stderr: &str) -> BackendError {
     }
 }
 
+/// Convert strongSwan's initiate diagnostics into a stable, user-facing
+/// category. The complete diagnostic stays in the journal; the GUI gets a
+/// sentence that explains the likely remedy without exposing connection IDs
+/// or raw CHILD_SA state-machine text.
+fn classify_initiate_failure(message: &str) -> BackendError {
+    let upper = message.to_ascii_uppercase();
+
+    if ["EAP_FAILURE", "AUTHENTICATION_FAILED", "AUTH_FAILED"]
+        .iter()
+        .any(|marker| upper.contains(marker))
+    {
+        BackendError::AuthenticationFailed(
+            "The FortiGate rejected the credentials. Check the username, password and PSK."
+                .into(),
+        )
+    } else if upper.contains("TIMEOUT") || upper.contains("TIMED OUT") {
+        BackendError::Timeout { seconds: 30 }
+    } else if upper.contains("NO_PROPOSAL_CHOSEN")
+        || upper.contains("NO MATCHING PROPOSAL")
+    {
+        BackendError::NegotiationFailed(
+            "The FortiGate and SuperManager could not agree on IKE/IPsec security settings."
+                .into(),
+        )
+    } else if upper.contains("PERMISSION DENIED") || upper.contains("EPERM") {
+        BackendError::Permission(
+            "The daemon needs root privileges to initiate IPsec tunnels.".into(),
+        )
+    } else if upper.contains("CONNECTION NOT FOUND") {
+        BackendError::Prerequisite(
+            "The strongSwan connection was not loaded. Ensure charon is running and try again."
+                .into(),
+        )
+    } else if upper.contains("NETWORK IS UNREACHABLE")
+        || upper.contains("NO ROUTE TO HOST")
+        || upper.contains("NAME OR SERVICE NOT KNOWN")
+    {
+        BackendError::ConnectionFailed(
+            "The FortiGate gateway could not be reached. Check the network and gateway address."
+                .into(),
+        )
+    } else {
+        BackendError::NegotiationFailed(
+            "The IPsec connection could not be established. Check the credentials, PSK and IKE settings on the FortiGate."
+                .into(),
+        )
+    }
+}
+
 /// Run `swanctl <args>`, log every detail, and return the raw `Output`.
 ///
 /// Never panics; propagates I/O errors as [`BackendError::Io`].
@@ -929,25 +978,8 @@ impl VpnBackend for FortiGateBackend {
             } else {
                 meaningful.join("\n")
             };
-            let hint = if message.contains("EAP_FAILURE") || message.contains("AUTHENTICATION_FAILED") || message.contains("AUTH_FAILED") {
-                "authentication failed — verify your username and password in the profile"
-            } else if message.contains("TIMEOUT") || message.contains("timed out") || message.contains("establishing connection") {
-                "connection timed out — the FortiGate gateway may be unreachable; \
-                 check your network connection and verify the gateway hostname"
-            } else if message.contains("NO_PROPOSAL_CHOSEN") || message.contains("no matching proposal") {
-                "IKE negotiation failed (no matching proposal) — the FortiGate may not \
-                 support the configured cipher suites; check VPN settings on the firewall"
-            } else if message.contains("Permission denied") || message.contains("EPERM") {
-                "permission denied — the daemon must run as root to initiate IPsec tunnels"
-            } else if message.contains("connection not found") {
-                "strongSwan configuration not loaded — ensure charon is running \
-                 (systemctl start strongswan)"
-            } else {
-                "IKE/IPsec negotiation failed"
-            };
-            return Err(BackendError::ConnectionFailed(format!(
-                "{hint}: {message}",
-            )));
+            warn!(details = %message, "strongSwan failed to establish the FortiGate CHILD_SA");
+            return Err(classify_initiate_failure(&message));
         }
 
         // ── Steps 6–7 wrapped in a rollback-on-error scope ───────────────────
@@ -1480,6 +1512,34 @@ error: connecting to 'default' URI failed: No such file or directory
     fn charon_unreachable_does_not_fire_on_unrelated_failures() {
         assert!(!charon_unreachable("establishing CHILD_SA supermgr-abc failed"));
         assert!(charon_unreachable(CHARON_DOWN_STDERR));
+    }
+
+    #[test]
+    fn a_bare_child_sa_failure_is_not_called_unreachable() {
+        let raw = "initiate failed: establishing CHILD_SA 'supermgr-a132dcaa7713' failed";
+        let error = classify_initiate_failure(raw);
+        assert!(matches!(error, BackendError::NegotiationFailed(_)), "{error}");
+        assert!(!error.to_string().contains("supermgr-a132dcaa7713"), "{error}");
+    }
+
+    #[test]
+    fn initiate_failures_keep_distinct_actionable_categories() {
+        assert!(matches!(
+            classify_initiate_failure("received EAP_FAILURE"),
+            BackendError::AuthenticationFailed(_)
+        ));
+        assert!(matches!(
+            classify_initiate_failure("NO_PROPOSAL_CHOSEN"),
+            BackendError::NegotiationFailed(_)
+        ));
+        assert!(matches!(
+            classify_initiate_failure("send failed: Network is unreachable"),
+            BackendError::ConnectionFailed(_)
+        ));
+        assert!(matches!(
+            classify_initiate_failure("initiate timed out"),
+            BackendError::Timeout { seconds: 30 }
+        ));
     }
 
     #[test]
