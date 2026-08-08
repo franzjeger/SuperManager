@@ -1,7 +1,7 @@
 //! VPN profile list sidebar widget.
 //!
 //! Builds a [`gtk4::ListBox`] where each row is an [`adw::ActionRow`] displaying
-//! the profile name, backend type, and a delete button.  The list is rebuilt
+//! the profile name, backend type, and a delete button. The list is rebuilt
 //! from scratch via [`populate_vpn_sidebar`] whenever the profile list changes.
 //!
 //! # Undifferentiated rows
@@ -13,11 +13,12 @@
 //! and one that had never been tried looked the same at a glance, separated
 //! only by a small monochrome prefix icon.
 //!
-//! Now the backend is a badge, the state is a coloured pill, and the pill
-//! appears **only on rows worth looking at** ([`Status::is_notable`], plus
-//! connected). A list where every row is decorated has no signal left in the
-//! decoration; a list where three rows out of twenty are marked is scannable
-//! from across the desk.
+//! Now the backend shares the secondary line with timing metadata, while the
+//! state is a coloured pill that appears **only on rows worth looking at**
+//! ([`Status::is_notable`], plus connected). Keeping the backend out of the
+//! suffix area is important: a long backend name, status pill and delete
+//! button otherwise leave the title no width and make GTK wrap it one letter
+//! per line.
 
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -113,6 +114,14 @@ fn last_connected(profile: &ProfileSummary, now_secs: u64) -> String {
     match profile.last_connected_secs {
         Some(ts) => format!("Last {}", crate::ui::format_ago(now_secs.saturating_sub(ts))),
         None => "Never connected".to_owned(),
+    }
+}
+
+fn row_subtitle(backend: &str, meta: &str) -> String {
+    if meta.is_empty() {
+        backend.to_owned()
+    } else {
+        format!("{backend} \u{b7} {meta}")
     }
 }
 
@@ -257,10 +266,13 @@ pub fn populate_vpn_sidebar(
 
     for profile in &sorted {
         let view = row_view(profile, vpn_state, now_secs);
+        let subtitle = row_subtitle(profile.backend.as_str(), &view.meta);
 
         let row = adw::ActionRow::builder()
             .title(profile.name.as_str())
-            .subtitle(view.meta.as_str())
+            .title_lines(1)
+            .subtitle(subtitle)
+            .subtitle_lines(1)
             .activatable(true)
             .build();
 
@@ -281,10 +293,6 @@ pub fn populate_vpn_sidebar(
             icon.add_css_class(view.status.style_class());
             row.add_prefix(&icon);
         }
-
-        // Backend as a neutral badge rather than the first word of the
-        // subtitle, so the subtitle is free to say something that changes.
-        row.add_suffix(&design::badge(profile.backend.as_str()));
 
         if view.show_pill {
             row.add_suffix(&design::status_pill(view.status, view.status.label()));
@@ -692,5 +700,14 @@ mod tests {
         let no_phase =
             VpnState::Connecting { profile_id: id, since, phase: "  ".into() };
         assert_eq!(row_view(&p, &no_phase, NOW).meta, "Auto");
+    }
+
+    #[test]
+    fn backend_and_timing_share_one_compact_secondary_line() {
+        assert_eq!(
+            row_subtitle("FortiGate (IPsec/IKEv2)", "Never connected"),
+            "FortiGate (IPsec/IKEv2) \u{b7} Never connected"
+        );
+        assert_eq!(row_subtitle("WireGuard", ""), "WireGuard");
     }
 }
