@@ -898,9 +898,14 @@ struct ComplianceHostView: View {
     /// Export buttons. Both FortiGate and Linux runs now produce
     /// complete reports (since 1.12c widened `compliance_list_checks`
     /// to include Linux `CheckDefinition` rows — the report's
-    /// lib_lookup resolves Linux check_ids and emits CIS reference,
-    /// description, and Remediation columns). The deviceType-gated
+    /// lib_lookup resolves Linux check_ids and emits the description
+    /// and Remediation columns). The deviceType-gated
     /// disabled-with-tooltip shipping in 1.12b is removed.
+    ///
+    /// One column is still blank on Linux: `linux.*` library rows
+    /// carry `cisReference: nil` because CIS Linux 4.0 section
+    /// numbers aren't authored yet, so that badge hides. Everything
+    /// else in the report resolves.
     ///
     /// Allowlist switch retained: `.notApplicable` hosts don't reach
     /// this code path (no Run-scan button, no run, so

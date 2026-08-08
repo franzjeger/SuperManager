@@ -193,17 +193,28 @@ impl EngineServer {
     /// `compliance_get_run` / `compliance_drift` calls see Linux
     /// rows alongside FortiGate rows.
     ///
-    /// **Known exposed gap — TODO(1.12b):** `compliance_render_report`
-    /// looks up CIS reference / description / remediation in the
-    /// library returned by `compliance_list_checks`, which today only
-    /// contains FortiGate checks. Linux runs render through that
-    /// path with their per-check `detail` field intact, but with no
-    /// remediation block — the most valuable column for the operator.
-    /// The fix is either widening `compliance_list_checks` to merge
-    /// in `ssh_compliance::LINUX_CHECKS` (preferred — the GUI's
-    /// library browser benefits too), or carrying the recommendation
-    /// inline on `CheckResult`. Land in 1.12b before exposing the
-    /// "Export report" button for Linux hosts.
+    /// **Closed in 1.12c:** `compliance_render_report` resolves CIS
+    /// reference / description / remediation against the library
+    /// returned by `compliance_list_checks`, which used to hold
+    /// FortiGate checks only — so Linux runs rendered with their
+    /// per-check `detail` intact but no remediation block, the most
+    /// valuable column for the operator. `list_checks()` now merges
+    /// in `ssh_compliance::linux_default_checks()` (the preferred
+    /// fix of the two considered — the GUI's library browser gets
+    /// the Linux rows out of it as well), so both the report and
+    /// the in-row Remediation block resolve `linux.*` check ids.
+    /// The deviceType gate that kept "Export report" disabled for
+    /// Linux hosts is gone from `ComplianceHostView.exportButtons`.
+    /// Regression cover in `compliance::tests`:
+    /// `list_checks_includes_linux_baseline_rows`,
+    /// `linux_library_rows_carry_remediation`, and
+    /// `render_report_emits_remediation_block_for_failed_linux_check`.
+    ///
+    /// **Still open:** every Linux library row carries
+    /// `cis_reference: None` — CIS Linux 4.0 section numbers aren't
+    /// authored yet — so the report's CIS column and the library
+    /// row's CIS badge stay hidden for `linux.*` checks. Title,
+    /// description, category, severity and remediation all render.
     pub(crate) async fn handle_compliance_run_linux(
         &self,
         id: u64,
