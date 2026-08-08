@@ -224,9 +224,22 @@ final class HelperClient {
     /// this itself — that's why "select exit node" used to be a
     /// no-op. See `install_exit_routes` in the helper for the
     /// full rationale.
+    /// `autoExitNode` tells the helper the user picked `auto:any` rather than a
+    /// named peer, so its persisted self-heal intent records "any exit node"
+    /// instead of pinning whichever peer tailscaled happened to resolve to.
+    /// Without it, the reconciler re-asserts that one peer after every wake —
+    /// silently converting an auto selection into a fixed one, and stranding
+    /// self-heal entirely once that peer goes offline.
+    ///
+    /// We state it here rather than let the helper infer it because this is
+    /// where the user's choice is known first-hand; tailscaled's prefs only
+    /// report what it resolved to.
     @discardableResult
-    func tailscaleInstallExitRoutes() async throws -> [String: Any] {
-        try await call("tailscale_install_exit_routes", params: [:])
+    func tailscaleInstallExitRoutes(autoExitNode: Bool = false) async throws -> [String: Any] {
+        try await call(
+            "tailscale_install_exit_routes",
+            params: ["auto_exit_node": autoExitNode]
+        )
     }
 
     /// Tear down the split-default routes. Idempotent — safe to

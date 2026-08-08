@@ -375,6 +375,16 @@ extension AppState {
     /// Caller is the UI layer, which should also surface a
     /// confirmation alert before this is invoked — auto-revert is
     /// a backstop, not an excuse to skip user consent.
+    ///
+    /// The sentinel `tailscale set --exit-node` accepts for "pick one for me,
+    /// and stay free to re-pick". No control in this app passes it yet — every
+    /// current caller sends a peer IP or `""` — but `setExitNodeWithSafety`
+    /// already branches on it, and the helper's self-heal intent has to
+    /// distinguish it from a named peer or the reconciler will pin whichever
+    /// peer tailscaled resolved to. Named here so that distinction is one
+    /// symbol rather than a literal repeated at each layer.
+    static let autoAnyExitNode = "auto:any"
+
     func setExitNodeWithSafety(_ ipOrAuto: String) async {
         DebugLog.write("[ts/exit] === setExitNodeWithSafety START target=\(ipOrAuto.isEmpty ? "<NONE>" : ipOrAuto) ===")
         // Suspend connectivity watchdog for 30 seconds so the
@@ -408,10 +418,16 @@ extension AppState {
             return
         }
 
+        // "Any exit node will do" — tailscaled chooses, and stays free to
+        // re-choose. Distinct from a named peer all the way down to the
+        // helper's persisted self-heal intent, so it is named rather than
+        // compared as a literal in two places.
+        let isAutoSelection = ipOrAuto == Self.autoAnyExitNode
+
         // 1. Apply daemon pref.
         DebugLog.write("[ts/exit] step 1/4: apply daemon pref")
         await applyTailscalePref(
-            optimistic: { p in p.exitNodeIP = ipOrAuto == "auto:any" ? "" : ipOrAuto },
+            optimistic: { p in p.exitNodeIP = isAutoSelection ? "" : ipOrAuto },
             cli: { try await TailscaleClient.setExitNode(ipOrAuto) }
         )
         DebugLog.write("[ts/exit] step 1/4 done — pref set")
@@ -452,7 +468,8 @@ extension AppState {
         // 3. Install full split-default routes.
         DebugLog.write("[ts/exit] step 3/4: install split-default routes via helper")
         do {
-            let r = try await HelperClient.shared.tailscaleInstallExitRoutes()
+            let r = try await HelperClient.shared
+                .tailscaleInstallExitRoutes(autoExitNode: isAutoSelection)
             DebugLog.write("[ts/exit] step 3/4 done: \(r["message"] ?? "")")
             tailscaleActionError = nil
         } catch {
