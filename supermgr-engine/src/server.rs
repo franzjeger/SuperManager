@@ -182,6 +182,7 @@ impl EngineServer {
             "ssh_delete_host" => self.handle_ssh_delete_host(id, req.params).await,
             "ssh_toggle_pin" => self.handle_ssh_toggle_pin(id, req.params).await,
             "ssh_set_password" => self.handle_ssh_set_password(id, req.params).await,
+            "ssh_set_certificate" => self.handle_ssh_set_certificate(id, req.params).await,
 
             // -- SSH operations --
             "ssh_execute_command" => self.handle_ssh_execute_command(id, req.params).await,
@@ -382,6 +383,46 @@ impl EngineServer {
     }
 }
 
+/// Retrieve the OpenSSH certificate for a certificate-auth host.
+///
+/// Returns `None` for every host that isn't on
+/// `AuthMethod::Certificate`, and — with a warning — for a cert-auth
+/// host whose certificate is unconfigured or unreadable. Callers treat
+/// `None` as "use plain public-key auth with the same key".
+///
+/// Degrading instead of erroring is deliberate and matches the Linux
+/// daemon: the private key is the thing that actually authenticates,
+/// the certificate only carries the CA's signature over it. A host
+/// that also has the bare key in `authorized_keys` stays reachable
+/// when the cert is missing, expired or unreadable from the keychain,
+/// which is the difference between a degraded login and an operator
+/// locked out mid-incident. The server still decides whether the bare
+/// key is acceptable, so this cannot turn a rejected cert into
+/// unauthorised access.
+async fn cert_pem_for_host(host: &Host, secrets: &Arc<dyn SecretStore>) -> Option<String> {
+    if host.auth_method != AuthMethod::Certificate {
+        return None;
+    }
+    let Some(cert_ref) = host.auth_cert_ref.as_ref() else {
+        warn!(
+            host = %host.hostname,
+            "certificate auth selected but no certificate configured — falling back to key auth"
+        );
+        return None;
+    };
+    match secrets.retrieve(&cert_ref.0).await {
+        Ok(bytes) => Some(String::from_utf8_lossy(&bytes).to_string()),
+        Err(e) => {
+            warn!(
+                host = %host.hostname,
+                error = %e,
+                "could not retrieve SSH certificate — falling back to key auth"
+            );
+            None
+        }
+    }
+}
+
 /// Same as `connect_to_host_owned` but returns a structured
 /// `EngineError` instead of a stringified error. Used by handlers
 /// that emit `Response::err_engine` so the Swift client can
@@ -426,7 +467,11 @@ pub async fn connect_to_host_owned_typed(
             .await
             .map_err(|e| ssh_error_to_engine(&host.hostname, e))?
         }
-        AuthMethod::Key => {
+        // Both arms need the same private key; certificate auth just
+        // presents a CA-signed cert alongside it. See
+        // `cert_pem_for_host` for why a missing cert degrades to plain
+        // key auth rather than failing here.
+        AuthMethod::Key | AuthMethod::Certificate => {
             let key_id = host.auth_key_id.ok_or_else(|| {
                 EngineError::Other(anyhow::anyhow!("no SSH key configured"))
             })?;
@@ -442,21 +487,29 @@ pub async fn connect_to_host_owned_typed(
                 })?;
                 String::from_utf8_lossy(&privkey_bytes).to_string()
             };
-            SshSession::connect_key(
-                &host.hostname,
-                host.port,
-                &host.username,
-                &privkey_pem,
-                10,
-                known_hosts,
-            )
-            .await
-            .map_err(|e| ssh_error_to_engine(&host.hostname, e))?
-        }
-        AuthMethod::Certificate => {
-            return Err(EngineError::Other(anyhow::anyhow!(
-                "ssh certificate auth not yet implemented in supermgr-engine"
-            )));
+            match cert_pem_for_host(&host, secrets).await {
+                Some(cert_pem) => SshSession::connect_certificate(
+                    &host.hostname,
+                    host.port,
+                    &host.username,
+                    &privkey_pem,
+                    &cert_pem,
+                    10,
+                    known_hosts,
+                )
+                .await
+                .map_err(|e| ssh_error_to_engine(&host.hostname, e))?,
+                None => SshSession::connect_key(
+                    &host.hostname,
+                    host.port,
+                    &host.username,
+                    &privkey_pem,
+                    10,
+                    known_hosts,
+                )
+                .await
+                .map_err(|e| ssh_error_to_engine(&host.hostname, e))?,
+            }
         }
     };
 
@@ -531,7 +584,9 @@ pub async fn connect_to_host_owned(
             .await
             .map_err(|e| e.to_string())?
         }
-        AuthMethod::Key => {
+        // See the typed variant above — same key fetch, same
+        // cert-degrades-to-key rule.
+        AuthMethod::Key | AuthMethod::Certificate => {
             let key_id = host
                 .auth_key_id
                 .ok_or_else(|| "no SSH key configured".to_string())?;
@@ -549,23 +604,29 @@ pub async fn connect_to_host_owned(
                     .map_err(|e| format!("retrieve private key: {e}"))?;
                 String::from_utf8_lossy(&privkey_bytes).to_string()
             };
-            SshSession::connect_key(
-                &host.hostname,
-                host.port,
-                &host.username,
-                &privkey_pem,
-                10,
-                known_hosts,
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        }
-        AuthMethod::Certificate => {
-            // Certificate auth (SSH cert signed by a CA) is a Linux
-            // path that hasn't been ported to the Mac engine yet.
-            // Fail loudly rather than silently mis-route to one of
-            // the other arms.
-            return Err("ssh certificate auth not yet implemented in supermgr-engine".to_string());
+            match cert_pem_for_host(&host, secrets).await {
+                Some(cert_pem) => SshSession::connect_certificate(
+                    &host.hostname,
+                    host.port,
+                    &host.username,
+                    &privkey_pem,
+                    &cert_pem,
+                    10,
+                    known_hosts,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+                None => SshSession::connect_key(
+                    &host.hostname,
+                    host.port,
+                    &host.username,
+                    &privkey_pem,
+                    10,
+                    known_hosts,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+            }
         }
     };
 
@@ -667,6 +728,112 @@ mod tests {
     fn api_ref() -> SecretRef {
         SecretRef("supermgr/ssh/host/<id>/api_token".to_owned())
     }
+    fn cert_ref() -> SecretRef {
+        SecretRef("supermgr/ssh/host/<id>/cert".to_owned())
+    }
+
+    /// In-memory `SecretStore` for the `cert_pem_for_host` tests:
+    /// resolves the labels it was seeded with, `NotFound` for the rest.
+    struct MapSecretStore(std::collections::HashMap<String, Vec<u8>>);
+
+    impl MapSecretStore {
+        fn with(label: &str, value: &str) -> Arc<dyn SecretStore> {
+            let mut m = std::collections::HashMap::new();
+            m.insert(label.to_owned(), value.as_bytes().to_vec());
+            Arc::new(Self(m))
+        }
+        fn empty() -> Arc<dyn SecretStore> {
+            Arc::new(Self(std::collections::HashMap::new()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SecretStore for MapSecretStore {
+        async fn store(
+            &self,
+            _label: &str,
+            _secret: &[u8],
+        ) -> Result<(), supermgr_core::error::SecretError> {
+            unreachable!("cert_pem_for_host never stores")
+        }
+        async fn retrieve(
+            &self,
+            label: &str,
+        ) -> Result<supermgr_core::keyring::ZeroizingSecret, supermgr_core::error::SecretError>
+        {
+            self.0
+                .get(label)
+                .map(|b| supermgr_core::keyring::ZeroizingSecret::from_vec(b.clone()))
+                .ok_or_else(|| supermgr_core::error::SecretError::NotFound {
+                    label: label.to_owned(),
+                })
+        }
+        async fn delete(&self, _label: &str) -> Result<(), supermgr_core::error::SecretError> {
+            unreachable!("cert_pem_for_host never deletes")
+        }
+    }
+
+    const FAKE_CERT: &str = "ssh-ed25519-cert-v01@openssh.com AAAAfake== user@example";
+
+    #[tokio::test]
+    async fn cert_fetch_returns_cert_for_certificate_auth_host() {
+        let mut host = full_host();
+        host.auth_method = AuthMethod::Certificate;
+        host.auth_cert_ref = Some(cert_ref());
+        let secrets = MapSecretStore::with(&cert_ref().0, FAKE_CERT);
+
+        assert_eq!(
+            cert_pem_for_host(&host, &secrets).await.as_deref(),
+            Some(FAKE_CERT),
+            "a cert-auth host with a readable certificate must present it"
+        );
+    }
+
+    #[tokio::test]
+    async fn cert_fetch_skips_non_certificate_auth_methods() {
+        // The guard that keeps a stray `auth_cert_ref` on a Key- or
+        // Password-auth host from silently switching the connection to
+        // certificate auth. `auth_method` is the only thing that
+        // decides, not the presence of a cert.
+        let secrets = MapSecretStore::with(&cert_ref().0, FAKE_CERT);
+        for method in [AuthMethod::Password, AuthMethod::Key] {
+            let mut host = full_host();
+            host.auth_method = method;
+            host.auth_cert_ref = Some(cert_ref());
+            assert!(
+                cert_pem_for_host(&host, &secrets).await.is_none(),
+                "{method:?} auth must not pick up a certificate"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cert_fetch_degrades_when_certificate_missing_or_unreadable() {
+        // Both degradation paths documented on `cert_pem_for_host`:
+        // no cert configured, and a cert_ref the store can't resolve.
+        // Either way the caller falls back to plain key auth instead of
+        // failing the connection — an operator with the bare key in
+        // authorized_keys stays able to log in.
+        let mut unconfigured = full_host();
+        unconfigured.auth_method = AuthMethod::Certificate;
+        unconfigured.auth_cert_ref = None;
+        assert!(
+            cert_pem_for_host(&unconfigured, &MapSecretStore::empty())
+                .await
+                .is_none(),
+            "cert auth with no configured certificate must degrade, not error"
+        );
+
+        let mut dangling = full_host();
+        dangling.auth_method = AuthMethod::Certificate;
+        dangling.auth_cert_ref = Some(cert_ref());
+        assert!(
+            cert_pem_for_host(&dangling, &MapSecretStore::empty())
+                .await
+                .is_none(),
+            "an unreadable certificate must degrade, not error"
+        );
+    }
 
     fn full_host() -> Host {
         // A "richly populated" host that exercises every field the merge
@@ -684,7 +851,11 @@ mod tests {
             auth_method: AuthMethod::Password,
             auth_key_id: None,
             auth_password_ref: Some(password_ref()),
-            auth_cert_ref: None,
+            // Populated so the merge tests below actually exercise it.
+            // This fixture documents itself as "every field populated";
+            // leaving the cert ref None meant an edit that silently
+            // dropped it would have passed.
+            auth_cert_ref: Some(cert_ref()),
             vpn_profile_id: Some(uuid::Uuid::nil()),
             api_port: None,
             api_token_ref: Some(api_ref()),
@@ -739,8 +910,41 @@ mod tests {
             Some(&api_ref().0),
             "merge_host_update wiped api_token_ref"
         );
+        assert_eq!(
+            host.auth_cert_ref.as_ref().map(|s| &s.0),
+            Some(&cert_ref().0),
+            "merge_host_update wiped auth_cert_ref — editing any field \
+             would strip a certificate host's certificate"
+        );
         assert!(host.pinned, "merge_host_update reset the pin flag");
         assert!(host.vpn_profile_id.is_some(), "merge_host_update wiped vpn_profile_id");
+    }
+
+    #[test]
+    fn merge_never_takes_a_client_supplied_cert_ref() {
+        // Secret labels are the engine's to mint — `ssh_set_certificate`
+        // and the `certificate` param on `ssh_add_host` both derive the
+        // label from the host id. If `auth_cert_ref` ever became a
+        // merge-able field, a caller could repoint a host at an arbitrary
+        // keychain entry and have the connect path read it. Same reasoning
+        // guards `auth_password_ref` and `api_token_ref`.
+        let mut host = full_host();
+        let incoming = serde_json::json!({
+            "auth_cert_ref": "supermgr/ssh/host/somebody-elses-host/certificate",
+            "auth_password_ref": "supermgr/ssh/host/somebody-elses-host/password",
+        });
+        merge_host_update(&mut host, &incoming);
+
+        assert_eq!(
+            host.auth_cert_ref.as_ref().map(|s| &s.0),
+            Some(&cert_ref().0),
+            "merge_host_update accepted an auth_cert_ref off the wire"
+        );
+        assert_eq!(
+            host.auth_password_ref.as_ref().map(|s| &s.0),
+            Some(&password_ref().0),
+            "merge_host_update accepted an auth_password_ref off the wire"
+        );
     }
 
     #[test]

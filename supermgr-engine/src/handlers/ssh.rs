@@ -30,6 +30,23 @@ pub(crate) enum FanoutOp {
     Revoke,
 }
 
+/// Reject anything that isn't a parseable OpenSSH certificate before it
+/// reaches the keychain, returning a message fit for a dialog.
+///
+/// The common mistake this catches is handing over the public key
+/// (`id_ed25519.pub`) instead of the certificate (`id_ed25519-cert.pub`);
+/// both are one line of base64 with a similar shape, and only the second
+/// carries a CA signature. `from_openssh` rejects the plain key because
+/// its algorithm name lacks the `-cert-v01@openssh.com` suffix.
+fn validate_openssh_certificate(cert: &str) -> Result<(), String> {
+    ssh_key::Certificate::from_openssh(cert.trim()).map(|_| ()).map_err(|e| {
+        format!(
+            "not a valid OpenSSH certificate ({e}). Expected the contents of a \
+             `*-cert.pub` file — the CA-signed certificate, not the public key."
+        )
+    })
+}
+
 /// Audit line for a key-lifecycle event. These have no target host, so
 /// the host columns stay empty and the UI omits them.
 fn audit_key_event(action: AuditAction, key_name: &str, fingerprint: &str) {
@@ -278,6 +295,27 @@ impl EngineServer {
             }
         }
 
+        // Same for an OpenSSH certificate. The engine owns the secret
+        // label rather than accepting `auth_cert_ref` off the wire, so a
+        // caller can't aim a host's cert ref at an arbitrary keychain
+        // entry — identical reasoning to the password above.
+        if let Some(cert) = params.get("certificate").and_then(|v| v.as_str()) {
+            if !cert.trim().is_empty() {
+                if let Err(msg) = validate_openssh_certificate(cert) {
+                    return Response::err(id, protocol::INVALID_PARAMS, msg);
+                }
+                let secret_label = format!("supermgr/ssh/host/{}/certificate", host.id);
+                if let Err(e) = self.secrets.store(&secret_label, cert.as_bytes()).await {
+                    return Response::err(
+                        id,
+                        protocol::INTERNAL_ERROR,
+                        format!("store certificate: {e}"),
+                    );
+                }
+                host.auth_cert_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
+            }
+        }
+
         let mut state = self.state.lock().await;
         if let Err(e) = state.save_ssh_host(&host) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
@@ -415,6 +453,50 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
             host.auth_password_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
+            host.updated_at = chrono::Utc::now();
+            let host_clone = host.clone();
+            let _ = state.save_ssh_host(&host_clone);
+        }
+
+        Response::ok(id, serde_json::json!(null))
+    }
+
+    /// Store an OpenSSH certificate for an existing host and point
+    /// `auth_cert_ref` at it. The edit-path counterpart to the
+    /// `certificate` param on `ssh_add_host`, and the exact shape of
+    /// `ssh_set_password` — including the engine owning the label.
+    ///
+    /// Validated before it is stored. The connect path treats an
+    /// unparseable certificate as non-fatal and falls back to plain key
+    /// auth, which is right at connect time but would make a typo here
+    /// look like a working save followed by a mysteriously
+    /// key-authenticated session. Rejecting on write is where the
+    /// operator can still act on the error.
+    pub(crate) async fn handle_ssh_set_certificate(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let host_id = match get_uuid_param(&params, "host_id") {
+            Ok(id) => id,
+            Err(r) => return r,
+        };
+        let certificate = match params.get("certificate").and_then(|v| v.as_str()) {
+            Some(c) => c,
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing certificate"),
+        };
+        if let Err(msg) = validate_openssh_certificate(certificate) {
+            return Response::err(id, protocol::INVALID_PARAMS, msg);
+        }
+
+        let secret_label = format!("supermgr/ssh/host/{host_id}/certificate");
+        if let Err(e) = self.secrets.store(&secret_label, certificate.as_bytes()).await {
+            return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
+        }
+
+        let mut state = self.state.lock().await;
+        if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
+            host.auth_cert_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             host.updated_at = chrono::Utc::now();
             let host_clone = host.clone();
             let _ = state.save_ssh_host(&host_clone);
@@ -879,6 +961,57 @@ impl EngineServer {
         match serde_json::to_value(&health) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real ed25519 certificate from `ssh-keygen -s ca -I testid -n root`.
+    /// Only parsed, never validity-checked, so the embedded expiry can't
+    /// rot the test.
+    const CERT: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIJ9a/RUT34M6KpfmIHf+OOJMzRUEfVeqUOI02LzMhfNtAAAAIOUk18Uqim7mDZikSU6bmR7b9zjAFqL88V8dFZXWCen/AAAAAAAAAAAAAAABAAAABnRlc3RpZAAAAAgAAAAEcm9vdAAAAABqd03QAAAAAGxXMCUAAAAAAAAAggAAABVwZXJtaXQtWDExLWZvcndhcmRpbmcAAAAAAAAAF3Blcm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAAABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5nAAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5wZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACDzWHnfe5a0E+lvGZ9ye+4ItyAp57rjW9E01WbNw7fkoAAAAFMAAAALc3NoLWVkMjU1MTkAAABATEJm0QvR/7+XQ0ya/o9gNs+Ew6HvmNhR3hbiW0jwuVL2Fbpc/cMxapnKqUzZAzNkMvxPQGtpUWcXxx5Q4siCDg== testkey";
+
+    /// The public key the certificate above was signed over. Shape-alike,
+    /// and the thing an operator reaches for by mistake.
+    const PLAIN_PUBKEY: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOUk18Uqim7mDZikSU6bmR7b9zjAFqL88V8dFZXWCen/ testkey";
+
+    #[test]
+    fn accepts_a_real_openssh_certificate() {
+        assert!(validate_openssh_certificate(CERT).is_ok());
+    }
+
+    #[test]
+    fn accepts_a_certificate_with_surrounding_whitespace() {
+        // `cat`-ing a *-cert.pub into a text field brings a trailing
+        // newline with it; a save must not fail on that.
+        let padded = format!("\n  {CERT}\n\n");
+        assert!(validate_openssh_certificate(&padded).is_ok());
+    }
+
+    #[test]
+    fn rejects_the_plain_public_key() {
+        // The mistake worth catching: handing over id_ed25519.pub
+        // instead of id_ed25519-cert.pub. Without this, the material
+        // stores fine and the host silently key-authenticates forever.
+        let err = validate_openssh_certificate(PLAIN_PUBKEY)
+            .expect_err("a plain public key is not a certificate");
+        assert!(
+            err.contains("*-cert.pub"),
+            "the error must point at the right file, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_garbage() {
+        for bad in ["", "   ", "not a cert", "ssh-ed25519-cert-v01@openssh.com !!!"] {
+            assert!(
+                validate_openssh_certificate(bad).is_err(),
+                "should have rejected {bad:?}"
+            );
         }
     }
 }

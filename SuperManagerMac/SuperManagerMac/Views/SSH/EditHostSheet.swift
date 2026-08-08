@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct EditHostSheet: View {
@@ -21,6 +22,10 @@ struct EditHostSheet: View {
     @State private var authMethod: AuthMethod = .key
     @State private var selectedKeyId: String?
     @State private var password: String = ""
+    /// Empty means "keep whatever is stored" — the same contract the
+    /// password field above has. Never pre-filled: the certificate lives
+    /// in the keychain and the summary only carries a presence flag.
+    @State private var certificate: String = ""
     @State private var showingNewCustomer = false
     @State private var slugsBeforeAdd: Set<String> = []
     @FocusState private var firstFieldFocused: Bool
@@ -62,14 +67,21 @@ struct EditHostSheet: View {
                     }
                 }
 
-                if authMethod == .key {
+                // See AddHostSheet: certificate auth needs the key picker
+                // as well as a certificate, so these are three
+                // independent conditions rather than a two-way branch.
+                if authMethod.requiresKey {
                     Picker("SSH Key", selection: $selectedKeyId) {
                         Text("None").tag(nil as String?)
                         ForEach(appState.sshKeys) { key in
                             Text("\(key.name) (\(key.keyType.displayName))").tag(key.id as String?)
                         }
                     }
-                } else {
+                }
+                if authMethod == .certificate {
+                    certificateField
+                }
+                if authMethod == .password {
                     SecureField("Password (leave empty to keep current)", text: $password)
                 }
             }
@@ -91,14 +103,15 @@ struct EditHostSheet: View {
                             deviceType: deviceType,
                             unrecognizedDeviceTypeRawValue: unrecognizedDeviceTypeRaw,
                             authMethod: authMethod,
-                            authKeyId: authMethod == .key ? selectedKeyId : nil,
-                            password: authMethod == .password ? password : nil
+                            authKeyId: authMethod.requiresKey ? selectedKeyId : nil,
+                            password: authMethod == .password ? password : nil,
+                            certificate: authMethod == .certificate ? certificate : nil
                         )
                         dismiss()
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(label.isEmpty || hostname.isEmpty)
+                .disabled(label.isEmpty || hostname.isEmpty || !certificateInputComplete)
             }
         }
         .padding()
@@ -118,6 +131,64 @@ struct EditHostSheet: View {
             try? await Task.sleep(for: .milliseconds(100))
             firstFieldFocused = true
         }
+    }
+
+    /// Certificate input. Mirrors `AddHostSheet.certificateField` but with
+    /// edit semantics: the prompt reflects whether one is already stored,
+    /// and leaving the field empty keeps it.
+    @ViewBuilder
+    private var certificateField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(host.hasCertificate ? "Replace certificate" : "Certificate")
+                Spacer()
+                Button("Load from file…") { loadCertificateFromFile() }
+                    .controlSize(.small)
+            }
+            TextEditor(text: $certificate)
+                .frame(minHeight: 64)
+                .font(.system(.caption, design: .monospaced))
+            Text(certificateHelpText)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// Spells out the empty-field contract, which differs depending on
+    /// whether this host already has a certificate: keeping the stored one
+    /// is fine, but a host switched *to* certificate auth with no stored
+    /// certificate would connect by plain key and silently look like it
+    /// worked.
+    private var certificateHelpText: String {
+        if host.hasCertificate {
+            return "A certificate is already stored. Leave this empty to keep it, or paste a new `*-cert.pub` to replace it."
+        }
+        return "Contents of the CA-signed `*-cert.pub` file — the certificate, not the public key. Required, since this host has none stored yet."
+    }
+
+    /// See `AddHostSheet.certificateInputComplete`. The edit sheet also
+    /// accepts an empty field when a certificate is already stored, since
+    /// that means "keep it".
+    private var certificateInputComplete: Bool {
+        guard authMethod == .certificate else { return true }
+        guard selectedKeyId != nil else { return false }
+        return host.hasCertificate
+            || !certificate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Mirrors `AddHostSheet.loadCertificateFromFile`.
+    private func loadCertificateFromFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.showsHiddenFiles = true
+        panel.message = "Pick the CA-signed certificate (*-cert.pub) for this host."
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".ssh", isDirectory: true)
+        guard panel.runModal() == .OK,
+              let url = panel.url,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        certificate = text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Slug-bound customer picker (mirrors AddHostSheet.groupPicker). Offers
