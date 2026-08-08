@@ -6,11 +6,28 @@
 # the build trusts; a tampered CDN can't substitute a different file
 # without breaking the verification step.
 #
+# Every url here must name an exact version. Never point an entry at a
+# "latest" pointer: upstream rotates those, so the hash goes stale on
+# somebody else's release schedule, and — worse — the bundled version
+# can change major release without anyone deciding to. Both have
+# happened; see the [openvpn] note.
+#
 # Updating an entry:
-#   1. Download the new MSI manually
-#   2. `Get-FileHash <file> -Algorithm SHA256`
-#   3. Replace the URL + sha256 here in a single commit so the diff
-#      shows both. Sign the commit if you have the GPG key wired up.
+#   1. Download the new installer AND its signature, if upstream
+#      publishes one (`.asc`, `.sig`, a checksum file).
+#   2. Verify it. `gpg --verify <file>.asc <file>` beats hashing what
+#      you just downloaded, which only proves the download completed.
+#      Record the key fingerprint and the exact command output in the
+#      entry's comment so the next person can re-check rather than
+#      re-trust.
+#   3. `shasum -a 256 <file>` (or `Get-FileHash -Algorithm SHA256`).
+#   4. Replace version + url + sha256 here in a single commit so the
+#      diff shows all three together. Sign the commit if you have the
+#      GPG key wired up.
+#
+# A hash mismatch on a versioned url is never routine. It means the
+# bytes at a fixed address changed, so treat it as a possible supply
+# chain problem and investigate before re-pinning.
 #
 # Output filename (`output`) is what the WiX bundle.wxs references via
 # `SourceFile="vendor\<output>"`. Renaming an entry's output requires
@@ -26,29 +43,43 @@ sha256 = "6DAA5D37A9E2950DFB8C48B95AB8E562CB2BAD1C785D020F38F97BEA4C6A5566"
 output = "wireguard-installer.msi"
 
 [openvpn]
-# OpenVPN Community Edition — official upstream "latest stable" amd64
-# build.
+# OpenVPN Community Edition, 2.6.22-I001 amd64.
 #
-# Re-pinned 2026-07-26 to the current `latest-stable` build. The previous
-# hash (7B70D592...) was pinned 2026-05-19 and went stale when upstream
-# rotated the symlink to a new release, which had `windows` red on every
-# branch — main included — since 2026-07-16.
+# Pinned to a VERSIONED url, 2026-08-06. It previously tracked
+# `.../releases/latest/openvpn-latest-stable-amd64.msi`, which is a
+# pointer upstream rotates on every release — so a fixed hash against it
+# was guaranteed to break, and did, twice (2026-07-16 and 2026-08-06),
+# each time turning `windows` red on every branch including main.
 #
-# Provenance of this hash: the artifact GitHub Actions fetched from this
-# URL over TLS on 2026-07-26 (run 30199755843). It has NOT been checked
-# against a checksum published by OpenVPN — trust-on-download, same basis
-# as the previous pin. If you want the stronger property, replace this
-# with a hash taken from OpenVPN's own published checksum for a named
-# release.
+# The rotation is worse than red CI. On 2026-08-05 upstream moved
+# `latest-stable` from the 2.6 branch to 2.7.6 — a MAJOR version change
+# in a VPN client we bundle into our installer, which would have shipped
+# with nobody looking at it. A versioned url makes that an explicit
+# decision instead of a silent one, and makes a hash mismatch mean
+# something: a fixed url's contents must never change, so a mismatch is
+# a real signal rather than routine staleness.
 #
-# This entry will go stale again on OpenVPN's next stable release,
-# because a fixed hash against a rotating URL always does. The durable
-# fix is a versioned URL + hash pinned together, the way [wireguard]
-# below does it — that needs whoever re-pins to record which version
-# `latest-stable` actually resolved to, which the symlink doesn't say.
-version = "latest-stable"
-url = "https://build.openvpn.net/downloads/releases/latest/openvpn-latest-stable-amd64.msi"
-sha256 = "20A9B2831CC3BE26C250CAF60891C230F3BF3E1E7BD6E17B4E182F166026377A"
+# Staying on 2.6.x deliberately — it is the branch we have been
+# shipping. Moving to 2.7.x is a real upgrade to evaluate on its own,
+# not something to inherit from a symlink.
+#
+# Provenance, 2026-08-06 — GPG-verified, not trust-on-download:
+#   $ curl -sSLO https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi{,.asc}
+#   $ gpg --verify OpenVPN-2.6.22-I001-amd64.msi.asc OpenVPN-2.6.22-I001-amd64.msi
+#   Signature made Wed Aug  5 17:55:39 2026 CEST
+#   using RSA key 33DA8C9EAE0EAE8C73172C10822F6DF096D04874
+#   Good signature from "OpenVPN - Security Mailing List <security@openvpn.net>"
+#   $ shasum -a 256 OpenVPN-2.6.22-I001-amd64.msi   # 5902336 bytes
+#
+# The signing key came from keys.openpgp.org, which publishes an email
+# identity only after verifying the key holder controls that address.
+# That is the strongest link available here: OpenVPN does not publish a
+# plain checksum file next to these artifacts, only the detached .asc.
+# Anyone re-pinning should repeat the gpg --verify step above rather
+# than trusting the download, and check the fingerprint still matches.
+version = "2.6.22-I001"
+url = "https://build.openvpn.net/downloads/releases/OpenVPN-2.6.22-I001-amd64.msi"
+sha256 = "1E1BB9A712990D1B2B961DE7E8DF3384964E4FB6F6776A100840F0D9A82ED507"
 output = "openvpn-installer.msi"
 
 # openfortivpn (FortiGate SSL VPN client) has no maintained Windows

@@ -373,7 +373,7 @@ fn build_setup_page() -> gtk4::Widget {
     let status = adw::StatusPage::builder()
         .title("Claude Console")
         .description("Connect an Anthropic API key to use the AI assistant.")
-        .icon_name("utilities-terminal-symbolic")
+        .icon_name(crate::ui::design::icon_name(crate::ui::design::icons::TERMINAL))
         .build();
 
     let group = adw::PreferencesGroup::builder()

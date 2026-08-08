@@ -226,6 +226,7 @@ mod tests {
             full_tunnel: true,
             last_connected_at: None,
             kill_switch: false,
+            push_dns: false,
             customer: customer.into(),
             config: ProfileConfig::FortiGate(FortiGateConfig {
                 host: "fw.example.com".into(),

@@ -392,13 +392,6 @@ fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
 // Kernel module preflight
 // ---------------------------------------------------------------------------
 
-/// Present once the module is in the kernel, whether it was loaded on demand
-/// or built in.
-const SYS_MODULE_WIREGUARD: &str = "/sys/module/wireguard";
-
-/// Directory modprobe searches, one subdirectory per installed kernel.
-const MODULE_ROOT: &str = "/lib/modules";
-
 /// Load the WireGuard module if the kernel does not already have it.
 ///
 /// Every mainstream distro ships WireGuard as `CONFIG_WIREGUARD=m` rather than
@@ -411,9 +404,9 @@ const MODULE_ROOT: &str = "/lib/modules";
 ///
 /// Best-effort by design: a failure here is not returned. The module may be
 /// built in (nothing to load), and if it genuinely is unavailable the apply
-/// below fails anyway, with [`diagnose_missing_module`] to explain it.
+/// below fails anyway, with [`wireguard_unsupported_hint`] to explain it.
 async fn ensure_module_loaded() {
-    if std::path::Path::new(SYS_MODULE_WIREGUARD).exists() {
+    if std::path::Path::new("/sys/module/wireguard").exists() {
         debug!("WireGuard module already in the kernel");
         return;
     }
@@ -433,67 +426,114 @@ async fn ensure_module_loaded() {
     }
 }
 
-/// Explain an unavailable WireGuard netlink family, given the running kernel
-/// release and the kernel versions that have a module tree installed.
-///
-/// The interesting case is the third one. A kernel upgrade removes the running
-/// kernel's module tree and installs the new one, so until the machine reboots
-/// every module that was not already loaded is unloadable — `modprobe` reports
-/// only "module not found", and the old message read that as a kernel built
-/// without WireGuard and sent the user to check `CONFIG_WIREGUARD`, which is
-/// both set and irrelevant. The fix is a reboot, so say so.
-fn describe_missing_module(running: &str, installed: &[String]) -> String {
-    if installed.iter().any(|k| k == running) {
-        return format!(
-            "the WireGuard kernel module could not be loaded on kernel {running} — \
-             check that your kernel provides it (CONFIG_WIREGUARD), or install the \
-             module package for this kernel (e.g. wireguard-dkms, \
-             linux-modules-extra-{running})"
-        );
-    }
-
-    if installed.is_empty() {
-        return format!(
-            "the WireGuard kernel module could not be loaded: no module tree is \
-             installed for the running kernel {running} ({MODULE_ROOT}/{running} \
-             does not exist)"
-        );
-    }
-
-    format!(
-        "the running kernel {running} has no module tree — {MODULE_ROOT}/{running} \
-         does not exist, so no kernel module can be loaded at all. This is what a \
-         kernel upgrade leaves behind until the machine is rebooted; the installed \
-         kernel is now {}. Reboot and connect again.",
-        installed.join(", ")
-    )
-}
-
-/// [`describe_missing_module`] applied to this machine.
-fn diagnose_missing_module() -> String {
-    // /proc rather than uname(2): `unsafe_code` is forbidden workspace-wide,
-    // and this is the same string modprobe resolves its search path from.
-    let running = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
-
-    let mut installed: Vec<String> = std::fs::read_dir(MODULE_ROOT)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    installed.sort();
-
-    describe_missing_module(&running, &installed)
-}
-
 // ---------------------------------------------------------------------------
 // Backend struct
 // ---------------------------------------------------------------------------
 
 /// WireGuard backend — creates and manages a WireGuard kernel interface.
+/// Explain an `EOPNOTSUPP` from interface creation in terms of what to do
+/// about it.
+///
+/// The kernel gives the same answer whether the module is missing from the
+/// build or merely not inserted, and the old message picked the rarer one:
+/// it told the operator to check `CONFIG_WIREGUARD`, which on a stock kernel
+/// is already `=m` and sends them reading kernel configs when the fix is one
+/// `modprobe`. Every kernel since 5.6 ships the module, so "not loaded" is
+/// the overwhelmingly likely case and goes first.
+///
+/// `/sys/module/<name>` is the cheapest way to tell the two apart: present
+/// means loaded, and if it is loaded then the failure is something else and
+/// saying "modprobe it" would be actively misleading.
+fn wireguard_unsupported_hint(err: &str) -> String {
+    if std::path::Path::new("/sys/module/wireguard").exists() {
+        return format!(
+            "the kernel refused to create a WireGuard interface even though the \
+             wireguard module is loaded — {err}"
+        );
+    }
+    wireguard_unsupported_hint_for(kernel_module_tree_state(), err)
+}
+
+/// The wording for a given tree state, split out so each branch can be
+/// exercised without arranging a matching `/lib/modules` on the test machine.
+fn wireguard_unsupported_hint_for(state: ModuleTree, err: &str) -> String {
+    match state {
+        ModuleTree::Stale { running, newest } => format!(
+            "the running kernel is {running}, but its modules are gone from \
+             /lib/modules — {newest} is what is installed now. A kernel update \
+             removed the tree the running one loads from, so nothing can be \
+             modprobed until you reboot. Reboot and try again — {err}"
+        ),
+        ModuleTree::Missing { running } => format!(
+            "there is no /lib/modules/{running} for the running kernel, so no \
+             module can be loaded at all. This normally means the kernel was \
+             updated or removed since boot; reboot into the installed kernel \
+             and try again — {err}"
+        ),
+        ModuleTree::Present => format!(
+            "the WireGuard kernel module is not loaded. Load it with \
+             `sudo modprobe wireguard`, and install \
+             contrib/modules-load.d/supermgr.conf to /etc/modules-load.d/ so it \
+             comes back after a reboot — `scripts/install-linux.sh` does both. \
+             If modprobe says the module does not exist, this kernel was built \
+             without CONFIG_WIREGUARD, which is unusual since 5.6 — {err}"
+        ),
+    }
+}
+
+/// Whether the running kernel still has a module tree to load from.
+#[derive(Debug, PartialEq, Eq)]
+enum ModuleTree {
+    /// `/lib/modules/<running>` is there; a missing module is a real absence.
+    Present,
+    /// It is not, and something newer is — a kernel update without a reboot.
+    Stale { running: String, newest: String },
+    /// It is not, and nothing else is either.
+    Missing { running: String },
+}
+
+/// Classify `/lib/modules` against the running kernel release.
+///
+/// Worth doing because the three cases have completely different remedies and
+/// the kernel reports the same `EOPNOTSUPP` for all of them. On a rolling
+/// distribution the common one is the middle case: `pacman -Syu` replaces the
+/// module tree, the running kernel's is deleted, and every `modprobe` fails
+/// with "not found in directory /lib/modules/<running>" even though the
+/// kernel was built with the module. Telling that operator to check
+/// `CONFIG_WIREGUARD` wastes their evening; the answer is "reboot".
+fn kernel_module_tree_state() -> ModuleTree {
+    let running = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+
+    if running.is_empty() {
+        return ModuleTree::Present; // nothing to reason about; keep the generic advice
+    }
+    if std::path::Path::new(&format!("/lib/modules/{running}")).exists() {
+        return ModuleTree::Present;
+    }
+
+    // Any other tree present means a different kernel is installed. Not sorted
+    // by version — "newest" here just needs to name one for the operator, and
+    // version-comparing distro kernel strings is its own swamp.
+    let other = std::fs::read_dir("/lib/modules")
+        .ok()
+        .and_then(|entries| {
+            let mut names: Vec<String> = entries
+                .filter_map(Result::ok)
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| *n != running)
+                .collect();
+            names.sort();
+            names.pop()
+        });
+
+    match other {
+        Some(newest) => ModuleTree::Stale { running, newest },
+        None => ModuleTree::Missing { running },
+    }
+}
+
 pub struct WireGuardBackend {
     state: Arc<Mutex<WgState>>,
 }
@@ -655,7 +695,7 @@ impl WireGuardBackend {
                     // Reached only after ensure_module_loaded() has already
                     // tried, so the module really is unavailable — the
                     // diagnosis says which of the reasons it is.
-                    BackendError::Prerequisite(diagnose_missing_module())
+                    BackendError::Prerequisite(wireguard_unsupported_hint(&e.to_string()))
                 } else {
                     BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
                 }
@@ -1463,38 +1503,79 @@ impl VpnBackend for WireGuardBackend {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod module_hint_tests {
+    use super::{kernel_module_tree_state, wireguard_unsupported_hint, ModuleTree};
+
+    /// The case a real CachyOS desktop hit: CONFIG_WIREGUARD=m in the running
+    /// kernel, and `modprobe` still reporting
+    /// "Module wireguard not found in directory /lib/modules/7.1.5-1-cachyos".
+    /// A kernel update had removed the running kernel's module tree. The
+    /// remedy is a reboot, and no amount of checking kernel config finds that.
+    #[test]
+    fn a_stale_module_tree_is_reported_as_needing_a_reboot() {
+        let msg = super::wireguard_unsupported_hint_for(
+            ModuleTree::Stale {
+                running: "7.1.5-1-cachyos".into(),
+                newest: "7.2.0-1-cachyos".into(),
+            },
+            "Operation not supported (os error 95)",
+        );
+
+        assert!(msg.contains("reboot"), "no remedy given: {msg}");
+        assert!(msg.contains("7.1.5-1-cachyos"), "does not name the running kernel: {msg}");
+        assert!(msg.contains("7.2.0-1-cachyos"), "does not name the installed one: {msg}");
+        assert!(
+            !msg.contains("sudo modprobe"),
+            "tells you to run modprobe when no tree exists to load from: {msg}"
+        );
+        assert!(
+            !msg.contains("CONFIG_WIREGUARD"),
+            "sends the reader to kernel config for a reboot problem: {msg}"
+        );
+    }
 
     #[test]
-    fn missing_tree_for_running_kernel_says_reboot() {
-        // The state a kernel upgrade leaves behind: the running kernel's
-        // modules are gone, the successor's are installed, nothing loads
-        // until the reboot.
-        let msg = describe_missing_module(
-            "7.1.5-1-cachyos",
-            &["6.18.42-1-cachyos-lts".into(), "7.1.6-1-cachyos".into()],
+    fn a_missing_tree_with_no_alternative_says_so_without_blaming_the_config() {
+        let msg = super::wireguard_unsupported_hint_for(
+            ModuleTree::Missing { running: "9.9.9-custom".into() },
+            "os error 95",
         );
-        assert!(msg.contains("Reboot"), "{msg}");
-        assert!(msg.contains("7.1.6-1-cachyos"), "{msg}");
-        // The old message sent the user here, and it is the wrong place to
-        // look when the kernel does have WireGuard.
+        assert!(msg.contains("9.9.9-custom"), "{msg}");
+        assert!(msg.contains("reboot"), "{msg}");
         assert!(!msg.contains("CONFIG_WIREGUARD"), "{msg}");
     }
 
     #[test]
-    fn tree_present_points_at_the_module_itself() {
-        let msg = describe_missing_module("7.1.6-1-cachyos", &["7.1.6-1-cachyos".into()]);
-        assert!(msg.contains("CONFIG_WIREGUARD"), "{msg}");
-        assert!(!msg.contains("Reboot"), "{msg}");
+    fn a_present_tree_still_gets_the_modprobe_advice() {
+        let msg = super::wireguard_unsupported_hint_for(ModuleTree::Present, "os error 95");
+        assert!(msg.contains("modprobe wireguard"), "{msg}");
+        let modprobe = msg.find("modprobe").unwrap();
+        let config = msg.find("CONFIG_WIREGUARD").unwrap();
+        assert!(modprobe < config, "rare cause stated first: {msg}");
     }
 
     #[test]
-    fn no_module_trees_at_all_is_not_reported_as_an_upgrade() {
-        // A container or a fully built-in kernel: /lib/modules is empty, so
-        // there is no successor kernel to name and no reboot to suggest.
-        let msg = describe_missing_module("7.1.6-1-cachyos", &[]);
-        assert!(msg.contains("no module tree is installed"), "{msg}");
-        assert!(!msg.contains("Reboot"), "{msg}");
+    fn this_machine_is_classified_without_panicking() {
+        // Whatever the environment, the classifier must return something and
+        // the running release must be named when it claims a problem.
+        match kernel_module_tree_state() {
+            ModuleTree::Present => {}
+            ModuleTree::Stale { running, .. } | ModuleTree::Missing { running } => {
+                assert!(!running.is_empty(), "claimed a bad tree without naming the kernel");
+            }
+        }
+    }
+
+
+    #[test]
+    fn a_loaded_module_is_not_told_to_load_it_again() {
+        if !std::path::Path::new("/sys/module/wireguard").exists() {
+            return;
+        }
+        let msg = wireguard_unsupported_hint("Operation not supported (os error 95)");
+        assert!(
+            !msg.contains("sudo modprobe"),
+            "tells you to load a module that is already loaded: {msg}"
+        );
     }
 }

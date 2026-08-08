@@ -97,8 +97,8 @@ targets:
       properties:
         CFBundleName: SuperManager
         CFBundleIdentifier: com.sybr.supermanager
-        CFBundleVersion: "1.6.0"
-        CFBundleShortVersionString: "1.6.0"
+        CFBundleVersion: "1.6.2"
+        CFBundleShortVersionString: "1.6.2"
         LSMinimumSystemVersion: "14.0"
         NSHighResolutionCapable: true
         NSSupportsAutomaticTermination: false
@@ -242,6 +242,20 @@ targets:
           cargo build --release -p supermgrd-mac -p supermanager-helper
 
     postBuildScripts:
+      - name: Bundle Tailscale CLI + daemon
+        # The CLI binaries (`tailscale`, `tailscaled`) from Homebrew's
+        # formula — NOT the GUI app. The App Store Tailscale.app can be
+        # removed at any moment, leaving a dead /usr/local/bin shim;
+        # bundling the CLI makes SuperManager the source of truth and
+        # lets it install the daemon itself.
+        #
+        # The script existed but was never wired in, so shipped builds
+        # had no Resources/tailscale-bin at all. That made
+        # `tailscaleIsBundled` false, which is the gate on the "Start
+        # daemon" remediation — so a stopped daemon showed a bare CLI
+        # error with no way forward instead of a button.
+        script: |
+          "${SRCROOT}/Signing/bundle_tailscale.sh"
       - name: Embed Rust binaries and LaunchDaemons plist
         # Copies the cargo-built binaries into the .app/Contents/MacOS
         # directory and re-signs them with the project's signing

@@ -7,7 +7,6 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use gtk4::glib;
 use gtk4::prelude::*;
-use libadwaita as adw;
 use serde_json::Value;
 use tracing::{info, warn};
 
@@ -33,12 +32,15 @@ pub fn build_ssh_dashboard(
 ) -> (gtk4::FlowBox, gtk4::Widget) {
     let outer_stack = gtk4::Stack::new();
 
-    // Empty state.
-    let empty_status = adw::StatusPage::builder()
-        .title("No Devices")
-        .description("Add FortiGate hosts with API tokens or configure a UI.com API key in Settings.")
-        .icon_name("network-server-symbolic")
-        .build();
+    // Empty state. Names both routes in, because "no devices" on a screen
+    // full of hosts is otherwise baffling: the Fleet view shows the ones that
+    // can be polled, which is a smaller set than the ones you can SSH into.
+    let empty_status = crate::ui::design::empty_state(
+        crate::ui::design::icon_name(crate::ui::design::icons::APPLIANCE),
+        "Nothing to monitor yet",
+        "This view shows devices that can report their own status. Add an API \
+         token to a FortiGate host, or a UI.com API key in Settings.",
+    );
     outer_stack.add_named(&empty_status, Some("empty"));
 
     // Flow box for device cards.
@@ -70,10 +72,14 @@ pub fn build_ssh_dashboard(
         .margin_top(8)
         .build();
 
+    // "Fleet" rather than "Dashboard": the sidebar calls it that, per the
+    // brief, and a section whose heading disagrees with the item you clicked
+    // to get here reads as a different screen.
     let title_lbl = gtk4::Label::builder()
-        .label("Dashboard")
+        .label("Fleet")
         .css_classes(["title-2"])
         .halign(gtk4::Align::Start)
+        .valign(gtk4::Align::Center)
         .build();
 
     // Filter toggle buttons (linked group).
@@ -1009,34 +1015,65 @@ pub fn apply_dashboard_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Va
     // Note: sort + summary are invalidated by the caller (not per-card).
 }
 
+/// What one device card has reported so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardState {
+    /// The device answered.
+    Online,
+    /// The device was asked and did not answer.
+    Offline,
+    /// The device has not been asked yet, or the answer has not arrived.
+    Pending,
+}
+
+/// Summarise the fleet in one line.
+///
+/// The old version counted `offline = total - online`, which meant every
+/// card that had not yet reported was counted as *offline*. On startup, with
+/// twenty devices being polled, the bar read "20 devices — 0 online — 20
+/// offline" until the replies landed. Never-asked and asked-and-silent are
+/// different facts, and only the second one is worth waking up for.
+#[must_use]
+pub fn summary_text(cards: &[CardState]) -> String {
+    if cards.is_empty() {
+        return String::new();
+    }
+    let count = |want: CardState| cards.iter().filter(|c| **c == want).count();
+    let (online, offline, pending) =
+        (count(CardState::Online), count(CardState::Offline), count(CardState::Pending));
+
+    let noun = if cards.len() == 1 { "device" } else { "devices" };
+    let mut text = format!("{} {noun} \u{2014} {online} online", cards.len());
+    if offline > 0 {
+        text.push_str(&format!(" \u{2014} {offline} offline"));
+    }
+    if pending > 0 {
+        text.push_str(&format!(" \u{2014} {pending} waiting"));
+    }
+    text
+}
+
 /// Recount online/offline devices and update the summary label.
 pub fn refresh_summary(flow_box: &gtk4::FlowBox) {
-    let mut total = 0u32;
-    let mut online = 0u32;
+    let mut cards = Vec::new();
     let mut child = flow_box.first_child();
     while let Some(c) = child {
-        total += 1;
-        if !has_error_class(&c) {
-            // Check if it has a success class (got data) vs still loading.
-            if has_success_class(&c) {
-                online += 1;
-            }
-        }
+        cards.push(if has_error_class(&c) {
+            CardState::Offline
+        } else if has_success_class(&c) {
+            CardState::Online
+        } else {
+            CardState::Pending
+        });
         child = c.next_sibling();
     }
-    let offline = total.saturating_sub(online);
+
     // Walk up to find the summary label (sibling of the flow_box's scroll parent).
     if let Some(parent) = flow_box.parent() {             // ScrolledWindow
         if let Some(content_box) = parent.parent() {      // content VBox
             if let Some(summary) = find_widget_by_name(&content_box, "dashboard-summary") {
                 if let Some(lbl) = summary.downcast_ref::<gtk4::Label>() {
-                    if total == 0 {
-                        lbl.set_label("");
-                    } else {
-                        lbl.set_label(&format!(
-                            "{total} devices \u{2014} {online} online \u{2014} {offline} offline"
-                        ));
-                    }
+                    lbl.set_label(&summary_text(&cards));
                 }
             }
         }
@@ -1471,4 +1508,46 @@ fn find_widget_by_name(root: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> 
         child = c.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::{summary_text, CardState};
+
+    #[test]
+    fn a_device_that_has_not_answered_yet_is_not_counted_as_offline() {
+        // The defect this replaces: `offline = total - online` meant that on
+        // startup, before any poll returned, every device in the fleet was
+        // reported as offline. An operator glancing at that bar would think
+        // the whole estate was down.
+        let text = summary_text(&[CardState::Pending, CardState::Pending]);
+        assert!(!text.contains("offline"), "{text}");
+        assert!(text.contains("2 waiting"), "{text}");
+        assert!(text.contains("0 online"), "{text}");
+    }
+
+    #[test]
+    fn the_three_counts_are_kept_apart() {
+        let text = summary_text(&[
+            CardState::Online,
+            CardState::Online,
+            CardState::Offline,
+            CardState::Pending,
+        ]);
+        assert_eq!(text, "4 devices \u{2014} 2 online \u{2014} 1 offline \u{2014} 1 waiting");
+    }
+
+    #[test]
+    fn a_healthy_fleet_says_nothing_it_does_not_have_to() {
+        // No zero counts padding out the line — the only numbers shown are
+        // ones that are not zero, so anything visible is worth reading.
+        assert_eq!(summary_text(&[CardState::Online]), "1 device \u{2014} 1 online");
+    }
+
+    #[test]
+    fn an_empty_fleet_has_no_summary_at_all() {
+        // The empty state says what to do; a "0 devices" line above it would
+        // just be the same news twice.
+        assert_eq!(summary_text(&[]), "");
+    }
 }

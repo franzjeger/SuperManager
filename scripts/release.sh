@@ -77,11 +77,23 @@ if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
 fi
 
 # Developer ID cert must be in Keychain.
-if ! security find-identity -p codesigning -v | grep -q "Developer ID Application"; then
-    echo "error: no Developer ID Application certificate in Keychain." >&2
-    echo "       Get one from developer.apple.com → Certificates." >&2
-    exit 1
-fi
+# NOTE on the checks below: never `cmd | grep -q` under `set -o
+# pipefail`. `grep -q` exits at the FIRST match, closing the pipe; the
+# producer then dies of SIGPIPE, and pipefail turns that non-zero exit
+# into a failed pipeline — so a MATCH reports failure. It cost two
+# rebuilds here: the Tailscale gate failed on correctly-signed binaries,
+# and the entitlements gate above only passed because its producer
+# happened to finish writing first, i.e. by luck. Capture the output
+# first, then match it.
+identities="$(security find-identity -p codesigning -v 2>&1 || true)"
+case "$identities" in
+    *"Developer ID Application"*) ;;
+    *)
+        echo "error: no Developer ID Application certificate in Keychain." >&2
+        echo "       Get one from developer.apple.com → Certificates." >&2
+        exit 1
+        ;;
+esac
 
 # Sparkle's sign_update tool.
 SIGN_UPDATE=""
@@ -152,13 +164,183 @@ codesign --force --options runtime --timestamp \
     --entitlements "$REPO_ROOT/SuperManagerMac/Signing/supermanager-helper.entitlements" \
     "$APP/Contents/MacOS/com.sybr.supermanager.helper"
 
-codesign --force --options runtime --timestamp --deep \
+# The app's OWN entitlements. Omitting these shipped v1.6.0 with no
+# keychain-access-groups at all: the data-protection keychain scopes
+# items by access group, so the release build could not read a single
+# VPN password it had written as a development build — every profile
+# failed to connect with errSecItemNotFound (-25300). `codesign
+# --verify` passes happily on an entitlement-less app; it validates the
+# signature, not what is in it.
+#
+# `$(AppIdentifierPrefix)` is an XCODE build-setting placeholder.
+# codesign does NOT expand it, so a resolved copy is generated here
+# with the real team prefix substituted.
+TEAM_ID="$(echo "$DEVELOPER_ID_APP" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+if [ -z "$TEAM_ID" ]; then
+    echo "error: could not parse team id out of \$DEVELOPER_ID_APP" >&2
+    exit 1
+fi
+# `keychain-access-groups` is a RESTRICTED entitlement: it must be
+# authorised by a provisioning profile matching the signing identity.
+# Xcode's development profile matches its Apple Development signature,
+# so dev builds are fine — but a Developer ID re-sign has no matching
+# profile, and AMFI then refuses to launch the app at all ("Launchd job
+# spawn failed", no crash report). Bisected on the 1.6.1 artifact:
+#
+#   no entitlements            -> launches
+#   keychain-access-groups     -> does not launch
+#   keychain-access-groups + embedded profile -> does not launch
+#
+# So distribution builds ship WITHOUT it. VPNKeychain never sets
+# kSecAttrAccessGroup explicitly, so items land in the app's default
+# data-protection group, derived from the signature — which works for a
+# stable Developer ID identity. The cost is one-time: credentials stored
+# by a locally-signed dev build are not visible to a released build, and
+# must be re-entered once.
+#
+# Doing this properly instead would mean a Developer ID provisioning
+# profile with keychain sharing from the Apple Developer portal, then
+# embedding it here. That is the upgrade path if credential continuity
+# across identities ever matters.
+APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-distribution.entitlements"
+cat > "$APP_ENTITLEMENTS" <<'ENTITLEMENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+</dict>
+</plist>
+ENTITLEMENTS
+echo "→ Distribution entitlements written (team ${TEAM_ID}, no restricted keys)"
+
+# A development provisioning profile does not belong in a Developer
+# ID-distributed app; Xcode embeds one and it is meaningless here.
+rm -f "$APP/Contents/embedded.provisionprofile"
+
+# The bundled Tailscale CLI. The build phase signs these with whatever
+# identity Xcode used — Apple Development — and without a timestamp,
+# which notarization rejects outright:
+#   "The binary is not signed with a valid Developer ID certificate"
+#   "The signature does not include a secure timestamp"
+# Re-sign them here with Developer ID like every other nested binary.
+# Missed on the first attempt because the inside-out list covered
+# Frameworks and Contents/MacOS but not Contents/Resources.
+for ts_bin in tailscale tailscaled; do
+    ts_path="$APP/Contents/Resources/tailscale-bin/$ts_bin"
+    [ -f "$ts_path" ] || continue
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" \
+        --identifier "com.sybr.supermanager.$ts_bin" \
+        "$ts_path"
+done
+
+# Sign inside-out, explicitly. NOT `--deep`: it re-signs every nested
+# binary with the OUTER options, which silently stripped the
+# entitlements just applied to the helper and daemon above. Apple
+# deprecates it for exactly this reason.
+find "$APP/Contents/Frameworks" \
+     -name "*.xpc" -o -name "Updater.app" -o -name "Autoupdate" 2>/dev/null \
+| while read -r nested; do
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" "$nested"
+done
+if [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" "$APP/Contents/Frameworks/Sparkle.framework"
+fi
+
+codesign --force --options runtime --timestamp \
     --sign "$DEVELOPER_ID_APP" \
+    --entitlements "$APP_ENTITLEMENTS" \
     "$APP"
 
 # Verify before notarization.
 codesign --verify --verbose=2 "$APP"
 spctl --assess --type execute --verbose=2 "$APP" || true
+
+# Entitlements gate. The signature being valid says nothing about the
+# app being able to reach its own keychain items — v1.6.0 passed
+# --verify and shipped broken. Assert the group is actually present.
+echo "→ Verifying signed app kept its keychain access group"
+app_entitlements="$(codesign -d --entitlements - "$APP" 2>&1 || true)"
+case "$app_entitlements" in
+    *keychain-access-groups*)
+        echo "error: signed app carries keychain-access-groups." >&2
+        echo "       That entitlement needs a matching provisioning profile;" >&2
+        echo "       without one AMFI refuses to launch the app at all." >&2
+        exit 1
+        ;;
+esac
+# The nested entitlement plists are deliberately EMPTY — the helper's
+# own comment explains it needs no keychain access, since secrets reach
+# it as RPC arguments. So there is nothing to assert about their
+# contents; what matters is that each is still validly signed after the
+# outer signature, which is what `--deep` used to break.
+for nested in "$APP/Contents/MacOS/supermgrd-mac" \
+              "$APP/Contents/MacOS/com.sybr.supermanager.helper"; do
+    if ! codesign --verify --strict "$nested" 2>/dev/null; then
+        echo "error: $(basename "$nested") is not validly signed" >&2
+        exit 1
+    fi
+done
+echo "  entitlements sane (app), nested binaries validly signed"
+
+# THE gate that was missing all along: does the signed app actually
+# LAUNCH? Every other check verified a property of the artifact —
+# signature valid, notarization accepted, ticket stapled, entitlements
+# present — and 1.6.1 passed all of them and could not start. AMFI
+# rejects at exec time, so nothing short of running it finds that.
+echo "→ Launch test on the signed app"
+launch_probe="$RELEASE_DIR/launch-probe"
+rm -rf "$launch_probe" && mkdir -p "$launch_probe"
+ditto "$APP" "$launch_probe/SuperManagerMac.app"
+"$launch_probe/SuperManagerMac.app/Contents/MacOS/SuperManagerMac" >/dev/null 2>&1 &
+probe_pid=$!
+sleep 6
+if kill -0 "$probe_pid" 2>/dev/null; then
+    kill "$probe_pid" 2>/dev/null || true
+    wait "$probe_pid" 2>/dev/null || true
+    rm -rf "$launch_probe"
+    echo "  app launches"
+else
+    rm -rf "$launch_probe"
+    echo "error: the signed app does not launch." >&2
+    echo "       Usually a restricted entitlement with no matching profile —" >&2
+    echo "       check 'log show --predicate \"process == \\\"amfid\\\"\"'." >&2
+    exit 1
+fi
+
+# The Tailscale CLI must be in the shipped bundle. The build phase that
+# puts it there skips silently when the Homebrew formula is absent (so
+# CI can build without it), which means a release machine missing the
+# formula would otherwise ship an app that cannot offer to start the
+# daemon — precisely the dead end reported from the field on 1.6.0.
+echo "→ Verifying bundled Tailscale CLI"
+for ts_bin in tailscale tailscaled; do
+    if [ ! -x "$APP/Contents/Resources/tailscale-bin/$ts_bin" ]; then
+        echo "error: $ts_bin missing from the bundle." >&2
+        echo "       Run 'brew install tailscale' and rebuild — without it the" >&2
+        echo "       app cannot install or start the Tailscale daemon." >&2
+        exit 1
+    fi
+done
+for ts_bin in tailscale tailscaled; do
+    # -dvv, not -dv: `Authority=` lines only appear at verbosity 2 and
+    # above. With -dv the gate matched nothing and failed a release
+    # whose binaries were correctly Developer ID-signed all along — a
+    # false alarm, but one that cost a full rebuild to diagnose.
+    ts_sig="$(codesign -dvv "$APP/Contents/Resources/tailscale-bin/$ts_bin" 2>&1 || true)"
+    case "$ts_sig" in
+        *"Authority=Developer ID Application"*) ;;
+        *)
+            echo "error: bundled $ts_bin is not Developer ID-signed — notarization will reject it" >&2
+            exit 1
+            ;;
+    esac
+done
+echo "  tailscale + tailscaled bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
@@ -251,6 +433,13 @@ case "$VERSION" in
 esac
 echo "→ Channel: $CHANNEL_LABEL → $APPCAST"
 
+# NOTE on the enclosure below: length AND sparkle:edSignature both come
+# from $SPARKLE_SIG_LINE, which is sign_update's output verbatim. Do not
+# add a `length=` attribute of your own — duplicating it is invalid XML,
+# and it shipped in 1.6.0's feed, where Sparkle rejected the whole thing
+# with "An error occurred while parsing the update feed". The comment
+# lives out here because a comment inside a start-tag is itself invalid
+# XML — which is how this very gate caught the first attempt at the fix.
 PUB_DATE="$(date -u +"%a, %d %b %Y %H:%M:%S +0000")"
 DOWNLOAD_URL="https://github.com/franzjeger/SuperManager/releases/download/v$VERSION/SuperManager-$VERSION.zip"
 
@@ -269,12 +458,6 @@ cat > "$APPCAST" <<EOF
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
                 url="$DOWNLOAD_URL"
-                <!-- length + sparkle:edSignature come from sign_update's
-                     output line. Do NOT add a length attribute here: it
-                     duplicated the one in $SPARKLE_SIG_LINE, produced
-                     invalid XML, and Sparkle failed the whole feed with
-                     "An error occurred while parsing the update feed"
-                     (seen live on 1.6.0's first check). -->
                 type="application/octet-stream"
                 $SPARKLE_SIG_LINE />
         </item>

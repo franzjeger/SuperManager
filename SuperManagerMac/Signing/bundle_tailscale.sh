@@ -34,21 +34,43 @@ APP="${TARGET_BUILD_DIR}/${PRODUCT_NAME}.app"
 DEST_DIR="${APP}/Contents/Resources/tailscale-bin"
 mkdir -p "${DEST_DIR}"
 
-# 1. Make sure Homebrew has tailscale installed. If it isn't, install
-# it. This is normally a no-op for incremental builds.
-if ! brew --prefix tailscale >/dev/null 2>&1; then
-    echo "Tailscale formula not installed via Homebrew, installing now..."
-    brew install tailscale
+# 1. Locate Homebrew's tailscale. If it isn't there, SKIP — don't
+# install it.
+#
+# A build phase must not install packages over the network: it is slow,
+# it needs credentials/network a CI runner may not have, and it turns a
+# compile into a package-manager operation. Wiring this phase in with a
+# `brew install` here failed the mac CI job outright, since the runner
+# has no tailscale formula.
+#
+# Skipping is safe because it degrades a FEATURE, not correctness: the
+# app checks `tailscaleIsBundled` and hides the "Start daemon" button
+# when the binaries are absent. Releases are protected separately —
+# scripts/release.sh refuses to ship a build without them.
+if ! command -v brew >/dev/null 2>&1; then
+    echo "note: Homebrew not found — skipping Tailscale bundling."
+    exit 0
 fi
 
 BREW_PREFIX="$(brew --prefix tailscale)"
 SRC_TS="${BREW_PREFIX}/bin/tailscale"
 SRC_TSD="${BREW_PREFIX}/bin/tailscaled"
 
+# `brew --prefix <formula>` prints a would-be path and exits 0 even
+# when the formula is NOT installed — it answers "where would this
+# live", not "is it here". Testing the prefix therefore proves nothing;
+# only the binaries do. This is what actually failed mac CI twice: the
+# prefix check passed on a runner with no tailscale, and the script then
+# hit its own hard error.
+#
+# Missing binaries are a SKIP, not an error. It degrades a feature (the
+# app hides "Start daemon" when unbundled), not correctness, and
+# scripts/release.sh refuses to ship a release without them — so the
+# only build that may quietly lack them is one nobody distributes.
 if [[ ! -x "${SRC_TS}" || ! -x "${SRC_TSD}" ]]; then
-    echo "ERROR: Expected tailscale binaries not found at ${BREW_PREFIX}/bin/" >&2
-    echo "       Run 'brew reinstall tailscale' to fix." >&2
-    exit 1
+    echo "note: tailscale CLI not installed via Homebrew — skipping bundling."
+    echo "      Run 'brew install tailscale' to include it."
+    exit 0
 fi
 
 # 2. Skip the copy if the cached version stamp matches — keeps clean
@@ -86,6 +108,20 @@ xattr -d com.apple.quarantine "${DEST_DIR}/tailscaled" 2>/dev/null || true
 # --verify` on the .app fails because the bundled binaries either
 # carry Homebrew's developer signature (which our team-id won't
 # match) or no signature at all.
+# CI runs with CODE_SIGNING_REQUIRED=NO — no Developer identity on a
+# GitHub-hosted runner — and Xcode then never sets
+# EXPANDED_CODE_SIGN_IDENTITY, so `set -u` aborts the phase the moment
+# it is referenced. Same trap the "Embed Rust binaries" phase documents.
+# The copied binaries are already in place by this point; only the
+# re-sign is skipped, which is what makes the artifact undistributable
+# and is exactly what CI does not care about.
+if [ "${CODE_SIGNING_REQUIRED:-YES}" = "NO" ] \
+   || [ "${CODE_SIGNING_ALLOWED:-YES}" = "NO" ] \
+   || [ -z "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+    echo "note: code signing disabled — bundled Tailscale binaries left unsigned."
+    exit 0
+fi
+
 codesign --force \
     --options runtime \
     --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \

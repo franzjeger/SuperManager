@@ -10,6 +10,7 @@
 // only one of them was enforcing. It now lives in `supermgr-core` next to
 // the invariant tests, and the exhaustive match there makes a new
 // `ProfileConfig` variant a compile error rather than a silent leak.
+use ipnet::IpNet;
 use supermgr_core::secret_lifecycle::SecretOwner;
 use supermgr_core::vpn::profile::{
     FortiGateConfig, Profile, ProfileConfig, ProfileSummary, SecretRef,
@@ -96,6 +97,7 @@ impl EngineServer {
             name: name.to_owned(),
             auto_connect: false,
             full_tunnel,
+            push_dns: false,
             last_connected_at: None,
             customer: String::new(),
             kill_switch,
@@ -164,6 +166,7 @@ impl EngineServer {
             name,
             auto_connect: existing.auto_connect,
             full_tunnel,
+            push_dns: false,
             last_connected_at: existing.last_connected_at,
             customer: existing.customer.clone(),
             kill_switch,
@@ -279,6 +282,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::WireGuard(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -375,6 +379,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::OpenVpn(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -456,6 +461,7 @@ impl EngineServer {
             last_connected_at: None,
             customer: String::new(),
             kill_switch: false,
+            push_dns: false,
             config: ProfileConfig::AzureVpn(cfg),
             updated_at: chrono::Utc::now(),
         };
@@ -726,6 +732,10 @@ impl EngineServer {
         };
         drop(state);
 
+        // Captured before `profile.config` is moved below.
+        let push_dns = profile.push_dns;
+        let full_tunnel = profile.full_tunnel;
+
         let ProfileConfig::WireGuard(wg) = profile.config else {
             return Response::err(
                 id,
@@ -769,20 +779,37 @@ impl EngineServer {
                 .join(", ");
             let _ = writeln!(out, "Address = {addrs}");
         }
+        // `wg-quick` applies a `DNS =` line by pointing the ENTIRE system
+        // resolver at the tunnel, so this is opt-in per profile.
+        //
+        // Right for a customer profile whose internal names only the
+        // gateway knows. Wrong for a personal full-tunnel, where it takes
+        // out the operator's local resolver — ad-blocking, split-horizon
+        // zones — the moment it connects.
+        //
+        // It was emitted unconditionally, then removed outright, and
+        // neither extreme was correct: removing it meant falling back to
+        // whatever DHCP hands out, which on a network with a
+        // non-answering router resolver is no DNS at all.
         if !wg.dns.is_empty() {
-            // The DNS line is ALWAYS omitted, full tunnel included. With it
-            // present, wg-quick points the whole system resolver at the
-            // tunnel's DNS, hijacking local name resolution — the operator's
-            // local resolver (ad-blocking, split-horizon customer zones) goes
-            // dark the moment any WireGuard profile connects. Split tunnels
-            // have omitted it since the first report of this; full tunnel kept
-            // it and hijacked the resolver just the same. Operator verdict on
-            // 2026-08-04, verbatim: "OVERSTYRER LOKAL DNS, IKKE AKTUELT!"
-            // The parsed servers stay on the profile for display only.
-            tracing::info!(
-                profile = %pid_str,
-                "wireguard render: omitting DNS line — WireGuard never touches system DNS"
-            );
+            if push_dns {
+                let dns = wg
+                    .dns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "DNS = {dns}");
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: pushing DNS ({dns}) — profile opted in"
+                );
+            } else {
+                tracing::info!(
+                    profile = %pid_str,
+                    "wireguard render: omitting DNS line — profile keeps system DNS"
+                );
+            }
         }
         if let Some(mtu) = wg.mtu {
             let _ = writeln!(out, "MTU = {mtu}");
@@ -801,9 +828,17 @@ impl EngineServer {
             if let Some(ref ep) = peer.endpoint {
                 let _ = writeln!(out, "Endpoint = {ep}");
             }
-            if !peer.allowed_ips.is_empty() {
-                let ips = peer
-                    .allowed_ips
+            let allowed = match effective_allowed_ips(
+                &peer.allowed_ips,
+                &wg.split_routes,
+                full_tunnel,
+                pid_str,
+            ) {
+                Ok(v) => v,
+                Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
+            };
+            if !allowed.is_empty() {
+                let ips = allowed
                     .iter()
                     .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
@@ -1127,6 +1162,39 @@ impl EngineServer {
         }
     }
 
+    /// Set the `push_dns` flag on a profile.
+    ///
+    /// Takes effect on the next connect: the conf is re-rendered each
+    /// time, so an already-up tunnel keeps whatever it was started with.
+    pub(crate) async fn handle_vpn_set_push_dns(&self, id: u64, params: serde_json::Value) -> Response {
+        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+        };
+        let pid = match uuid::Uuid::parse_str(pid_str) {
+            Ok(u) => u,
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
+        };
+        let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
+            Some(b) => b,
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned()),
+        };
+        let mut state = self.state.lock().await;
+        let Some(mut profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
+        };
+        profile.push_dns = enabled;
+        profile.updated_at = chrono::Utc::now();
+        if let Err(e) = state.save_profile(&profile) {
+            return Response::err(id, protocol::INTERNAL_ERROR, format!("save: {e}"));
+        }
+        state.profiles.insert(profile.id, profile.clone());
+        match serde_json::to_value(&profile) {
+            Ok(v) => Response::ok(id, v),
+            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        }
+    }
+
     /// Set the `kill_switch` flag on a profile. Persisted in the
     /// profile's TOML; the GUI's connect path reads it and asks
     /// the helper to install pf rules accordingly.
@@ -1158,5 +1226,133 @@ impl EngineServer {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
+    }
+
+}
+
+/// Resolve what a peer's `AllowedIPs` should actually be, reconciling
+/// `Profile.full_tunnel` with the peer's stored list.
+///
+/// These are two descriptions of the same thing and nothing kept them
+/// in step. Flipping a profile to split tunnel set the flag but left
+/// `AllowedIPs = 0.0.0.0/0, ::/0` in place, so `wg-quick` happily
+/// built a full tunnel regardless — the flag was decorative.
+///
+/// The IPv6 half of that is worse than merely ineffective. A tunnel
+/// whose only v6 address is a ULA cannot source traffic to a global
+/// destination, so `::/0` routed into it does not fail cleanly: the
+/// route exists, the kernel returns EHOSTUNREACH, and anything that
+/// probes v6 reachability concludes v6 is *present but flaky* rather
+/// than absent. That is what took Tailscale down — it kept choosing
+/// IPv6 DERP relays and reconnect-looping instead of falling back to
+/// IPv4, which worked the whole time.
+///
+/// So in split-tunnel mode the catch-alls are stripped and
+/// `split_routes` takes their place, exactly as `WireGuardConfig`
+/// documents. A split-tunnel profile that ends up with nothing left
+/// is a contradiction the operator has to see: it would carry no
+/// traffic at all, so it is an error rather than a silent empty
+/// tunnel.
+fn effective_allowed_ips(
+    peer_allowed: &[IpNet],
+    split_routes: &[IpNet],
+    full_tunnel: bool,
+    profile_id: &str,
+) -> Result<Vec<IpNet>, String> {
+    if full_tunnel {
+        return Ok(peer_allowed.to_vec());
+    }
+
+    let is_catch_all = |n: &IpNet| n.prefix_len() == 0;
+    let specific: Vec<IpNet> = peer_allowed
+        .iter()
+        .filter(|n| !is_catch_all(n))
+        .copied()
+        .collect();
+
+    // `split_routes` is the operator's explicit statement of intent and
+    // replaces the catch-all; peer-level specifics are kept alongside
+    // it, since those were never the thing making the tunnel global.
+    let mut out = split_routes.to_vec();
+    for n in specific {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(format!(
+            "profile {profile_id} is set to split tunnel but has no routes: \
+             its AllowedIPs are catch-all only and split_routes is empty. \
+             Add the prefixes the tunnel should carry, or switch it back \
+             to full tunnel."
+        ));
+    }
+
+    if out.len() != peer_allowed.len() {
+        tracing::info!(
+            profile = %profile_id,
+            "wireguard render: split tunnel — AllowedIPs {:?} replaces catch-all",
+            out.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        );
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod allowed_ips_tests {
+    use super::*;
+
+    fn net(s: &str) -> IpNet { s.parse().unwrap() }
+
+    /// Full tunnel is passed through untouched — the catch-all is the
+    /// whole point there.
+    #[test]
+    fn full_tunnel_keeps_catch_all() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let got = effective_allowed_ips(&peer, &[], true, "p").unwrap();
+        assert_eq!(got, peer);
+    }
+
+    /// The regression that took Tailscale down: profile flipped to
+    /// split tunnel, but AllowedIPs still catch-all, so wg-quick built
+    /// a full tunnel and blackholed IPv6 into a ULA-only tunnel.
+    #[test]
+    fn split_tunnel_replaces_catch_all_with_split_routes() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let split = vec![net("10.0.0.0/8")];
+        let got = effective_allowed_ips(&peer, &split, false, "p").unwrap();
+        assert_eq!(got, split, "catch-all must not survive split tunnel");
+        assert!(!got.iter().any(|n| n.prefix_len() == 0));
+    }
+
+    /// A split-tunnel profile with nothing to route is a contradiction
+    /// the operator must be told about, not a silently empty tunnel.
+    #[test]
+    fn split_tunnel_without_routes_is_an_error() {
+        let peer = vec![net("0.0.0.0/0"), net("::/0")];
+        let err = effective_allowed_ips(&peer, &[], false, "abc").unwrap_err();
+        assert!(err.contains("abc"), "{err}");
+        assert!(err.contains("split tunnel"), "{err}");
+    }
+
+    /// Specific prefixes already on the peer were never what made the
+    /// tunnel global, so they survive alongside split_routes.
+    #[test]
+    fn split_tunnel_keeps_specific_peer_prefixes() {
+        let peer = vec![net("0.0.0.0/0"), net("192.168.4.0/24")];
+        let got = effective_allowed_ips(&peer, &[net("10.0.0.0/8")], false, "p").unwrap();
+        assert!(got.contains(&net("192.168.4.0/24")));
+        assert!(got.contains(&net("10.0.0.0/8")));
+        assert!(!got.contains(&net("0.0.0.0/0")));
+    }
+
+    /// Split tunnel with only specific prefixes and no split_routes is
+    /// already well-formed — don't reject it.
+    #[test]
+    fn split_tunnel_with_only_specific_prefixes_is_fine() {
+        let peer = vec![net("192.168.4.0/24")];
+        let got = effective_allowed_ips(&peer, &[], false, "p").unwrap();
+        assert_eq!(got, peer);
     }
 }

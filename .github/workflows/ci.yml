@@ -26,6 +26,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # Vendor pins first: it is seconds of curl, and it is the check most
+      # likely to fail for reasons that have nothing to do with the commit
+      # under test.
+      #
+      # The Windows job stages these same files and verifies the same
+      # hashes, but ~15 minutes into a build on our slowest runner, so a
+      # stale pin cost a full Windows build to discover. It also enforces
+      # what Windows cannot: that no entry points at a rotating "latest"
+      # pointer. That rule is why the pin goes stale in the first place,
+      # and one such rotation silently moved the bundled OpenVPN from 2.6
+      # to 2.7 — a major version change in a shipped VPN client that
+      # nobody chose. See vendor/manifest.toml.
+      #
+      # Runs on every PR rather than only when the manifest changes:
+      # upstream can invalidate a pin without anyone touching the repo,
+      # and finding that out here beats finding it out in Windows.
+      - name: Verify vendor pins
+        run: ./scripts/check-vendor-pins.sh
       # tcpdump is a runtime dependency of the engine's traffic-sniff
       # analysis, and its tests shell out to it. Installed explicitly rather
       # than relying on whatever the runner image happens to ship.

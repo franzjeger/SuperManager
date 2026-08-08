@@ -22,7 +22,12 @@
 #![allow(missing_docs)]
 
 pub mod console;
+pub mod design;
 pub mod navigation;
+mod lock;
+pub mod palette;
+mod preferences;
+pub mod shell;
 pub mod provisioning;
 pub mod ssh;
 pub mod vpn;
@@ -115,101 +120,6 @@ fn push_tray_update(
 }
 
 // ---------------------------------------------------------------------------
-// Lock screen page
-// ---------------------------------------------------------------------------
-
-/// Widgets composing the lock / set-password page.
-#[derive(Clone)]
-struct LockPage {
-    container: gtk4::Box,
-    password_row: adw::PasswordEntryRow,
-    confirm_row: adw::PasswordEntryRow,
-    unlock_btn: gtk4::Button,
-    set_btn: gtk4::Button,
-    quit_btn: gtk4::Button,
-    status_label: gtk4::Label,
-}
-
-/// Build the lock screen page (password entry + unlock / set-password buttons).
-fn build_lock_page() -> LockPage {
-    let container = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .halign(gtk4::Align::Center)
-        .valign(gtk4::Align::Center)
-        .spacing(24)
-        .margin_start(48)
-        .margin_end(48)
-        .build();
-
-    let icon = gtk4::Image::builder()
-        .icon_name("system-lock-screen-symbolic")
-        .pixel_size(64)
-        .build();
-    container.append(&icon);
-
-    let title = gtk4::Label::builder()
-        .label("SuperManager")
-        .css_classes(["title-1"])
-        .build();
-    container.append(&title);
-
-    let status_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["dim-label"])
-        .wrap(true)
-        .build();
-    container.append(&status_label);
-
-    let prefs_group = adw::PreferencesGroup::new();
-
-    let password_row = adw::PasswordEntryRow::builder()
-        .title("Master Password")
-        .build();
-    prefs_group.add(&password_row);
-
-    let confirm_row = adw::PasswordEntryRow::builder()
-        .title("Confirm Password")
-        .build();
-    prefs_group.add(&confirm_row);
-    container.append(&prefs_group);
-
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .halign(gtk4::Align::Center)
-        .spacing(12)
-        .build();
-
-    let unlock_btn = gtk4::Button::builder()
-        .label("Unlock")
-        .css_classes(["suggested-action", "pill"])
-        .build();
-    btn_box.append(&unlock_btn);
-
-    let set_btn = gtk4::Button::builder()
-        .label("Set Password")
-        .css_classes(["suggested-action", "pill"])
-        .build();
-    btn_box.append(&set_btn);
-
-    let quit_btn = gtk4::Button::builder()
-        .label("Quit")
-        .css_classes(["destructive-action", "pill"])
-        .build();
-    btn_box.append(&quit_btn);
-    container.append(&btn_box);
-
-    LockPage {
-        container,
-        password_row,
-        confirm_row,
-        unlock_btn,
-        set_btn,
-        quit_btn,
-        status_label,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Main entry point
 // ---------------------------------------------------------------------------
 
@@ -220,10 +130,26 @@ pub fn build_ui(
     app_settings: Arc<Mutex<AppSettings>>,
     rt: tokio::runtime::Handle,
 ) {
-    // Apply persisted colour scheme.
+    // The desktop's palette, then the two shapes libadwaita has no
+    // equivalent of. Nothing here names a colour of its own.
+    let desktop = palette::desktop_palette();
+    design::install_stylesheet();
+
+    // Apply the colour scheme.
+    //
+    // "Follow System" used to mean "follow libadwaita", which on Plasma means
+    // following nothing at all — libadwaita has no idea the desktop is dark.
+    // With a desktop palette in hand it can mean what it says.
     {
         let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
-        adw::StyleManager::default().set_color_scheme(s.adw_color_scheme());
+        let scheme = match (&s.color_scheme, desktop.as_ref()) {
+            (crate::settings::ColorScheme::Default, Some(p)) if p.is_dark() => {
+                adw::ColorScheme::ForceDark
+            }
+            (crate::settings::ColorScheme::Default, Some(_)) => adw::ColorScheme::ForceLight,
+            _ => s.adw_color_scheme(),
+        };
+        adw::StyleManager::default().set_color_scheme(scheme);
     }
 
     let window = adw::ApplicationWindow::builder()
@@ -398,7 +324,7 @@ pub fn build_ui(
         .build();
 
     let logs_btn = gtk4::Button::builder()
-        .icon_name("utilities-terminal-symbolic")
+        .icon_name(design::icon_name(design::icons::TERMINAL))
         .tooltip_text("View daemon logs")
         .build();
 
@@ -422,11 +348,10 @@ pub fn build_ui(
     // View stack: VPN + SSH pages
     // =========================================================================
     let view_stack = navigation::build_view_stack();
-    let view_switcher = navigation::build_view_switcher(&view_stack);
 
     // Notification bell button + popover.
     let notif_btn = gtk4::MenuButton::builder()
-        .icon_name("bell-outline-symbolic")
+        .icon_name(design::icon_name(design::icons::NOTIFICATIONS))
         .tooltip_text("Notifications")
         .css_classes(["flat"])
         .build();
@@ -495,13 +420,6 @@ pub fn build_ui(
         .build();
     notif_btn.set_popover(Some(&notif_popover));
 
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&view_switcher));
-    header.pack_end(&hamburger_btn);
-    header.pack_end(&add_menu_btn);
-    header.pack_end(&notif_btn);
-    header.pack_end(&logs_btn);
-    header.pack_end(&settings_btn);
 
     // -- Daemon-unavailable banner -------------------------------------------
     let banner = adw::Banner::new("Daemon not running");
@@ -541,7 +459,7 @@ pub fn build_ui(
             app_state.lock().unwrap_or_else(|e| e.into_inner()).vpn_filter = text;
         });
     }
-    let (vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
+    let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
     vpn_split.set_min_sidebar_width(280.0);
@@ -551,7 +469,7 @@ pub fn build_ui(
 
     view_stack.add_titled(&vpn_split, Some("vpn"), "VPN");
     let vpn_page = view_stack.page(&vpn_split);
-    vpn_page.set_icon_name(Some("network-vpn-symbolic"));
+    vpn_page.set_icon_name(Some(design::icon_name(design::icons::VPN)));
 
     // =========================================================================
     // Dashboard page (standalone, full-width)
@@ -559,9 +477,11 @@ pub fn build_ui(
     let (dashboard_flow_box, dashboard_widget) =
         ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
-    view_stack.add_titled(&dashboard_widget, Some("dashboard"), "Dashboard");
+    // "fleet" is the id the navigation sidebar addresses this page by. The
+    // two must agree: a mismatch is a nav row that silently does nothing.
+    view_stack.add_titled(&dashboard_widget, Some("fleet"), "Fleet");
     let dashboard_page_ref = view_stack.page(&dashboard_widget);
-    dashboard_page_ref.set_icon_name(Some("utilities-system-monitor-symbolic"));
+    dashboard_page_ref.set_icon_name(Some(design::icon_name(design::icons::GRID)));
 
     // =========================================================================
     // Hosts page
@@ -617,7 +537,7 @@ pub fn build_ui(
     ssh_host_search.set_hexpand(true);
     // Batch command button.
     let ssh_batch_btn = gtk4::Button::builder()
-        .icon_name("utilities-terminal-symbolic")
+        .icon_name(design::icon_name(design::icons::TERMINAL))
         .tooltip_text("Run command on multiple hosts")
         .css_classes(["flat"])
         .build();
@@ -671,11 +591,11 @@ pub fn build_ui(
     let (ssh_host_detail, ssh_host_detail_widget) = ssh::host_detail::build_ssh_host_detail();
 
     let hosts_content_stack = gtk4::Stack::new();
-    let hosts_empty_status = adw::StatusPage::builder()
-        .title("Hosts")
-        .description("Select a host from the sidebar to view details.")
-        .icon_name("computer-symbolic")
-        .build();
+    let hosts_empty_status = design::empty_state(
+        "computer-symbolic",
+        "No host selected",
+        "Pick a host from the list to see how it connects, or use + to add one.",
+    );
     hosts_content_stack.add_named(&hosts_empty_status, Some("empty"));
     hosts_content_stack.add_named(&ssh_host_detail_widget, Some("host-detail"));
     hosts_content_stack.set_visible_child_name("empty");
@@ -747,11 +667,11 @@ pub fn build_ui(
     let (ssh_key_detail, ssh_key_detail_widget) = ssh::key_detail::build_ssh_key_detail();
 
     let keys_content_stack = gtk4::Stack::new();
-    let keys_empty_status = adw::StatusPage::builder()
-        .title("Keys")
-        .description("Select a key from the sidebar to view details.")
-        .icon_name("dialog-password-symbolic")
-        .build();
+    let keys_empty_status = design::empty_state(
+        "dialog-password-symbolic",
+        "No key selected",
+        "Pick a key from the list to see its fingerprint and where it is deployed.",
+    );
     keys_content_stack.add_named(&keys_empty_status, Some("empty"));
     keys_content_stack.add_named(&ssh_key_detail_widget, Some("key-detail"));
     keys_content_stack.set_visible_child_name("empty");
@@ -926,7 +846,7 @@ pub fn build_ui(
 
     view_stack.add_titled(&console_widget, Some("console"), "Console");
     let console_page_ref = view_stack.page(&console_widget);
-    console_page_ref.set_icon_name(Some("utilities-terminal-symbolic"));
+    console_page_ref.set_icon_name(Some(design::icon_name(design::icons::TERMINAL)));
 
     // Console setup page is already handled internally by the stack.
 
@@ -939,6 +859,21 @@ pub fn build_ui(
     view_stack.add_titled(&provisioning_widget, Some("provisioning"), "Provisioning");
     let provisioning_page_ref = view_stack.page(&provisioning_widget);
     provisioning_page_ref.set_icon_name(Some("emblem-system-symbolic"));
+
+    // =========================================================================
+    // Sections the redesign adds that have no implementation yet
+    //
+    // Registered as real stack children so the sidebar can reach them and
+    // say what they are, rather than having the nav row do nothing when
+    // clicked. `shell::placeholder` names what *is* built so nobody
+    // concludes the application is broken.
+    // =========================================================================
+    for section in shell::all_sections() {
+        if !section.built {
+            let page = shell::placeholder(section);
+            view_stack.add_titled(&page, Some(section.id), section.title);
+        }
+    }
 
     // =========================================================================
     // Assemble the window
@@ -988,14 +923,29 @@ pub fn build_ui(
     let toast_overlay = adw::ToastOverlay::new();
     toast_overlay.set_child(Some(&root_box));
 
-    let main_toolbar = adw::ToolbarView::new();
-    main_toolbar.add_top_bar(&header);
-    main_toolbar.set_content(Some(&toast_overlay));
+    // The sidebar replaces the header bar's view switcher. Everything that
+    // was packed into that header moves to the shell's own, so the buttons
+    // are unchanged — only what carries them differs.
+    let shell = shell::build(&view_stack, &toast_overlay);
+    // The toolbar pill is painted by the same code that paints the VPN detail
+    // pane, because they answer to the same events; it just answers a
+    // different question — the daemon's state rather than the selected
+    // profile's. It can only be handed over here, since the pane is built
+    // long before the shell that carries the toolbar.
+    vpn_detail.status.toolbar_slot = shell.vpn_status.clone();
+
+    shell.header_end.append(&settings_btn);
+    shell.header_end.append(&logs_btn);
+    shell.header_end.append(&notif_btn);
+    shell.header_end.append(&add_menu_btn);
+    shell.header_end.append(&hamburger_btn);
+
+    let main_toolbar = shell.widget.clone();
 
     // =========================================================================
     // Lock screen (overlays entire app content via a GtkStack)
     // =========================================================================
-    let lock_page = build_lock_page();
+    let lock_page = lock::build();
     let outer_stack = gtk4::Stack::builder()
         .transition_type(gtk4::StackTransitionType::Crossfade)
         .transition_duration(200)
@@ -1007,9 +957,7 @@ pub fn build_ui(
     {
         if crate::master_password::is_set() {
             outer_stack.set_visible_child_name("lock");
-            lock_page.status_label.set_text("Enter your master password to unlock.");
-            lock_page.set_btn.set_visible(false);
-            lock_page.confirm_row.set_visible(false);
+            lock_page.present(lock::LOCKED);
             lock_page.password_row.grab_focus();
         } else {
             // No password yet — go straight to the app.
@@ -1086,13 +1034,7 @@ pub fn build_ui(
         if s.selected_profile.is_some() {
             vpn_detail.detail_stack.set_visible_child_name("detail");
         }
-        apply_vpn_state(
-            &vpn_detail.connect_btn,
-            &vpn_detail.rename_btn,
-            &vpn_detail.status_label,
-            &vpn_detail.stats_box,
-            &s,
-        );
+        apply_vpn_state(&vpn_detail.status, &s);
     }
 
     // =========================================================================
@@ -1106,7 +1048,7 @@ pub fn build_ui(
         let tx = tx.clone();
         let rt = rt.clone();
         settings_btn.connect_clicked(move |_| {
-            vpn::dialogs::show_settings_dialog(
+            preferences::show_settings_dialog(
                 &window,
                 Arc::clone(&app_settings),
                 &tx,
@@ -1291,11 +1233,9 @@ pub fn build_ui(
     // --- VPN profile row activated (sidebar selection) -----------------------
     {
         let app_state = Arc::clone(&app_state);
-        let connect_btn = vpn_detail.connect_btn.clone();
+        let vpn_status = vpn_detail.status.clone();
         let rename_btn = vpn_detail.rename_btn.clone();
         let edit_creds_btn = vpn_detail.edit_creds_btn.clone();
-        let status_label = vpn_detail.status_label.clone();
-        let stats_box = vpn_detail.stats_box.clone();
         let detail_stack = vpn_detail.detail_stack.clone();
         let vpn_content_page = vpn_content_page.clone();
         let profile_name_label = vpn_detail.profile_name_label.clone();
@@ -1371,7 +1311,7 @@ pub fn build_ui(
 
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             rename_btn.set_sensitive(s.selected_profile.is_some());
-            apply_vpn_state(&connect_btn, &rename_btn, &status_label, &stats_box, &s);
+            apply_vpn_state(&vpn_status, &s);
         });
     }
 
@@ -1398,21 +1338,27 @@ pub fn build_ui(
                 key_name_label.set_label(&key.name);
                 key_type_badge.set_label(&format!("{:?}", key.key_type));
                 fingerprint_label.set_label(&key.fingerprint);
-                if key.tags.is_empty() {
-                    tags_label.set_visible(false);
-                } else {
-                    tags_label.set_label(&format!("Tags: {}", key.tags.join(", ")));
-                    tags_label.set_visible(true);
-                }
+                // The row carries the "Tags" label; this is only the values,
+                // and an empty one hides its own row.
+                tags_label.set_label(&key.tags.join(", "));
+                tags_label.set_visible(!key.tags.is_empty());
 
                 // Clear deployed-to list
                 while let Some(child) = deployed_list.first_child() {
                     deployed_list.remove(&child);
                 }
-                let deployed_row = adw::ActionRow::builder()
-                    .title(format!("Deployed to {} host(s)", key.deployed_count))
-                    .activatable(false)
-                    .build();
+                let deployed_row = if key.deployed_count == 0 {
+                    adw::ActionRow::builder()
+                        .title("Not deployed anywhere")
+                        .subtitle("Use Push to Hosts to install it")
+                        .activatable(false)
+                        .build()
+                } else {
+                    adw::ActionRow::builder()
+                        .title(format!("{} host(s)", key.deployed_count))
+                        .activatable(false)
+                        .build()
+                };
                 deployed_list.append(&deployed_row);
 
                 key_detail_stack.set_visible_child_name("detail");
@@ -2833,11 +2779,8 @@ pub fn build_ui(
     // =========================================================================
     let rx_app_state = Arc::clone(&app_state);
     let rx_profile_list = vpn_profile_list.clone();
-    let rx_connect_btn = vpn_detail.connect_btn.clone();
-    let rx_rename_btn = vpn_detail.rename_btn.clone();
-    let rx_status_label = vpn_detail.status_label.clone();
+    let rx_vpn_status = vpn_detail.status.clone();
     let rx_profile_name_label = vpn_detail.profile_name_label.clone();
-    let rx_stats_box = vpn_detail.stats_box.clone();
     let rx_stats_sent = vpn_detail.stats_sent.clone();
     let rx_stats_recv = vpn_detail.stats_recv.clone();
     let rx_stats_uptime = vpn_detail.stats_uptime.clone();
@@ -2892,13 +2835,7 @@ pub fn build_ui(
                         &rx_tx,
                         &s.vpn_filter,
                     );
-                    apply_vpn_state(
-                        &rx_connect_btn,
-                        &rx_rename_btn,
-                        &rx_status_label,
-                        &rx_stats_box,
-                        &s,
-                    );
+                    apply_vpn_state(&rx_vpn_status, &s);
                     push_tray_update(
                         &rx_tray_handle,
                         s.vpn_state.clone(),
@@ -2960,7 +2897,7 @@ pub fn build_ui(
                                 rx_app.send_notification(Some("vpn-state"), &notif);
                                 push_notification(
                                     &rx_app_state, &rx_notif_list, &rx_notif_btn,
-                                    "network-vpn-symbolic",
+                                    design::icon_name(design::icons::VPN),
                                     &format!("VPN Connected: {body}"),
                                 );
                             }
@@ -2987,7 +2924,7 @@ pub fn build_ui(
                                 rx_app.send_notification(Some("vpn-state"), &notif);
                                 push_notification(
                                     &rx_app_state, &rx_notif_list, &rx_notif_btn,
-                                    "network-vpn-disabled-symbolic",
+                                    design::icon_name(design::icons::VPN_OFF),
                                     &format!("VPN Disconnected: {body}"),
                                 );
                             }
@@ -3019,13 +2956,7 @@ pub fn build_ui(
                     // Re-lock briefly for apply_vpn_state (reads multiple fields).
                     {
                         let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                        apply_vpn_state(
-                            &rx_connect_btn,
-                            &rx_rename_btn,
-                            &rx_status_label,
-                            &rx_stats_box,
-                            &s,
-                        );
+                        apply_vpn_state(&rx_vpn_status, &s);
                     }
                     push_tray_update(
                         &rx_tray_handle,
@@ -3042,20 +2973,21 @@ pub fn build_ui(
                     active_routes,
                     uptime_secs,
                 } => {
-                    rx_stats_sent.set_label(&format!("Sent: {}", format_bytes(bytes_sent)));
-                    rx_stats_recv
-                        .set_label(&format!("Received: {}", format_bytes(bytes_received)));
+                    // The rows carry their own titles now, so these are bare
+                    // values — "1.20 MiB", not "Sent: 1.20 MiB".
+                    rx_stats_sent.set_label(&format_bytes(bytes_sent));
+                    rx_stats_recv.set_label(&format_bytes(bytes_received));
 
                     if uptime_secs > 0 {
                         let h = uptime_secs / 3600;
                         let m = (uptime_secs % 3600) / 60;
                         let s = uptime_secs % 60;
                         let uptime_text = if h > 0 {
-                            format!("Connected: {h}h {m:02}m")
+                            format!("{h}h {m:02}m")
                         } else if m > 0 {
-                            format!("Connected: {m}m {s:02}s")
+                            format!("{m}m {s:02}s")
                         } else {
-                            format!("Connected: {s}s")
+                            format!("{s}s")
                         };
                         rx_stats_uptime.set_label(&uptime_text);
                         rx_stats_uptime.set_visible(true);
@@ -3064,28 +2996,27 @@ pub fn build_ui(
                     }
 
                     let hs_text = if last_handshake_secs == 0 {
-                        "Last handshake: \u{2014}".to_owned()
+                        "\u{2014}".to_owned()
                     } else {
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
                         let elapsed = now.saturating_sub(last_handshake_secs);
-                        format!("Last handshake: {}", format_ago(elapsed))
+                        format_ago(elapsed)
                     };
                     rx_stats_handshake.set_label(&hs_text);
 
                     if virtual_ip.is_empty() {
                         rx_stats_virtual_ip.set_visible(false);
                     } else {
-                        rx_stats_virtual_ip.set_label(&format!("VPN IP: {virtual_ip}"));
+                        rx_stats_virtual_ip.set_label(&virtual_ip);
                         rx_stats_virtual_ip.set_visible(true);
                     }
                     if active_routes.is_empty() {
                         rx_stats_routes.set_visible(false);
                     } else {
-                        rx_stats_routes
-                            .set_label(&format!("Routes: {}", active_routes.join(", ")));
+                        rx_stats_routes.set_label(&active_routes.join(", "));
                         rx_stats_routes.set_visible(true);
                     }
                 }
@@ -3112,13 +3043,7 @@ pub fn build_ui(
                         rx_vpn_detail_stack.set_visible_child_name("empty");
                         rx_profile_name_label.set_label("");
                     }
-                    apply_vpn_state(
-                        &rx_connect_btn,
-                        &rx_rename_btn,
-                        &rx_status_label,
-                        &rx_stats_box,
-                        &s,
-                    );
+                    apply_vpn_state(&rx_vpn_status, &s);
                     rx_toast_overlay.add_toast(adw::Toast::new("Profile deleted"));
                     push_tray_update(
                         &rx_tray_handle,
@@ -3559,7 +3484,7 @@ pub fn build_ui(
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_2 => {
-                        view_stack.set_visible_child_name("dashboard");
+                        view_stack.set_visible_child_name("fleet");
                         return glib::Propagation::Stop;
                     }
                     gtk4::gdk::Key::_3 => {
@@ -3622,7 +3547,7 @@ pub fn build_ui(
                 // Reset inactivity counter on unlock.
                 inactivity_counter.set(0);
             } else {
-                lock_page.status_label.set_text("Incorrect password.");
+                lock_page.status_label.set_text(lock::WRONG);
             }
         });
     }
@@ -3635,40 +3560,11 @@ pub fn build_ui(
         });
     }
 
-    // --- Set Password button (first-time setup, also accessible from lock) ----
-    {
-        let _app_settings = Arc::clone(&app_settings);
-        let outer_stack = outer_stack.clone();
-        let lock_page = lock_page.clone();
-        let inactivity_counter = inactivity_counter.clone();
-        lock_page.set_btn.connect_clicked(move |_| {
-            let pw = lock_page.password_row.text().to_string();
-            let confirm = lock_page.confirm_row.text().to_string();
-            if pw.is_empty() {
-                lock_page.status_label.set_text("Password cannot be empty.");
-                return;
-            }
-            if pw != confirm {
-                lock_page.status_label.set_text("Passwords do not match.");
-                return;
-            }
-            {
-                let _ = crate::master_password::set(&pw);
-            }
-            lock_page.password_row.set_text("");
-            lock_page.confirm_row.set_text("");
-            lock_page.status_label.set_text("");
-            outer_stack.set_visible_child_name("app");
-            inactivity_counter.set(0);
-        });
-    }
-
-    // Allow pressing Enter anywhere to trigger unlock/set when the lock page
-    // is visible.  Attach to the *window* so the event is caught even if
+    // Allow pressing Enter anywhere to unlock when the lock page is visible.
+    // Attach to the *window* so the event is caught even if
     // PasswordEntryRow consumes it at the widget level.
     {
         let unlock_btn = lock_page.unlock_btn.clone();
-        let set_btn = lock_page.set_btn.clone();
         let outer_stack_enter = outer_stack.clone();
         let key_ctrl = gtk4::EventControllerKey::builder()
             .propagation_phase(gtk4::PropagationPhase::Capture)
@@ -3677,13 +3573,8 @@ pub fn build_ui(
         key_ctrl.connect_key_pressed(move |_, key, _, _| {
             if outer_stack_enter.visible_child_name().as_deref() == Some("lock") {
                 if key == gtk4::gdk::Key::Return || key == gtk4::gdk::Key::KP_Enter {
-                    if unlock_btn.is_visible() {
-                        unlock_btn.emit_clicked();
-                        return glib::Propagation::Stop;
-                    } else if set_btn.is_visible() {
-                        set_btn.emit_clicked();
-                        return glib::Propagation::Stop;
-                    }
+                    unlock_btn.emit_clicked();
+                    return glib::Propagation::Stop;
                 } else if key == gtk4::gdk::Key::Escape {
                     quit_btn.emit_clicked();
                     return glib::Propagation::Stop;
@@ -3928,48 +3819,35 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
 
 /// Switch the outer stack to the lock page and prepare it for unlock.
 /// Build one popover row from a stored notification.
-fn notification_row(notification: &crate::app::Notification) -> gtk4::Box {
-    let row_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(8)
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(8)
-        .margin_end(8)
+fn notification_row(notification: &crate::app::Notification) -> adw::ActionRow {
+    // A hand-rolled box until now, which is why this list was the one place
+    // in the application whose rows had their own spacing, their own icon
+    // size and their own idea of where a timestamp goes. It is a list of
+    // things that happened; it looks like every other list.
+    let row = adw::ActionRow::builder()
+        .title(glib::markup_escape_text(&notification.message))
+        .activatable(false)
+        // Long messages wrap rather than being cut off at the popover's
+        // edge — a truncated VPN error is no use to anybody.
+        .title_lines(0)
         .build();
-    row_box.append(&gtk4::Image::from_icon_name(notification.icon));
+    row.add_prefix(&design::icon(&[notification.icon, "dialog-information"]));
 
-    let text_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(2)
-        .hexpand(true)
-        .build();
-    text_box.append(
-        &gtk4::Label::builder()
-            .label(&notification.message)
-            .halign(gtk4::Align::Start)
-            .wrap(true)
-            .wrap_mode(gtk4::pango::WrapMode::WordChar)
-            .build(),
-    );
-    // The stored instant, shown in local time — not a second clock read
-    // at render time. Re-rendering an old notification now gives the
-    // time it happened rather than the time it was redrawn.
-    text_box.append(
-        &gtk4::Label::builder()
-            .label(
-                notification
-                    .timestamp
-                    .with_timezone(&chrono::Local)
-                    .format("%H:%M:%S")
-                    .to_string(),
-            )
-            .halign(gtk4::Align::Start)
-            .css_classes(["caption", "dim-label"])
-            .build(),
-    );
-    row_box.append(&text_box);
-    row_box
+    // The stored instant, shown in local time — not a second clock read at
+    // render time. Re-rendering an old notification now gives the time it
+    // happened rather than the time it was redrawn.
+    let when = gtk4::Label::new(Some(
+        &notification
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string(),
+    ));
+    when.add_css_class("caption");
+    when.add_css_class("dim-label");
+    when.set_valign(gtk4::Align::Center);
+    row.add_suffix(&when);
+    row
 }
 
 /// Redraw the popover list from `AppState::notifications`.
@@ -3996,18 +3874,19 @@ fn render_notifications(
     if notifications.is_empty() {
         notif_list.append(
             &adw::ActionRow::builder()
-                .title("No notifications")
+                .title("Nothing to report")
+                .subtitle("Connections, failures and key pushes show up here")
                 .activatable(false)
                 .build(),
         );
-        notif_btn.set_icon_name("bell-outline-symbolic");
+        notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
         return;
     }
 
     for notification in &notifications {
         notif_list.append(&notification_row(notification));
     }
-    notif_btn.set_icon_name("bell-symbolic");
+    notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
 }
 
 /// Push a notification into the store and redraw the popover from it.
@@ -4025,13 +3904,8 @@ fn push_notification(
     render_notifications(app_state, notif_list, notif_btn);
 }
 
-fn lock_session(outer_stack: &gtk4::Stack, lock_page: &LockPage) {
-    lock_page.password_row.set_text("");
-    lock_page.confirm_row.set_text("");
-    lock_page.status_label.set_text("Session locked. Enter your password.");
-    lock_page.unlock_btn.set_visible(true);
-    lock_page.set_btn.set_visible(false);
-    lock_page.confirm_row.set_visible(false);
+fn lock_session(outer_stack: &gtk4::Stack, lock_page: &lock::LockPage) {
+    lock_page.present(lock::AUTO_LOCKED);
     outer_stack.set_visible_child_name("lock");
     lock_page.password_row.grab_focus();
 }

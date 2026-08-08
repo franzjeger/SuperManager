@@ -17,6 +17,26 @@ use crate::app::AppMsg;
 use crate::dbus_client::{
     dbus_ssh_delete_key, dbus_ssh_export_private_key, dbus_ssh_export_public_key,
 };
+use crate::ui::design;
+
+// ---------------------------------------------------------------------------
+// Row content
+// ---------------------------------------------------------------------------
+
+/// Shorten a fingerprint to something that fits in a sidebar row.
+///
+/// Truncation is by character, not by byte: a fingerprint is Base64 today,
+/// but slicing a `String` at a fixed byte offset panics the moment one is
+/// not, and a list of keys is not where that should be discovered.
+#[must_use]
+pub fn short_fingerprint(fingerprint: &str) -> String {
+    const KEEP: usize = 20;
+    let mut short: String = fingerprint.chars().take(KEEP).collect();
+    if fingerprint.chars().nth(KEEP).is_some() {
+        short.push('\u{2026}');
+    }
+    short
+}
 
 // ---------------------------------------------------------------------------
 // Build
@@ -88,33 +108,32 @@ pub fn populate_ssh_key_list(
     sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     for key in &sorted {
-        let type_str = format!("{:?}", key.key_type);
-        // Truncate fingerprint for display: "SHA256:abcdef..." -> first 16 chars.
-        let fp_short = if key.fingerprint.len() > 20 {
-            format!("{}\u{2026}", &key.fingerprint[..20])
-        } else {
-            key.fingerprint.clone()
-        };
-        let subtitle = format!("{} \u{b7} {}", type_str, fp_short);
-
         let row = adw::ActionRow::builder()
             .title(key.name.as_str())
-            .subtitle(&subtitle)
+            .subtitle(&short_fingerprint(&key.fingerprint))
             .activatable(true)
             .build();
+        row.add_prefix(&design::icon(design::icons::KEY));
 
-        row.add_prefix(&gtk4::Image::from_icon_name("dialog-password-symbolic"));
+        // Key type as a badge, as backends are in the VPN list — the same
+        // fact in the same shape, so the two lists read the same way.
+        row.add_suffix(&design::badge(&format!("{:?}", key.key_type)));
 
-        // Deployed-count badge.
-        if key.deployed_count > 0 {
-            let badge = gtk4::Label::builder()
-                .label(format!("{}", key.deployed_count))
-                .css_classes(["caption", "dim-label"])
-                .valign(gtk4::Align::Center)
-                .tooltip_text(format!("Deployed to {} host(s)", key.deployed_count))
-                .build();
-            row.add_suffix(&badge);
-        }
+        // Deployment count. Zero is worth saying: a key that exists but is
+        // installed nowhere is the one an operator is usually looking for,
+        // and the old list simply omitted the badge in that case, which made
+        // "not deployed" indistinguishable from "not rendered".
+        let deployed = design::badge(&if key.deployed_count == 0 {
+            "unused".to_owned()
+        } else {
+            format!("{} host(s)", key.deployed_count)
+        });
+        deployed.set_tooltip_text(Some(&if key.deployed_count == 0 {
+            "Not deployed to any host".to_owned()
+        } else {
+            format!("Deployed to {} host(s)", key.deployed_count)
+        }));
+        row.add_suffix(&deployed);
 
         // Delete button.
         let delete_btn = gtk4::Button::builder()
@@ -566,5 +585,38 @@ pub fn export_all_keys_to_ssh_dir(
 
     if keys.is_empty() {
         tx.send(AppMsg::ShowToast("No keys to export".into())).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_fingerprint_is_left_alone() {
+        assert_eq!(short_fingerprint("SHA256:abc"), "SHA256:abc");
+        // Exactly at the limit: nothing was cut, so nothing claims it was.
+        let exact = "0123456789abcdefghij";
+        assert_eq!(exact.chars().count(), 20);
+        assert_eq!(short_fingerprint(exact), exact);
+    }
+
+    #[test]
+    fn a_long_fingerprint_is_cut_and_says_so() {
+        let long = "SHA256:1234567890abcdefghijklmnop";
+        let short = short_fingerprint(long);
+        assert!(short.ends_with('\u{2026}'), "{short}");
+        assert_eq!(short.chars().count(), 21, "20 kept plus the ellipsis");
+        assert!(long.starts_with(&short[..short.len() - '\u{2026}'.len_utf8()]));
+    }
+
+    #[test]
+    fn a_multibyte_fingerprint_does_not_panic() {
+        // The old code did `&fingerprint[..20]`, which panics if byte 20 is
+        // not a character boundary. Base64 never puts one there — but the
+        // fingerprint is a string from the daemon, and a list of keys is not
+        // where a slicing panic should first be discovered.
+        let s = "ü".repeat(30);
+        assert_eq!(short_fingerprint(&s).chars().count(), 21);
     }
 }

@@ -299,6 +299,16 @@ struct VpnDetailView: View {
         )
     }
 
+    /// Binding for the "Use tunnel DNS" toggle.
+    private var pushDnsBinding: Binding<Bool> {
+        Binding(
+            get: { profile?.pushDns ?? false },
+            set: { newValue in
+                Task { await appState.setPushDns(profileId: profileId, enabled: newValue) }
+            }
+        )
+    }
+
     /// SwiftUI binding for the always-on Toggle. Reads from
     /// AppState's set; on flip calls `setAutoReconnect` which
     /// pushes to the helper.
@@ -756,6 +766,20 @@ struct VpnDetailView: View {
                         // successful connect — so for IKEv2 you must connect once
                         // manually after enabling it (WireGuard reads the daemon's
                         // secret store, so it works on first toggle).
+                        // Only shown where it can do anything: a
+                        // WireGuard profile that actually carries DNS
+                        // servers. Offering it elsewhere would be a
+                        // switch that changes nothing.
+                        if case .wireguard(let wg) = profile.config, !wg.dns.isEmpty {
+                            ToggleRow(
+                                title: "Use tunnel DNS",
+                                help: profile.pushDns
+                                    ? "Resolving through \(wg.dns.joined(separator: ", ")). Your local DNS is replaced while connected."
+                                    : "Keep local DNS. Turn on if this network's internal names only resolve through the tunnel.",
+                                isOn: pushDnsBinding
+                            )
+                            Divider()
+                        }
                         ToggleRow(
                             title: "Always on",
                             help: alwaysOnHelp,

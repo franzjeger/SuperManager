@@ -464,32 +464,56 @@ extension AppState {
             return
         }
 
-        // 4. Post-install verification with RETRIES. The first 1-3
-        //    seconds after install are inherently disruptive — DNS
-        //    state churn, TCP resets, route table flux. Don't decide
-        //    "exit-node failed" off a single probe. Retry 6 times
-        //    over 12s; if ANY one succeeds, the exit-node is
-        //    working. Auto-revert only if all 6 fail (i.e., the peer
-        //    really is non-functional even after the network settles).
+        // 4. Post-install verification. The first 1-3 seconds after
+        //    install are inherently disruptive — DNS state churn, TCP
+        //    resets, route table flux — so one failed probe means
+        //    nothing. But one *passed* probe means little either: a
+        //    single lucky packet out of six used to be reported as
+        //    "live", and the user then met a path that took 19
+        //    seconds to answer and called the feature useless. It
+        //    was, and we had told them it was fine.
+        //
+        //    So: keep probing until two CONSECUTIVE successes, which
+        //    is what distinguishes a settled path from a fluke, and
+        //    grade the result rather than reducing it to a boolean.
+        //    A path that works but took several attempts is kept —
+        //    slow is the user's call to make, not ours — and said out
+        //    loud, with the number that makes it actionable.
         Task { @MainActor in
-            DebugLog.write("[ts/exit] step 4/4: post-install probes (6× over 12s)")
-            var anyOk = false
-            for attempt in 1...6 {
+            DebugLog.write("[ts/exit] step 4/4: post-install probes (up to 6, 2s apart)")
+            var results: [Bool] = []
+            for attempt in 1...ExitNodeProbeVerdict.maxAttempts {
                 try? await Task.sleep(for: .seconds(2))
                 let ok = await probeInternet()
-                DebugLog.write("[ts/exit] step 4/4 probe \(attempt)/6: \(ok ? "OK" : "fail")")
-                if ok {
-                    anyOk = true
-                    break
-                }
+                results.append(ok)
+                DebugLog.write("[ts/exit] step 4/4 probe \(attempt)/\(ExitNodeProbeVerdict.maxAttempts): \(ok ? "OK" : "fail")")
+                if ExitNodeProbeVerdict.settled(results) { break }
             }
-            if anyOk {
+
+            switch ExitNodeProbeVerdict.evaluate(results) {
+            case .healthy:
                 DebugLog.write("[ts/exit] === SUCCESS: exit-node \(ipOrAuto) live ===")
                 tailscaleActionError = nil
                 _ = try? await HelperClient.shared.tailscaleResumeWatchdog()
-            } else {
-                DebugLog.write("[ts/exit] === AUTO-REVERT: 12s no internet through peer ===")
-                tailscaleActionError = "Internet didn't recover after 12s through exit node — auto-reverted."
+
+            case let .degraded(secondsToFirstResponse, failures):
+                // Deliberately NOT reverted. It forwards traffic, and
+                // whether that is good enough depends on what the user
+                // is doing — but they get the measurement instead of a
+                // mystery.
+                DebugLog.write(
+                    "[ts/exit] === DEGRADED: live but unstable "
+                    + "(\(failures) failed probe(s), \(secondsToFirstResponse)s to first response) ===")
+                tailscaleActionError =
+                    "Exit node is forwarding traffic, but the path is unstable — "
+                    + "\(failures) of \(results.count) probes failed and it took "
+                    + "\(secondsToFirstResponse)s to respond. Expect it to feel slow."
+                _ = try? await HelperClient.shared.tailscaleResumeWatchdog()
+
+            case .dead:
+                DebugLog.write("[ts/exit] === AUTO-REVERT: no internet through peer ===")
+                tailscaleActionError =
+                    "Internet didn't recover through the exit node — auto-reverted."
                 await panicResetTailscale()
                 _ = try? await HelperClient.shared.tailscaleResumeWatchdog()
             }
@@ -530,5 +554,67 @@ extension AppState {
         } catch {
             tailscaleActionError = error.localizedDescription
         }
+    }
+}
+
+/// How the post-install probe sequence is graded when an exit node is
+/// selected.
+///
+/// This used to be a boolean: any one probe passing out of six meant
+/// "live". That reported a path where four probes failed and the fifth
+/// answered after 19 seconds as working — which is technically true and
+/// practically useless, and left the user to discover the difference
+/// themselves.
+///
+/// The rule now turns on two consecutive successes. One success can be a
+/// lucky packet during route-table flux; two in a row means the path has
+/// settled. A path that gets there eventually is still kept — whether
+/// slow is acceptable depends on what the user is doing, and that is
+/// their call — but it is reported as degraded, with the numbers that
+/// make it actionable.
+///
+/// Pure and `nonisolated` so the grading can be tested without a daemon,
+/// a network, or twelve seconds of sleeping.
+enum ExitNodeProbeVerdict: Equatable {
+    /// Answered immediately and stayed up.
+    case healthy
+    /// Forwards traffic, but took a while or flaked on the way.
+    /// `secondsToFirstResponse` is wall-clock from the first probe;
+    /// `failures` counts every probe that did not answer.
+    case degraded(secondsToFirstResponse: Int, failures: Int)
+    /// Nothing got through. Caller reverts.
+    case dead
+
+    /// Probes are spaced this far apart, which is what turns a probe
+    /// index into the seconds figure shown to the user.
+    static let probeIntervalSeconds = 2
+    /// Upper bound on probing before we grade what we have.
+    static let maxAttempts = 6
+    /// Consecutive successes that count as a settled path.
+    static let requiredConsecutive = 2
+
+    /// Whether probing can stop early: the path has proven itself.
+    static func settled(_ results: [Bool]) -> Bool {
+        guard results.count >= requiredConsecutive else { return false }
+        return results.suffix(requiredConsecutive).allSatisfy { $0 }
+    }
+
+    static func evaluate(_ results: [Bool]) -> ExitNodeProbeVerdict {
+        guard let firstOk = results.firstIndex(of: true) else { return .dead }
+        let failures = results.filter { !$0 }.count
+
+        // Healthy means it answered on the first probe and never
+        // missed. Checking only that the tail settled would grade
+        // [ok, fail, ok, ok] as healthy — answered, dropped, recovered
+        // — and dropping the connection once is exactly the flakiness
+        // the user is entitled to hear about. Any failure at all makes
+        // it degraded; the count and timing say how bad.
+        if failures == 0 && settled(results) {
+            return .healthy
+        }
+        return .degraded(
+            secondsToFirstResponse: (firstOk + 1) * probeIntervalSeconds,
+            failures: failures
+        )
     }
 }

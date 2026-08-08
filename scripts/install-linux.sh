@@ -72,11 +72,19 @@ FILES=(
     "target/release/supermgr|/usr/bin/supermgr|755"
     "target/release/supermgr-mcp|/usr/bin/supermgr-mcp|755"
     "contrib/systemd/supermgrd.service|/etc/systemd/system/supermgrd.service|644"
+    "contrib/modules-load.d/supermgr.conf|/etc/modules-load.d/supermgr.conf|644"
     "contrib/dbus/org.supermgr.Daemon.conf|/usr/share/dbus-1/system.d/org.supermgr.Daemon.conf|644"
     "contrib/dbus/org.supermgr.Daemon.service|/usr/share/dbus-1/system-services/org.supermgr.Daemon.service|644"
     "contrib/polkit/org.supermgr.Daemon.policy|/usr/share/polkit-1/actions/org.supermgr.Daemon.policy|644"
     "contrib/desktop/org.supermgr.SuperManager.desktop|/usr/share/applications/org.supermgr.SuperManager.desktop|644"
     "contrib/icons/org.supermgr.SuperManager.svg|/usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg|644"
+    "contrib/icons/hicolor/16.png|/usr/share/icons/hicolor/16x16/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/24.png|/usr/share/icons/hicolor/24x24/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/32.png|/usr/share/icons/hicolor/32x32/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/48.png|/usr/share/icons/hicolor/48x48/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/64.png|/usr/share/icons/hicolor/64x64/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/128.png|/usr/share/icons/hicolor/128x128/apps/org.supermgr.SuperManager.png|644"
+    "contrib/icons/hicolor/256.png|/usr/share/icons/hicolor/256x256/apps/org.supermgr.SuperManager.png|644"
     "contrib/man/supermgr.1|/usr/share/man/man1/supermgr.1|644"
     "contrib/man/supermgrd.8|/usr/share/man/man8/supermgrd.8|644"
 )
@@ -366,10 +374,75 @@ fi
 if command -v gtk-update-icon-cache >/dev/null; then
     sudo gtk-update-icon-cache -f /usr/share/icons/hicolor 2>/dev/null || true
 fi
+# Plasma keeps its own cache of desktop entries and icons, and it is per-user
+# rather than system-wide — so this one runs as you, not under sudo. Without
+# it the task manager and the system tray keep showing whatever icon they saw
+# first, which makes a corrected icon look like it did not install.
+for sycoca in kbuildsycoca6 kbuildsycoca5; do
+    if command -v "$sycoca" >/dev/null; then
+        "$sycoca" >/dev/null 2>&1 || true
+        break
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # 5. Start the daemon
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Kernel modules
+#
+# The file installed above handles every boot after this one. This handles
+# the first one, so the first VPN connect does not fail on a module that is
+# on disk but not loaded — which surfaces as EOPNOTSUPP from netlink and
+# reads like the kernel has no WireGuard support at all.
+#
+# The daemon cannot do this itself: its bounding set has no CAP_SYS_MODULE,
+# and giving a VPN manager the ability to load kernel modules to save an
+# install step is not a trade worth making.
+# ---------------------------------------------------------------------------
+
+say "Kernel modules"
+
+# Before blaming any individual module: if the running kernel has no module
+# tree at all, every modprobe below fails for one reason and the remedy is a
+# reboot, not a kernel rebuild. On a rolling distribution this is the common
+# case — an update replaces /lib/modules and deletes the running kernel's,
+# so `modprobe wireguard` says "not found in directory /lib/modules/<running>"
+# on a kernel that was built with CONFIG_WIREGUARD=m all along.
+RUNNING_KERNEL="$(uname -r)"
+if [ ! -d "/lib/modules/$RUNNING_KERNEL" ]; then
+    warn "no /lib/modules/$RUNNING_KERNEL — the running kernel has no modules to load."
+    OTHER=""
+    for d in /lib/modules/*/; do
+        d="${d%/}"; d="${d##*/}"
+        [ "$d" = "$RUNNING_KERNEL" ] || [ "$d" = "*" ] || OTHER="$d"
+    done
+    if [ -n "$OTHER" ]; then
+        warn "  $OTHER is installed instead: the kernel was updated and not rebooted into."
+        warn "  Reboot, then re-run this script. Nothing below can succeed until you do."
+    else
+        warn "  and nothing else is installed either. Reinstall your kernel package."
+    fi
+else
+    for mod in wireguard tun nf_tables; do
+        if [ -d "/sys/module/$mod" ]; then
+            note "$mod already loaded"
+        elif sudo modprobe "$mod" 2>/dev/null; then
+            note "loaded $mod"
+        else
+            case "$mod" in
+                wireguard)
+                    warn "cannot load $mod — WireGuard profiles will not connect"
+                    warn "  a stock kernel has had it since 5.6; a custom one may not"
+                    ;;
+                tun)       warn "cannot load $mod — OpenVPN and Azure VPN will not connect" ;;
+                nf_tables) warn "cannot load $mod — the kill switch cannot block traffic" ;;
+            esac
+            warn "  sudo modprobe $mod   # for the actual reason"
+        fi
+    done
+fi
 
 say "Starting the daemon"
 sudo systemctl daemon-reload
@@ -405,11 +478,31 @@ note "Uninstall:   ./scripts/install-linux.sh --uninstall"
 note ""
 note "Working now: SSH, key management, network scan, compliance,"
 note "             UniFi/FortiGate/OPNsense/Sophos APIs, WireGuard,"
-note "             IKEv2, FortiGate SSL VPN, OpenVPN, Azure VPN."
+note "             IKEv2 / FortiGate IPsec, Azure VPN."
+note ""
+# Said plainly because the alternative is finding out at connect time.
+# `vpn::backend_for_profile` returns an error for this variant on Linux;
+# the backend exists only in the Windows daemon.
+note "Not on Linux: FortiGate SSL VPN. That backend is Windows-only, and a"
+note "              profile of that type fails when you try to connect it."
+note "              Use the FortiGate (IPsec/IKEv2) profile type instead."
+
+# The OpenVPN backend drives the `openvpn3` CLI, not the `openvpn` binary
+# installed above — so an OpenVPN profile does not work until this is
+# present. Azure VPN is unaffected: that backend spawns `openvpn` itself.
 if ! command -v openvpn3 >/dev/null 2>&1; then
     note ""
-    note "Not installed: openvpn3, which no distro but Arch packages."
-    note "               Only needed for OpenVPN profiles driven through the"
-    note "               openvpn3 CLI; Azure VPN uses it too. Everything else"
-    note "               works without it."
+    note "Not installed: openvpn3. OpenVPN profiles are driven through that"
+    note "               CLI, so they will not connect until it is present."
+    case "$FAMILY" in
+        arch)
+            note "               On Arch it is in the AUR, which pacman does not"
+            note "               reach:  paru -S openvpn3    (or yay, or makepkg)"
+            ;;
+        *)
+            note "               No distribution but Arch packages it; build from"
+            note "               https://github.com/OpenVPN/openvpn3-linux"
+            ;;
+    esac
+    note "               Everything else above works without it."
 fi

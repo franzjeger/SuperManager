@@ -3,6 +3,21 @@
 //! Builds a [`gtk4::ListBox`] where each row is an [`adw::ActionRow`] displaying
 //! the profile name, backend type, and a delete button.  The list is rebuilt
 //! from scratch via [`populate_vpn_sidebar`] whenever the profile list changes.
+//!
+//! # Undifferentiated rows
+//!
+//! The redesign brief lists *"undifferentiated list rows"* among the things
+//! wrong with the old interface, and this list was the clearest example:
+//! every row carried the same subtitle shape — backend, then maybe "Auto",
+//! then a timestamp, all dot-separated — so a connected tunnel, a failed one
+//! and one that had never been tried looked the same at a glance, separated
+//! only by a small monochrome prefix icon.
+//!
+//! Now the backend is a badge, the state is a coloured pill, and the pill
+//! appears **only on rows worth looking at** ([`Status::is_notable`], plus
+//! connected). A list where every row is decorated has no signal left in the
+//! decoration; a list where three rows out of twenty are marked is scannable
+//! from across the desk.
 
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -15,6 +30,91 @@ use supermgr_core::vpn::{profile::ProfileSummary, state::VpnState};
 
 use crate::app::{AppMsg, AppState};
 use crate::dbus_client::{dbus_connect, dbus_delete_profile, dbus_disconnect};
+use crate::ui::design::{self, Status};
+
+// ---------------------------------------------------------------------------
+// What a row says
+// ---------------------------------------------------------------------------
+
+/// One sidebar row's content, decided without reference to any widget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowView {
+    /// Which of the shared states this profile is in.
+    pub status: Status,
+    /// The secondary line: how long, how recently, and whether automatic.
+    pub meta: String,
+    /// Whether this row is worth marking with a pill.
+    pub show_pill: bool,
+}
+
+/// Decide what a sidebar row says.
+///
+/// `now_secs` is Unix time, passed in rather than read, so that a row's text
+/// is a function of its inputs and can be checked.
+#[must_use]
+pub fn row_view(profile: &ProfileSummary, vpn: &VpnState, now_secs: u64) -> RowView {
+    let id = profile.id;
+    let (status, timing) = match vpn {
+        VpnState::Connected { profile_id, since, .. } if *profile_id == id => {
+            // A clock that has gone backwards — or a `since` from the
+            // future after an NTP step — must not produce a nonsense
+            // duration, so the difference is clamped rather than wrapped.
+            let now = i64::try_from(now_secs).unwrap_or(i64::MAX);
+            let elapsed = u64::try_from(now.saturating_sub(since.timestamp())).unwrap_or(0);
+            let (h, m) = (elapsed / 3600, (elapsed % 3600) / 60);
+            let text = if h > 0 {
+                format!("Up {h}h {m:02}m")
+            } else {
+                format!("Up {m}m")
+            };
+            (Status::Connected, text)
+        }
+        VpnState::Connecting { profile_id, phase, .. } if *profile_id == id => {
+            let phase = phase.trim();
+            let text =
+                if phase.is_empty() { String::new() } else { phase.to_owned() };
+            (Status::Connecting, text)
+        }
+        VpnState::Disconnecting { profile_id } if *profile_id == id => {
+            (Status::Connecting, "Disconnecting\u{2026}".to_owned())
+        }
+        VpnState::Error { profile_id: Some(failed), .. } if *failed == id => {
+            (Status::Error, last_connected(profile, now_secs))
+        }
+        // Everything else — including a tunnel or a failure belonging to some
+        // *other* profile — leaves this row idle. A profile that has never
+        // been connected is `Unknown` rather than `Disconnected`: nothing has
+        // been tried, so nothing is known, and "Disconnected" would imply it
+        // had been up at some point.
+        _ if profile.last_connected_secs.is_none() => {
+            (Status::Unknown, "Never connected".to_owned())
+        }
+        _ => (Status::Disconnected, last_connected(profile, now_secs)),
+    };
+
+    let mut parts = Vec::new();
+    if !timing.is_empty() {
+        parts.push(timing);
+    }
+    if profile.auto_connect {
+        parts.push("Auto".to_owned());
+    }
+
+    RowView {
+        status,
+        meta: parts.join(" \u{b7} "),
+        // A pill on every row is wallpaper. These are the rows an operator
+        // scans a list to find.
+        show_pill: status.is_notable() || status == Status::Connected,
+    }
+}
+
+fn last_connected(profile: &ProfileSummary, now_secs: u64) -> String {
+    match profile.last_connected_secs {
+        Some(ts) => format!("Last {}", crate::ui::format_ago(now_secs.saturating_sub(ts))),
+        None => "Never connected".to_owned(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Build
@@ -150,80 +250,44 @@ pub fn populate_vpn_sidebar(
     let mut sorted: Vec<&ProfileSummary> = filtered;
     sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    for profile in &sorted {
-        let pid = profile.id;
-        enum RowState {
-            Connected,
-            Connecting,
-            Error,
-            Idle,
-        }
-        let row_state = match vpn_state {
-            VpnState::Connected { profile_id, .. } if *profile_id == pid => RowState::Connected,
-            VpnState::Connecting { profile_id, .. } if *profile_id == pid => RowState::Connecting,
-            VpnState::Disconnecting { profile_id } if *profile_id == pid => RowState::Connecting,
-            VpnState::Error {
-                profile_id: Some(epid),
-                ..
-            } if *epid == pid => RowState::Error,
-            _ => RowState::Idle,
-        };
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
-        let mut subtitle_parts = vec![profile.backend.as_str().to_owned()];
-        if profile.auto_connect {
-            subtitle_parts.push("Auto".to_owned());
-        }
-        // Show connection duration for active profile, last-connected for idle.
-        if matches!(row_state, RowState::Connected) {
-            if let VpnState::Connected { since, .. } = vpn_state {
-                let elapsed = chrono::Utc::now()
-                    .signed_duration_since(*since)
-                    .num_seconds()
-                    .max(0) as u64;
-                let h = elapsed / 3600;
-                let m = (elapsed % 3600) / 60;
-                if h > 0 {
-                    subtitle_parts.push(format!("Connected {h}h {m:02}m"));
-                } else {
-                    subtitle_parts.push(format!("Connected {m}m"));
-                }
-            }
-        } else if matches!(row_state, RowState::Connecting) {
-            subtitle_parts.push("Connecting\u{2026}".to_owned());
-        } else if let Some(ts) = profile.last_connected_secs {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let elapsed = now.saturating_sub(ts);
-            subtitle_parts.push(format!("Last: {}", super::super::format_ago(elapsed)));
-        }
-        let subtitle = subtitle_parts.join(" \u{b7} ");
+    for profile in &sorted {
+        let view = row_view(profile, vpn_state, now_secs);
 
         let row = adw::ActionRow::builder()
             .title(profile.name.as_str())
-            .subtitle(subtitle.as_str())
+            .subtitle(view.meta.as_str())
             .activatable(true)
             .build();
 
-        match row_state {
-            RowState::Connected => {
-                row.add_prefix(&gtk4::Image::from_icon_name("network-vpn-symbolic"));
-            }
-            RowState::Connecting => {
-                let spinner = gtk4::Spinner::new();
-                spinner.start();
-                spinner.set_valign(gtk4::Align::Center);
-                row.add_prefix(&spinner);
-            }
-            RowState::Error => {
-                row.add_prefix(&gtk4::Image::from_icon_name("dialog-error-symbolic"));
-            }
-            RowState::Idle => {
-                row.add_prefix(&gtk4::Image::from_icon_name(
-                    "network-vpn-disabled-symbolic",
-                ));
-            }
+        // A spinner where something is genuinely in progress, and a static
+        // icon otherwise. The spinner is the one case where movement is the
+        // honest rendering — it says "still going" without a timer.
+        if view.status == Status::Connecting {
+            let spinner = gtk4::Spinner::new();
+            spinner.start();
+            spinner.set_valign(gtk4::Align::Center);
+            row.add_prefix(&spinner);
+        } else {
+            let icon = design::icon(if view.status == Status::Connected {
+                design::icons::VPN
+            } else {
+                design::icons::VPN_OFF
+            });
+            icon.add_css_class(view.status.style_class());
+            row.add_prefix(&icon);
+        }
+
+        // Backend as a neutral badge rather than the first word of the
+        // subtitle, so the subtitle is free to say something that changes.
+        row.add_suffix(&design::badge(profile.backend.as_str()));
+
+        if view.show_pill {
+            row.add_suffix(&design::status_pill(view.status, view.status.label()));
         }
 
         // Delete button.
@@ -287,7 +351,7 @@ pub fn populate_vpn_sidebar(
             let profile_id = profile.id.to_string();
             let profile_name = profile.name.clone();
             let backend = profile.backend.clone();
-            let is_connected = matches!(row_state, RowState::Connected);
+            let is_connected = view.status == Status::Connected;
             let window_ctx = window.clone();
             let rt_ctx = rt.clone();
             let tx_ctx = tx.clone();
@@ -451,5 +515,182 @@ pub fn populate_vpn_sidebar(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use supermgr_core::vpn::state::ErrorCode;
+    use uuid::Uuid;
+
+    const NOW: u64 = 1_700_000_000;
+    const NOW_I64: i64 = 1_700_000_000;
+
+    fn profile(id: Uuid) -> ProfileSummary {
+        ProfileSummary {
+            id,
+            name: "Sybr HQ".into(),
+            backend: "WireGuard".into(),
+            auto_connect: false,
+            full_tunnel: true,
+            split_routes: Vec::new(),
+            last_connected_secs: None,
+            host: None,
+            username: None,
+            dns_servers: Vec::new(),
+            kill_switch: false,
+            customer: String::new(),
+        }
+    }
+
+    fn connected(id: Uuid, seconds_ago: i64) -> VpnState {
+        VpnState::Connected {
+            profile_id: id,
+            since: Utc
+                .timestamp_opt(NOW_I64 - seconds_ago, 0)
+                .single()
+                .expect("a valid timestamp"),
+            interface: "wg0".into(),
+        }
+    }
+
+    #[test]
+    fn a_profile_that_has_never_been_tried_is_unknown_not_disconnected() {
+        // "Disconnected" claims a history the profile does not have. The
+        // difference matters when an operator is looking for the one profile
+        // in the list that has never worked.
+        let p = profile(Uuid::new_v4());
+        let view = row_view(&p, &VpnState::Disconnected, NOW);
+
+        assert_eq!(view.status, Status::Unknown);
+        assert_eq!(view.meta, "Never connected");
+    }
+
+    #[test]
+    fn a_profile_with_a_history_is_disconnected_and_says_when() {
+        let mut p = profile(Uuid::new_v4());
+        p.last_connected_secs = Some(NOW - 7200);
+        let view = row_view(&p, &VpnState::Disconnected, NOW);
+
+        assert_eq!(view.status, Status::Disconnected);
+        assert!(view.meta.starts_with("Last "), "{}", view.meta);
+    }
+
+    #[test]
+    fn only_the_rows_worth_finding_are_marked() {
+        // The whole point of the pill. If every row carries one, the list is
+        // decorated rather than informative — which is what the brief means
+        // by undifferentiated rows.
+        let id = Uuid::new_v4();
+        let mut p = profile(id);
+        p.last_connected_secs = Some(NOW - 60);
+
+        assert!(row_view(&p, &connected(id, 60), NOW).show_pill);
+        assert!(row_view(
+            &p,
+            &VpnState::Error {
+                profile_id: Some(id),
+                code: ErrorCode::Internal,
+                message: "boom".into()
+            },
+            NOW
+        )
+        .show_pill);
+        assert!(row_view(&p, &VpnState::Disconnecting { profile_id: id }, NOW).show_pill);
+
+        assert!(!row_view(&p, &VpnState::Disconnected, NOW).show_pill);
+        assert!(!row_view(&profile(id), &VpnState::Disconnected, NOW).show_pill);
+    }
+
+    #[test]
+    fn another_profiles_tunnel_does_not_colour_this_row() {
+        // Every arm of the match is guarded on the profile id. Drop one of
+        // those guards and the whole list lights up green whenever anything
+        // is connected.
+        let mine = Uuid::new_v4();
+        let theirs = Uuid::new_v4();
+        let mut p = profile(mine);
+        p.last_connected_secs = Some(NOW - 300);
+
+        for state in [
+            connected(theirs, 300),
+            VpnState::Connecting {
+                profile_id: theirs,
+                since: Utc.timestamp_opt(NOW_I64, 0).single().expect("valid"),
+                phase: "handshake".into(),
+            },
+            VpnState::Disconnecting { profile_id: theirs },
+            VpnState::Error {
+                profile_id: Some(theirs),
+                code: ErrorCode::Internal,
+                message: "boom".into(),
+            },
+        ] {
+            let view = row_view(&p, &state, NOW);
+            assert_eq!(view.status, Status::Disconnected, "leaked from {state:?}");
+            assert!(!view.show_pill, "leaked from {state:?}");
+        }
+    }
+
+    #[test]
+    fn the_connected_row_says_how_long_it_has_been_up() {
+        let id = Uuid::new_v4();
+        let p = profile(id);
+
+        assert_eq!(row_view(&p, &connected(id, 90 * 60), NOW).meta, "Up 1h 30m");
+        assert_eq!(row_view(&p, &connected(id, 5 * 60), NOW).meta, "Up 5m");
+        // A clock that has gone backwards must not produce a nonsense
+        // duration or a panic.
+        assert_eq!(row_view(&p, &connected(id, -60), NOW).meta, "Up 0m");
+    }
+
+    #[test]
+    fn auto_connect_is_mentioned_whatever_the_state() {
+        // It is a property of the profile, not of the connection, so no state
+        // may swallow it.
+        let id = Uuid::new_v4();
+        let mut p = profile(id);
+        p.auto_connect = true;
+        p.last_connected_secs = Some(NOW - 60);
+
+        for state in [
+            VpnState::Disconnected,
+            connected(id, 60),
+            VpnState::Disconnecting { profile_id: id },
+            VpnState::Error {
+                profile_id: Some(id),
+                code: ErrorCode::Internal,
+                message: "boom".into(),
+            },
+        ] {
+            assert!(
+                row_view(&p, &state, NOW).meta.contains("Auto"),
+                "auto-connect vanished in {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_connecting_row_shows_the_phase_and_never_a_stray_separator() {
+        // The phase is the only thing that distinguishes one moment of a slow
+        // connection from the next. An empty one must not leave "· Auto"
+        // dangling off the front of the line.
+        let id = Uuid::new_v4();
+        let since = Utc.timestamp_opt(NOW_I64, 0).single().expect("valid");
+        let mut p = profile(id);
+        p.auto_connect = true;
+
+        let with_phase = VpnState::Connecting {
+            profile_id: id,
+            since,
+            phase: "IKE_SA_INIT".into(),
+        };
+        assert_eq!(row_view(&p, &with_phase, NOW).meta, "IKE_SA_INIT \u{b7} Auto");
+
+        let no_phase =
+            VpnState::Connecting { profile_id: id, since, phase: "  ".into() };
+        assert_eq!(row_view(&p, &no_phase, NOW).meta, "Auto");
     }
 }
