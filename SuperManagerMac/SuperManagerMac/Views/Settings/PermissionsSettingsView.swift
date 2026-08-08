@@ -130,6 +130,11 @@ struct PermissionsSettingsView: View {
                     }
                 }
             }
+            // The engine's probe reports what IS there; this installs
+            // what isn't. One place the operator can get every missing
+            // VPN client without leaving the app for Terminal.
+            DependencyCard { Task { await refreshTools() } }
+                .padding(.top, 4)
             HStack {
                 Button("Refresh") { Task { await refreshTools() } }
                     .controlSize(.small)
