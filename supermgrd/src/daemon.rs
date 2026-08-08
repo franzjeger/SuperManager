@@ -5479,9 +5479,16 @@ pub async fn connect_profile(
                 match backend.connect(&profile).await {
                     Ok(()) => break 'retry Ok(()),
                     Err(e) => {
+                        // A missing prerequisite — a stopped IKE daemon, a
+                        // kernel module that will not load — is settled before
+                        // the first attempt and cannot resolve itself in the
+                        // six seconds this loop would spend on it. Retrying it
+                        // only delays the error the user needs to read, and
+                        // logs it three times over.
                         let transient = !matches!(
                             e,
                             supermgr_core::error::BackendError::AlreadyConnected
+                                | supermgr_core::error::BackendError::Prerequisite(_)
                         );
                         if !transient || attempt == 2 {
                             break 'retry Err(e);

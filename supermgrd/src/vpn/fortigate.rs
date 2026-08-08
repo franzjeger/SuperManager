@@ -147,6 +147,53 @@ impl Default for FortiGateBackend {
 // swanctl subprocess helper
 // ---------------------------------------------------------------------------
 
+/// True when swanctl's stderr says it could not reach charon over the vici
+/// socket.
+///
+/// swanctl is a client: it is installed and runs fine with the IKE daemon
+/// stopped, and then fails on every call with this. On a distro that ships
+/// `strongswan.service` disabled by default — Arch, and Debian when installed
+/// without the daemon enabled — that is the state a machine is in until
+/// somebody starts the unit, so it is the first thing a FortiGate connect
+/// hits.
+fn charon_unreachable(stderr: &str) -> bool {
+    stderr.contains("charon.vici") || stderr.contains("connecting to 'default' URI failed")
+}
+
+/// Strip swanctl's usage block from stderr.
+///
+/// On any argument or connection error swanctl prints its full ~20-line usage
+/// text after the one line that says what actually went wrong. That block was
+/// being handed to the GUI verbatim as the connection error, which buried the
+/// real message under a wall of option documentation.
+fn strip_usage_block(stderr: &str) -> String {
+    stderr
+        .lines()
+        .take_while(|l| !l.starts_with("strongSwan ") && !l.starts_with("usage:"))
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Turn a failed swanctl invocation into the error the user should see.
+///
+/// Charon being down is a [`BackendError::Prerequisite`] naming the command
+/// that fixes it; anything else keeps the (de-noised) stderr.
+fn swanctl_failure(command: &str, stderr: &str) -> BackendError {
+    if charon_unreachable(stderr) {
+        return BackendError::Prerequisite(
+            "strongSwan is installed but its IKE daemon (charon) is not running — \
+             start it with: sudo systemctl enable --now strongswan.service"
+                .into(),
+        );
+    }
+    BackendError::Subprocess {
+        command: command.into(),
+        message: strip_usage_block(stderr),
+    }
+}
+
 /// Run `swanctl <args>`, log every detail, and return the raw `Output`.
 ///
 /// Never panics; propagates I/O errors as [`BackendError::Io`].
@@ -746,10 +793,10 @@ impl VpnBackend for FortiGateBackend {
         let out = run_swanctl(&["--load-all"]).await?;
         if !out.status.success() {
             let _ = tokio::fs::remove_file(&config_path).await;
-            return Err(BackendError::Subprocess {
-                command: "swanctl --load-all".into(),
-                message: String::from_utf8_lossy(&out.stderr).into_owned(),
-            });
+            return Err(swanctl_failure(
+                "swanctl --load-all",
+                &String::from_utf8_lossy(&out.stderr),
+            ));
         }
 
         // ── Step 3: Resolve FortiGate host to IP ────────────────────────────
@@ -1386,6 +1433,54 @@ impl VpnBackend for FortiGateBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim stderr from `swanctl --load-all` on a machine where
+    /// strongswan.service is installed but not started — the state Arch
+    /// leaves after `pacman -S strongswan`, since the unit ships disabled.
+    const CHARON_DOWN_STDERR: &str = "\
+connecting to 'unix:///var/run/charon.vici' failed: No such file or directory
+strongSwan 6.0.7 swanctl (--load-all/-q)
+load credentials, authorities, pools and connections
+usage:
+  swanctl --load-all [--raw|--pretty] [--clear] [--noprompt]
+options:
+  --help            (-h)  show usage information
+  --clear           (-c)  clear previously loaded credentials
+  --debug           (-v)  set debug level, default: 1
+error: connecting to 'default' URI failed: No such file or directory
+";
+
+    #[test]
+    fn stopped_charon_is_a_prerequisite_naming_the_fix() {
+        let err = swanctl_failure("swanctl --load-all", CHARON_DOWN_STDERR);
+        let msg = err.to_string();
+        assert!(matches!(err, BackendError::Prerequisite(_)), "{msg}");
+        assert!(msg.contains("systemctl enable --now strongswan.service"), "{msg}");
+    }
+
+    #[test]
+    fn the_usage_block_never_reaches_the_user() {
+        // This is what the GUI used to display as the connection error: one
+        // useful line followed by swanctl's whole option list.
+        let msg = swanctl_failure("swanctl --load-all", CHARON_DOWN_STDERR).to_string();
+        assert!(!msg.contains("show usage information"), "{msg}");
+        assert!(!msg.contains("--noprompt"), "{msg}");
+        assert!(msg.lines().count() == 1, "expected one line, got: {msg}");
+    }
+
+    #[test]
+    fn a_real_swanctl_error_keeps_its_message() {
+        let stderr = "establishing CHILD_SA supermgr-abc failed\n";
+        let err = swanctl_failure("swanctl --initiate", stderr);
+        assert!(matches!(err, BackendError::Subprocess { .. }));
+        assert!(err.to_string().contains("establishing CHILD_SA"), "{err}");
+    }
+
+    #[test]
+    fn charon_unreachable_does_not_fire_on_unrelated_failures() {
+        assert!(!charon_unreachable("establishing CHILD_SA supermgr-abc failed"));
+        assert!(charon_unreachable(CHARON_DOWN_STDERR));
+    }
 
     #[test]
     fn parse_gateway_extracts_via_and_dev() {

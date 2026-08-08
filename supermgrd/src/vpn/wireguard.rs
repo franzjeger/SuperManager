@@ -250,6 +250,17 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
         Ok(()) => {
             info!("restored {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
         }
+        // EEXIST means a default route is already back — NetworkManager or
+        // dhcpcd reinstalled it when the tunnel interface went away, which is
+        // the common case on a desktop and races us every time. The route we
+        // wanted is present, so this is the goal state, not a failure; it was
+        // being logged as one on every single disconnect.
+        Err(e) if e.to_string().contains("File exists") => {
+            info!(
+                "{} default route already restored by the system — nothing to do",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
+        }
         Err(e) => {
             warn!("restore {} default route failed: {e}", if ipv6 { "IPv6" } else { "IPv4" });
         }
@@ -375,6 +386,44 @@ fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
     let net: ipnet::IpNet = cidr.parse()
         .map_err(|e| BackendError::Interface(format!("invalid CIDR '{cidr}': {e}")))?;
     Ok((net.addr(), net.prefix_len()))
+}
+
+// ---------------------------------------------------------------------------
+// Kernel module preflight
+// ---------------------------------------------------------------------------
+
+/// Load the WireGuard module if the kernel does not already have it.
+///
+/// Every mainstream distro ships WireGuard as `CONFIG_WIREGUARD=m` rather than
+/// built in, so on a freshly booted machine that has never run a tunnel the
+/// module is usually absent. Creating the interface through the generic-netlink
+/// `wireguard` family does not autoload it the way creating a `wireguard`-type
+/// link would — the family simply is not registered, and the netlink call comes
+/// back `ENOTSUP`. Without this the daemon reported that as a kernel that
+/// cannot do WireGuard at all.
+///
+/// Best-effort by design: a failure here is not returned. The module may be
+/// built in (nothing to load), and if it genuinely is unavailable the apply
+/// below fails anyway, with [`wireguard_unsupported_hint`] to explain it.
+async fn ensure_module_loaded() {
+    if std::path::Path::new("/sys/module/wireguard").exists() {
+        debug!("WireGuard module already in the kernel");
+        return;
+    }
+
+    match tokio::process::Command::new("modprobe")
+        .arg("wireguard")
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => info!("loaded the WireGuard kernel module"),
+        Ok(out) => debug!(
+            "modprobe wireguard: exit={} stderr={:?}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => debug!("modprobe not available: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -557,6 +606,9 @@ impl WireGuardBackend {
             .parse()
             .map_err(|e| BackendError::Interface(format!("invalid interface name '{iface_name}': {e}")))?;
 
+        // The netlink call below needs the wireguard family registered.
+        ensure_module_loaded().await;
+
         // Build the device update.
         let mut update = DeviceUpdate::new().set_private_key(private_key);
 
@@ -640,7 +692,10 @@ impl WireGuardBackend {
                          the daemon must run as root (or with CAP_NET_ADMIN) — {e}"
                     ))
                 } else if msg.contains("not supported") || msg.contains("ENOTSUP") || msg.contains("No such device") {
-                    BackendError::Interface(wireguard_unsupported_hint(&e.to_string()))
+                    // Reached only after ensure_module_loaded() has already
+                    // tried, so the module really is unavailable — the
+                    // diagnosis says which of the reasons it is.
+                    BackendError::Prerequisite(wireguard_unsupported_hint(&e.to_string()))
                 } else {
                     BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
                 }
