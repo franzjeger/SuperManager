@@ -5648,7 +5648,7 @@ pub async fn connect_profile(
                 s = state_arc.lock().await;
                 s.vpn_state = VpnState::Error {
                     profile_id: Some(id),
-                    code: supermgr_core::vpn::state::ErrorCode::Internal,
+                    code: supermgr_core::vpn::state::ErrorCode::from(&e),
                     message: e.to_string(),
                 };
                 s.active_backend = None;

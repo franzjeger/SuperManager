@@ -36,7 +36,7 @@ use libadwaita::prelude::*;
 
 use crate::app::AppState;
 use crate::ui::design::{self, Status};
-use supermgr_core::vpn::state::VpnState;
+use supermgr_core::vpn::state::{ErrorCode, VpnState};
 
 // ---------------------------------------------------------------------------
 // What the pane should say
@@ -127,9 +127,22 @@ pub fn status_view(vpn: &VpnState, selected_profile: Option<&str>) -> StatusView
             action_enabled: true,
             show_stats: false,
         },
-        VpnState::Error { message, .. } => StatusView {
+        VpnState::Error { code, message, .. } => StatusView {
             status: Status::Error,
-            headline: "Error",
+            headline: match code {
+                ErrorCode::AuthFailed => "Authentication failed",
+                ErrorCode::Unreachable => "Gateway unreachable",
+                ErrorCode::Timeout => "Connection timed out",
+                ErrorCode::NegotiationFailed => "VPN negotiation failed",
+                ErrorCode::KernelError => "Kernel error",
+                ErrorCode::SubprocessError => "VPN helper failed",
+                ErrorCode::ConfigError => "Invalid profile",
+                ErrorCode::SecretMissing => "Credential missing",
+                ErrorCode::InvalidKey => "Invalid key",
+                ErrorCode::PrerequisiteMissing => "Setup required",
+                ErrorCode::PermissionDenied => "Permission required",
+                ErrorCode::Internal => "Error",
+            },
             // The message goes here rather than into the headline. It is
             // often a whole sentence from a VPN driver, and it belongs at
             // body size where it can be read, not in the pill.
@@ -187,7 +200,10 @@ pub fn toolbar_status(
         VpnState::Disconnecting { .. } => {
             (Status::Connecting, "Disconnecting\u{2026}".to_owned())
         }
-        VpnState::Error { .. } => (Status::Error, "VPN error".to_owned()),
+        VpnState::Error { .. } => (
+            Status::Error,
+            active_name.unwrap_or("VPN error").to_owned(),
+        ),
         VpnState::Disconnected => (Status::Disconnected, "No VPN".to_owned()),
     }
 }
@@ -554,7 +570,6 @@ pub fn apply_vpn_state(w: &VpnStatusWidgets, state: &AppState) {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use supermgr_core::vpn::state::ErrorCode;
     use uuid::Uuid;
 
     fn connected(id: Uuid) -> VpnState {
@@ -565,6 +580,14 @@ mod tests {
         VpnState::Error {
             profile_id: id,
             code: ErrorCode::Internal,
+            message: message.to_owned(),
+        }
+    }
+
+    fn coded_error(code: ErrorCode, message: &str) -> VpnState {
+        VpnState::Error {
+            profile_id: None,
+            code,
             message: message.to_owned(),
         }
     }
@@ -586,6 +609,22 @@ mod tests {
         assert!(view.headline.len() < 16, "the pill's text has to fit in a pill");
         assert_eq!(view.detail, message, "the message was dropped instead of moved");
         assert_eq!(view.status, Status::Error);
+    }
+
+    #[test]
+    fn actionable_error_codes_get_specific_headlines() {
+        let cases = [
+            (ErrorCode::PrerequisiteMissing, "Setup required"),
+            (ErrorCode::PermissionDenied, "Permission required"),
+            (ErrorCode::SecretMissing, "Credential missing"),
+            (ErrorCode::Timeout, "Connection timed out"),
+        ];
+
+        for (code, expected) in cases {
+            let view = status_view(&coded_error(code, "details"), Some("p"));
+            assert_eq!(view.headline, expected);
+            assert_eq!(view.detail, "details");
+        }
     }
 
     #[test]

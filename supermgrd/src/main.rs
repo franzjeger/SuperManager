@@ -42,7 +42,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use tokio::sync::{watch, Mutex};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{
     fmt, layer::SubscriberExt as _, reload, util::SubscriberInitExt as _, EnvFilter,
 };
@@ -305,8 +305,14 @@ async fn cleanup_stale_strongswan() {
         Ok(ref o) => {
             // swanctl may not be installed — that's fine.
             let stderr = String::from_utf8_lossy(&o.stderr);
-            if !stderr.contains("command not found") {
-                warn!("swanctl --list-sas: exit={} stderr={:?}", o.status, stderr.trim());
+            if crate::vpn::fortigate::charon_unreachable(&stderr) {
+                // An installed but stopped strongSwan is normal when the user
+                // does not use IPsec. There cannot be stale SAs to clean up,
+                // so keep the expected condition out of the warning log.
+                debug!("startup cleanup: strongSwan/charon is not running");
+            } else if !stderr.contains("command not found") {
+                let message = crate::vpn::fortigate::strip_usage_block(&stderr);
+                warn!("swanctl --list-sas: exit={} stderr={message:?}", o.status);
             }
             return;
         }
