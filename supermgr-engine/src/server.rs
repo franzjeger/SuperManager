@@ -182,6 +182,7 @@ impl EngineServer {
             "ssh_delete_host" => self.handle_ssh_delete_host(id, req.params).await,
             "ssh_toggle_pin" => self.handle_ssh_toggle_pin(id, req.params).await,
             "ssh_set_password" => self.handle_ssh_set_password(id, req.params).await,
+            "ssh_set_certificate" => self.handle_ssh_set_certificate(id, req.params).await,
 
             // -- SSH operations --
             "ssh_execute_command" => self.handle_ssh_execute_command(id, req.params).await,
@@ -850,7 +851,11 @@ mod tests {
             auth_method: AuthMethod::Password,
             auth_key_id: None,
             auth_password_ref: Some(password_ref()),
-            auth_cert_ref: None,
+            // Populated so the merge tests below actually exercise it.
+            // This fixture documents itself as "every field populated";
+            // leaving the cert ref None meant an edit that silently
+            // dropped it would have passed.
+            auth_cert_ref: Some(cert_ref()),
             vpn_profile_id: Some(uuid::Uuid::nil()),
             api_port: None,
             api_token_ref: Some(api_ref()),
@@ -905,8 +910,41 @@ mod tests {
             Some(&api_ref().0),
             "merge_host_update wiped api_token_ref"
         );
+        assert_eq!(
+            host.auth_cert_ref.as_ref().map(|s| &s.0),
+            Some(&cert_ref().0),
+            "merge_host_update wiped auth_cert_ref — editing any field \
+             would strip a certificate host's certificate"
+        );
         assert!(host.pinned, "merge_host_update reset the pin flag");
         assert!(host.vpn_profile_id.is_some(), "merge_host_update wiped vpn_profile_id");
+    }
+
+    #[test]
+    fn merge_never_takes_a_client_supplied_cert_ref() {
+        // Secret labels are the engine's to mint — `ssh_set_certificate`
+        // and the `certificate` param on `ssh_add_host` both derive the
+        // label from the host id. If `auth_cert_ref` ever became a
+        // merge-able field, a caller could repoint a host at an arbitrary
+        // keychain entry and have the connect path read it. Same reasoning
+        // guards `auth_password_ref` and `api_token_ref`.
+        let mut host = full_host();
+        let incoming = serde_json::json!({
+            "auth_cert_ref": "supermgr/ssh/host/somebody-elses-host/certificate",
+            "auth_password_ref": "supermgr/ssh/host/somebody-elses-host/password",
+        });
+        merge_host_update(&mut host, &incoming);
+
+        assert_eq!(
+            host.auth_cert_ref.as_ref().map(|s| &s.0),
+            Some(&cert_ref().0),
+            "merge_host_update accepted an auth_cert_ref off the wire"
+        );
+        assert_eq!(
+            host.auth_password_ref.as_ref().map(|s| &s.0),
+            Some(&password_ref().0),
+            "merge_host_update accepted an auth_password_ref off the wire"
+        );
     }
 
     #[test]
