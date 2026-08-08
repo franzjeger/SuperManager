@@ -12,6 +12,11 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
     let authMethod: AuthMethod
     let authKeyId: String?
     let vpnProfileId: String?
+    /// Whether an OpenSSH certificate is stored for this host. Mirrors
+    /// `has_certificate` on Rust's `HostSummary` — a presence flag, never
+    /// the certificate itself, the same way `hasApi` works. Lets the edit
+    /// sheet offer "replace" rather than "set" without reading a secret.
+    let hasCertificate: Bool
     let hasApi: Bool
     let apiPort: UInt16?
     let hasUnifiController: Bool
@@ -23,6 +28,7 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
         case authMethod = "auth_method"
         case authKeyId = "auth_key_id"
         case vpnProfileId = "vpn_profile_id"
+        case hasCertificate = "has_certificate"
         case hasApi = "has_api"
         case apiPort = "api_port"
         case hasUnifiController = "has_unifi_controller"
@@ -93,6 +99,7 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
         authMethod = (try? c.decode(AuthMethod.self, forKey: .authMethod)) ?? .key
         authKeyId = try? c.decode(String.self, forKey: .authKeyId)
         vpnProfileId = try? c.decode(String.self, forKey: .vpnProfileId)
+        hasCertificate = (try? c.decode(Bool.self, forKey: .hasCertificate)) ?? false
         hasApi = (try? c.decode(Bool.self, forKey: .hasApi)) ?? false
         apiPort = try? c.decode(UInt16.self, forKey: .apiPort)
         hasUnifiController = (try? c.decode(Bool.self, forKey: .hasUnifiController)) ?? false
@@ -198,14 +205,35 @@ enum DeviceType: String, Codable, CaseIterable, Hashable {
 }
 
 /// Rust uses `#[serde(rename_all = "snake_case")]`
+///
+/// All three cases must stay in sync with Rust's `AuthMethod`. The
+/// `.certificate` case was missing until the engine gained a working
+/// certificate connect path: while it was absent, `SshHostSummary`'s
+/// decoder fell back to `.key` for a certificate host, the UI labelled
+/// it "SSH Key", and saving any edit wrote `auth_method: "key"` back —
+/// silently converting the host and orphaning its certificate.
 enum AuthMethod: String, Codable, CaseIterable, Hashable {
     case password = "password"
     case key = "key"
+    case certificate = "certificate"
 
     var displayName: String {
         switch self {
         case .password: return "Password"
         case .key: return "SSH Key"
+        case .certificate: return "SSH Certificate"
+        }
+    }
+
+    /// Whether this method authenticates with a private key from the key
+    /// store. Certificate auth presents a CA-signed certificate
+    /// *alongside* the key rather than instead of it, so both cases need
+    /// a key selected — the engine rejects a certificate host with no
+    /// `auth_key_id` as "no SSH key configured".
+    var requiresKey: Bool {
+        switch self {
+        case .key, .certificate: return true
+        case .password: return false
         }
     }
 }

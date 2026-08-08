@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct AddHostSheet: View {
@@ -52,6 +53,7 @@ struct AddHostSheet: View {
     @State private var authMethod: AuthMethod = .key
     @State private var selectedKeyId: String?
     @State private var password = ""
+    @State private var certificate = ""
     @State private var showingNewCustomer = false
     @State private var slugsBeforeAdd: Set<String> = []
     @FocusState private var firstFieldFocused: Bool
@@ -81,14 +83,21 @@ struct AddHostSheet: View {
                     }
                 }
 
-                if authMethod == .key {
+                // Three independent conditions rather than if/else:
+                // certificate auth needs the key picker *and* a
+                // certificate, so the old two-way branch can't express it.
+                if authMethod.requiresKey {
                     Picker("SSH Key", selection: $selectedKeyId) {
                         Text("None").tag(nil as String?)
                         ForEach(appState.sshKeys) { key in
                             Text("\(key.name) (\(key.keyType.displayName))").tag(key.id as String?)
                         }
                     }
-                } else {
+                }
+                if authMethod == .certificate {
+                    certificateField
+                }
+                if authMethod == .password {
                     SecureField("Password", text: $password)
                 }
             }
@@ -108,14 +117,15 @@ struct AddHostSheet: View {
                             group: group,
                             deviceType: deviceType,
                             authMethod: authMethod,
-                            authKeyId: authMethod == .key ? selectedKeyId : nil,
-                            password: authMethod == .password ? password : nil
+                            authKeyId: authMethod.requiresKey ? selectedKeyId : nil,
+                            password: authMethod == .password ? password : nil,
+                            certificate: authMethod == .certificate ? certificate : nil
                         )
                         dismiss()
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(label.isEmpty || hostname.isEmpty)
+                .disabled(label.isEmpty || hostname.isEmpty || !certificateInputComplete)
             }
         }
         .padding()
@@ -128,6 +138,56 @@ struct AddHostSheet: View {
             try? await Task.sleep(for: .milliseconds(100))
             firstFieldFocused = true
         }
+    }
+
+    /// Certificate input for `.certificate` hosts. Deliberately not
+    /// shared with `EditHostSheet` — the two sheets keep their own copies
+    /// of this and `groupPicker` because the edit variants differ (there,
+    /// an empty field means "keep the stored certificate").
+    @ViewBuilder
+    private var certificateField: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Certificate")
+                Spacer()
+                Button("Load from file…") { loadCertificateFromFile() }
+                    .controlSize(.small)
+            }
+            TextEditor(text: $certificate)
+                .frame(minHeight: 64)
+                .font(.system(.caption, design: .monospaced))
+            Text("Contents of the CA-signed `*-cert.pub` file — the certificate, not the public key. Certificate auth also needs the matching SSH key selected above.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    /// A certificate is one long base64 line, so pasting works — but the
+    /// file sits next to the key in `~/.ssh`, which is usually quicker.
+    /// `showsHiddenFiles` because that directory is itself hidden.
+    private func loadCertificateFromFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.showsHiddenFiles = true
+        panel.message = "Pick the CA-signed certificate (*-cert.pub) for this host."
+        panel.directoryURL = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .appendingPathComponent(".ssh", isDirectory: true)
+        guard panel.runModal() == .OK,
+              let url = panel.url,
+              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+        certificate = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Certificate auth needs both a key and a certificate; the engine
+    /// rejects a host missing either. Block the button rather than let
+    /// the save round-trip and fail. Only gates `.certificate` — the
+    /// pre-existing latitude to save a `.key` host with no key selected
+    /// is left as it was.
+    private var certificateInputComplete: Bool {
+        guard authMethod == .certificate else { return true }
+        return selectedKeyId != nil
+            && !certificate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Group picker — uses customer slugs (the conventional grouping

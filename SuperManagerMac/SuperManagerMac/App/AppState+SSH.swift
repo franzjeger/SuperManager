@@ -41,11 +41,16 @@ extension AppState {
         }
     }
 
+    /// `certificate` is the contents of a `*-cert.pub` file, sent only
+    /// for `.certificate` hosts. The engine validates it, stores it under
+    /// a label it owns, and points the host's `auth_cert_ref` at it — we
+    /// never construct that ref here.
     func addHost(label: String, hostname: String, port: UInt16, username: String,
                  group: String, deviceType: DeviceType,
                  unrecognizedDeviceTypeRawValue: String? = nil,
                  authMethod: AuthMethod,
-                 authKeyId: String? = nil, password: String? = nil) async {
+                 authKeyId: String? = nil, password: String? = nil,
+                 certificate: String? = nil) async {
         // Use the original wire string for unrecognised types to
         // prevent round-trip data loss. For all known types (and
         // genuinely-.custom hosts), rawValue is the right thing.
@@ -70,6 +75,9 @@ extension AppState {
             if let pw = password, !pw.isEmpty {
                 params["password"] = pw
             }
+            if let cert = certificate, !cert.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                params["certificate"] = cert
+            }
             let _: String = try await client.call("ssh_add_host", params: params)
             await refreshHosts()
         } catch {
@@ -77,11 +85,16 @@ extension AppState {
         }
     }
 
+    /// `password` and `certificate` follow the same rule: nil or empty
+    /// means "keep whatever is already stored", so an operator editing a
+    /// host's port doesn't have to re-enter either. Clearing a stored
+    /// secret is deliberately not expressible here — switching
+    /// `authMethod` is how you stop using one.
     func updateHost(id: String, label: String, hostname: String, port: UInt16,
                     username: String, group: String, deviceType: DeviceType,
                     unrecognizedDeviceTypeRawValue: String? = nil,
                     authMethod: AuthMethod, authKeyId: String? = nil,
-                    password: String? = nil) async {
+                    password: String? = nil, certificate: String? = nil) async {
         // Same write-amplification prevention as addHost: prefer the
         // original wire string when the host's type was unrecognised.
         // If the operator explicitly changed the picker (in which
@@ -104,6 +117,10 @@ extension AppState {
             try await client.callVoid("ssh_update_host", params: ["host_id": id, "host_json": jsonStr])
             if let pw = password, !pw.isEmpty {
                 try await client.callVoid("ssh_set_password", params: ["host_id": id, "password": pw])
+            }
+            if let cert = certificate, !cert.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try await client.callVoid("ssh_set_certificate",
+                                          params: ["host_id": id, "certificate": cert])
             }
             await refreshHosts()
         } catch {
