@@ -1350,6 +1350,46 @@ pub fn reconcile_exit_node() {
     }
 }
 
+/// Gaps between the post-wake reconcile attempts, in seconds — cumulative
+/// delays of 8s and 20s from wake.
+///
+/// Their sum must stay inside the watchdog pause both wake paths arm
+/// (`connectivity_watchdog::pause_for(45)` in main.rs), or a re-install could
+/// land after escalation resumed and trip the `panic_reset` it was meant to
+/// avoid. `wake_reconcile_attempts_land_inside_the_watchdog_pause` pins that.
+const WAKE_RECONCILE_GAPS_SECS: [u64; 2] = [8, 12];
+
+/// Kick one-shot reconciles shortly after wake, ahead of the 30s tick.
+///
+/// The always-on `auto_reconnect` tick already heals a post-wake exit node,
+/// but "eventually" is up to 30 seconds of egress quietly bypassing the exit
+/// node — and sleep/wake is the case users actually hit. Both wake paths call
+/// this so the common case recovers in seconds instead.
+///
+/// Delayed rather than immediate, because at wake the tailscale utun does not
+/// exist yet: tailscaled is still re-handshaking, so an immediate call bails at
+/// `detect_tailscale_utun` and achieves nothing. Two attempts (~8s and ~20s
+/// after wake) cover a slow handshake, and both land inside the 45s watchdog
+/// pause each caller arms — so the reinstall's brief disruption still cannot
+/// trip `panic_reset`.
+///
+/// Safe to call unconditionally. `reconcile_exit_node` is idempotent: it
+/// no-ops when no exit node is desired, when 0/1 already points at the current
+/// utun, when a live foreign full tunnel owns 0/1, or when the reachability
+/// gate fails. A wasted attempt costs one route lookup, and the 30s tick stays
+/// the backstop if both land too early.
+pub fn schedule_wake_reconcile() {
+    tokio::spawn(async {
+        for (attempt, gap) in WAKE_RECONCILE_GAPS_SECS.iter().enumerate() {
+            tokio::time::sleep(std::time::Duration::from_secs(*gap)).await;
+            tracing::info!(attempt = attempt + 1, "wake: one-shot exit-node reconcile");
+            // spawn_blocking: reconcile_exit_node shells out to route/tailscale
+            // and must not block a tokio worker.
+            let _ = tokio::task::spawn_blocking(reconcile_exit_node).await;
+        }
+    });
+}
+
 /// Best-effort detection of the active "primary" network interface.
 /// Reads `networksetup -listnetworkserviceorder` which lists
 /// services in priority order. We pick the first one that has a
@@ -1575,6 +1615,46 @@ pub fn ensure_plist_current() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watchdog pause both wake paths arm before scheduling reconciles
+    /// (`connectivity_watchdog::pause_for(45)`, main.rs wake detector and the
+    /// system_wake RPC arm). Mirrored here because the coupling is what makes
+    /// the post-wake re-install safe.
+    const WAKE_WATCHDOG_PAUSE_SECS: u64 = 45;
+
+    #[test]
+    fn wake_reconcile_attempts_land_inside_the_watchdog_pause() {
+        // reconcile_exit_node calls install_exit_routes, which briefly
+        // disrupts egress. That is only safe while watchdog escalation is
+        // paused — otherwise the disruption accumulates probe misses and
+        // fires the panic_reset this whole mechanism exists to recover from.
+        // Widening the gaps past the pause would reintroduce that, silently.
+        let total: u64 = WAKE_RECONCILE_GAPS_SECS.iter().sum();
+        assert!(
+            total < WAKE_WATCHDOG_PAUSE_SECS,
+            "post-wake reconcile attempts finish {total}s after wake, but watchdog \
+             escalation resumes at {WAKE_WATCHDOG_PAUSE_SECS}s — the last re-install \
+             would run unprotected. Shorten the gaps or lengthen pause_for()."
+        );
+        // Leave room for the attempt itself: the reachability probe alone has
+        // an 8s budget, and install_exit_routes runs after it.
+        assert!(
+            WAKE_WATCHDOG_PAUSE_SECS - total >= 15,
+            "only {}s of watchdog pause left after the last attempt starts — \
+             not enough for an 8s reachability probe plus install_exit_routes",
+            WAKE_WATCHDOG_PAUSE_SECS - total
+        );
+    }
+
+    #[test]
+    fn wake_reconcile_first_attempt_waits_for_the_handshake() {
+        // An immediate attempt is pure waste: at wake the tailscale utun does
+        // not exist yet, so reconcile_exit_node bails at detect_tailscale_utun.
+        assert!(
+            WAKE_RECONCILE_GAPS_SECS[0] >= 5,
+            "first post-wake reconcile fires before tailscaled can re-handshake"
+        );
+    }
 
     /// Real `networksetup -listnetworkserviceorder` output from a Mac
     /// that has had docks and USB-Ethernet adapters attached. Only en0

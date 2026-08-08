@@ -267,6 +267,10 @@ async fn main() -> anyhow::Result<()> {
                 connectivity_watchdog::pause_for(45);
                 route_guardian::reset_snapshot();
                 strongswan::sweep_stale_configs().await;
+                // Don't wait up to 30s for the auto_reconnect tick to heal a
+                // desired exit node — this is the GUI-closed wake case, so
+                // there is no Swift-side system_wake RPC coming either.
+                tailscale::schedule_wake_reconcile();
             }
             last = now;
         }
@@ -1062,6 +1066,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // determine source address" errors on the first post-wake
             // connect attempt.
             strongswan::sweep_stale_configs().await;
+
+            // Accelerate exit-node recovery past the 30s reconcile tick. The
+            // sweep above runs first on purpose: it is what may have removed
+            // the stale /1 pair the reconciler is about to re-install.
+            tailscale::schedule_wake_reconcile();
 
             info!("system_wake: done");
             Response::ok(id, serde_json::json!({"ok": true}))
