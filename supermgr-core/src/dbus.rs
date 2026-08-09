@@ -459,6 +459,17 @@ pub trait Daemon {
     /// tailscale CLI isn't installed or tailscaled isn't running.
     async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
 
+    /// Route this machine's traffic through `value`, or clear the selection
+    /// when `value` is empty.
+    ///
+    /// `value` is a Tailscale IP or MagicDNS name of a peer advertising
+    /// exit-node capability. Runs `tailscale set --exit-node=…`, which on
+    /// Linux installs the routing itself.
+    ///
+    /// Polkit-gated (`org.supermgr.daemon.tailscale-exit-node`): the caller
+    /// is choosing where every packet this machine sends goes.
+    async fn tailscale_set_exit_node(&self, value: &str) -> fdo::Result<()>;
+
     /// Return the full [`crate::ssh::key::SshKey`] serialised as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String>;
 

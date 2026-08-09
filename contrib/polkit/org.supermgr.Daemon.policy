@@ -70,4 +70,35 @@
     </defaults>
   </action>
 
+  <action id="org.supermgr.daemon.tailscale-exit-node">
+    <description>Route this machine's traffic through a Tailscale exit node</description>
+    <message>Authentication is required to send this machine's network traffic through another device</message>
+
+    <!--
+      Gated even though starting a VPN profile is not, and the asymmetry is
+      deliberate.
+
+      The bus policy for this daemon allows context="default", i.e. every
+      local account. An exit node sends every packet this machine emits
+      through a host the caller picked. Ungated, any local user could
+      silently redirect another user's traffic through a machine they
+      control — which is a different thing from starting a VPN an admin
+      already configured and stored credentials for.
+
+      auth_admin_keep, not auth_admin: choosing between exit nodes means
+      trying one, checking it, trying another. A prompt per attempt is the
+      kind of friction that ends with the policy file deleted.
+
+      Clearing the exit node goes through the same action. Being asked to
+      authenticate to stop routing through somebody else is mildly annoying
+      and the alternative is worse: an ungated clear is a way to knock a
+      machine off its exit node without asking anyone.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
 </policyconfig>

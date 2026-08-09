@@ -30,6 +30,7 @@ mod preferences;
 pub mod shell;
 pub mod provisioning;
 pub mod ssh;
+pub mod tailscale;
 pub mod vpn;
 
 use std::sync::{mpsc, Arc, Mutex};
@@ -472,6 +473,20 @@ pub fn build_ui(
     vpn_page.set_icon_name(Some(design::icon_name(design::icons::VPN)));
 
     // =========================================================================
+    // Tailscale page (standalone, full-width)
+    //
+    // Read-only: the daemon exposes exactly one tailscale method. Refreshed
+    // when the page becomes visible rather than on a timer — tailnet
+    // membership changes on a human timescale, and polling a subprocess for a
+    // screen nobody is looking at is pure cost.
+    // =========================================================================
+    let tailscale_view = tailscale::build_tailscale_page(&rt, &tx);
+    view_stack.add_titled(&tailscale_view.widget, Some("tailscale"), "Tailscale");
+    let tailscale_page_ref = view_stack.page(&tailscale_view.widget);
+    tailscale_page_ref.set_icon_name(Some(design::icon_name(design::icons::MESH)));
+    let tailscale_view = std::rc::Rc::new(tailscale_view);
+
+    // =========================================================================
     // Dashboard page (standalone, full-width)
     // =========================================================================
     let (dashboard_flow_box, dashboard_widget) =
@@ -890,10 +905,32 @@ pub fn build_ui(
         let ssh_keys_add_group = ssh_keys_add_group.clone();
         let ssh_hosts_add_group = ssh_hosts_add_group.clone();
         let add_menu_btn = add_menu_btn.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
             let page = page.as_deref().unwrap_or("vpn");
             match page {
+                "tailscale" => {
+                    vpn_add_group.set_visible(false);
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(false);
+                    // Nothing to add: the page is read-only.
+                    add_menu_btn.set_visible(false);
+                    // Refresh on arrival. Tailnet membership changes on a
+                    // human timescale, so a poll would spend a subprocess
+                    // every few seconds to tell us nothing; opening the page
+                    // is the signal that someone wants to know.
+                    let tx = tx.clone();
+                    rt.spawn(async move {
+                        let msg = AppMsg::TailscaleNodesUpdated(
+                            crate::dbus_client::dbus_tailscale_list_nodes()
+                                .await
+                                .map_err(|e| format!("{e:#}")),
+                        );
+                        tx.send(msg).ok();
+                    });
+                }
                 "vpn" => {
                     vpn_add_group.set_visible(true);
                     ssh_keys_add_group.set_visible(false);
@@ -2789,6 +2826,7 @@ pub fn build_ui(
     let rx_stats_routes = vpn_detail.stats_routes.clone();
     let rx_vpn_detail_stack = vpn_detail.detail_stack.clone();
     let rx_banner = banner.clone();
+    let rx_tailscale_view = std::rc::Rc::clone(&tailscale_view);
     let rx_toast_overlay = toast_overlay.clone();
     let rx_window = window.clone();
     let rx_app = app.clone();
@@ -3055,6 +3093,17 @@ pub fn build_ui(
                 AppMsg::DaemonUnavailable => {
                     rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available = false;
                     rx_banner.set_revealed(true);
+                }
+                AppMsg::TailscaleNodesUpdated(result) => {
+                    // Deliberately no toast on the error path: the page shows
+                    // the failure itself and keeps showing it. A toast would
+                    // fire every time the operator opened the tab and then
+                    // vanish, which is the wrong shape for a condition that
+                    // persists until tailscale is installed or started.
+                    if let Err(ref e) = result {
+                        info!("tailscale list failed: {}", e);
+                    }
+                    rx_tailscale_view.render(&result);
                 }
                 AppMsg::OperationFailed(msg) => {
                     error!("operation failed: {}", msg);

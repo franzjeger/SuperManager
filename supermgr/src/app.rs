@@ -7,6 +7,7 @@ use supermgr_core::{
     vpn::state::VpnState,
     ssh::key::SshKeySummary,
     host::HostSummary,
+    tailscale::TailscaleNode,
 };
 
 /// Which top-level section is active in the UI.
@@ -201,6 +202,13 @@ pub enum AppMsg {
     DaemonUnavailable,
     /// A user-initiated operation failed; show this message as a toast.
     OperationFailed(String),
+    /// Outcome of a `TailscaleListNodes` call, for the Tailscale page.
+    ///
+    /// Carries the whole `Result` rather than routing the failure through
+    /// `OperationFailed`: a tailnet that cannot be read is the page's own
+    /// state, not a transient toast. "tailscaled is not running" needs to stay
+    /// on screen until it stops being true.
+    TailscaleNodesUpdated(Result<Vec<TailscaleNode>, String>),
     /// Copy text to clipboard and show a toast.
     CopyToClipboard(String),
     /// Show a success toast with the given message.
