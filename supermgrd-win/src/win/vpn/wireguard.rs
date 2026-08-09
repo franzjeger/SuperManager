@@ -101,13 +101,22 @@ impl WireGuardBackend {
             return Ok(lib.clone());
         }
         // Probe the DLL in order of preference:
-        //  1. Same directory as the daemon binary (MSI install: bin\wireguard.dll)
+        //  1. Same directory as the daemon binary
         //  2. WIREGUARD_DLL env var override (developer/testing)
-        //  3. System PATH (legacy: full WireGuard-for-Windows install)
+        //  3. System PATH — a full WireGuard-for-Windows install
+        //
+        // Today only (3) finds anything on a normal machine: nothing ships
+        // `wireguard.dll` beside the daemon yet. (1) is here because the
+        // installer is meant to grow that — bundling WireGuardNT rather than
+        // requiring the full WireGuard-for-Windows MSI — and the probe order
+        // is what makes landing it a pure installer change with no daemon
+        // edit. Until then this costs one `exists()` call and falls through.
         //
         // `unsafe` is unavoidable: dynamic library loading can never be
-        // safe in the Rust sense. The MSI places the DLL inside a
-        // system-protected directory (%ProgramFiles%\SuperManager\bin\).
+        // safe in the Rust sense. What limits the risk is *where* we load
+        // from — our own install directory, or a path the operator set
+        // deliberately — never a working directory or a search path an
+        // unprivileged process can seed.
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
