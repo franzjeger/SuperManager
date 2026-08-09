@@ -75,12 +75,15 @@ log      = "0.4"
 # connect time; the MSI installer bundles both. We pin the patch version
 # we tested against to avoid surprise breakage from upstream API churn.
 wireguard-nt = "0.5"
-# wireguard-nt 0.4 declares a use of `winapi::shared::winerror` but does
-# not enable the `winerror` feature on its own winapi dep, so it fails to
-# compile unless some other crate in the dependency graph activates the
-# feature. We do that ourselves; this is purely a build-graph fix and our
-# code does not touch winapi directly.
-winapi = { version = "0.3", features = ["winerror", "winbase", "ntdef", "minwindef"] }
+#
+# No `winapi` dependency here any more. 0.4 declared a use of
+# `winapi::shared::winerror` without enabling the `winerror` feature on its own
+# winapi dep, so it only compiled if something else in the graph turned that
+# feature on — which we did, purely as a build-graph fix, since our code never
+# touched winapi directly. 0.5 dropped winapi entirely, so the workaround has
+# nothing left to work around. `winapi` is still in the tree via
+# `russh-cryptovec`, which declares the features it needs (`basetsd`,
+# `minwindef`, `memoryapi`) rather than relying on ours.
 
 # The workspace-wide `unsafe_code = "forbid"` lint is incompatible with
 # Win32 integration: `define_windows_service!` expands to an `extern "system"`

@@ -7355,7 +7355,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "which",
- "winapi",
  "windows-service",
  "windows-sys 0.59.0",
  "winres",
