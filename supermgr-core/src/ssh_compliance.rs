@@ -8,13 +8,32 @@
 //! # Approach
 //!
 //! Each check is a small `LinuxCheck` declaring:
-//!   - The shell command to run (`grep`, `sysctl`, `systemctl`, etc.)
-//!   - A regex/substring assertion on the output that means "pass"
+//!   - A POSIX shell script to run (`grep`, `sysctl`, `systemctl`, etc.)
+//!   - An [`Expect`] describing what output means "pass"
 //!   - Severity + recommendation if it fails
 //!
-//! We run the commands over an existing SSH connection (the same
+//! We run the scripts over an existing SSH connection (the same
 //! connection_pool the SSH section uses). No agent install
 //! required — vanilla coreutils is enough for the starter set.
+//!
+//! # Two invariants this module got wrong once, and now tests
+//!
+//! **The login shell does not parse our scripts.** Every script goes over the
+//! wire inside [`posix_wrap`]'s `sh -c '…'`. The firewall check used to rely on
+//! the account's shell being bash; against a `fish` account its `(…) && … || …`
+//! was a syntax error, and because fish echoes the offending line back — and
+//! that line contains the literal `echo enabled` — a substring match found its
+//! needle in the *error message* and reported PASS.
+//!
+//! **A script's exit status is its verdict about whether it knows.** Exit 0
+//! means "the answer is in my output"; non-zero means "I could not determine
+//! this". Scripts are written to honour that (`systemctl is-active` returns 3
+//! for a stopped unit, so those scripts normalise it away and report the state
+//! in their output instead). The runner maps non-zero to [`Status::Error`],
+//! because "we could not ask" and "we asked and the answer was wrong" are
+//! different things to whoever triages the row. Both callers used to discard
+//! the exit status, which is how an unprivileged `sshd -T` became a report
+//! that root login was enabled.
 //!
 //! # Coverage (v1)
 //!
@@ -27,27 +46,194 @@
 //!   - SSH password auth disabled (vs key-only)
 //!   - SSH root login disabled
 //!   - SSH protocol v2 only (rule out v1 fallback)
-//!   - Kernel core_pattern is sane (no pipe to attacker process)
-//!   - World-writable files in / (excluding /tmp)
-//!   - Listening services beyond expected baseline
-//!   - rsyslog / journald running (audit trail exists)
+//!   - Kernel core_pattern is sane (no pipe to an unrecognised program)
+//!   - Automatic security updates applying
+//!   - journald running (audit trail exists)
+//!   - Host firewall active
 //!
-//! Future: kernel hardening sysctls, AIDE/auditd presence, automatic
-//! updates configured. Each new check is ~10 lines.
+//! That is the whole set — seven, matching `LINUX_CHECKS`. This list previously
+//! also named world-writable files, listening services and rsyslog, none of
+//! which were ever implemented; a coverage list that overstates coverage is the
+//! same kind of false claim as a wrong benchmark reference.
+//!
+//! Future: kernel hardening sysctls, AIDE/auditd presence, world-writable file
+//! sweep. Each new check is ~10 lines.
 
 use chrono::Utc;
 
 use crate::compliance::{self, BaselineKind, ComplianceRun, Status, TriggerKind};
 use crate::severity::Severity;
 
+/// How much of a command's output is kept as the row's `raw_value`.
+const RAW_LIMIT: usize = 2048;
+
+/// What a check's script produced.
+///
+/// The exit status is the load-bearing addition. Both callers already had it
+/// from their SSH transport and threw it away, which left the runner unable to
+/// tell "the setting is wrong" from "the command failed" — so an unprivileged
+/// `sshd -T`, which exits 1 and prints nothing to stdout, was scored as a
+/// security finding. Carrying it costs one field.
+pub struct CmdOutput {
+    /// stdout and stderr combined — checks read stdout, diagnostics land on
+    /// stderr and are worth keeping in `raw_value` either way.
+    pub output: String,
+    /// Exit status of the script, or `None` if the transport cannot report one.
+    /// `None` is treated as "no reason to doubt it", so a transport that
+    /// genuinely cannot observe status degrades to the old behaviour instead of
+    /// erroring on every check.
+    pub code: Option<i32>,
+}
+
+impl CmdOutput {
+    /// Output from a command that exited successfully.
+    #[must_use]
+    pub fn ok(output: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            code: Some(0),
+        }
+    }
+
+    /// Output plus an observed exit status.
+    #[must_use]
+    pub fn new(output: impl Into<String>, code: i32) -> Self {
+        Self {
+            output: output.into(),
+            code: Some(code),
+        }
+    }
+}
+
+/// What a check's output has to look like to pass.
+///
+/// This replaced a bare `expect_contains: &str`, which was substring-only and
+/// silently defeated two checks in opposite directions:
+///
+/// - `"active"` is a substring of `"inactive"`, so `systemctl is-active`
+///   reporting a *stopped* auto-update service passed the patching check.
+/// - `"core"` is a substring of `"systemd-coredump"`, so a `kernel.core_pattern`
+///   piped to a program — the precise attack the check exists to detect —
+///   passed it. That is the default on every systemd distribution, so the check
+///   passed essentially everywhere while verifying nothing.
+///
+/// Both were PASSes, which is the direction that never gets investigated.
+///
+/// Two variants, not a richer set: every check the baseline has is served by an
+/// exact line match, and the one genuine substring case is the OpenSSH version
+/// banner. Anything a check cannot express exactly belongs in the check's own
+/// script, where the reasoning ends up visible in `raw_value` — which is how the
+/// core-dump check now allowlists distribution handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// Some line of the output, trimmed, equals this. The right mode for a
+    /// setting's value: `permitrootlogin no` must not be satisfied by
+    /// `permitrootlogin no-such-value`.
+    LineIs(&'static str),
+    /// The output contains this substring anywhere. Correct only where the
+    /// needle cannot hide inside a longer word that means the opposite — see
+    /// `no_check_still_uses_bare_substring_matching_for_a_state_word`.
+    Contains(&'static str),
+}
+
+impl Expect {
+    /// Whether `output` satisfies this expectation.
+    ///
+    /// Matching is case-insensitive, done by lowercasing here rather than in
+    /// each script, so a config file's `PermitRootLogin` and `sshd -T`'s
+    /// `permitrootlogin` compare equal without shell gymnastics. Needles are
+    /// therefore required to be lowercase, which `needles_are_lowercase` tests.
+    fn satisfied_by(self, output: &str) -> bool {
+        let lower = output.to_lowercase();
+        match self {
+            Self::LineIs(want) => lower.lines().any(|l| l.trim() == want),
+            Self::Contains(want) => lower.contains(want),
+        }
+    }
+
+    /// The needle, for tests that need to inspect it without matching.
+    #[cfg(test)]
+    fn needle(self) -> &'static str {
+        match self {
+            Self::LineIs(n) | Self::Contains(n) => n,
+        }
+    }
+}
+
+/// What a check's script actually told us.
+///
+/// The distinction this type exists to force: only `Answered` may become a Pass
+/// or a Fail. Everything else is [`Status::Error`], because a compliance row
+/// that says "fail" is a claim about the host, and a permission error is not
+/// evidence about the host.
+enum Reading {
+    /// The script ran, claimed success, and produced output.
+    Answered(String),
+    /// No answer was obtained, with the reason to show the operator.
+    Inconclusive {
+        /// Operator-facing explanation, stamped into `CheckResult.detail`.
+        reason: String,
+        /// Whatever came back, kept as `raw_value` so the underlying message
+        /// (`sshd: no hostkeys available -- exiting`) stays visible.
+        raw: String,
+    },
+}
+
+/// Wrap a check's script so the account's *login* shell never parses it.
+///
+/// SSH hands a command to the login shell, and that shell is not ours to
+/// choose — the host that exposed this was a `fish` account. The login shell
+/// now only ever sees one simple command with one single-quoted argument, which
+/// every shell agrees how to parse, and the script itself is interpreted by
+/// `sh`.
+///
+/// Embedded single quotes are escaped the portable way (close, escaped quote,
+/// reopen) rather than with a backslash, which single quotes do not honour.
+fn posix_wrap(script: &str) -> String {
+    format!("/bin/sh -c '{}'", script.replace('\'', r"'\''"))
+}
+
+/// Read one effective sshd setting, most authoritative source first, and print
+/// `source=<how>` then `<key> <value>`.
+///
+/// `$k` is the setting name; `$d` is the value OpenSSH compiles in when no
+/// config file mentions it. Exits 3 when nothing could answer, which the runner
+/// turns into [`Status::Error`].
+///
+/// The fallback chain exists because `sshd -T` loads host keys and therefore
+/// needs root, while a fleet scan runs as an ordinary user. Without it these
+/// two checks — the two most valuable in the baseline — are unanswerable on
+/// every normal scan. `sudo -n` never prompts, so an account without sudo just
+/// falls through. The config-file branch is what the CIS controls are written
+/// against; it does not resolve `Match` blocks, which is why `source=` is
+/// reported alongside the value instead of being hidden.
+macro_rules! sshd_value {
+    ($key:literal, $default:literal) => {
+        concat!(
+            "k=", $key, "\n",
+            "d=", $default, "\n",
+            r#"v=$(sshd -T 2>/dev/null | grep -i "^$k "); s=sshd-T"#, "\n",
+            r#"if [ -z "$v" ]; then v=$(sudo -n sshd -T 2>/dev/null | grep -i "^$k "); s=sudo-sshd-T; fi"#, "\n",
+            r#"if [ -z "$v" ]; then v=$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | sed "s/#.*//" | grep -iE "^[[:space:]]*$k[[:space:]]" | tail -1); s=config-file; fi"#, "\n",
+            r#"if [ -z "$v" ] && [ -r /etc/ssh/sshd_config ]; then v="$k $d"; s=openssh-default; fi"#, "\n",
+            r#"[ -z "$v" ] && exit 3"#, "\n",
+            r#"printf "source=%s\n" "$s""#, "\n",
+            r#"set -- $v"#, "\n",
+            r#"printf "%s %s\n" "$1" "$2""#, "\n",
+        )
+    };
+}
+
 struct LinuxCheck {
     id: &'static str,
     title: &'static str,
+    /// POSIX shell script. Runs under `sh` via [`posix_wrap`], so bourne
+    /// syntax is safe regardless of the account's login shell. Must exit 0
+    /// only when its output actually answers the question — see the module
+    /// docs.
     command: &'static str,
-    /// Substring that, when present in stdout, means the check
-    /// PASSED. Inverse: if the substring is absent, the check
-    /// failed.
-    expect_contains: &'static str,
+    /// What the output has to look like to pass.
+    expect: Expect,
     severity: Severity,
     /// CVSS score, currently unused by both the runner and the
     /// library (the library uses `severity` as the operator-facing
@@ -56,6 +242,15 @@ struct LinuxCheck {
     #[allow(dead_code)]
     cvss: f32,
     detail_on_fail: &'static str,
+    /// Optional refinement of `detail_on_fail`, given the observed output in
+    /// lowercase. Exists because a substring match can be right about pass/fail
+    /// and still leave the message wrong: `PermitRootLogin prohibit-password`
+    /// fails the same control as `yes` and means something materially different
+    /// to whoever reads the row. Return `None` to keep `detail_on_fail`.
+    ///
+    /// A function pointer rather than a closure so `LINUX_CHECKS` stays a
+    /// `const`.
+    refine_detail: Option<fn(&str) -> Option<&'static str>>,
     /// Authored remediation text. Read by `linux_default_checks()`
     /// into `CheckDefinition.remediation` since 1.12c — drives the
     /// in-row Remediation block and the report's Remediation column.
@@ -66,83 +261,184 @@ const LINUX_CHECKS: &[LinuxCheck] = &[
     LinuxCheck {
         id: "linux.ssh.password-auth-disabled",
         title: "sshd PasswordAuthentication disabled",
-        // Effective config (sshd -T) takes precedence over file —
-        // grep against -T's output to see what sshd actually does
-        // after parsing all Match blocks.
-        command: "sshd -T 2>/dev/null | grep -i '^passwordauthentication' || sshd -T -f /etc/ssh/sshd_config 2>/dev/null | grep -i '^passwordauthentication'",
-        expect_contains: "passwordauthentication no",
+        // `yes` is OpenSSH's compiled-in default, so a config file that says
+        // nothing fails this control — the old command's `||` fallback to
+        // `sshd -T -f` was dead weight, since that form loads host keys too and
+        // fails for exactly the same reason the first one does.
+        command: sshd_value!("passwordauthentication", "yes"),
+        expect: Expect::LineIs("passwordauthentication no"),
         severity: Severity::High,
         cvss: 7.0,
         detail_on_fail: "SSH password auth is enabled — exposes the host to credential-stuffing and brute-force attacks. Key-based auth is the modern best practice.",
+        refine_detail: None,
         recommendation: "Set `PasswordAuthentication no` in /etc/ssh/sshd_config. Verify all admins have keys deployed before applying. Reload sshd: `systemctl reload sshd`.",
     },
     LinuxCheck {
         id: "linux.ssh.root-login-disabled",
         title: "sshd PermitRootLogin disabled",
-        command: "sshd -T 2>/dev/null | grep -i '^permitrootlogin'",
-        expect_contains: "permitrootlogin no",
+        command: sshd_value!("permitrootlogin", "prohibit-password"),
+        expect: Expect::LineIs("permitrootlogin no"),
         severity: Severity::High,
         cvss: 7.0,
-        detail_on_fail: "Direct root SSH login is allowed. Use sudo for privilege escalation instead — keeps an audit trail of which user invoked which root command.",
-        recommendation: "Set `PermitRootLogin no` in /etc/ssh/sshd_config. Reload sshd.",
+        // Reached only if sshd reports something this does not recognise.
+        // The two values that actually occur are handled below, precisely.
+        detail_on_fail: "Root SSH login is not disabled. CIS 5.2.10 requires `PermitRootLogin no`; check the observed value for what sshd is currently allowing.",
+        // `prohibit-password` and `yes` both fail 5.2.10, and calling both
+        // "direct root login is allowed" cost an operator the difference
+        // between an open door and untidy housekeeping. Observed on a real
+        // host: the row said root login was allowed when only key-based root
+        // login was, which reads as far more urgent than it is.
+        //
+        // Severity stays High for both. It drives the score penalty, and CIS
+        // grades the control not the value — but the text no longer implies
+        // they are the same problem.
+        refine_detail: Some(|observed| {
+            if observed.contains("prohibit-password") {
+                Some(
+                    "Root can log in over SSH with a key, but not with a password, \
+                     so this is housekeeping rather than an open door. It still \
+                     fails CIS 5.2.10, which requires `no`: a shared root key \
+                     leaves no record of which admin used it, and sudo does.",
+                )
+            } else if observed.contains("permitrootlogin yes") {
+                Some(
+                    "Root can log in over SSH with a password. This is the urgent \
+                     form of the finding: directly brute-forceable from anywhere \
+                     the port is reachable, and it leaves no audit trail of who \
+                     acted.",
+                )
+            } else {
+                // `forced-commands-only` and anything future. Better to fall
+                // back to the general message than to guess at what a value we
+                // have not seen implies.
+                None
+            }
+        }),
+        recommendation: "Set `PermitRootLogin no` in /etc/ssh/sshd_config, make sure a non-root account with sudo works first, then `systemctl reload sshd`.",
     },
     LinuxCheck {
         id: "linux.ssh.protocol-v2-only",
         title: "sshd Protocol 2 only",
-        // Modern sshd doesn't even compile Protocol 1 — we check
-        // by inspecting the daemon-reported version.
-        command: "ssh -V 2>&1 | head -1",
-        expect_contains: "OpenSSH",
+        // Modern OpenSSH does not compile Protocol 1 at all, so the version is
+        // the evidence. `ssh -V` writes to stderr and is the form present on
+        // every release (`sshd -V` is not), which is why the version read is the
+        // installed OpenSSH build rather than a running-daemon banner.
+        command: "v=$(ssh -V 2>&1 | head -1)\n[ -z \"$v\" ] && exit 3\nprintf \"%s\\n\" \"$v\"\n",
+        expect: Expect::Contains("openssh"),
         severity: Severity::Medium,
         cvss: 4.0,
         detail_on_fail: "Could not detect OpenSSH version. SSHv1 is broken and shouldn't be on PATH.",
+        refine_detail: None,
         recommendation: "Install OpenSSH ≥7.0 (SSHv1 was removed in 7.0). Verify with `ssh -V`.",
     },
     LinuxCheck {
         id: "linux.kernel.core-pattern-safe",
         title: "kernel.core_pattern not piped to attacker",
-        command: "sysctl -n kernel.core_pattern 2>/dev/null",
-        // Pass: starts with `core` or `/var` or empty (default).
-        // The attack vector is `|/path/to/program` which lets
-        // an attacker triggering a SIGSEGV run code as root
-        // (CVE-2021-4034 / pwnkit-class).
-        expect_contains: "core",
+        // The verdict is computed where the value is, so `raw_value` shows both
+        // the pattern and the reasoning. `expect_contains: "core"` used to stand
+        // here, and `|/usr/lib/systemd/systemd-coredump` contains `core` —
+        // meaning the check passed on precisely the piped form it exists to
+        // catch, on every systemd host, which is nearly all of them.
+        //
+        // The threat is a pipe to an *attacker-controlled* program, not a pipe
+        // as such: systemd-coredump and apport are root-owned distribution
+        // defaults. Allowlisting them by absolute path keeps the check from
+        // firing High on a stock install (which is how a check gets ignored)
+        // while still failing anything else piped.
+        command: "v=$(sysctl -n kernel.core_pattern 2>/dev/null)\n\
+                  [ -z \"$v\" ] && v=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)\n\
+                  [ -z \"$v\" ] && exit 3\n\
+                  printf \"value=%s\\n\" \"$v\"\n\
+                  case \"$v\" in\n\
+                  \x20 \"|\"/usr/lib/systemd/systemd-coredump*|\"|\"/lib/systemd/systemd-coredump*|\"|\"/usr/share/apport/apport*)\n\
+                  \x20   printf \"handler=distro-default\\ncore-pattern=safe\\n\" ;;\n\
+                  \x20 \"|\"*)\n\
+                  \x20   printf \"handler=unrecognised-pipe\\ncore-pattern=piped\\n\" ;;\n\
+                  \x20 *)\n\
+                  \x20   printf \"handler=file\\ncore-pattern=safe\\n\" ;;\n\
+                  esac\n",
+        expect: Expect::LineIs("core-pattern=safe"),
         severity: Severity::High,
         cvss: 7.5,
-        detail_on_fail: "kernel.core_pattern is unusual. If it pipes to a program (`|...`), an unprivileged process can crash, triggering arbitrary code as root.",
+        detail_on_fail: "kernel.core_pattern pipes core dumps to a program that is not a known distribution handler. An unprivileged process can crash on demand, so whatever is on the other side of that pipe runs as root (pwnkit-class escalation).",
+        refine_detail: None,
         recommendation: "Set `kernel.core_pattern = core.%p` (or empty) in /etc/sysctl.conf. Apply with `sysctl -p`.",
     },
     LinuxCheck {
         id: "linux.unattended-upgrades-active",
         title: "unattended-upgrades running",
-        // Ubuntu/Debian: unattended-upgrades. RHEL: dnf-automatic.
-        // Either is enough — auto-patching is the whole CIS
-        // intent.
-        command: "systemctl is-active unattended-upgrades dnf-automatic 2>/dev/null | head -1",
-        expect_contains: "active",
+        // Ubuntu/Debian: unattended-upgrades. RHEL: dnf-automatic. Either is
+        // enough — auto-patching is the whole CIS intent.
+        //
+        // The comparison is `= active` in the script and `LineIs` in Rust, both
+        // exact, because `expect_contains: "active"` matched `inactive` and so
+        // reported PASS on hosts with no automatic patching at all. `systemctl
+        // is-active` exits 3 for a stopped unit, so the loop normalises the
+        // status away and states the finding in its output instead; a missing
+        // `systemctl` is the one case we genuinely cannot answer.
+        command: "for u in unattended-upgrades.service dnf-automatic.timer apt-daily-upgrade.timer; do\n\
+                  \x20 if [ \"$(systemctl is-active \"$u\" 2>/dev/null)\" = active ]; then\n\
+                  \x20   printf \"unit=%s\\nauto-updates=active\\n\" \"$u\"; exit 0\n\
+                  \x20 fi\n\
+                  done\n\
+                  command -v systemctl >/dev/null 2>&1 || exit 3\n\
+                  printf \"auto-updates=inactive\\n\"\n",
+        expect: Expect::LineIs("auto-updates=active"),
         severity: Severity::Medium,
         cvss: 5.0,
         detail_on_fail: "No automatic security-update service is active. CVE patches reach the host only when an admin manually intervenes.",
+        refine_detail: None,
         recommendation: "Install + enable unattended-upgrades (Debian/Ubuntu) or dnf-automatic (RHEL/Fedora). Configure to auto-apply security updates daily.",
     },
     LinuxCheck {
         id: "linux.audit.journald-running",
         title: "journald collecting logs",
-        command: "systemctl is-active systemd-journald 2>/dev/null",
-        expect_contains: "active",
+        // Same `inactive`-contains-`active` trap as the patching check: the
+        // prefix makes the two states impossible to confuse under any matcher.
+        command: "command -v systemctl >/dev/null 2>&1 || exit 3\n\
+                  printf \"journald=%s\\n\" \"$(systemctl is-active systemd-journald 2>/dev/null)\"\n",
+        expect: Expect::LineIs("journald=active"),
         severity: Severity::Medium,
         cvss: 4.0,
         detail_on_fail: "systemd-journald is not running — no centralized log collection means an intrusion goes uninvestigated.",
+        refine_detail: None,
         recommendation: "`systemctl enable --now systemd-journald`. Check storage isn't volatile: `journalctl --disk-usage`.",
     },
     LinuxCheck {
         id: "linux.firewall.active",
         title: "Host firewall enabled",
-        command: "(systemctl is-active firewalld ufw 2>/dev/null | grep -q active) && echo enabled || (iptables -L -n 2>/dev/null | head -3 | grep -qE 'DROP|REJECT' && echo enabled) || echo disabled",
-        expect_contains: "enabled",
+        // This is the script that made the shell assumption load-bearing: the
+        // old one-liner was bash, and under a `fish` account it was a syntax
+        // error whose message echoed the command back — including the literal
+        // `echo enabled` the old `expect_contains: "enabled"` was looking for.
+        // A PASS produced entirely by a parse failure.
+        //
+        // `iptables -L` normally needs root, so an unreadable ruleset with no
+        // active firewall unit exits 3: "we could not tell" rather than a
+        // confident "no firewall", which would be a fabricated finding on any
+        // host whose firewall we simply lack the privilege to see.
+        command: "for u in firewalld ufw nftables; do\n\
+                  \x20 if [ \"$(systemctl is-active \"$u\" 2>/dev/null)\" = active ]; then\n\
+                  \x20   printf \"via=%s\\nfirewall=active\\n\" \"$u\"; exit 0\n\
+                  \x20 fi\n\
+                  done\n\
+                  ipt=$(iptables -L INPUT -n 2>/dev/null)\n\
+                  [ -z \"$ipt\" ] && ipt=$(sudo -n iptables -L INPUT -n 2>/dev/null)\n\
+                  if [ -z \"$ipt\" ]; then\n\
+                  \x20 printf \"firewall=unknown\\nreason=no-active-firewall-unit-and-iptables-unreadable\\n\"; exit 3\n\
+                  fi\n\
+                  if printf \"%s\\n\" \"$ipt\" | head -1 | grep -qE \"policy (DROP|REJECT)\"; then\n\
+                  \x20 printf \"via=iptables-default-deny\\nfirewall=active\\n\"; exit 0\n\
+                  fi\n\
+                  if printf \"%s\\n\" \"$ipt\" | grep -qE \"^(DROP|REJECT)\"; then\n\
+                  \x20 printf \"via=iptables-rules\\nfirewall=active\\n\"; exit 0\n\
+                  fi\n\
+                  printf \"via=iptables-no-deny-rules\\nfirewall=inactive\\n\"\n",
+        expect: Expect::LineIs("firewall=active"),
         severity: Severity::Medium,
         cvss: 5.5,
-        detail_on_fail: "No host firewall (firewalld/ufw/iptables) detected. Anything listening on a non-localhost port is internet-reachable if the host has a public interface.",
+        detail_on_fail: "No host firewall (firewalld/ufw/nftables/iptables) detected. Anything listening on a non-localhost port is internet-reachable if the host has a public interface.",
+        refine_detail: None,
         recommendation: "Enable a host firewall: `ufw enable` (Debian/Ubuntu) or `systemctl enable --now firewalld` (RHEL).",
     },
 ];
@@ -170,43 +466,81 @@ pub async fn run_baseline<F, Fut>(
 ) -> ComplianceRun
 where
     F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<String>>,
+    Fut: std::future::Future<Output = anyhow::Result<CmdOutput>>,
 {
     let started_at = Utc::now();
     let mut check_results = Vec::with_capacity(LINUX_CHECKS.len());
 
     for check in LINUX_CHECKS {
-        let (output, errored) = match run_cmd(check.command.to_owned()).await {
-            Ok(s) => (s, false),
-            // SSH disconnect / command exec error → mark as Error,
-            // not Fail. Fail means "we asked and the answer was wrong";
-            // Error means "we couldn't ask," which a careful operator
-            // wants to retry rather than treat as a failure.
-            Err(e) => (format!("[error: {e}]"), true),
+        // Three outcomes, not two. Fail means "we asked and the answer was
+        // wrong"; Error means "we could not ask", which an operator retries
+        // instead of remediating. Collapsing the second into the first is what
+        // turned a permission error on `sshd -T` into a report that root login
+        // was enabled.
+        let reading = match run_cmd(posix_wrap(check.command)).await {
+            // The message goes into `raw` as well as the reason: `raw_value` is
+            // what the GUI shows as the row's evidence, and "connection reset"
+            // is exactly the evidence an operator needs to decide whether to
+            // retry the scan or investigate the host.
+            Err(e) => Reading::Inconclusive {
+                reason: format!("the command could not be run: {e}"),
+                raw: format!("[transport error: {e}]"),
+            },
+            Ok(out) => {
+                let raw = out.output.chars().take(RAW_LIMIT).collect::<String>();
+                match out.code {
+                    // Every script's contract: exit 0 only when its output
+                    // answers the question. See the module docs.
+                    Some(code) if code != 0 => Reading::Inconclusive {
+                        reason: format!(
+                            "the check script exited {code}, meaning it could not \
+                             determine this setting — commonly because reading the \
+                             effective sshd config needs root, or because the tool \
+                             it queries is not installed"
+                        ),
+                        raw,
+                    },
+                    _ if raw.trim().is_empty() => Reading::Inconclusive {
+                        reason: "the command produced no output, so nothing was \
+                                 verified"
+                            .to_owned(),
+                        raw,
+                    },
+                    _ => Reading::Answered(raw),
+                }
+            }
         };
-        let lower = output.to_lowercase();
-        let passed = !errored && lower.contains(&check.expect_contains.to_lowercase());
-        let truncated = output.chars().take(2048).collect::<String>();
 
-        let status = if errored {
-            Status::Error
-        } else if passed {
-            Status::Pass
-        } else {
-            Status::Fail
+        let (status, detail, raw) = match reading {
+            Reading::Inconclusive { reason, raw } => (
+                Status::Error,
+                format!("Not determined: {reason}"),
+                raw,
+            ),
+            Reading::Answered(raw) if check.expect.satisfied_by(&raw) => (
+                Status::Pass,
+                "Configuration matches baseline.".to_owned(),
+                raw,
+            ),
+            Reading::Answered(raw) => {
+                // The refinement sees the same lowercased output the pass/fail
+                // decision was made on, so a message can never describe a value
+                // the check did not actually read.
+                let lower = raw.to_lowercase();
+                let detail = check
+                    .refine_detail
+                    .and_then(|refine| refine(&lower))
+                    .unwrap_or(check.detail_on_fail)
+                    .to_owned();
+                (Status::Fail, detail, raw)
+            }
         };
-        let detail = if passed {
-            "Configuration matches baseline.".to_owned()
-        } else if errored {
-            format!("Command execution failed: {}", truncated)
-        } else {
-            check.detail_on_fail.to_owned()
-        };
+
         check_results.push(compliance::CheckResult {
             check_id: check.id.to_owned(),
             status,
             detail,
-            raw_value: Some(truncated),
+            raw_value: Some(raw),
             severity: map_severity(check.severity),
             title: check.title.to_owned(),
             category: category_for_id(check.id),
@@ -512,6 +846,439 @@ mod tests {
         }
     }
 
+    /// One check by id, so a test can assert about it without running a scan.
+    fn find(check_id: &str) -> &'static LinuxCheck {
+        LINUX_CHECKS
+            .iter()
+            .find(|c| c.id == check_id)
+            .unwrap_or_else(|| panic!("no check with id {check_id}"))
+    }
+
+    /// Pull the refinement for one check id, so the messages can be checked
+    /// without running a baseline.
+    fn refine(check_id: &str, observed: &str) -> Option<&'static str> {
+        find(check_id).refine_detail.and_then(|f| f(observed))
+    }
+
+    #[test]
+    fn prohibit_password_is_not_described_as_an_open_door() {
+        // The bug this fixes, observed on a real host: sshd reported
+        // `PermitRootLogin prohibit-password` and the row said "Direct root SSH
+        // login is allowed". True of `yes`, misleading here — root cannot use a
+        // password, so an operator reading it would escalate something that is
+        // housekeeping.
+        let msg = refine(
+            "linux.ssh.root-login-disabled",
+            "permitrootlogin prohibit-password",
+        )
+        .expect("prohibit-password has its own message");
+        assert!(
+            msg.contains("not with a password"),
+            "must say passwords are already refused: {msg}"
+        );
+        assert!(
+            msg.contains("5.2.10"),
+            "must still cite the control it fails: {msg}"
+        );
+    }
+
+    #[test]
+    fn permitrootlogin_yes_is_described_as_urgent() {
+        let msg = refine("linux.ssh.root-login-disabled", "permitrootlogin yes")
+            .expect("yes has its own message");
+        assert!(
+            msg.contains("password"),
+            "must name password login as the risk: {msg}"
+        );
+        assert!(
+            msg.contains("brute-forceable"),
+            "must say why it is the urgent form: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_two_root_login_messages_are_not_interchangeable() {
+        // The whole point. If these ever converge, the distinction that cost an
+        // operator a wrong priority call is gone again.
+        let lenient = refine(
+            "linux.ssh.root-login-disabled",
+            "permitrootlogin prohibit-password",
+        );
+        let open = refine("linux.ssh.root-login-disabled", "permitrootlogin yes");
+        assert_ne!(lenient, open);
+    }
+
+    #[test]
+    fn an_unrecognised_value_falls_back_rather_than_guessing() {
+        // `forced-commands-only` exists and neither branch describes it. A
+        // general message beats inventing an implication for a value we have
+        // never seen.
+        assert_eq!(
+            refine(
+                "linux.ssh.root-login-disabled",
+                "permitrootlogin forced-commands-only"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn only_the_root_login_check_refines_its_message() {
+        // Not a style rule: every other check's failure means exactly one
+        // thing, and a refinement there would be a second place for the text
+        // to drift from the control.
+        let refining: Vec<&str> = LINUX_CHECKS
+            .iter()
+            .filter(|c| c.refine_detail.is_some())
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(refining, ["linux.ssh.root-login-disabled"]);
+    }
+
+    // -- the four defects a live scan exposed, each with its own regression ---
+    //
+    // All four were found by running the baseline against a real host and
+    // disbelieving the result, not by reading the code. Three of them produced
+    // PASS, which is the direction nobody audits.
+
+    #[test]
+    fn inactive_does_not_satisfy_active() {
+        // Defect 1. `expect_contains: "active"` matched `systemctl is-active`'s
+        // output `inactive`, so a host with no automatic patching at all passed
+        // the patching check. Verified against the real command: on the host
+        // that exposed this, `systemctl is-active unattended-upgrades
+        // dnf-automatic` prints exactly `inactive`.
+        assert!(
+            !Expect::LineIs("auto-updates=active").satisfied_by("auto-updates=inactive\n"),
+            "the stopped state must not satisfy the running expectation"
+        );
+        assert!(Expect::LineIs("auto-updates=active").satisfied_by("unit=x\nauto-updates=active\n"));
+
+        // The trap itself, so the reason this matcher exists stays legible.
+        assert!(
+            Expect::Contains("active").satisfied_by("inactive"),
+            "substring matching really does accept the opposite state"
+        );
+    }
+
+    #[test]
+    fn the_journald_check_cannot_be_fooled_the_same_way() {
+        // Same trap, same shape, second occurrence — it was two checks, not one.
+        let check = find("linux.audit.journald-running");
+        assert!(!check.expect.satisfied_by("journald=inactive\n"));
+        assert!(check.expect.satisfied_by("journald=active\n"));
+    }
+
+    #[test]
+    fn systemd_coredump_is_not_mistaken_for_a_safe_core_pattern() {
+        // Defect 4, and the worst of them: `expect_contains: "core"` was
+        // satisfied by `|/usr/lib/systemd/systemd-coredump` — the exact piped
+        // form the check exists to detect — because `coredump` contains `core`.
+        // systemd is the default init nearly everywhere, so this High/CVSS-7.5
+        // check passed on nearly every host while verifying nothing.
+        let piped = "|/usr/lib/systemd/systemd-coredump %P %u %g %s %t %c %h";
+        assert!(
+            Expect::Contains("core").satisfied_by(piped),
+            "the old needle really did accept a piped pattern"
+        );
+
+        // What the check does now: the script classifies, and only its verdict
+        // is matched. A pipe to an unrecognised program fails.
+        let check = find("linux.kernel.core-pattern-safe");
+        assert!(check.expect.satisfied_by("value=core.%p\nhandler=file\ncore-pattern=safe\n"));
+        assert!(
+            !check
+                .expect
+                .satisfied_by("value=|/tmp/evil\nhandler=unrecognised-pipe\ncore-pattern=piped\n"),
+            "a pipe to an attacker's program must fail"
+        );
+        // And the distribution handler is allowlisted by absolute path in the
+        // script, so a stock install does not produce a High finding.
+        assert!(check.command.contains("/usr/lib/systemd/systemd-coredump"));
+        assert!(check.command.contains("/usr/share/apport/apport"));
+    }
+
+    #[tokio::test]
+    async fn a_script_that_could_not_answer_is_an_error_not_a_failure() {
+        // Defect 3. `sshd -T` needs root; over SSH as an ordinary user it exits
+        // non-zero and prints nothing to stdout. The old runner scored the empty
+        // output as Fail, so an unprivileged scan reported that root login was
+        // enabled and that passwords were accepted — findings invented from a
+        // permission error. Both callers had the exit status and dropped it.
+        let run = run_baseline("h", None, TriggerKind::Manual, |cmd| async move {
+            let _ = cmd;
+            Ok(CmdOutput::new("sshd: no hostkeys available -- exiting.", 1))
+        })
+        .await;
+
+        assert_eq!(run.errored, check_count() as u32, "every check is inconclusive");
+        assert_eq!(run.failed, 0, "a permission error is not a finding");
+        assert_eq!(run.passed, 0);
+        for c in &run.checks {
+            assert!(matches!(c.status, Status::Error), "{}", c.check_id);
+            assert!(
+                c.detail.starts_with("Not determined:"),
+                "the row must say we could not tell, not what is wrong: {}",
+                c.detail
+            );
+            // The underlying reason stays visible for triage.
+            assert!(c
+                .raw_value
+                .as_deref()
+                .is_some_and(|r| r.contains("no hostkeys available")));
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_output_with_a_zero_exit_is_still_not_an_answer() {
+        // The other half of defect 3: a transport that cannot report status
+        // (code: None) or a script that exits 0 having printed nothing has still
+        // verified nothing, and must not be scored as a failed control.
+        let run = run_baseline("h", None, TriggerKind::Manual, |cmd| async move {
+            let _ = cmd;
+            Ok(CmdOutput {
+                output: "   \n".to_owned(),
+                code: None,
+            })
+        })
+        .await;
+        assert_eq!(run.errored, check_count() as u32);
+        assert_eq!(run.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn every_script_reaches_the_host_wrapped_for_a_posix_shell() {
+        // Defect 2. SSH runs commands through the account's login shell. On the
+        // host that exposed this the shell was fish, where the firewall check's
+        // `(…) && … || …` is a syntax error — and fish's error message echoes the
+        // offending line, which contained the literal `echo enabled` the old
+        // needle was looking for. The check passed on its own error message.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tap = std::sync::Arc::clone(&seen);
+        let _ = run_baseline("h", None, TriggerKind::Manual, move |cmd| {
+            let tap = std::sync::Arc::clone(&tap);
+            async move {
+                tap.lock().unwrap().push(cmd);
+                Ok(CmdOutput::ok(ALL_PASS))
+            }
+        })
+        .await;
+
+        let sent = seen.lock().unwrap();
+        assert_eq!(sent.len(), check_count());
+        for cmd in sent.iter() {
+            assert!(
+                cmd.starts_with("/bin/sh -c '") && cmd.ends_with('\''),
+                "the login shell must only ever see one quoted argument: {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_survives_a_script_containing_single_quotes() {
+        // Backslash does not escape a quote inside single quotes; the portable
+        // form is close-quote, quoted-quote, reopen. A script with an `awk '…'`
+        // in it would otherwise break out of the wrapper.
+        let wrapped = posix_wrap("echo 'hi there'");
+        assert_eq!(wrapped, r"/bin/sh -c 'echo '\''hi there'\'''");
+
+        // And it really parses: the wrapper is only correct if a shell agrees.
+        #[cfg(unix)]
+        {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&wrapped)
+                .output()
+                .expect("run /bin/sh");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi there");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_posix_login_shell_can_parse_every_wrapped_command() {
+        // The defect-2 regression against the actual shell that exposed it.
+        // `fish -n` parses without executing, and it rejects the *unwrapped*
+        // firewall script outright — so this asserts the wrapper is what makes
+        // the difference, not that fish happens to be lenient.
+        //
+        // Skipped where fish is absent (CI runners), because the invariant is
+        // already covered structurally by
+        // `every_script_reaches_the_host_wrapped_for_a_posix_shell`.
+        let parses = |shell: &str, args: &[&str]| -> Option<bool> {
+            std::process::Command::new(shell)
+                .args(args)
+                .output()
+                .ok()
+                .map(|o| o.status.success())
+        };
+        if parses("fish", &["-n", "-c", "true"]) != Some(true) {
+            return;
+        }
+
+        for check in LINUX_CHECKS {
+            let wrapped = posix_wrap(check.command);
+            assert_eq!(
+                parses("fish", &["-n", "-c", &wrapped]),
+                Some(true),
+                "{}: a fish login shell cannot parse the wrapped command",
+                check.id
+            );
+        }
+
+        // And the control: bourne syntax really is rejected unwrapped, which is
+        // what silently turned into a PASS on a customer's host.
+        let bourne = "(systemctl is-active ufw) && echo enabled || echo disabled";
+        assert_eq!(
+            parses("fish", &["-n", "-c", bourne]),
+            Some(false),
+            "fish should reject this — if it does not, the test proves nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_check_script_is_valid_posix_shell() {
+        // The defect-2 backstop that does not depend on anyone remembering. `sh
+        // -n` parses without executing, so this is cheap and catches the class
+        // of mistake — bashisms, unbalanced quotes, a stray `(` — at test time
+        // rather than as a false PASS on a customer's host.
+        for check in LINUX_CHECKS {
+            let out = std::process::Command::new("/bin/sh")
+                .arg("-n")
+                .arg("-c")
+                .arg(check.command)
+                .output()
+                .expect("run /bin/sh -n");
+            assert!(
+                out.status.success(),
+                "{} is not valid POSIX shell:\n{}\n--- script ---\n{}",
+                check.id,
+                String::from_utf8_lossy(&out.stderr),
+                check.command
+            );
+        }
+    }
+
+    #[test]
+    fn no_operator_facing_string_has_ragged_whitespace() {
+        // A multi-line Rust string literal keeps every leading space of each
+        // continuation line unless the line ends in `\`. The refined root-login
+        // message shipped with a twenty-space gap in the middle of a sentence,
+        // and it took reading a live scan's output to notice — these strings go
+        // straight into a GUI row and a Markdown report an auditor reads.
+        let mut authored: Vec<(&str, &str)> = Vec::new();
+        for check in LINUX_CHECKS {
+            authored.push((check.id, check.detail_on_fail));
+            authored.push((check.id, check.recommendation));
+            authored.push((check.id, linux_description(check.id)));
+            if let Some(refine) = check.refine_detail {
+                for probe in [
+                    "permitrootlogin prohibit-password",
+                    "permitrootlogin yes",
+                ] {
+                    if let Some(msg) = refine(probe) {
+                        authored.push((check.id, msg));
+                    }
+                }
+            }
+        }
+
+        for (id, s) in authored {
+            assert!(
+                !s.contains("  "),
+                "{id}: authored text has a run of spaces, which renders as a gap \
+                 mid-sentence: {s:?}"
+            );
+            assert!(
+                !s.contains('\n') && !s.contains('\t'),
+                "{id}: authored text has a hard line break: {s:?}"
+            );
+            assert_eq!(s.trim(), s, "{id}: authored text has edge whitespace: {s:?}");
+        }
+    }
+
+    #[test]
+    fn needles_are_lowercase() {
+        // `satisfied_by` lowercases the output rather than making every script
+        // normalise its own casing. An uppercase needle would therefore never
+        // match, and the check would fail on a perfectly compliant host.
+        for check in LINUX_CHECKS {
+            let n = check.expect.needle();
+            assert_eq!(
+                n,
+                n.to_lowercase(),
+                "{}: needle {n:?} can never match a lowercased output",
+                check.id
+            );
+        }
+    }
+
+    #[test]
+    fn no_check_still_uses_bare_substring_matching_for_a_state_word() {
+        // `Contains` is still the right mode for a genuine substring — the
+        // OpenSSH version banner — but it is the mode both false PASSes came
+        // from. Anything asserting a state or a setting value must be exact, so
+        // adding a `Contains("active")`-shaped check fails here rather than on a
+        // customer's host.
+        for check in LINUX_CHECKS {
+            if let Expect::Contains(n) = check.expect {
+                assert_eq!(
+                    check.id, "linux.ssh.protocol-v2-only",
+                    "{}: substring matching on {n:?} — use LineIs or HasToken",
+                    check.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sshd_checks_can_answer_without_root() {
+        // Reporting Error on the two most valuable checks for every scan run as
+        // an ordinary user would be honest but useless, so the reader falls back
+        // through sudo, then the config file, then OpenSSH's compiled-in
+        // default — reporting which source answered rather than hiding it.
+        for id in [
+            "linux.ssh.password-auth-disabled",
+            "linux.ssh.root-login-disabled",
+        ] {
+            let cmd = find(id).command;
+            assert!(cmd.contains("sudo -n sshd -T"), "{id}: no sudo fallback");
+            assert!(cmd.contains("/etc/ssh/sshd_config.d"), "{id}: no drop-in dir");
+            assert!(cmd.contains("s=openssh-default"), "{id}: no default branch");
+            assert!(cmd.contains("exit 3"), "{id}: must be able to give up");
+        }
+
+        // The defaults named have to be OpenSSH's actual defaults, or the
+        // fallback reports a value the host does not have. Both of these fail
+        // their control, which is why a silent config file is a Fail and not a
+        // Pass.
+        assert!(find("linux.ssh.root-login-disabled")
+            .command
+            .contains("d=prohibit-password"));
+        assert!(find("linux.ssh.password-auth-disabled")
+            .command
+            .contains("d=yes"));
+    }
+
+    #[tokio::test]
+    async fn a_config_file_answer_is_matched_despite_the_source_line() {
+        // The reader prints `source=<how>` on its own line so the operator can
+        // see whether Match blocks were resolved. That line must not stop the
+        // value from matching — which is why the source is a separate line
+        // rather than a prefix.
+        let check = find("linux.ssh.root-login-disabled");
+        assert!(check
+            .expect
+            .satisfied_by("source=config-file\nPermitRootLogin no\n"));
+        assert!(check
+            .expect
+            .satisfied_by("source=openssh-default\npermitrootlogin no\n"));
+        assert!(!check
+            .expect
+            .satisfied_by("source=sshd-T\npermitrootlogin prohibit-password\n"));
+    }
+
     #[test]
     fn check_count_matches_array_length() {
         assert_eq!(check_count(), LINUX_CHECKS.len());
@@ -543,18 +1310,27 @@ mod tests {
         assert_eq!(titles.len(), check_count());
     }
 
+    /// Output of a maximally-compliant host: every check's expectation is
+    /// satisfied by some line of this.
+    const ALL_PASS: &str = "source=sshd-T\n\
+                            passwordauthentication no\n\
+                            permitrootlogin no\n\
+                            openssh_9.0\n\
+                            value=core.%p\n\
+                            core-pattern=safe\n\
+                            auto-updates=active\n\
+                            journald=active\n\
+                            firewall=active\n";
+
     #[tokio::test]
     async fn run_baseline_pass_path_produces_all_pass_checks() {
-        // Mock ssh-cmd that always returns matching output.
-        // Build a response that contains every expect_contains
-        // substring across all checks (a maximally-passing host).
         let run = run_baseline(
             "host-id-1",
             Some("test-linux"),
             TriggerKind::Manual,
             |cmd| async move {
                 let _ = cmd;
-                Ok("passwordauthentication no\npermitrootlogin no\nopenssh_9.0\ncore.%p\nactive\nactive\nenabled".into())
+                Ok(CmdOutput::ok(ALL_PASS))
             }
         ).await;
         assert_eq!(run.checks.len(), check_count());
@@ -577,7 +1353,7 @@ mod tests {
             TriggerKind::Manual,
             |cmd| async move {
                 let _ = cmd;
-                Ok("nothing matches".into())
+                Ok(CmdOutput::ok("nothing matches"))
             }
         ).await;
         assert_eq!(run.checks.len(), check_count());
@@ -637,7 +1413,7 @@ mod tests {
                 let _ = cmd;
                 // Contains exactly the substring needed by the
                 // password-auth-disabled check; other checks miss.
-                Ok("passwordauthentication no".into())
+                Ok(CmdOutput::ok("passwordauthentication no"))
             }
         ).await;
 
@@ -689,7 +1465,7 @@ mod tests {
             TriggerKind::Manual,
             |cmd| async move {
                 let _ = cmd;
-                Ok("passwordauthentication no".into())
+                Ok(CmdOutput::ok("passwordauthentication no"))
             }
         ).await;
         let run_id = run.id.clone();

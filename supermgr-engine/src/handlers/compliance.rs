@@ -252,17 +252,23 @@ impl EngineServer {
             |cmd| {
                 let session = &session;
                 async move {
-                    let (_status, stdout, stderr) = session
+                    let (status, stdout, stderr) = session
                         .exec(&cmd)
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    // Combine — checks grep against stdout but error
-                    // messages tend to land on stderr.
-                    Ok(if stderr.is_empty() {
+                    // Combine — checks read stdout but error messages tend to
+                    // land on stderr. The exit status goes through too: it is
+                    // how the runner tells "the setting is wrong" from "the
+                    // command could not run".
+                    let combined = if stderr.is_empty() {
                         stdout
                     } else {
                         format!("{stdout}\n{stderr}")
-                    })
+                    };
+                    Ok(crate::ssh_compliance::CmdOutput::new(
+                        combined,
+                        i32::try_from(status).unwrap_or(-1),
+                    ))
                 }
             },
         )
