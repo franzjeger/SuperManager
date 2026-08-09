@@ -217,6 +217,46 @@ pub enum SshError {
 }
 
 // ---------------------------------------------------------------------------
+// Findings store errors
+// ---------------------------------------------------------------------------
+
+/// Errors from the security-findings store.
+///
+/// These were `EngineError::Findings*` / `InvalidScope`. They moved with
+/// [`crate::findings_store`], and kept their three-way split because the GUI
+/// acts differently on each: an IO error is worth retrying, a parse error means
+/// offer to restore a backup, and a bad scope is the caller's bug and should
+/// never reach a user as a retry prompt.
+#[derive(Debug, Error)]
+pub enum FindingsError {
+    /// Reading or writing the store failed — missing directory, permission
+    /// denied, or an invalid path component.
+    #[error("findings store IO error: {reason}")]
+    Io {
+        /// What the filesystem reported.
+        reason: String,
+    },
+
+    /// Stored JSON was malformed: either the schema drifted or the file was
+    /// hand-edited. A UI should offer to restore from a recent backup rather
+    /// than retry.
+    #[error("findings store JSON parse: {reason}")]
+    Parse {
+        /// What the deserialiser reported.
+        reason: String,
+    },
+
+    /// The caller passed a scope slug that fails validation — a path-traversal
+    /// attempt, illegal characters, or too long. See
+    /// [`crate::findings::validate_slug`].
+    #[error("invalid scope slug: {reason}")]
+    InvalidScope {
+        /// Which rule the slug broke.
+        reason: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Top-level error
 // ---------------------------------------------------------------------------
 
@@ -229,6 +269,10 @@ pub enum CoreError {
     /// Originates inside a VPN backend.
     #[error("backend: {0}")]
     Backend(#[from] BackendError),
+
+    /// Originates in the findings store.
+    #[error("findings: {0}")]
+    Findings(#[from] FindingsError),
 
     /// Originates in the profile store.
     #[error("profile: {0}")]
