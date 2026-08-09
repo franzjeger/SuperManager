@@ -7165,6 +7165,7 @@ dependencies = [
 name = "supermgr-core"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -7182,6 +7183,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.2",
  "tracing",
  "uuid",
  "zbus 4.4.0",

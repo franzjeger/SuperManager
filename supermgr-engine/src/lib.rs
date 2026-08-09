@@ -42,7 +42,13 @@ pub mod server;
 pub mod smb_enum;
 pub mod snmp_walk;
 pub mod ssh;
-pub mod ssh_compliance;
+/// The Linux CIS baseline, which lives in core now — nothing about running
+/// `sshd -T` over a closure is macOS-specific, and the Linux daemon needs the
+/// same check definitions rather than a second set. Re-exported so existing
+/// `crate::ssh_compliance::` paths keep resolving.
+pub mod ssh_compliance {
+    pub use supermgr_core::ssh_compliance::*;
+}
 pub mod state;
 pub mod unifi;
 pub mod unifi_controllers;

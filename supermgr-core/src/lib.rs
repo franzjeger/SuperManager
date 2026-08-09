@@ -24,6 +24,7 @@ pub mod pipe;
 pub mod protocol;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod client;
+pub mod compliance;
 pub mod error;
 pub mod host;
 pub mod keyring;
@@ -31,6 +32,7 @@ pub mod paths;
 pub mod secret_lifecycle;
 pub mod severity;
 pub mod ssh;
+pub mod ssh_compliance;
 pub mod tailscale;
 pub mod vpn;
 
