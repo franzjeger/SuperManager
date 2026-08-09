@@ -65,7 +65,14 @@ async-trait = "0.1"
 # Base64 encoding (secrets file)
 base64      = "0.22"
 # HTTP client — native-tls for FortiGate compat, rustls-tls for Claude API
-reqwest     = { version = "0.12", default-features = false, features = ["json", "native-tls", "stream", "cookies"] }
+#
+# `form` and `query` are explicit because 0.13 made them opt-in features that
+# 0.12 compiled unconditionally. We build with `default-features = false`, so
+# the bump silently removed `RequestBuilder::form` and `::query` — seven call
+# sites across the Sophos SOAP envelope, the Azure OAuth token exchange and the
+# Tailscale API. That is what the 0.13 upgrade failed on, and it is a feature
+# list problem rather than a code one.
+reqwest     = { version = "0.13", default-features = false, features = ["json", "form", "query", "native-tls", "stream", "cookies"] }
 # SHA-256 for PKCE code_challenge
 sha2        = "0.11"
 # SSH key generation, parsing, fingerprinting (RustCrypto)
