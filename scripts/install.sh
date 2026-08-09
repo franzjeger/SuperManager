@@ -30,6 +30,27 @@
 # proper admin prompts on first use. This script never runs as root, and
 # Homebrew refuses to.
 
+# Refuse to run under anything but bash, and say how to fix it.
+#
+# The shebang is only consulted when a file is executed — never when a script
+# arrives on stdin. So `curl … | sh` and `sh -c "$(curl …)"` run this under
+# dash or zsh, where `set -u` semantics and expansion rules differ from bash
+# enough to abort on lines that are perfectly correct bash.
+#
+# Re-execing ourselves under bash was the obvious fix and does not work:
+# the interpreting shell has already read ahead on stdin, so copying "the
+# script" from stdin yields whatever is left after its parse buffer — under
+# zsh that is a fragment starting mid-file, which then runs. Re-downloading
+# instead would work but silently substitutes a different copy than the one
+# the operator piped. Stopping is the only honest option, and one clear line
+# beats an "unbound variable" from a shell nobody chose.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "install.sh needs bash (it is running under ${0##*/})." >&2
+    echo "Pipe it into bash instead:" >&2
+    echo "  curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh | bash" >&2
+    exit 1
+fi
+
 set -euo pipefail
 
 REPO="franzjeger/SuperManager"
@@ -48,7 +69,20 @@ while [ $# -gt 0 ]; do
         --no-deps)       DO_DEPS=0 ;;
         --deps-only)     DO_APP=0 ;;
         --with-openvpn3) WITH_OPENVPN3=1 ;;
-        -h|--help)       sed -n '2,31p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # `${BASH_SOURCE[0]}` is unset when the script arrives on stdin, which
+        # is the documented invocation — so under `set -u` the bare expansion
+        # aborted with "unbound variable" instead of printing help. Guard it,
+        # and when there is genuinely no file to read from, say where the text
+        # lives rather than printing nothing.
+        -h|--help)
+            self="${BASH_SOURCE[0]:-}"
+            if [ -n "$self" ] && [ -r "$self" ]; then
+                sed -n '2,31p' "$self" | sed 's/^# \{0,1\}//'
+            else
+                echo "Options and behaviour are documented at the top of the script:"
+                echo "  $RAW/scripts/install.sh"
+            fi
+            exit 0 ;;
         *)               echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -159,7 +193,12 @@ if [ "$DO_DEPS" = 1 ]; then
             # Use the in-tree script when this is a checkout, otherwise
             # fetch it: the documented install path is a curl pipe, which
             # has no repository to run it from.
-            LOCAL_BUILD="$(dirname "${BASH_SOURCE[0]}")/../contrib/build-openvpn3-mac.sh"
+            # Guarded for the same reason as --help above: piped in, there is
+            # no BASH_SOURCE, and the unguarded expansion aborted here under
+            # `set -u` — before reaching the curl fallback three lines down
+            # that exists precisely for that case. Empty resolves to `.`, the
+            # path does not exist, and the fallback runs as intended.
+            LOCAL_BUILD="$(dirname "${BASH_SOURCE[0]:-}")/../contrib/build-openvpn3-mac.sh"
             if [ -f "$LOCAL_BUILD" ]; then
                 bash "$LOCAL_BUILD"
             else
