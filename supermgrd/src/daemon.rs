@@ -4493,6 +4493,129 @@ impl DaemonService {
     /// output against CIS FortiGate hardening recommendations.
     ///
     /// Returns a JSON object with individual check results and a summary score.
+    /// Run the CIS Linux baseline over SSH and persist the result.
+    ///
+    /// Ungated, like the other read-only inspection methods: it opens an SSH
+    /// session with credentials the daemon already holds and runs seven
+    /// read-only commands (`sshd -T`, `sysctl -n`, `systemctl is-active`).
+    /// Nothing is changed on the target, so this belongs with `ListHosts`
+    /// rather than with the methods that stage credentials or reroute traffic.
+    ///
+    /// Persisted before returning so a GUI that dies between the scan and the
+    /// reply does not lose a result that took seven round-trips to produce.
+    async fn compliance_run_linux(
+        &self,
+        host_id: &str,
+        triggered_by: &str,
+    ) -> fdo::Result<String> {
+        use supermgr_core::compliance::TriggerKind;
+
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let host = {
+            let state = self.state.lock().await;
+            state
+                .hosts
+                .get(&id)
+                .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?
+                .clone()
+        };
+
+        // Unrecognised values read as Manual rather than erroring: the trigger
+        // is provenance for the history list, and refusing a whole scan over a
+        // mislabelled cause would be the wrong trade.
+        let trigger = match triggered_by {
+            "scheduled" => TriggerKind::Scheduled,
+            "post_deploy" => TriggerKind::PostDeploy,
+            _ => TriggerKind::Manual,
+        };
+
+        info!(
+            "compliance_run_linux: {}@{}:{}",
+            host.username, host.hostname, host.port
+        );
+
+        let session = connect_to_ssh_host(&host, &None, &self.state)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
+
+        // `run_baseline` asks for a closure rather than a session, which is
+        // why the Linux baseline needed no porting to live here: the daemon
+        // supplies its own transport. stderr is folded in because the checks
+        // grep stdout while diagnostics land on stderr.
+        let run = supermgr_core::ssh_compliance::run_baseline(
+            &id.simple().to_string(),
+            Some(&host.hostname),
+            trigger,
+            |cmd| {
+                let session = &session;
+                async move {
+                    let (_status, stdout, stderr) = session
+                        .exec(&cmd)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Ok(if stderr.is_empty() {
+                        stdout
+                    } else {
+                        format!("{stdout}\n{stderr}")
+                    })
+                }
+            },
+        )
+        .await;
+        let _ = session.disconnect().await;
+
+        // Non-fatal: the caller gets the run either way. A scan we performed
+        // and could not file is still a scan we performed.
+        if let Err(e) = supermgr_core::compliance::persist_run(&run) {
+            warn!("compliance_run_linux: could not persist run: {e:#}");
+        }
+
+        serde_json::to_string(&run)
+            .map_err(|e| fdo::Error::Failed(format!("serialise run: {e}")))
+    }
+
+    /// Run summaries for a host, newest first.
+    async fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let history = supermgr_core::compliance::load_history(
+            &id.simple().to_string(),
+            limit as usize,
+        )
+        .map_err(|e| fdo::Error::Failed(format!("read history: {e:#}")))?;
+        serde_json::to_string(&history)
+            .map_err(|e| fdo::Error::Failed(format!("serialise history: {e}")))
+    }
+
+    /// One stored run in full.
+    async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let run = supermgr_core::compliance::load_run(&id.simple().to_string(), run_id)
+            .map_err(|e| fdo::Error::Failed(format!("read run: {e:#}")))?;
+        serde_json::to_string(&run)
+            .map_err(|e| fdo::Error::Failed(format!("serialise run: {e}")))
+    }
+
+    /// The check library, including any user-supplied checks.
+    async fn compliance_list_checks(&self) -> fdo::Result<String> {
+        let checks = supermgr_core::compliance::list_checks();
+        serde_json::to_string(&checks)
+            .map_err(|e| fdo::Error::Failed(format!("serialise checks: {e}")))
+    }
+
+    /// What changed between a run and the one before it.
+    async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let report =
+            supermgr_core::compliance::drift_against_previous(&id.simple().to_string(), run_id)
+                .map_err(|e| fdo::Error::Failed(format!("compute drift: {e:#}")))?;
+        serde_json::to_string(&report)
+            .map_err(|e| fdo::Error::Failed(format!("serialise drift: {e}")))
+    }
+
     async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
