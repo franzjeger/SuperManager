@@ -480,7 +480,7 @@ pub fn build_ui(
     // membership changes on a human timescale, and polling a subprocess for a
     // screen nobody is looking at is pure cost.
     // =========================================================================
-    let tailscale_view = tailscale::build_tailscale_page();
+    let tailscale_view = tailscale::build_tailscale_page(&rt, &tx);
     view_stack.add_titled(&tailscale_view.widget, Some("tailscale"), "Tailscale");
     let tailscale_page_ref = view_stack.page(&tailscale_view.widget);
     tailscale_page_ref.set_icon_name(Some(design::icon_name(design::icons::MESH)));

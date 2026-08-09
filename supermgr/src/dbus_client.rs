@@ -404,6 +404,24 @@ pub async fn dbus_tailscale_list_nodes() -> anyhow::Result<Vec<TailscaleNode>> {
     serde_json::from_str(&json).context("parse tailscale nodes")
 }
 
+/// Call `TailscaleSetExitNode`. Empty `value` clears the selection.
+///
+/// Polkit-gated on the daemon side, so a cancelled prompt arrives here as an
+/// error — `describe_daemon_error` is what turns that into "you dismissed the
+/// prompt" rather than "you lack permission".
+pub async fn dbus_tailscale_set_exit_node(value: &str) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.tailscale_set_exit_node(value).await.map_err(|e| {
+        let doing = if value.is_empty() {
+            "Could not stop using the exit node"
+        } else {
+            "Could not set the exit node"
+        };
+        anyhow::anyhow!(describe_daemon_error(&anyhow::Error::new(e), doing))
+    })
+}
+
 pub async fn dbus_list_profiles() -> anyhow::Result<Vec<ProfileSummary>> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;

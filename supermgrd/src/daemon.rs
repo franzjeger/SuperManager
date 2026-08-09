@@ -2033,6 +2033,23 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("serialise nodes: {e}")))
     }
 
+    /// Select or clear the Tailscale exit node.
+    ///
+    /// Authenticated, unlike `connect`: this bus is reachable by every local
+    /// account, and an exit node decides where all of this machine's traffic
+    /// goes. See `polkit::ACTION_TAILSCALE_EXIT_NODE`.
+    async fn tailscale_set_exit_node(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+        value: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_EXIT_NODE).await?;
+        crate::tailscale::set_exit_node(value)
+            .await
+            .map_err(fdo::Error::Failed)
+    }
+
     /// Return a single SSH key as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;

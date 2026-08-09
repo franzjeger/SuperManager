@@ -2,16 +2,23 @@
 //!
 //! # What this can and cannot do
 //!
-//! Read-only, because that is all the Linux daemon exposes: one D-Bus method,
-//! `TailscaleListNodes`, backed by `tailscale status --json`. There is no
-//! bring-up, no exit-node selection and no login flow here, and the page does
-//! not pretend otherwise — no disabled buttons hinting at features that do not
-//! exist behind them. Adding control means adding daemon methods first.
+//! Two things: list the tailnet, and choose an exit node. Both are backed by a
+//! daemon method — `TailscaleListNodes` and `TailscaleSetExitNode`. There is
+//! still no bring-up and no login flow, and the page does not pretend
+//! otherwise: no disabled buttons hinting at features that are not behind
+//! them.
 //!
-//! That is still worth a screen. "Which of my machines are on the tailnet,
-//! what are their addresses, which one is advertising an exit node" is the
-//! question an operator actually asks before SSH-ing somewhere, and answering
-//! it here beats dropping to a terminal for `tailscale status`.
+//! # Exit nodes
+//!
+//! Only peers advertising the capability are offered — `exit_node_option`, not
+//! `exit_node`. The second means "this is the one currently carrying my
+//! traffic", and offering every peer as a choice when tailscaled would refuse
+//! most of them is how a control teaches people not to trust it.
+//!
+//! Selecting one is polkit-gated in the daemon, so the first use per session
+//! raises an authentication prompt. That is deliberate: it decides where every
+//! packet this machine sends goes, and this bus is reachable by every local
+//! account. A dismissed prompt comes back as an error and is shown as one.
 //!
 //! # Why three states and not two
 //!
@@ -22,12 +29,15 @@
 //! absent or asleep — CLI not installed, daemon down, not logged in — so the
 //! error text is surfaced verbatim rather than summarised into a shrug.
 
+use std::sync::mpsc;
+
 use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
 use supermgr_core::tailscale::TailscaleNode;
 
+use crate::app::AppMsg;
 use crate::ui::design::{self, Status};
 
 /// Handles the page needs in order to re-render without being rebuilt.
@@ -42,11 +52,18 @@ pub struct TailscaleView {
     status_slot: adw::Bin,
     /// Row count, shown beside the heading.
     subtitle: gtk4::Label,
+    /// Runtime the exit-node D-Bus calls are spawned on.
+    rt: tokio::runtime::Handle,
+    /// Where those calls report back to.
+    tx: mpsc::Sender<AppMsg>,
 }
 
 /// Build the page. Starts in the "asking" state — the first render replaces it.
 #[must_use]
-pub fn build_tailscale_page() -> TailscaleView {
+pub fn build_tailscale_page(
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+) -> TailscaleView {
     let (scroller, content) = design::detail_body();
 
     let heading = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
@@ -84,6 +101,8 @@ pub fn build_tailscale_page() -> TailscaleView {
         list,
         status_slot,
         subtitle,
+        rt: rt.clone(),
+        tx: tx.clone(),
     }
 }
 
@@ -141,12 +160,121 @@ impl TailscaleView {
             if nodes.len() == 1 { "" } else { "s" },
         ));
 
+        if let Some(card) = self.exit_node_card(nodes) {
+            self.list.append(&card);
+        }
+
         let group = design::card("Devices");
         for node in ordered {
             group.add(&Self::node_row(node));
         }
         self.list.append(&group);
         self.stack.set_visible_child_name("list");
+    }
+
+    /// The exit-node card, or `None` when there is nothing to offer.
+    ///
+    /// Absent rather than empty when no peer advertises the capability: a card
+    /// headed "Exit node" containing only the words "none available" is worse
+    /// than no card, because it reads as a broken feature rather than a tailnet
+    /// where nobody runs `--advertise-exit-node`.
+    fn exit_node_card(&self, nodes: &[TailscaleNode]) -> Option<adw::PreferencesGroup> {
+        let active = nodes.iter().find(|n| n.exit_node);
+        let mut candidates: Vec<&TailscaleNode> = nodes
+            .iter()
+            .filter(|n| n.exit_node_option && !n.is_self)
+            .collect();
+        if candidates.is_empty() && active.is_none() {
+            return None;
+        }
+        candidates.sort_by_key(|n| (!n.online, n.display_name().to_ascii_lowercase()));
+
+        let card = design::card("Exit node");
+        card.set_description(Some(
+            "All traffic from this machine leaves through the device you pick.",
+        ));
+
+        if let Some(node) = active {
+            let row = adw::ActionRow::new();
+            row.set_title(node.display_name());
+            row.set_subtitle("Carrying this machine's traffic");
+            row.add_prefix(&design::status_pill(Status::Connected, "In use"));
+            let stop = gtk4::Button::with_label("Stop using");
+            stop.add_css_class("destructive-action");
+            stop.set_valign(gtk4::Align::Center);
+            self.wire_exit_node_button(&stop, String::new());
+            row.add_suffix(&stop);
+            card.add(&row);
+        }
+
+        for node in candidates {
+            // Skip the active one: it already has a row above, with the
+            // control that applies to it.
+            if node.exit_node {
+                continue;
+            }
+            let row = adw::ActionRow::new();
+            row.set_title(node.display_name());
+            row.set_subtitle(if node.online {
+                "Available"
+            } else {
+                "Offline — tailscale will refuse this one"
+            });
+            let use_btn = gtk4::Button::with_label("Use");
+            use_btn.set_valign(gtk4::Align::Center);
+            // An offline peer cannot carry traffic, and tailscaled says so
+            // rather than trying. Disabling the button says the same thing
+            // without spending a polkit prompt to find out.
+            use_btn.set_sensitive(node.online);
+            if let Some(target) = node.primary_ip() {
+                self.wire_exit_node_button(&use_btn, target.to_owned());
+            } else {
+                // No address to name it by. Nothing to send.
+                use_btn.set_sensitive(false);
+            }
+            row.add_suffix(&use_btn);
+            card.add(&row);
+        }
+
+        Some(card)
+    }
+
+    /// Send `value` to the daemon when `button` is clicked; empty clears.
+    ///
+    /// The button goes insensitive on click so a double-click cannot queue two
+    /// polkit prompts. Nothing re-enables it, and nothing needs to: the reply
+    /// carries a fresh node list, `show_nodes` rebuilds every row, and this
+    /// button is replaced by a new one. Re-enabling it from the worker would
+    /// mean touching a GTK widget off the main thread anyway.
+    ///
+    /// Both calls happen in the worker: set, then re-list. The authority on
+    /// which node is in use is tailscaled, not what we just asked for — a
+    /// `set` that reported success and a peer that then refused traffic would
+    /// otherwise leave the page claiming something untrue.
+    fn wire_exit_node_button(&self, button: &gtk4::Button, value: String) {
+        let rt = self.rt.clone();
+        let tx = self.tx.clone();
+        button.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            let tx = tx.clone();
+            let value = value.clone();
+            rt.spawn(async move {
+                let outcome = crate::dbus_client::dbus_tailscale_set_exit_node(&value)
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                if let Err(message) = outcome {
+                    tx.send(AppMsg::OperationFailed(message)).ok();
+                }
+                // Re-list either way: on success to pick up the new active
+                // node, on failure because the page's picture of the tailnet
+                // is now unverified — including the case where the operator
+                // dismissed the authentication prompt.
+                let nodes = crate::dbus_client::dbus_tailscale_list_nodes()
+                    .await
+                    .map_err(|e| format!("{e:#}"));
+                tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok();
+            });
+        });
     }
 
     /// One device. Title is the name, subtitle carries the address and the
@@ -207,6 +335,7 @@ mod tests {
             online,
             is_self,
             exit_node: false,
+            exit_node_option: false,
             last_seen: String::new(),
             rx_bytes: 0,
             tx_bytes: 0,

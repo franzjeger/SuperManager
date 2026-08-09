@@ -31,8 +31,21 @@ pub struct TailscaleNode {
     pub online: bool,
     /// Whether this is the local node (`Self` in the raw JSON).
     pub is_self: bool,
-    /// Whether this node is enabled as an exit node.
+    /// Whether this node is the exit node currently in use.
+    ///
+    /// Tailscale's `ExitNode`. Exactly one peer can have this set, and it
+    /// means every packet leaving this machine is going through it right now —
+    /// not that the peer is willing to carry traffic. That is
+    /// [`Self::exit_node_option`], and conflating the two is how a UI ends up
+    /// labelling six machines as exit nodes when none is in use.
     pub exit_node: bool,
+    /// Whether this node advertises itself as available to be an exit node.
+    ///
+    /// Tailscale's `ExitNodeOption`, i.e. the peer ran
+    /// `tailscale up --advertise-exit-node` and an admin approved it. The set
+    /// of peers a user may legitimately choose between.
+    #[serde(default)]
+    pub exit_node_option: bool,
     /// RFC 3339 timestamp of last activity, when known. Empty for nodes that
     /// have never been seen on the tailnet.
     pub last_seen: String,
@@ -89,6 +102,7 @@ mod tests {
             online: true,
             is_self: false,
             exit_node: false,
+            exit_node_option: false,
             last_seen: String::new(),
             rx_bytes: 0,
             tx_bytes: 0,

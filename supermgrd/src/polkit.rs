@@ -64,6 +64,26 @@ pub const ACTION_SECRETS: &str = "org.supermgr.daemon.secrets";
 /// once, and the prompt names what is being asked for.
 pub const ACTION_SSH_CONNECT: &str = "org.supermgr.daemon.ssh-connect";
 
+/// Selecting or clearing a Tailscale exit node.
+///
+/// Gated, even though `connect` (bring up a VPN profile) is not, and the
+/// difference is worth stating rather than leaving as an inconsistency.
+///
+/// The bus policy lets **any** local account talk to this daemon —
+/// `context="default"` with a bare `allow send_destination`. An exit node
+/// routes every packet this machine sends through a host of the caller's
+/// choosing, so ungated it would let any local user silently redirect
+/// another user's traffic through a machine they control. That is a
+/// different shape of problem from starting a VPN the admin already
+/// configured, and the direction this daemon has been moving is to gate
+/// exactly that kind of surface once it is noticed rather than to match the
+/// loosest existing precedent.
+///
+/// `auth_admin_keep` for the same reason as SSH connect: the operator
+/// comparing two exit nodes would otherwise authenticate on every attempt,
+/// and a control that irritating gets worked around.
+pub const ACTION_TAILSCALE_EXIT_NODE: &str = "org.supermgr.daemon.tailscale-exit-node";
+
 #[zbus::proxy(
     interface = "org.freedesktop.PolicyKit1.Authority",
     default_service = "org.freedesktop.PolicyKit1",
@@ -161,7 +181,8 @@ mod tests {
     /// unchecked, so keep the two in step — the assertions below are the
     /// only thing standing between a typo and a method that denies
     /// everybody for a reason nobody can see.
-    const ALL_ACTIONS: &[&str] = &[ACTION_SECRETS, ACTION_SSH_CONNECT];
+    const ALL_ACTIONS: &[&str] =
+        &[ACTION_SECRETS, ACTION_SSH_CONNECT, ACTION_TAILSCALE_EXIT_NODE];
 
     #[test]
     fn every_action_the_daemon_uses_is_declared_in_the_policy_file() {
@@ -304,6 +325,33 @@ mod tests {
             "ssh_connect_command no longer authorizes against {ACTION_SSH_CONNECT}. \
              It stages the host's password or private key on disk; ungated, a caller \
              refused by {ACTION_SECRETS} can come here for the same material instead."
+        );
+    }
+
+    /// Same shape as the test above, and the same reason for the shape:
+    /// comments are stripped so a deleted guard with its explanation left
+    /// behind still fails.
+    #[test]
+    fn tailscale_set_exit_node_is_gated() {
+        let daemon = include_str!("daemon.rs");
+        let body: String = daemon
+            .split("async fn tailscale_set_exit_node")
+            .nth(1)
+            .expect("tailscale_set_exit_node exists")
+            .split("\n    /// ")
+            .next()
+            .expect("something follows tailscale_set_exit_node")
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            body.contains("authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_EXIT_NODE)"),
+            "tailscale_set_exit_node no longer authorizes against \
+             {ACTION_TAILSCALE_EXIT_NODE}. This bus accepts every local account, and \
+             the method decides which host every packet from this machine leaves \
+             through — ungated, one local user can redirect another's traffic."
         );
     }
 

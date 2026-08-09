@@ -98,6 +98,10 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
         online: v.get("Online").and_then(|x| x.as_bool()).unwrap_or(false),
         is_self,
         exit_node: v.get("ExitNode").and_then(|x| x.as_bool()).unwrap_or(false),
+        exit_node_option: v
+            .get("ExitNodeOption")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false),
         last_seen: v
             .get("LastSeen")
             .and_then(|x| x.as_str())
@@ -109,6 +113,78 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
         rx_bytes: v.get("RxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
         tx_bytes: v.get("TxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
     }
+}
+
+/// Select an exit node, or clear the selection with an empty `value`.
+///
+/// `value` is a Tailscale IP, a MagicDNS name, or `""` to route normally
+/// again. Handed to `tailscale set --exit-node=<value>`, which is the
+/// documented interface and — unlike macOS, where open-source tailscaled
+/// leaves the split-default routes to the caller — installs the routing
+/// itself on Linux. So this is the whole implementation, not the first half of
+/// one; there is no route bookkeeping to keep in sync here.
+///
+/// Rejects anything that is not a plausible address or DNS label rather than
+/// passing it through. The argument reaches a subprocess, and while the argv
+/// form means a shell is never involved, `--exit-node=--flag` would let a
+/// caller inject a tailscale option instead of a host. tailscaled would
+/// reject most of that anyway; not relying on somebody else's parser for that
+/// guarantee costs one function.
+pub async fn set_exit_node(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if !value.is_empty() && !is_plausible_exit_node(value) {
+        return Err(format!(
+            "{value:?} is not a Tailscale address or MagicDNS name"
+        ));
+    }
+
+    let out = tokio::process::Command::new("tailscale")
+        .arg("set")
+        .arg(format!("--exit-node={value}"))
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "the tailscale CLI is not installed".to_owned()
+            } else {
+                format!("could not run tailscale: {e}")
+            }
+        })?;
+
+    if out.status.success() {
+        if value.is_empty() {
+            debug!("tailscale exit node cleared");
+        } else {
+            debug!(exit_node = %value, "tailscale exit node set");
+        }
+        return Ok(());
+    }
+
+    // tailscale writes the useful part to stderr — "exit node not found",
+    // "not logged in". Pass it through: it is better than anything we would
+    // write, and the failure modes are somebody else's state, not ours.
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+    let message = if stderr.is_empty() {
+        format!("tailscale set failed ({})", out.status)
+    } else {
+        stderr
+    };
+    warn!(exit_node = %value, "{message}");
+    Err(message)
+}
+
+/// Whether `value` looks like a Tailscale IP or a MagicDNS name.
+///
+/// Deliberately a shape check, not a resolution: whether the peer exists is
+/// tailscaled's business and it answers with a better error than we could.
+/// This only ensures what we hand over is an address-or-name and not an
+/// option — the leading-dash case is the one that matters.
+fn is_plausible_exit_node(value: &str) -> bool {
+    !value.starts_with('-')
+        && !value.contains(char::is_whitespace)
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_'))
 }
 
 #[cfg(test)]
@@ -176,5 +252,36 @@ mod tests {
         let me = nodes.iter().find(|n| n.is_self).expect("no Self in node list");
         eprintln!("Self: {me:?}");
         assert!(!me.hostname.is_empty());
+    }
+
+    #[test]
+    fn exit_node_option_is_parsed_separately_from_exit_node() {
+        // The two mean different things and a real tailnet has peers where
+        // they differ: one advertising exit-node capability while none is in
+        // use. Collapsing them mislabels every candidate as active.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"HostName":"gw","ExitNode":false,"ExitNodeOption":true}"#,
+        )
+        .unwrap();
+        let n = parse_node(&v, false);
+        assert!(!n.exit_node, "not the active exit node");
+        assert!(n.exit_node_option, "but available as one");
+    }
+
+    #[test]
+    fn plausible_exit_node_rejects_option_injection() {
+        // The value reaches `--exit-node=<value>`. argv means no shell, but a
+        // leading dash would still let a caller pass a tailscale flag.
+        assert!(!is_plausible_exit_node("--advertise-exit-node"));
+        assert!(!is_plausible_exit_node("-x"));
+        assert!(!is_plausible_exit_node("100.64.0.1 --reset"));
+        assert!(!is_plausible_exit_node("host;reboot"));
+    }
+
+    #[test]
+    fn plausible_exit_node_accepts_what_tailscale_accepts() {
+        assert!(is_plausible_exit_node("100.96.91.67"));
+        assert!(is_plausible_exit_node("fd7a:115c:a1e0::4832:5b44"));
+        assert!(is_plausible_exit_node("cachyos-x8664.tailb0b06a.ts.net"));
     }
 }
