@@ -38,6 +38,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::findings::Finding;
 use tracing::warn;
 
 
@@ -1872,6 +1874,131 @@ pub fn render_markdown_report(
 }
 
 // ---------------------------------------------------------------------------
+// Compliance failures as findings
+// ---------------------------------------------------------------------------
+
+/// Map a compliance severity onto the shared [`crate::severity::Severity`].
+///
+/// Two enums with identical variants, which is a wart that predates this
+/// module: `severity::Severity` came from the vulnerability scanner and this one
+/// came later. Consolidating them touches notify, report, risk and the whole
+/// Swift side, so it stays a mapping for now — exhaustive, so adding a variant
+/// to either fails to compile rather than silently picking a default.
+#[must_use]
+pub fn as_shared_severity(s: &Severity) -> crate::severity::Severity {
+    match s {
+        Severity::Info => crate::severity::Severity::Info,
+        Severity::Low => crate::severity::Severity::Low,
+        Severity::Medium => crate::severity::Severity::Medium,
+        Severity::High => crate::severity::Severity::High,
+        Severity::Critical => crate::severity::Severity::Critical,
+    }
+}
+
+/// How much of a check's observed value is quoted into a finding's detail.
+///
+/// `CheckResult::raw_value` can hold 2 KB. A finding's detail is read in a table
+/// row, so the whole thing would wreck the layout while the first line is what
+/// carries the evidence.
+const EVIDENCE_LIMIT: usize = 160;
+
+/// Turn a compliance run's *failures* into findings.
+///
+/// This is the wire that was missing. `ssh_compliance::run_baseline` has carried
+/// a note since it was written that pushing to the findings store "was never
+/// wired up"; the GUI renders failure rows straight off `run.checks`, which
+/// means a failed control has no disposition, no history, and no way for an
+/// operator to accept it as a known risk. Findings have all three.
+///
+/// It also gives the Linux daemon something to put in a Security page without a
+/// port scanner, which is the only reason that page can exist yet.
+///
+/// # Only failures
+///
+/// `Status::Error` deliberately produces nothing. An error means the check could
+/// not be evaluated — no root for `sshd -T`, a tool not installed — and a
+/// finding is a claim about the host. Recording "we could not tell" as a
+/// security finding is exactly the confusion that made an unprivileged scan
+/// report seven fabricated problems before it was fixed. `Pass` and `Skip`
+/// produce nothing for the obvious reasons.
+///
+/// # Identity
+///
+/// `Finding::id` is the check id, so [`crate::findings_store::finding_key`]
+/// resolves to the same key on every run against the same host. That is what
+/// makes `first_seen`, `scan_count` and the disposition history mean anything —
+/// and what makes an accepted risk stay accepted after the next scan.
+///
+/// `library` is passed in rather than looked up, because the caller knows which
+/// baseline ran: [`crate::ssh_compliance::linux_default_checks`] for the Linux
+/// controls, [`list_checks`] for FortiGate. Definitions missing from it cost
+/// only the remediation text.
+#[must_use]
+pub fn failures_as_findings(run: &ComplianceRun, library: &[CheckDefinition]) -> Vec<Finding> {
+    let host = run
+        .hostname
+        .clone()
+        .unwrap_or_else(|| run.host_id.clone());
+
+    run.checks
+        .iter()
+        .filter(|c| matches!(c.status, Status::Fail))
+        .map(|c| {
+            let definition = library.iter().find(|d| d.id == c.check_id);
+
+            // The library's remediation is authored text and the whole reason
+            // the definition is consulted. Without it the operator is told what
+            // is wrong and nothing about what to do, so say that plainly rather
+            // than leaving the field empty and letting the GUI render a blank.
+            let recommendation = definition
+                .and_then(|d| d.remediation.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "No remediation text is authored for {}. See the {} benchmark.",
+                        c.check_id,
+                        definition.map_or("relevant", |d| d.framework.as_str())
+                    )
+                });
+
+            // The observed value is what turns "this control failed" into
+            // something an operator can act on without re-running the scan.
+            let mut detail = c.detail.clone();
+            if let Some(raw) = c.raw_value.as_ref() {
+                let evidence: String = raw
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if !evidence.is_empty() {
+                    let clipped: String = evidence.chars().take(EVIDENCE_LIMIT).collect();
+                    let ellipsis = if evidence.chars().count() > EVIDENCE_LIMIT {
+                        "…"
+                    } else {
+                        ""
+                    };
+                    detail = format!("{detail} Observed: {clipped}{ellipsis}");
+                }
+            }
+
+            Finding {
+                id: c.check_id.clone(),
+                host_ip: host.clone(),
+                port: None,
+                service: None,
+                severity: as_shared_severity(&c.severity),
+                title: c.title.clone(),
+                detail,
+                recommendation,
+                // A compliance control is not a CVE, and inventing a CVSS for
+                // one would put a fabricated number next to real ones.
+                cve: None,
+                cvss: None,
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pure functions only.
 //
 // The runner (`run`, `scan_all`) hits FortiGate over the network and is
@@ -1884,6 +2011,141 @@ pub fn render_markdown_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    // -- failures_as_findings -------------------------------------------
+    //
+    // The rule these exist to protect: only a Fail becomes a finding. An Error
+    // means the check could not be evaluated, and recording that as a security
+    // finding is the confusion that had an unprivileged scan reporting seven
+    // fabricated problems before #182 fixed it.
+
+    #[test]
+    fn only_failures_become_findings() {
+        let run = run_fixture(
+            "r1",
+            50,
+            vec![
+                result("c.fail", Severity::High, Status::Fail),
+                result("c.pass", Severity::High, Status::Pass),
+                result("c.error", Severity::Critical, Status::Error),
+                result("c.skip", Severity::Medium, Status::Skip),
+            ],
+        );
+        let findings = failures_as_findings(&run, &[]);
+        let ids: Vec<&str> = findings.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, ["c.fail"], "only the failed control is a finding");
+    }
+
+    #[test]
+    fn an_unevaluable_check_never_becomes_a_finding() {
+        // Stated separately from the test above because it is the one that
+        // matters: a Critical-severity Error is the most tempting thing to
+        // record, and it is a claim we have no evidence for.
+        let run = run_fixture(
+            "r2",
+            0,
+            vec![result("c.error", Severity::Critical, Status::Error)],
+        );
+        assert!(
+            failures_as_findings(&run, &[]).is_empty(),
+            "an error is 'we could not ask', not a finding"
+        );
+    }
+
+    #[test]
+    fn a_findings_identity_is_stable_across_runs() {
+        // What makes first_seen, scan_count and an accepted-risk disposition
+        // survive the next scan. If the key moved, every run would file the
+        // same problem again as new and accepted risks would un-accept.
+        let checks = vec![result("linux.ssh.root-login-disabled", Severity::High, Status::Fail)];
+        let a = failures_as_findings(&run_fixture("r1", 50, checks.clone()), &[]);
+        let b = failures_as_findings(&run_fixture("r2", 50, checks), &[]);
+        assert_eq!(
+            crate::findings_store::finding_key(&a[0]),
+            crate::findings_store::finding_key(&b[0]),
+        );
+        assert_eq!(a[0].id, "linux.ssh.root-login-disabled");
+    }
+
+    #[test]
+    fn remediation_comes_from_the_library() {
+        let mut d = def("c.fail", Severity::High, Expectation::Contains { needle: "x".to_owned() });
+        d.remediation = Some("Set PermitRootLogin no.".to_owned());
+        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let f = failures_as_findings(&run, &[d]);
+        assert_eq!(f[0].recommendation, "Set PermitRootLogin no.");
+    }
+
+    #[test]
+    fn a_missing_remediation_says_so_rather_than_rendering_blank() {
+        // An empty recommendation field reads as "nothing to do".
+        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let f = failures_as_findings(&run, &[]);
+        assert!(!f[0].recommendation.is_empty());
+        assert!(f[0].recommendation.contains("c.fail"), "name the check");
+    }
+
+    #[test]
+    fn the_observed_value_is_carried_into_the_detail() {
+        // Without it, acting on the finding means re-running the scan to see
+        // what the host actually said.
+        let mut r = result("c.fail", Severity::High, Status::Fail);
+        r.detail = "Root SSH login is not disabled.".to_owned();
+        r.raw_value = Some("source=sudo-sshd-T\nPermitRootLogin prohibit-password\n".to_owned());
+        let run = run_fixture("r1", 50, vec![r]);
+        let f = failures_as_findings(&run, &[]);
+        assert!(f[0].detail.contains("Root SSH login is not disabled."));
+        assert!(f[0].detail.contains("PermitRootLogin prohibit-password"));
+        assert!(!f[0].detail.contains('\n'), "must stay one line for a table row");
+    }
+
+    #[test]
+    fn a_huge_observed_value_is_clipped() {
+        let mut r = result("c.fail", Severity::High, Status::Fail);
+        r.raw_value = Some("x".repeat(4000));
+        let run = run_fixture("r1", 50, vec![r]);
+        let f = failures_as_findings(&run, &[]);
+        assert!(
+            f[0].detail.chars().count() < 400,
+            "2 KB of raw value would wreck the row: {} chars",
+            f[0].detail.chars().count()
+        );
+        assert!(f[0].detail.ends_with('\u{2026}'), "say it was clipped");
+    }
+
+    #[test]
+    fn severity_maps_across_without_reordering() {
+        // Two enums with identical variants; a transposed pair here would
+        // silently downgrade real findings.
+        for (from, to) in [
+            (Severity::Info, crate::severity::Severity::Info),
+            (Severity::Low, crate::severity::Severity::Low),
+            (Severity::Medium, crate::severity::Severity::Medium),
+            (Severity::High, crate::severity::Severity::High),
+            (Severity::Critical, crate::severity::Severity::Critical),
+        ] {
+            assert_eq!(as_shared_severity(&from), to, "{from:?} mapped wrong");
+        }
+    }
+
+    #[test]
+    fn a_compliance_finding_claims_no_cve_or_cvss() {
+        // The scanner's findings carry both. Inventing them for a control
+        // would put fabricated numbers beside real ones in the same table.
+        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let f = failures_as_findings(&run, &[]);
+        assert!(f[0].cve.is_none());
+        assert!(f[0].cvss.is_none());
+    }
+
+    #[test]
+    fn the_host_falls_back_to_its_id_when_unnamed() {
+        let mut run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        run.hostname = None;
+        let f = failures_as_findings(&run, &[]);
+        assert_eq!(f[0].host_ip, run.host_id, "a blank host makes the row useless");
+    }
 
     // -- Test fixtures --------------------------------------------------
 

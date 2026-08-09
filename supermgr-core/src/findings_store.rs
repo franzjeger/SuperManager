@@ -559,6 +559,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+    // -- compliance run -> findings -> store, end to end -----------------
+    //
+    // The wire added alongside this: a failed control has to become a finding
+    // with a disposition and a history, and has to auto-resolve when it starts
+    // passing. Covers everything the daemon does except deriving the scope.
+
+    #[test]
+    fn a_compliance_run_files_only_its_failures_and_resolves_them_later() {
+        use crate::compliance::{
+            failures_as_findings, CheckResult, ComplianceRun, Status, TriggerKind,
+        };
+        use crate::compliance::{BaselineKind, Severity as CSeverity};
+
+        let scope = unique_scope("compliance");
+
+        let check = |id: &str, status: Status| CheckResult {
+            check_id: id.to_owned(),
+            status,
+            detail: "d".to_owned(),
+            raw_value: Some("observed=x".to_owned()),
+            severity: CSeverity::High,
+            title: format!("T {id}"),
+            category: "SSH".to_owned(),
+        };
+        let run = |checks: Vec<CheckResult>| ComplianceRun {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            host_id: "h1".to_owned(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            firmware: None,
+            model: None,
+            hostname: Some("web01".to_owned()),
+            triggered_by: TriggerKind::Manual,
+            baseline_kind: BaselineKind::Linux,
+            score: 50,
+            passed: 0,
+            failed: 0,
+            errored: 0,
+            skipped: 0,
+            checks,
+        };
+
+        // First scan: one fail, one error, one pass. Only the fail is filed —
+        // an error means the check could not be evaluated, and filing that as a
+        // finding is the fabrication #182 removed.
+        let first = run(vec![
+            check("linux.ssh.root-login-disabled", Status::Fail),
+            check("linux.ssh.password-auth-disabled", Status::Error),
+            check("linux.audit.journald-running", Status::Pass),
+        ]);
+        let diff = reconcile(&scope, &failures_as_findings(&first, &[])).expect("reconcile");
+        assert_eq!(diff.new_findings.len(), 1, "only the failure is a finding");
+        assert_eq!(
+            diff.new_findings[0].finding.id,
+            "linux.ssh.root-login-disabled"
+        );
+        assert!(
+            diff.new_findings[0].finding.detail.contains("observed=x"),
+            "the evidence has to survive into the store"
+        );
+
+        // Second scan, same failure: still open, not a duplicate. This is what
+        // the stable check-id key buys.
+        let diff = reconcile(&scope, &failures_as_findings(&first, &[])).expect("reconcile");
+        assert_eq!(diff.new_findings.len(), 0, "not filed twice");
+        assert_eq!(diff.still_open.len(), 1);
+        assert_eq!(diff.still_open[0].scan_count, 2);
+
+        // Third scan, the control now passes: absent from the fresh set, so the
+        // finding auto-resolves. An empty findings list is a signal, not a
+        // no-op, which is why the daemon reconciles even when a scan finds
+        // nothing.
+        let fixed = run(vec![check("linux.ssh.root-login-disabled", Status::Pass)]);
+        let diff = reconcile(&scope, &failures_as_findings(&fixed, &[])).expect("reconcile");
+        assert_eq!(diff.auto_resolved.len(), 1, "a passing control closes its finding");
+        assert_eq!(diff.still_open.len(), 0);
+
+        // And the history is there to read afterwards.
+        let stored = list_findings(&scope).expect("list");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].disposition.label(), "fixed");
+        assert_eq!(stored[0].scan_count, 2, "the passing scan does not count as an observation");
+
+        cleanup(&scope);
+    }
+
     #[test]
     fn first_scan_records_all_as_new() {
         let scope = unique_scope("first");
