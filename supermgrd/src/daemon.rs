@@ -4542,7 +4542,12 @@ impl DaemonService {
         // `run_baseline` asks for a closure rather than a session, which is
         // why the Linux baseline needed no porting to live here: the daemon
         // supplies its own transport. stderr is folded in because the checks
-        // grep stdout while diagnostics land on stderr.
+        // read stdout while diagnostics land on stderr.
+        //
+        // The exit status is passed through rather than dropped. Discarding it
+        // left the runner unable to distinguish a wrong setting from a command
+        // that never ran, and an unprivileged `sshd -T` was consequently
+        // reported as a root-login finding.
         let run = supermgr_core::ssh_compliance::run_baseline(
             &id.simple().to_string(),
             Some(&host.hostname),
@@ -4550,15 +4555,19 @@ impl DaemonService {
             |cmd| {
                 let session = &session;
                 async move {
-                    let (_status, stdout, stderr) = session
+                    let (status, stdout, stderr) = session
                         .exec(&cmd)
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    Ok(if stderr.is_empty() {
+                    let combined = if stderr.is_empty() {
                         stdout
                     } else {
                         format!("{stdout}\n{stderr}")
-                    })
+                    };
+                    Ok(supermgr_core::ssh_compliance::CmdOutput::new(
+                        combined,
+                        i32::try_from(status).unwrap_or(-1),
+                    ))
                 }
             },
         )
