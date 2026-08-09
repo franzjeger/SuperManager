@@ -16,10 +16,16 @@
 #
 # # What it does, and what it does not
 #
-# The gated methods are called with a nil UUID. Authorization runs before
-# the daemon looks anything up, so the gate is exercised in full and the
-# operation then fails with "not found" — nothing is exported, no tunnel
-# is raised, no credential is staged. Read-only throughout.
+# The gated methods are called with a sentinel that cannot resolve: a nil
+# UUID for the ones taking an id, and an unassigned 100.64/10 address for
+# the exit-node one. Authorization runs before the daemon looks anything
+# up, so the gate is exercised in full and the operation then fails with
+# "not found" — nothing is exported, no tunnel is raised, no credential is
+# staged, and no traffic is rerouted. Read-only throughout.
+#
+# The exit-node sentinel matters more than the others: a real address there
+# would send every packet this machine emits through another host as a side
+# effect of running a test script.
 #
 # It cannot check what the prompt looks like or what the GUI shows when
 # you dismiss it. Those need eyes; the summary at the end says so.
@@ -31,16 +37,24 @@ set -uo pipefail   # not -e: a failing check is a result, not a crash
 
 ACTION_SECRETS="org.supermgr.daemon.secrets"
 ACTION_SSH_CONNECT="org.supermgr.daemon.ssh-connect"
+ACTION_TS_EXIT="org.supermgr.daemon.tailscale-exit-node"
 SERVICE="org.supermgr.Daemon"
 OBJECT="/org/supermgr/Daemon"
 IFACE="org.supermgr.Daemon1"
 NIL_UUID="00000000-0000-0000-0000-000000000000"
+# An address inside Tailscale's 100.64/10 range that no node holds. Shape-valid,
+# so it passes the daemon's own argument check and reaches tailscaled, which
+# refuses it — the exit-node equivalent of the nil UUID. Never route through
+# a real peer from here.
+UNASSIGNED_TS_IP="100.64.255.254"
 
 ASSUME_YES=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -y|--yes)  ASSUME_YES=1 ;;
-        -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        # Range tracks the header comment above: it ends at the "--help"
+        # line. Widen it when the header grows, or --help silently truncates.
+        -h|--help) sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -153,7 +167,7 @@ if ! busctl --system status org.freedesktop.PolicyKit1 >/dev/null 2>&1; then
 fi
 
 if [ "$POLKIT_LIVE" = 1 ]; then
-    for action in "$ACTION_SECRETS" "$ACTION_SSH_CONNECT"; do
+    for action in "$ACTION_SECRETS" "$ACTION_SSH_CONNECT" "$ACTION_TS_EXIT"; do
         if pkaction --action-id "$action" >/dev/null 2>&1; then
             pass "polkit knows $action"
         else
@@ -184,6 +198,7 @@ check_default() {  # <action> <expected implicit_active>
 if [ "$POLKIT_LIVE" = 1 ]; then
     check_default "$ACTION_SECRETS" auth_admin
     check_default "$ACTION_SSH_CONNECT" auth_admin_keep
+    check_default "$ACTION_TS_EXIT" auth_admin_keep
 fi
 
 # ---------------------------------------------------------------------------
@@ -231,12 +246,22 @@ verdict() {  # <label> <output>
     local label="$1" out="$2"
     if printf '%s' "$out" | grep -qi 'AccessDenied\|not permitted\|not completed'; then
         pass "$label — refused by polkit"
-    elif printf '%s' "$out" | grep -qi 'not found\|UnknownObject'; then
-        pass "$label — authorised, then failed on the nil UUID as intended"
+    elif printf '%s' "$out" | grep -qi 'not found\|UnknownObject\|no node found'; then
+        pass "$label — authorised, then failed on the sentinel as intended"
     elif printf '%s' "$out" | grep -qi 'cannot reach polkit\|refused to decide'; then
         fail "$label — polkit could not be consulted, so the call failed closed"
         info "that is the designed behaviour, but it means polkit is unreachable:"
         info "  systemctl status polkit"
+    elif printf '%s' "$out" | grep -qi 'timed out\|Timeout'; then
+        # The gate is working — too well to observe from here. polkit raised a
+        # challenge and nothing answered it, so the daemon is still waiting
+        # when the bus call gives up. Reporting "the gate may not be wired in"
+        # for this sends the reader to audit code that is fine; the fault is
+        # that there is no agent, or nobody is looking at the screen.
+        skip "$label — the call timed out waiting for authentication"
+        info "polkit asked and got no answer. Either no authentication agent is"
+        info "running, or the prompt is on screen unanswered. With no graphical"
+        info "session:  pkttyagent  in another terminal, then re-run."
     else
         fail "$label — unexpected result, the gate may not be wired in"
         info "${out%%$'\n'*}"
@@ -248,6 +273,7 @@ pause "Ready"
 
 verdict "SshExportPrivateKey ($ACTION_SECRETS)" "$(call SshExportPrivateKey "$NIL_UUID")"
 verdict "SshConnectCommand   ($ACTION_SSH_CONNECT)" "$(call SshConnectCommand "$NIL_UUID")"
+verdict "TailscaleSetExitNode ($ACTION_TS_EXIT)" "$(call TailscaleSetExitNode "$UNASSIGNED_TS_IP")"
 
 # ---------------------------------------------------------------------------
 # 4. Does auth_admin_keep keep?
