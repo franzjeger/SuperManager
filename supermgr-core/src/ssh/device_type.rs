@@ -31,7 +31,51 @@ pub enum DeviceType {
     Custom,
 }
 
+/// Which compliance baseline applies to a device, if any.
+///
+/// Two destinations and an explicit "neither", rather than an `Option`: the
+/// difference between "run the FortiGate controls" and "run the Linux
+/// controls" is not a presence check, and collapsing the third case into
+/// `None` loses the ability to say *why* a host has no scan button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComplianceDispatch {
+    /// FortiGate controls, read over the REST API and CLI.
+    FortigateBaseline,
+    /// The CIS Linux host baseline, run as shell commands over SSH.
+    LinuxBaseline,
+    /// No baseline exists for this device type. Not a gap to fill by
+    /// guessing — a UniFi AP is not a Linux server for CIS purposes even
+    /// though it runs Linux.
+    NotApplicable,
+}
+
 impl DeviceType {
+    /// Which baseline to run against this device type.
+    ///
+    /// An allowlist with an exhaustive match, deliberately: adding a variant
+    /// to [`DeviceType`] without classifying it here fails to compile, which
+    /// is the point. The alternative — a `_ => NotApplicable` catch-all —
+    /// would silently give every new device type no compliance coverage and no
+    /// error to notice it by.
+    ///
+    /// Shared with the macOS app, which had this mapping in Swift and now
+    /// reads it from here. Two copies would be two chances to disagree about
+    /// which controls a device gets audited against.
+    #[must_use]
+    pub fn compliance_dispatch(&self) -> ComplianceDispatch {
+        match self {
+            Self::Fortigate => ComplianceDispatch::FortigateBaseline,
+            Self::Linux => ComplianceDispatch::LinuxBaseline,
+            Self::UniFi
+            | Self::PfSense
+            | Self::OpenWrt
+            | Self::OpnSense
+            | Self::Sophos
+            | Self::Windows
+            | Self::Custom => ComplianceDispatch::NotApplicable,
+        }
+    }
+
     /// Returns a warning message for device types that require manual key
     /// deployment steps, or `None` if automated deployment is supported.
     pub fn warning_message(&self) -> Option<&'static str> {

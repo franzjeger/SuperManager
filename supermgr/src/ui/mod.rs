@@ -21,6 +21,7 @@
 //! ```
 #![allow(missing_docs)]
 
+pub mod compliance;
 pub mod console;
 pub mod design;
 pub mod navigation;
@@ -480,6 +481,11 @@ pub fn build_ui(
     // membership changes on a human timescale, and polling a subprocess for a
     // screen nobody is looking at is pure cost.
     // =========================================================================
+    let compliance_view = std::rc::Rc::new(compliance::build_compliance_page(&rt, &tx));
+    view_stack.add_titled(&compliance_view.widget, Some("compliance"), "Compliance");
+    let compliance_page_ref = view_stack.page(&compliance_view.widget);
+    compliance_page_ref.set_icon_name(Some(design::icon_name(&["emblem-ok-symbolic", "dialog-ok"])));
+
     let tailscale_view = tailscale::build_tailscale_page(&rt, &tx);
     view_stack.add_titled(&tailscale_view.widget, Some("tailscale"), "Tailscale");
     let tailscale_page_ref = view_stack.page(&tailscale_view.widget);
@@ -907,10 +913,28 @@ pub fn build_ui(
         let add_menu_btn = add_menu_btn.clone();
         let rt = rt.clone();
         let tx = tx.clone();
+        let nav_compliance_view = std::rc::Rc::clone(&compliance_view);
+        let nav_app_state = Arc::clone(&app_state);
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
             let page = page.as_deref().unwrap_or("vpn");
             match page {
+                "compliance" => {
+                    vpn_add_group.set_visible(false);
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(false);
+                    // Nothing to add here: hosts are added in the SSH section.
+                    add_menu_btn.set_visible(false);
+                    // Rebuild the picker from whatever the host list holds now.
+                    // Cheap, and it means a host added in the SSH section shows
+                    // up here without a refresh button to press.
+                    let hosts = nav_app_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .hosts
+                        .clone();
+                    nav_compliance_view.set_hosts(&hosts);
+                }
                 "tailscale" => {
                     vpn_add_group.set_visible(false);
                     ssh_keys_add_group.set_visible(false);
@@ -2827,6 +2851,12 @@ pub fn build_ui(
     let rx_vpn_detail_stack = vpn_detail.detail_stack.clone();
     let rx_banner = banner.clone();
     let rx_tailscale_view = std::rc::Rc::clone(&tailscale_view);
+    let rx_compliance_view = std::rc::Rc::clone(&compliance_view);
+    // Holds the run between ComplianceRunFinished and ComplianceContextLoaded.
+    // The run arrives first because it is what took seven SSH round-trips; the
+    // library and history are cheap follow-ups that redraw it with detail.
+    let rx_last_run: std::rc::Rc<std::cell::RefCell<Option<supermgr_core::compliance::ComplianceRun>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
     let rx_toast_overlay = toast_overlay.clone();
     let rx_window = window.clone();
     let rx_app = app.clone();
@@ -3093,6 +3123,46 @@ pub fn build_ui(
                 AppMsg::DaemonUnavailable => {
                     rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available = false;
                     rx_banner.set_revealed(true);
+                }
+                AppMsg::ComplianceRunFinished { host_id, result } => {
+                    match result {
+                        Ok(run) => {
+                            // The run alone cannot render: descriptions, CIS
+                            // references and remediation live in the library.
+                            // Fetch both, then draw once.
+                            let tx2 = rx_tx.clone();
+                            let hid = host_id.clone();
+                            let run_for_draw = run.clone();
+                            rx_compliance_view.show_run(&host_id, &run_for_draw, &[], &[]);
+                            rx_rt.spawn(async move {
+                                let library = crate::dbus_client::dbus_compliance_list_checks()
+                                    .await
+                                    .unwrap_or_default();
+                                let history =
+                                    crate::dbus_client::dbus_compliance_history(&hid, 10)
+                                        .await
+                                        .unwrap_or_default();
+                                tx2.send(AppMsg::ComplianceContextLoaded { host_id: hid, library, history }).ok();
+                            });
+                            rx_last_run.replace(Some(run));
+                        }
+                        Err(message) => {
+                            error!("compliance scan failed: {}", message);
+                            rx_compliance_view.show_message(
+                                "dialog-error-symbolic",
+                                "Scan did not complete",
+                                &message,
+                            );
+                        }
+                    }
+                }
+                AppMsg::ComplianceContextLoaded { host_id, library, history } => {
+                    // Redraw with the context attached. Cheap: rebuilding the
+                    // rows is a handful of widgets, and it keeps "what a row
+                    // shows" in one place instead of two.
+                    if let Some(run) = rx_last_run.borrow().as_ref() {
+                        rx_compliance_view.show_run(&host_id, run, &library, &history);
+                    }
                 }
                 AppMsg::TailscaleNodesUpdated(result) => {
                     // Deliberately no toast on the error path: the page shows
