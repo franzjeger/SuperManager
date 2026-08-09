@@ -41,9 +41,23 @@ tempfile        = "3"
 # `OSX_10_15` enables the Data Protection Keychain shim — the modern
 # (entitlement / access-group based) keychain whose ACL is *not* pinned
 # to the calling app's cdhash.
-security-framework = { version = "2.11", features = ["OSX_10_15"] }
-security-framework-sys = "2.11"
-core-foundation = "0.9"
+#
+# `security-framework` moves with `core-foundation`, not independently.
+# `keychain.rs` pushes `(CFString, CFType)` pairs into `PasswordOptions::query`,
+# and those types come from whichever core-foundation *the crate* was built
+# against — so 2.11 (core-foundation 0.9) beside a 0.10 here produces
+# "expected core_foundation::string::CFString, found CFString". Bumping one
+# without the other cannot compile.
+#
+# This also removes a pre-existing duplicate: `supermgr-core` already uses
+# `security-framework` 3.x, so a macOS build carried both 2.11/0.9 and 3.7/0.10
+# — two copies of the Keychain binding in one process.
+#
+# `security-framework-sys` deliberately stays on 2.x: there is no 3.x of it, and
+# 3.7 itself depends on `security-framework-sys = "2.17"`.
+security-framework = { version = "3.7", features = ["OSX_10_15"] }
+security-framework-sys = "2.17"
+core-foundation = "0.10"
 core-foundation-sys = "0.8"
 
 # `secrets::default_data_dir` has a Linux branch that checks for root via
