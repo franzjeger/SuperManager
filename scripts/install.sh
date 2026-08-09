@@ -235,6 +235,19 @@ if [ -z "$ZIP_URL" ]; then
 fi
 note "$ZIP_URL"
 
+# Stop here when asked. Everything above this line is the part CI can
+# exercise for real: the bash-only guard, expansion behaviour under `set -u`,
+# and the release lookup — a curl|grep|grep|head|sed pipeline that breaks
+# silently if GitHub changes its response shape or no Mac zip has shipped. The
+# operator never finds out until an install fails in front of them.
+#
+# Everything below downloads a zip and replaces /Applications, which CI has no
+# business doing. This is the honest boundary between the two.
+if [ -n "${SUPERMGR_INSTALL_DRY_RUN:-}" ]; then
+    say "Dry run: release lookup succeeded, stopping before download."
+    exit 0
+fi
+
 TMP="$(mktemp -d /tmp/supermgr-install.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
