@@ -13,6 +13,7 @@ use supermgr_core::{
     ssh::key::SshKeySummary,
     host::HostSummary,
     tailscale::TailscaleNode,
+    compliance::{CheckDefinition, ComplianceRun, RunSummary},
 };
 
 use crate::app::{AppMsg, AppState};
@@ -390,6 +391,64 @@ pub async fn dbus_set_log_level(level: String) -> anyhow::Result<()> {
 }
 
 /// Call `ListProfiles` on the daemon and return the deserialized list.
+/// Run the CIS Linux baseline against `host_id` and return the stored run.
+///
+/// Seven read-only commands over SSH, so this takes as long as seven
+/// round-trips to the host — the caller is expected to show progress rather
+/// than block a click on it.
+pub async fn dbus_compliance_run_linux(
+    host_id: &str,
+    triggered_by: &str,
+) -> anyhow::Result<ComplianceRun> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy
+        .compliance_run_linux(host_id, triggered_by)
+        .await
+        .context("ComplianceRunLinux")?;
+    serde_json::from_str(&json).context("parse compliance run")
+}
+
+/// Run summaries for a host, newest first.
+pub async fn dbus_compliance_history(
+    host_id: &str,
+    limit: u32,
+) -> anyhow::Result<Vec<RunSummary>> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy
+        .compliance_history(host_id, limit)
+        .await
+        .context("ComplianceHistory")?;
+    serde_json::from_str(&json).context("parse compliance history")
+}
+
+/// One stored run in full.
+pub async fn dbus_compliance_get_run(
+    host_id: &str,
+    run_id: &str,
+) -> anyhow::Result<ComplianceRun> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy
+        .compliance_get_run(host_id, run_id)
+        .await
+        .context("ComplianceGetRun")?;
+    serde_json::from_str(&json).context("parse compliance run")
+}
+
+/// The check library. Resolved once per page load, not per row: a run carries
+/// its own titles, but description, CIS reference and remediation live here.
+pub async fn dbus_compliance_list_checks() -> anyhow::Result<Vec<CheckDefinition>> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy
+        .compliance_list_checks()
+        .await
+        .context("ComplianceListChecks")?;
+    serde_json::from_str(&json).context("parse check library")
+}
+
 /// Call `TailscaleListNodes` on the daemon.
 ///
 /// The daemon shells out to `tailscale status --json`, so every failure mode

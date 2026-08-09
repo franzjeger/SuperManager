@@ -8,6 +8,7 @@ use supermgr_core::{
     ssh::key::SshKeySummary,
     host::HostSummary,
     tailscale::TailscaleNode,
+    compliance::{CheckDefinition, ComplianceRun, RunSummary},
 };
 
 /// Which top-level section is active in the UI.
@@ -202,6 +203,25 @@ pub enum AppMsg {
     DaemonUnavailable,
     /// A user-initiated operation failed; show this message as a toast.
     OperationFailed(String),
+    /// A compliance scan finished. Carries the whole `Result` so the page can
+    /// show a failed scan as its own state rather than a toast that vanishes.
+    ComplianceRunFinished {
+        /// Host the scan ran against.
+        host_id: String,
+        /// The run, or why it did not happen.
+        result: Result<ComplianceRun, String>,
+    },
+    /// Check library and history fetched alongside a run — the run carries
+    /// titles, but description, CIS reference and remediation live in the
+    /// library, and history is a separate call.
+    ComplianceContextLoaded {
+        /// Host the context belongs to, so history rows know what to fetch.
+        host_id: String,
+        /// The library.
+        library: Vec<CheckDefinition>,
+        /// Run summaries for the host just scanned.
+        history: Vec<RunSummary>,
+    },
     /// Outcome of a `TailscaleListNodes` call, for the Tailscale page.
     ///
     /// Carries the whole `Result` rather than routing the failure through
