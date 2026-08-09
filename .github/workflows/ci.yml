@@ -98,6 +98,28 @@ jobs:
           rc=0; bash scripts/install-linux.sh --bogus >/dev/null 2>&1 || rc=$?
           [ "$rc" = 2 ] || { echo "expected exit 2 for a bad option, got $rc"; exit 1; }
 
+      # The `guards` stop point is only a gate if it comes before the network.
+      # The mac job runs `SUPERMGR_INSTALL_DRY_RUN=guards`; if a future edit
+      # moves the release lookup above that branch, the gate silently starts
+      # depending on api.github.com again and starts failing on other people's
+      # rate limit. Line order is the invariant, so line order is what is
+      # checked.
+      - name: install.sh guards stop before any network call
+        run: |
+          set -euo pipefail
+          f=scripts/install.sh
+          # `curl` on the same line, not any mention of the host: the rationale
+          # comment above the stop point names api.github.com too, and matching
+          # that made the first version of this check compare a comment against
+          # the code and fail on a correct file.
+          guards=$(grep -n 'SUPERMGR_INSTALL_DRY_RUN:-}" = guards' "$f" | head -1 | cut -d: -f1)
+          curl_line=$(grep -n 'curl[^|]*api\.github\.com' "$f" | head -1 | cut -d: -f1)
+          [ -n "$guards" ]    || { echo "no 'guards' dry-run branch in $f"; exit 1; }
+          [ -n "$curl_line" ] || { echo "no curl to api.github.com in $f — did it move?"; exit 1; }
+          echo "  guards stop at line $guards, first network call at line $curl_line"
+          [ "$guards" -lt "$curl_line" ] \
+            || { echo "the guards stop point must precede the network call"; exit 1; }
+
       # D-Bus and polkit read these at startup, and a file they cannot parse is
       # skipped with a warning rather than refused. For an access-control file
       # that means it fails *open*: no policy loaded, no restriction applied,
@@ -261,16 +283,29 @@ jobs:
       # `mapfile`, no associative arrays, no `${x,,}` — and it cannot be caught
       # on a Linux runner.
       #
-      # `install.sh` exits early on Linux, so this is also the only place the
-      # release lookup gets exercised: a curl|grep|grep|head|sed pipeline over
-      # the GitHub API that breaks silently if the response shape changes or no
-      # Mac zip has shipped. The dry run stops before the download and before
-      # anything touches /Applications.
+      # `=guards` stops before any network call. That keeps this a gate: the
+      # first version of this step ran the release lookup, which hits
+      # api.github.com unauthenticated, and GitHub rate limits that per source
+      # IP across shared runners. It passed on two pull requests and failed on
+      # the third for reasons unrelated to the change under test — a gate that
+      # fails on someone else's traffic teaches people to re-run CI, not to fix
+      # code.
       - name: install.sh dry run under Apple's bash 3.2
         run: |
           set -euo pipefail
           /bin/bash --version | head -1
-          SUPERMGR_INSTALL_DRY_RUN=1 /bin/bash scripts/install.sh
+          SUPERMGR_INSTALL_DRY_RUN=guards /bin/bash scripts/install.sh
+
+      # The release lookup, kept because it is worth knowing when it breaks: a
+      # curl|grep|grep|head|sed pipeline over the GitHub API, and `install.sh`
+      # exits early on Linux so this is the only place it runs. Advisory, not
+      # blocking — see above. A red mark here means "look at the API shape",
+      # not "your branch is broken".
+      - name: install.sh release lookup (advisory — unauthenticated API)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          SUPERMGR_INSTALL_DRY_RUN=full /bin/bash scripts/install.sh
 
       # xcodegen turns `SuperManagerMac/project.yml` → `.xcodeproj`.
       # pandoc is the engagement-report renderer; install so report

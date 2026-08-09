@@ -217,6 +217,22 @@ fi
 # 3. The app
 # ---------------------------------------------------------------------------
 
+# First of two dry-run stop points, and the only one CI can gate on.
+#
+# Everything above this line is offline: the bash-only guard, the platform and
+# root checks, and expansion behaviour under `set -u`. Everything below reaches
+# api.github.com unauthenticated, which is rate limited per source IP — and CI
+# runners share IPs. Gating on the network call made the mac job fail on the
+# third pull request of the day for reasons that had nothing to do with the
+# change under test.
+#
+# So `guards` stops here and is a real gate; `1` (or anything else) continues
+# through the release lookup and is useful to a human, and advisory in CI.
+if [ "${SUPERMGR_INSTALL_DRY_RUN:-}" = guards ]; then
+    say "Dry run (guards): interpreter, platform and privilege checks passed."
+    exit 0
+fi
+
 # Newest release tag that actually carries a Mac zip. Releases are shared
 # with Windows, so "latest" alone is not enough — v1.4.0 was
 # Windows-only. The API returns releases newest-first; take the first
