@@ -41,15 +41,10 @@ pub struct Finding {
     pub cvss: Option<f32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Severity {
-    Info,
-    Low,
-    Medium,
-    High,
-    Critical,
-}
+// Lives in `supermgr-core::severity` now, so the compliance model can move to
+// core without pulling this module's 1300 lines of CVE matching with it.
+// Re-exported: `vuln::Severity` still resolves everywhere it already did.
+pub use supermgr_core::severity::Severity;
 
 /// Run all detection rules against a single host's probe results.
 /// Returns a flat list of findings — host-level + sub-probe extras.
