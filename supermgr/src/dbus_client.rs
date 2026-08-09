@@ -14,6 +14,7 @@ use supermgr_core::{
     host::HostSummary,
     tailscale::TailscaleNode,
     compliance::{CheckDefinition, ComplianceRun, RunSummary},
+    findings_store::{Disposition, PersistedFinding, StoreSummary},
 };
 
 use crate::app::{AppMsg, AppState};
@@ -447,6 +448,47 @@ pub async fn dbus_compliance_list_checks() -> anyhow::Result<Vec<CheckDefinition
         .await
         .context("ComplianceListChecks")?;
     serde_json::from_str(&json).context("parse check library")
+}
+
+/// Call `FindingsList` on the daemon.
+///
+/// `scope` is a customer slug, or a host id for a host with no customer set —
+/// which is what the daemon files compliance findings under, so it is what the
+/// Security page has to ask for.
+pub async fn dbus_findings_list(scope: &str) -> anyhow::Result<Vec<PersistedFinding>> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy.findings_list(scope).await.context("FindingsList")?;
+    serde_json::from_str(&json).context("parse findings")
+}
+
+/// Call `FindingsSummary` on the daemon.
+pub async fn dbus_findings_summary(scope: &str) -> anyhow::Result<StoreSummary> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy.findings_summary(scope).await.context("FindingsSummary")?;
+    serde_json::from_str(&json).context("parse findings summary")
+}
+
+/// Call `FindingsSetDisposition` on the daemon.
+///
+/// The disposition is serialised here rather than assembled as a string by the
+/// caller, so a reason or an expiry cannot go missing between the widget and the
+/// wire. The author is not passed: the daemon takes it from the caller's uid.
+pub async fn dbus_findings_set_disposition(
+    scope: &str,
+    key: &str,
+    disposition: &Disposition,
+    note: &str,
+) -> anyhow::Result<PersistedFinding> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let payload = serde_json::to_string(disposition).context("serialise disposition")?;
+    let json = proxy
+        .findings_set_disposition(scope, key, &payload, note)
+        .await
+        .context("FindingsSetDisposition")?;
+    serde_json::from_str(&json).context("parse updated finding")
 }
 
 /// Call `TailscaleListNodes` on the daemon.

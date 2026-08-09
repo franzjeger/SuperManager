@@ -222,6 +222,25 @@ pub enum AppMsg {
         /// Run summaries for the host just scanned.
         history: Vec<RunSummary>,
     },
+    /// Findings and counts for one scope, for the Security page.
+    ///
+    /// Both in one message rather than two: painting the counts before the rows
+    /// would look like a stall, and a scope where the summary succeeded but the
+    /// list failed is not a state worth rendering.
+    FindingsLoaded {
+        /// Scope they belong to.
+        scope: String,
+        /// The summary and the findings, or why neither arrived.
+        result: Result<(supermgr_core::findings_store::StoreSummary, Vec<supermgr_core::findings_store::PersistedFinding>), String>,
+    },
+    /// A triage action finished. The page reloads the scope rather than patching
+    /// the row, so what is on screen is what the daemon stored.
+    FindingDispositionSet {
+        /// Scope to reload.
+        scope: String,
+        /// Whether the write landed.
+        result: Result<(), String>,
+    },
     /// Outcome of a `TailscaleListNodes` call, for the Tailscale page.
     ///
     /// Carries the whole `Result` rather than routing the failure through
