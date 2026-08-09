@@ -210,11 +210,15 @@ impl EngineServer {
     /// `linux_library_rows_carry_remediation`, and
     /// `render_report_emits_remediation_block_for_failed_linux_check`.
     ///
-    /// **Still open:** every Linux library row carries
-    /// `cis_reference: None` — CIS Linux 4.0 section numbers aren't
-    /// authored yet — so the report's CIS column and the library
-    /// row's CIS badge stay hidden for `linux.*` checks. Title,
-    /// description, category, severity and remediation all render.
+    /// **CIS references, resolved:** two of the seven Linux checks carry a
+    /// section — `5.2.4` and `5.2.10` of the CIS Distribution Independent
+    /// Linux Benchmark. The other five have no counterpart in it and stay
+    /// `None` on purpose, with the reasoning per check in
+    /// `ssh_compliance::cis_reference`. Notably `firewall.active` is *not*
+    /// cited as 3.5.2.1: that control verifies a default-deny policy and the
+    /// check only verifies a firewall is active, so the reference would
+    /// overstate what a PASS means. The badge and report column render for
+    /// the two that have one and hide for the rest.
     pub(crate) async fn handle_compliance_run_linux(
         &self,
         id: u64,

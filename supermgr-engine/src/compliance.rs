@@ -2544,7 +2544,7 @@ mod tests {
         let checks = list_checks();
         let linux_rows: Vec<_> = checks
             .iter()
-            .filter(|c| c.framework == "CIS Linux 4.0")
+            .filter(|c| c.framework == crate::ssh_compliance::LINUX_FRAMEWORK)
             .collect();
         assert!(!linux_rows.is_empty(),
             "Linux library rows must appear in list_checks() — \
