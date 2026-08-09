@@ -4580,6 +4580,41 @@ impl DaemonService {
             warn!("compliance_run_linux: could not persist run: {e:#}");
         }
 
+        // File the failures as findings, so a failed control gets a
+        // disposition, a first-seen date and a history an operator can accept a
+        // risk against — none of which a run alone provides.
+        //
+        // Scoped to the host's customer, falling back to the host id. An empty
+        // scope would fail slug validation, and silently dropping the findings
+        // because nobody filled in a customer field is worse than filing them
+        // somewhere findable.
+        let scope = if host.customer.trim().is_empty() {
+            id.simple().to_string()
+        } else {
+            host.customer.clone()
+        };
+        let findings = supermgr_core::compliance::failures_as_findings(
+            &run,
+            &supermgr_core::ssh_compliance::linux_default_checks(),
+        );
+        // `reconcile` is what auto-resolves controls that now pass, so it runs
+        // even when this scan produced nothing: an empty list is the signal
+        // that everything previously failing is fixed.
+        match supermgr_core::findings_store::reconcile(&scope, &findings) {
+            Ok(diff) => info!(
+                "compliance_run_linux: findings for {scope} — {} new, {} still open, \
+                 {} regressed, {} auto-resolved",
+                diff.new_findings.len(),
+                diff.still_open.len(),
+                diff.regressed.len(),
+                diff.auto_resolved.len(),
+            ),
+            // Non-fatal for the same reason `persist_run` is: the caller asked
+            // for a scan and the scan happened. Losing the filing is worth a
+            // warning, not throwing away seven round-trips of results.
+            Err(e) => warn!("compliance_run_linux: could not file findings: {e:#}"),
+        }
+
         serde_json::to_string(&run)
             .map_err(|e| fdo::Error::Failed(format!("serialise run: {e}")))
     }
@@ -4612,6 +4647,76 @@ impl DaemonService {
         let checks = supermgr_core::compliance::list_checks();
         serde_json::to_string(&checks)
             .map_err(|e| fdo::Error::Failed(format!("serialise checks: {e}")))
+    }
+
+    /// Every stored finding for a scope, newest-triage-first.
+    ///
+    /// Read-only, so it needs no polkit gate for the same reason
+    /// `ComplianceRunLinux` does not: it reveals nothing a caller allowed onto
+    /// the bus at all cannot already read. That the bus is now restricted to
+    /// root and the `supermgr` group is what makes that true — see
+    /// `contrib/dbus/org.supermgr.Daemon.conf`.
+    async fn findings_list(&self, scope: &str) -> fdo::Result<String> {
+        let findings = supermgr_core::findings_store::list_findings(scope)
+            .map_err(|e| fdo::Error::Failed(format!("list findings: {e:#}")))?;
+        serde_json::to_string(&findings)
+            .map_err(|e| fdo::Error::Failed(format!("serialise findings: {e}")))
+    }
+
+    /// Counts for a scope, for a dashboard tile without loading every finding.
+    async fn findings_summary(&self, scope: &str) -> fdo::Result<String> {
+        let summary = supermgr_core::findings_store::summary(scope)
+            .map_err(|e| fdo::Error::Failed(format!("findings summary: {e:#}")))?;
+        serde_json::to_string(&summary)
+            .map_err(|e| fdo::Error::Failed(format!("serialise summary: {e}")))
+    }
+
+    /// Move a finding through triage: accept the risk, mark it fixed, or call it
+    /// a false positive.
+    ///
+    /// `disposition` is JSON matching `findings_store::Disposition` — a tagged
+    /// enum, so the reason and expiry travel with the state rather than as
+    /// loose parallel arguments that can disagree with it.
+    ///
+    /// This one *writes*, and what it writes is an audit trail: "who accepted
+    /// this risk, and when" is the question an auditor asks. `by` is recorded
+    /// from the caller's uid rather than taken as an argument, because a
+    /// self-reported author in an audit log is worth nothing.
+    async fn findings_set_disposition(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+        scope: &str,
+        key: &str,
+        disposition: &str,
+        note: &str,
+    ) -> fdo::Result<String> {
+        let parsed: supermgr_core::findings_store::Disposition =
+            serde_json::from_str(disposition).map_err(|e| {
+                fdo::Error::InvalidArgs(format!("disposition is not valid JSON: {e}"))
+            })?;
+
+        // Resolved to a username where possible, since a uid in an audit log
+        // makes the reader go looking. Falls back to the uid rather than
+        // refusing: an unresolvable account is still better provenance than
+        // nothing, and the disposition is worth recording either way.
+        let by = match caller_uid(conn, &hdr).await {
+            Ok(uid) => nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))
+                .ok()
+                .flatten()
+                .map_or_else(|| format!("uid:{uid}"), |u| u.name),
+            Err(e) => {
+                warn!("findings_set_disposition: cannot identify caller: {e}");
+                "unknown".to_owned()
+            }
+        };
+
+        info!("findings_set_disposition: {scope}/{key} -> {} by {by}", parsed.label());
+        let updated =
+            supermgr_core::findings_store::set_disposition(scope, key, parsed, &by, note)
+                .map_err(|e| fdo::Error::Failed(format!("set disposition: {e:#}")))?;
+        serde_json::to_string(&updated)
+            .map_err(|e| fdo::Error::Failed(format!("serialise finding: {e}")))
     }
 
     /// What changed between a run and the one before it.
