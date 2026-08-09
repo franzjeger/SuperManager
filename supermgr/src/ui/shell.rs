@@ -65,7 +65,7 @@ pub const MANAGE: &[Section] = &[
     Section { id: "hosts",     title: "SSH",       icon: design::icons::HOST,               built: true },
     Section { id: "keys",      title: "Keys",      icon: design::icons::KEY,        built: true },
     Section { id: "vpn",       title: "VPN",       icon: design::icons::VPN,            built: true },
-    Section { id: "tailscale", title: "Tailscale", icon: design::icons::MESH,      built: false },
+    Section { id: "tailscale", title: "Tailscale", icon: design::icons::MESH,      built: true },
 ];
 
 /// The operational group.
@@ -332,14 +332,19 @@ mod tests {
 
     #[test]
     fn everything_that_exists_today_is_marked_built() {
-        // These six have real implementations. Marking one unbuilt would
-        // put a "Soon" badge on a working screen.
+        // These have real implementations. Marking one unbuilt would put a
+        // "Soon" badge on a working screen — and worse, `ui::mod` would then
+        // register a placeholder under the same id as the real page.
+        //
+        // `tailscale` earns its place on a read-only list: the daemon exposes
+        // one method, TailscaleListNodes, and the page shows exactly what that
+        // returns. It claims no control it does not have.
         let built: Vec<&str> = all_sections()
             .iter()
             .filter(|s| s.built)
             .map(|s| s.id)
             .collect();
-        for id in ["fleet", "hosts", "keys", "vpn", "provisioning", "console"] {
+        for id in ["fleet", "hosts", "keys", "vpn", "tailscale", "provisioning", "console"] {
             assert!(built.contains(&id), "'{id}' exists but is marked unbuilt");
         }
     }
@@ -381,7 +386,7 @@ mod tests {
             .collect();
         assert_eq!(
             unbuilt,
-            vec!["tailscale", "compliance", "security", "recon"],
+            ["compliance", "security", "recon"],
             "the set of unimplemented sections changed"
         );
     }

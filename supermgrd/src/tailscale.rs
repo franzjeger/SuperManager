@@ -13,37 +13,12 @@
 //! human-curated subset that Tailscale guarantees backwards compatibility
 //! for, so it's the recommended boundary for third-party tooling.
 
-use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-/// One node in the tailnet, normalized for GUI consumption.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TailscaleNode {
-    /// Stable Tailscale node ID.
-    pub id: String,
-    /// Short hostname (e.g. `franzjeger`).
-    pub hostname: String,
-    /// MagicDNS name (e.g. `franzjeger.tailb0b06a.ts.net`).
-    pub dns_name: String,
-    /// Operating system as reported by tailscaled (e.g. `linux`, `macOS`,
-    /// `iOS`, `windows`).
-    pub os: String,
-    /// All Tailscale IPs (IPv4 + IPv6) for this node.
-    pub tailscale_ips: Vec<String>,
-    /// Whether tailscaled currently considers this node online.
-    pub online: bool,
-    /// Whether this is the local node (`Self` in the raw JSON).
-    pub is_self: bool,
-    /// Whether this node is enabled as an exit node.
-    pub exit_node: bool,
-    /// RFC 3339 timestamp of last activity, when known. Empty for nodes that
-    /// have never been seen on the tailnet.
-    pub last_seen: String,
-    /// Bytes received from this peer since tailscaled started.
-    pub rx_bytes: u64,
-    /// Bytes sent to this peer since tailscaled started.
-    pub tx_bytes: u64,
-}
+// The node shape is shared with the GUI, which deserializes it straight off
+// D-Bus — see `supermgr_core::tailscale`. Re-exported so existing
+// `crate::tailscale::TailscaleNode` paths keep resolving.
+pub use supermgr_core::tailscale::TailscaleNode;
 
 /// Run `tailscale status --json` and parse the output into a normalized
 /// node list. Returns an error string suitable for surfacing to the GUI on

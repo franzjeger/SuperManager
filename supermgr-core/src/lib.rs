@@ -29,6 +29,7 @@ pub mod host;
 pub mod keyring;
 pub mod secret_lifecycle;
 pub mod ssh;
+pub mod tailscale;
 pub mod vpn;
 
 // Re-export commonly used items at crate root.

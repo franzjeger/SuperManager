@@ -12,6 +12,7 @@ use supermgr_core::{
     vpn::state::{state_from_json, VpnState},
     ssh::key::SshKeySummary,
     host::HostSummary,
+    tailscale::TailscaleNode,
 };
 
 use crate::app::{AppMsg, AppState};
@@ -389,6 +390,20 @@ pub async fn dbus_set_log_level(level: String) -> anyhow::Result<()> {
 }
 
 /// Call `ListProfiles` on the daemon and return the deserialized list.
+/// Call `TailscaleListNodes` on the daemon.
+///
+/// The daemon shells out to `tailscale status --json`, so every failure mode
+/// is somebody else's software being absent or asleep: no CLI installed,
+/// tailscaled not running, not logged in. Those arrive as an error string
+/// meant for the operator, and the page renders it rather than an empty list —
+/// "no devices" and "tailscale isn't installed" are different facts.
+pub async fn dbus_tailscale_list_nodes() -> anyhow::Result<Vec<TailscaleNode>> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy.tailscale_list_nodes().await.context("TailscaleListNodes")?;
+    serde_json::from_str(&json).context("parse tailscale nodes")
+}
+
 pub async fn dbus_list_profiles() -> anyhow::Result<Vec<ProfileSummary>> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
