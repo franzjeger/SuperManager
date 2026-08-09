@@ -341,8 +341,30 @@ impl SecretStore for KeychainStore {
 /// `"com.sybr.supermanager:<label>"`, persisted at `LOCAL_MACHINE` scope so
 /// the daemon (running as `LocalSystem`) and the interactive-user GUI can
 /// both reach them. Persistence survives reboot but does not roam.
+///
+/// # Large-secret chunking
+///
+/// Windows Credential Manager limits `CredentialBlobSize` to 2 560 bytes
+/// (`CRED_MAX_CREDENTIAL_BLOB_SIZE`).  RSA-4096 private keys in PEM format
+/// are ~3 200 bytes and would overflow that limit.  When a secret exceeds
+/// [`WIN_CRED_MAX_BLOB`] bytes this implementation transparently splits it
+/// into numbered chunks stored at `{label}:chunk:{i}` and writes a compact
+/// marker at the primary label so `retrieve` can reassemble them.  Callers
+/// see a single opaque `store` / `retrieve` / `delete` interface regardless
+/// of whether chunking was needed.
 #[cfg(target_os = "windows")]
 pub struct CredentialManagerStore;
+
+/// Safe upper bound for a single Credential Manager blob (platform limit is
+/// 2 560 bytes; we stay 160 bytes below to leave room for encoding overhead).
+#[cfg(target_os = "windows")]
+const WIN_CRED_MAX_BLOB: usize = 2400;
+
+/// ASCII prefix written into the primary credential entry when a secret has
+/// been split across multiple chunks.  Real secrets (PEM keys, passwords,
+/// PSKs) never start with this string.
+#[cfg(target_os = "windows")]
+const CHUNK_PREFIX: &str = "SMCHNK:";
 
 #[cfg(target_os = "windows")]
 const WIN_KEYRING_SERVICE: &str = "com.sybr.supermanager";
@@ -363,6 +385,63 @@ impl CredentialManagerStore {
             SecretError::ServiceUnavailable(format!("keyring entry construct: {e}"))
         })
     }
+
+    // ------------------------------------------------------------------
+    // Low-level single-entry helpers (no chunking logic)
+    // ------------------------------------------------------------------
+
+    /// Write `secret` bytes directly to one Credential Manager entry.
+    async fn write_one(label: String, secret: Vec<u8>) -> Result<(), SecretError> {
+        tokio::task::spawn_blocking(move || {
+            let entry = Self::entry(&label)?;
+            entry.set_secret(&secret).map_err(|e| SecretError::StoreFailed {
+                label: label.clone(),
+                reason: e.to_string(),
+            })
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+    }
+
+    /// Read bytes from one Credential Manager entry.
+    async fn read_one(label: String) -> Result<Vec<u8>, SecretError> {
+        tokio::task::spawn_blocking(move || {
+            let entry = Self::entry(&label)?;
+            match entry.get_secret() {
+                Ok(b) => Ok(b),
+                Err(keyring::Error::NoEntry) => {
+                    Err(SecretError::NotFound { label: label.clone() })
+                }
+                Err(e) => Err(SecretError::ServiceUnavailable(e.to_string())),
+            }
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+    }
+
+    /// Delete one Credential Manager entry.  Returns `NotFound` if absent.
+    async fn erase_one(label: String) -> Result<(), SecretError> {
+        tokio::task::spawn_blocking(move || {
+            let entry = Self::entry(&label)?;
+            match entry.delete_credential() {
+                Ok(()) => Ok(()),
+                Err(keyring::Error::NoEntry) => {
+                    Err(SecretError::NotFound { label: label.clone() })
+                }
+                Err(e) => Err(SecretError::StoreFailed {
+                    label: label.clone(),
+                    reason: e.to_string(),
+                }),
+            }
+        })
+        .await
+        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+    }
+
+    /// Delete one entry, silently ignoring `NotFound`.
+    async fn erase_one_best_effort(label: String) {
+        let _ = Self::erase_one(label).await;
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -376,55 +455,74 @@ impl Default for CredentialManagerStore {
 #[async_trait]
 impl SecretStore for CredentialManagerStore {
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
-        let label_owned = label.to_owned();
-        let secret_owned = secret.to_vec();
-        // Credential Manager APIs are synchronous syscalls; bounce them to
-        // a blocking thread so we don't stall the async runtime.
-        tokio::task::spawn_blocking(move || -> Result<(), SecretError> {
-            let entry = Self::entry(&label_owned)?;
-            entry
-                .set_secret(&secret_owned)
-                .map_err(|e| SecretError::StoreFailed {
-                    label: label_owned.clone(),
-                    reason: e.to_string(),
-                })
-        })
-        .await
-        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+        if secret.len() <= WIN_CRED_MAX_BLOB {
+            // Fits in one entry — direct write.
+            Self::write_one(label.to_owned(), secret.to_vec()).await
+        } else {
+            // Too large: split into chunks and write a marker at the
+            // primary label so `retrieve` knows to reassemble.
+            let chunks: Vec<Vec<u8>> = secret
+                .chunks(WIN_CRED_MAX_BLOB)
+                .map(|c| c.to_vec())
+                .collect();
+            let n = chunks.len();
+            let marker = format!("{CHUNK_PREFIX}{n}").into_bytes();
+            Self::write_one(label.to_owned(), marker).await?;
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                Self::write_one(format!("{label}:chunk:{i}"), chunk).await?;
+            }
+            Ok(())
+        }
     }
 
     async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
-        let label_owned = label.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<ZeroizingSecret, SecretError> {
-            let entry = Self::entry(&label_owned)?;
-            match entry.get_secret() {
-                Ok(bytes) => Ok(ZeroizingSecret::from_vec(bytes)),
-                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
-                    label: label_owned.clone(),
-                }),
-                Err(e) => Err(SecretError::ServiceUnavailable(e.to_string())),
+        let primary = Self::read_one(label.to_owned()).await?;
+
+        // Check whether this entry is a chunk manifest.
+        if let Ok(s) = std::str::from_utf8(&primary) {
+            if let Some(rest) = s.strip_prefix(CHUNK_PREFIX) {
+                if let Ok(n) = rest.parse::<usize>() {
+                    let mut assembled: Vec<u8> = Vec::new();
+                    for i in 0..n {
+                        let chunk =
+                            Self::read_one(format!("{label}:chunk:{i}")).await?;
+                        assembled.extend_from_slice(&chunk);
+                    }
+                    return Ok(ZeroizingSecret::from_vec(assembled));
+                }
             }
-        })
-        .await
-        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+        }
+
+        Ok(ZeroizingSecret::from_vec(primary))
     }
 
     async fn delete(&self, label: &str) -> Result<(), SecretError> {
-        let label_owned = label.to_owned();
-        tokio::task::spawn_blocking(move || -> Result<(), SecretError> {
-            let entry = Self::entry(&label_owned)?;
-            match entry.delete_credential() {
-                Ok(()) => Ok(()),
-                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
-                    label: label_owned.clone(),
-                }),
-                Err(e) => Err(SecretError::StoreFailed {
-                    label: label_owned.clone(),
-                    reason: e.to_string(),
-                }),
+        // Peek at the primary entry to determine whether it is chunked.
+        match Self::read_one(label.to_owned()).await {
+            Ok(bytes) => {
+                if let Ok(s) = std::str::from_utf8(&bytes) {
+                    if let Some(rest) = s.strip_prefix(CHUNK_PREFIX) {
+                        if let Ok(n) = rest.parse::<usize>() {
+                            for i in 0..n {
+                                Self::erase_one_best_effort(
+                                    format!("{label}:chunk:{i}"),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                }
             }
-        })
-        .await
-        .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
+            Err(SecretError::NotFound { .. }) => {
+                // Propagate NotFound — nothing to delete.
+                return Err(SecretError::NotFound {
+                    label: label.to_owned(),
+                });
+            }
+            Err(_) => {
+                // Unreadable but present — try to delete the primary anyway.
+            }
+        }
+        Self::erase_one(label.to_owned()).await
     }
 }

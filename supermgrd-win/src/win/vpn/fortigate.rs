@@ -115,14 +115,13 @@ impl FortiGateBackend {
 
         let store = self.secret_store.as_ref().ok_or_else(|| {
             VpnError::MissingDependency(
-                "FortiGate backend has no secret store; cannot resolve PSK/EAP password".into(),
+                "FortiGate backend has no secret store; cannot resolve EAP password".into(),
             )
         })?;
-        let psk = retrieve_string(store.as_ref(), &cfg.psk, "PSK").await?;
         let password = retrieve_string(store.as_ref(), &cfg.password, "EAP password").await?;
 
         let conn_name = Self::connection_name(&profile.id);
-        register_connection(&conn_name, cfg, &psk).await?;
+        register_connection(&conn_name, cfg).await?;
         rasdial_connect(&conn_name, &cfg.username, &password).await?;
 
         // Poll until Connected — rasdial returns when the dial-up
@@ -222,24 +221,83 @@ async fn retrieve_string(
 
 /// Register the VPN connection. Idempotent — replaces any existing
 /// connection with the same name first.
-async fn register_connection(
-    conn_name: &str,
-    cfg: &FortiGateConfig,
-    psk: &str,
-) -> Result<(), VpnError> {
+///
+/// Register an IKEv2 + EAP-MSCHAPv2 connection.
+///
+/// Windows IKEv2 only accepts `Eap` or `MachineCertificate` — `MSChapv2` is
+/// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
+/// explicit EAP type defaults to EAP-TLS (type 13), which tries to show a
+/// certificate-selection dialog.  `rasdial` cannot display UI and exits with
+/// error 703 (ERROR_INTERACTIVE_MODE).
+///
+/// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
+/// the inner auth method so `rasdial` can feed credentials non-interactively.
+async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
     let _ = remove_connection(conn_name).await;
+
+    // PEAP (type 25) wrapping EAP-MSCHAPv2 (type 26).
+    //
+    // Windows IKEv2 EAP requires PEAP as the outer method; raw type-26
+    // standalone XML is rejected by the EAP subsystem with
+    // "Failed to generate the EAP Configuration" (WIN32 1).
+    //
+    // DisableUserPromptForServerValidation=true + PerformServerValidation=false
+    // prevent an interactive certificate-trust dialog even if the FortiGate
+    // presents a self-signed or private-CA certificate.
+    //
+    // All attribute values use double quotes, which are safe inside the
+    // PowerShell single-quoted string wrapper.
+    let eap_xml = concat!(
+        r#"<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
+        r#"<EapMethod>"#,
+        r#"<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">25</Type>"#,
+        r#"<VendorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorId>"#,
+        r#"<VendorType xmlns="http://www.microsoft.com/provisioning/EapCommon">0</VendorType>"#,
+        r#"<AuthorId xmlns="http://www.microsoft.com/provisioning/EapCommon">0</AuthorId>"#,
+        r#"</EapMethod>"#,
+        r#"<Config xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
+        r#"<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">"#,
+        r#"<Type>25</Type>"#,
+        r#"<EapType xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV1">"#,
+        r#"<ServerValidation>"#,
+        r#"<DisableUserPromptForServerValidation>true</DisableUserPromptForServerValidation>"#,
+        r#"<ServerNames></ServerNames>"#,
+        r#"</ServerValidation>"#,
+        r#"<FastReconnect>true</FastReconnect>"#,
+        r#"<InnerEapOptional>false</InnerEapOptional>"#,
+        r#"<Eap xmlns="http://www.microsoft.com/provisioning/BaseEapConnectionPropertiesV1">"#,
+        r#"<Type>26</Type>"#,
+        r#"<EapType xmlns="http://www.microsoft.com/provisioning/MsChapV2ConnectionPropertiesV1">"#,
+        r#"<UseWinLogonCredentials>false</UseWinLogonCredentials>"#,
+        r#"</EapType>"#,
+        r#"</Eap>"#,
+        r#"<EnableQuarantineChecks>false</EnableQuarantineChecks>"#,
+        r#"<RequireCryptoBinding>false</RequireCryptoBinding>"#,
+        r#"<PeapExtensions>"#,
+        r#"<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</PerformServerValidation>"#,
+        r#"<AcceptServerName xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</AcceptServerName>"#,
+        r#"</PeapExtensions>"#,
+        r#"</EapType>"#,
+        r#"</Eap>"#,
+        r#"</Config>"#,
+        r#"</EapHostConfig>"#,
+    );
+
     let cmd = format!(
-        "Add-VpnConnection -Name '{name}' \
-            -ServerAddress '{host}' \
-            -TunnelType Ikev2 \
-            -EncryptionLevel Required \
-            -AuthenticationMethod Eap \
-            -L2tpPsk '{psk}' \
-            -AllUserConnection \
-            -Force",
+        "$xml = [xml]'{eap_xml}'; \
+         Add-VpnConnection \
+           -Name '{name}' \
+           -ServerAddress '{host}' \
+           -TunnelType Ikev2 \
+           -EncryptionLevel Required \
+           -AuthenticationMethod Eap \
+           -EapConfigXmlStream $xml \
+           -RememberCredential \
+           -AllUserConnection \
+           -Force",
+        eap_xml = eap_xml,
         name = ps_escape(conn_name),
         host = ps_escape(&cfg.host),
-        psk = ps_escape(psk),
     );
     run_powershell(&cmd).await
 }
