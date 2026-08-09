@@ -873,6 +873,46 @@ pub trait Daemon {
     /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
     async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String>;
 
+    // =======================================================================
+    // CIS Linux baseline
+    //
+    // The Linux baseline needs nothing but an SSH session: `run_baseline` in
+    // `supermgr_core::ssh_compliance` takes a closure for command execution.
+    // That is why these exist on the Linux daemon while FortiGate compliance
+    // does not yet — the FortiGate path wants a REST client this daemon has
+    // no equivalent of.
+    // =======================================================================
+
+    /// Run the CIS Linux baseline against a host over SSH and persist the run.
+    ///
+    /// `triggered_by` is `manual`, `scheduled` or `post_deploy`; anything else
+    /// is read as `manual`. Returns the full `ComplianceRun` as JSON.
+    async fn compliance_run_linux(
+        &self,
+        host_id: &str,
+        triggered_by: &str,
+    ) -> fdo::Result<String>;
+
+    /// Run summaries for a host, newest first, capped at `limit`.
+    ///
+    /// Summaries rather than full runs so a history list does not deserialise
+    /// every check vector to render its rows.
+    async fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String>;
+
+    /// One stored run in full, as JSON.
+    async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
+
+    /// The check library: every `CheckDefinition` this build knows, including
+    /// user-supplied ones. What the GUI resolves descriptions, CIS references
+    /// and remediation through.
+    async fn compliance_list_checks(&self) -> fdo::Result<String>;
+
+    /// What changed between `run_id` and the run before it on the same host.
+    ///
+    /// A host's first run has no baseline to compare against; everything
+    /// currently failing is reported as newly failing in that case.
+    async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
+
     /// Generate a new FortiGate REST API token via SSH.
     ///
     /// Creates the API user if needed, generates a key, stores it in the
