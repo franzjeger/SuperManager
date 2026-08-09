@@ -10,17 +10,19 @@ permissions:
   contents: read
 
 jobs:
-  # Shell scripts — 39 kB of install and release automation that until now was
-  # only ever executed by a user hitting a bug in it.
+  # Shell scripts and packaging policy — the parts of the repo that ship
+  # behaviour without going through the compiler, and until now were only ever
+  # exercised by a user hitting a bug in them.
   #
   # Four install defects landed in one week (#173, #174, #175, and a shell
   # dialect one), all found in production because nothing here was checked.
   # Two more were dead variables nobody noticed. That is the gap this closes.
   #
-  # The gate is `shellcheck -S style`, the strictest level, because the scripts
-  # are already clean at it — three findings were fixed to get there rather than
-  # loosening the gate to accommodate them. Starting strict is the only way it
-  # stays strict; a gate set to `error` would have passed all six defects above.
+  # The shell gate is `shellcheck -S style`, the strictest level, because the
+  # scripts are already clean at it — three findings were fixed to get there
+  # rather than loosening the gate to accommodate them. Starting strict is the
+  # only way it stays strict; a gate set to `error` would have passed all six
+  # defects above.
   shell:
     runs-on: ubuntu-latest
     steps:
@@ -95,6 +97,57 @@ jobs:
               echo "an unknown option must not succeed"; exit 1; }
           rc=0; bash scripts/install-linux.sh --bogus >/dev/null 2>&1 || rc=$?
           [ "$rc" = 2 ] || { echo "expected exit 2 for a bad option, got $rc"; exit 1; }
+
+      # D-Bus and polkit read these at startup, and a file they cannot parse is
+      # skipped with a warning rather than refused. For an access-control file
+      # that means it fails *open*: no policy loaded, no restriction applied,
+      # and nothing louder than a line in the journal to say so.
+      #
+      # This step exists because the commit that added it shipped a malformed
+      # policy first: XML forbids a "dash dash" sequence inside a comment, and
+      # a `busctl` invocation quoted in the rationale contained one. `xmllint`
+      # caught it; a human reviewer reading for meaning would not have.
+      - name: Validate D-Bus and polkit policy XML
+        run: |
+          set -euo pipefail
+          command -v xmllint >/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq libxml2-utils; }
+          mapfile -d '' -t policies < <(
+              git ls-files -z 'contrib/dbus/*.conf' 'contrib/polkit/*.policy'
+          )
+          [ "${#policies[@]}" -gt 0 ] || { echo "no policy files found — glob is wrong"; exit 1; }
+          printf '  %s\n' "${policies[@]}"
+          xmllint --noout "${policies[@]}"
+
+      # The security property itself, not just well-formedness. The daemon
+      # exposes 94 D-Bus methods and polkit gates 8 of them; `SshExecuteCommand`
+      # runs an arbitrary command on a managed host and `FortigateGetApiToken`
+      # returns a firewall token, and neither is among the 8. This file being
+      # deny-by-default is what stands between those and any local account, so
+      # a well-meaning "make the GUI work again" edit must fail here instead of
+      # in someone's fleet.
+      - name: D-Bus policy denies callers outside the supermgr group
+        run: |
+          set -euo pipefail
+          conf=contrib/dbus/org.supermgr.Daemon.conf
+          grep -Eq '<policy[[:space:]]+context="default">' "$conf" \
+            || { echo "no default policy block in $conf"; exit 1; }
+          # The default block must deny, and must not allow.
+          python3 - "$conf" <<'PY'
+          import sys, xml.dom.minidom as m
+          doc = m.parse(sys.argv[1])
+          groups, default = set(), None
+          for p in doc.getElementsByTagName("policy"):
+              if p.getAttribute("group"):
+                  groups.add(p.getAttribute("group"))
+              if p.getAttribute("context") == "default":
+                  default = [c.tagName for c in p.childNodes if c.nodeType == 1]
+          assert default is not None, "no context=default policy"
+          assert default and set(default) == {"deny"}, \
+              f"context=default must only deny, got {default}"
+          assert "supermgr" in groups, f"supermgr group not allowed, groups={groups}"
+          print(f"  default={default}, allowed groups={sorted(groups)}")
+          PY
 
   # Linux build — the daemon, the GTK GUI, the shared core, the MCP server
   # and the engine.

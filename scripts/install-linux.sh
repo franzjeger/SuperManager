@@ -514,6 +514,42 @@ else
     done
 fi
 
+# ---------------------------------------------------------------------------
+# `supermgr` group — the daemon's access boundary.
+#
+# The D-Bus policy in contrib/dbus/org.supermgr.Daemon.conf denies
+# org.supermgr.Daemon to everyone outside this group. It has to exist, and the
+# desktop user has to be in it, before the reload below activates that policy —
+# otherwise the GUI is locked out of a daemon that was working a moment ago.
+#
+# Read that file for why the boundary is here rather than in polkit.
+# ---------------------------------------------------------------------------
+if getent group supermgr >/dev/null 2>&1; then
+    note "group 'supermgr' already exists"
+else
+    say "Creating the 'supermgr' group"
+    sudo groupadd --system supermgr \
+        || die "could not create the 'supermgr' group — the GUI would be locked out of the daemon"
+fi
+
+# `SUDO_USER` is the account that ran sudo. The script refuses to run as root
+# outright (see the check near the top), so this is set in every supported
+# invocation; the fallback exists so a stray `sudo -u` cannot silently skip the
+# membership and leave a broken install.
+TARGET_USER="${SUDO_USER:-$(id -un)}"
+NEEDS_RELOGIN=0
+if [ "$TARGET_USER" = root ]; then
+    warn "could not tell which user to add to 'supermgr' — add yours by hand:"
+    warn "  sudo usermod -aG supermgr <your-user>"
+elif id -nG "$TARGET_USER" 2>/dev/null | tr ' ' '\n' | grep -qx supermgr; then
+    note "$TARGET_USER is already in the 'supermgr' group"
+else
+    say "Adding $TARGET_USER to the 'supermgr' group"
+    sudo usermod -aG supermgr "$TARGET_USER" \
+        || die "could not add $TARGET_USER to 'supermgr' — the GUI would be locked out"
+    NEEDS_RELOGIN=1
+fi
+
 say "Starting the daemon"
 sudo systemctl daemon-reload
 # Reloading D-Bus picks up the new system.d policy without a reboot;
@@ -594,4 +630,20 @@ if ! command -v openvpn3 >/dev/null 2>&1; then
             ;;
     esac
     note "               Everything else above works without it."
+fi
+
+# Last, so it is the thing still on screen. D-Bus reads a connection's
+# credentials when it connects, so a shell or GUI that was already running
+# keeps the groups it started with — the new membership does not apply to it.
+# Without this line the symptom is a GUI that says the daemon is unreachable
+# right after a successful install, which reads as a broken install.
+if [ "${NEEDS_RELOGIN:-0}" = 1 ]; then
+    note ""
+    warn "Log out and back in before starting the GUI."
+    warn "  $TARGET_USER was just added to the 'supermgr' group, and the daemon's"
+    warn "  D-Bus policy only accepts that group. Sessions already running still"
+    warn "  have the old group list, so the GUI cannot reach the daemon until you"
+    warn "  start a new session."
+    warn "  To check without logging out:  sg supermgr -c 'busctl --system call \\"
+    warn "    org.supermgr.Daemon /org/supermgr/Daemon org.supermgr.Daemon1 ListHosts'"
 fi
