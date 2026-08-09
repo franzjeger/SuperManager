@@ -73,7 +73,7 @@ pub const OPERATE: &[Section] = &[
     Section { id: "provisioning", title: "Provisioning", icon: &["document-edit-symbolic", "document-edit"],     built: true },
     Section { id: "console",      title: "Console",      icon: design::icons::TERMINAL, built: true },
     Section { id: "compliance",   title: "Compliance",   icon: &["emblem-ok-symbolic", "dialog-ok"],         built: true },
-    Section { id: "security",     title: "Security",     icon: design::icons::SHIELD,     built: false },
+    Section { id: "security",     title: "Security",     icon: design::icons::SHIELD,     built: true },
     Section { id: "recon",        title: "Recon",        icon: design::icons::SEARCH,     built: false },
 ];
 
@@ -344,7 +344,10 @@ mod tests {
             .filter(|s| s.built)
             .map(|s| s.id)
             .collect();
-        for id in ["fleet", "hosts", "keys", "vpn", "tailscale", "compliance", "provisioning", "console"] {
+        for id in [
+            "fleet", "hosts", "keys", "vpn", "tailscale", "compliance", "provisioning",
+            "console", "security",
+        ] {
             assert!(built.contains(&id), "'{id}' exists but is marked unbuilt");
         }
     }
@@ -386,7 +389,7 @@ mod tests {
             .collect();
         assert_eq!(
             unbuilt,
-            ["security", "recon"],
+            ["recon"],
             "the set of unimplemented sections changed"
         );
     }

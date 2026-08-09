@@ -913,6 +913,46 @@ pub trait Daemon {
     /// currently failing is reported as newly failing in that case.
     async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
 
+    // =======================================================================
+    // Security findings
+    //
+    // A finding is a compliance failure (or, on macOS, a scanner result) that
+    // has been given a lifecycle: a first-seen date, a scan count, and a
+    // disposition an operator can move. The Linux daemon fills the store from
+    // its own compliance runs, which is what lets a Security page exist here
+    // without the port scanner.
+    // =======================================================================
+
+    /// Every stored `PersistedFinding` for a scope, as JSON.
+    ///
+    /// `scope` is a customer slug, or a host id when the host has no customer
+    /// set. Invalid slugs are refused rather than sanitised — it is a
+    /// path-traversal guard, since the slug becomes a directory name.
+    async fn findings_list(&self, scope: &str) -> fdo::Result<String>;
+
+    /// `StoreSummary` counts for a scope, as JSON.
+    ///
+    /// For a dashboard tile that should not deserialise every finding to show
+    /// four numbers.
+    async fn findings_summary(&self, scope: &str) -> fdo::Result<String>;
+
+    /// Move a finding through triage. Returns the updated `PersistedFinding`.
+    ///
+    /// `disposition` is a JSON `Disposition` — a tagged enum, so a reason and an
+    /// expiry travel with the state instead of as loose arguments that can
+    /// contradict it. `key` comes from `findings_store::finding_key`, which the
+    /// listed findings already carry.
+    ///
+    /// The author is *not* a parameter: the daemon records it from the caller's
+    /// uid, because a self-reported author in an audit trail is worth nothing.
+    async fn findings_set_disposition(
+        &self,
+        scope: &str,
+        key: &str,
+        disposition: &str,
+        note: &str,
+    ) -> fdo::Result<String>;
+
     /// Generate a new FortiGate REST API token via SSH.
     ///
     /// Creates the API user if needed, generates a key, stores it in the

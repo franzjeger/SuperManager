@@ -30,6 +30,7 @@ pub mod palette;
 mod preferences;
 pub mod shell;
 pub mod provisioning;
+pub mod security;
 pub mod ssh;
 pub mod tailscale;
 pub mod vpn;
@@ -493,6 +494,18 @@ pub fn build_ui(
     let tailscale_view = std::rc::Rc::new(tailscale_view);
 
     // =========================================================================
+    // Security page (standalone, full-width)
+    //
+    // Reads the findings store the daemon fills from compliance runs. Loaded on
+    // demand per scope rather than on startup: the store is per-customer and
+    // nobody wants every customer's findings deserialised to open the app.
+    // =========================================================================
+    let security_view = std::rc::Rc::new(security::build_security_page(&rt, &tx));
+    view_stack.add_titled(&security_view.widget, Some("security"), "Security");
+    let security_page_ref = view_stack.page(&security_view.widget);
+    security_page_ref.set_icon_name(Some(design::icon_name(design::icons::SHIELD)));
+
+    // =========================================================================
     // Dashboard page (standalone, full-width)
     // =========================================================================
     let (dashboard_flow_box, dashboard_widget) =
@@ -914,6 +927,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         let nav_compliance_view = std::rc::Rc::clone(&compliance_view);
+        let nav_security_view = std::rc::Rc::clone(&security_view);
         let nav_app_state = Arc::clone(&app_state);
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
@@ -934,6 +948,24 @@ pub fn build_ui(
                         .hosts
                         .clone();
                     nav_compliance_view.set_hosts(&hosts);
+                }
+                "security" => {
+                    vpn_add_group.set_visible(false);
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(false);
+                    // Nothing to add: findings arrive from compliance scans.
+                    add_menu_btn.set_visible(false);
+                    // Same reasoning as the compliance page: rebuild the picker
+                    // on arrival so a host or customer tag set elsewhere shows up
+                    // without a refresh button. The findings themselves are only
+                    // fetched when a scope is opened — the store is per-customer
+                    // and loading all of them to render a list would be waste.
+                    let hosts = nav_app_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .hosts
+                        .clone();
+                    nav_security_view.set_hosts(&hosts);
                 }
                 "tailscale" => {
                     vpn_add_group.set_visible(false);
@@ -2852,6 +2884,7 @@ pub fn build_ui(
     let rx_banner = banner.clone();
     let rx_tailscale_view = std::rc::Rc::clone(&tailscale_view);
     let rx_compliance_view = std::rc::Rc::clone(&compliance_view);
+    let rx_security_view = std::rc::Rc::clone(&security_view);
     // Holds the run between ComplianceRunFinished and ComplianceContextLoaded.
     // The run arrives first because it is what took seven SSH round-trips; the
     // library and history are cheap follow-ups that redraw it with detail.
@@ -3162,6 +3195,44 @@ pub fn build_ui(
                     // shows" in one place instead of two.
                     if let Some(run) = rx_last_run.borrow().as_ref() {
                         rx_compliance_view.show_run(&host_id, run, &library, &history);
+                    }
+                }
+                AppMsg::FindingsLoaded { scope, result } => {
+                    match result {
+                        Ok((summary, findings)) => {
+                            rx_security_view.show_findings(&scope, &summary, &findings);
+                        }
+                        Err(message) => {
+                            // Shown on the page rather than as a toast, same as
+                            // the compliance page: a scope that cannot be read
+                            // stays unreadable until something changes, and a
+                            // toast for that vanishes before it is understood.
+                            error!("findings load failed for {}: {}", scope, message);
+                            rx_security_view.show_message(
+                                "dialog-error-symbolic",
+                                "Could not read findings",
+                                &message,
+                            );
+                        }
+                    }
+                }
+                AppMsg::FindingDispositionSet { scope, result } => {
+                    match result {
+                        // Reload rather than patch the row: the daemon owns the
+                        // history entry it just appended, and re-reading is the
+                        // only way the screen shows what was actually stored.
+                        Ok(()) => rx_security_view.reload_current(),
+                        Err(message) => {
+                            error!("disposition change failed for {}: {}", scope, message);
+                            push_notification(
+                                &rx_app_state, &rx_notif_list, &rx_notif_btn,
+                                "dialog-error-symbolic", &message,
+                            );
+                            // Reload anyway: the button that fired this is now
+                            // disabled, and leaving it that way after a failure
+                            // would strand the row.
+                            rx_security_view.reload_current();
+                        }
                     }
                 }
                 AppMsg::TailscaleNodesUpdated(result) => {
