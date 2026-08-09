@@ -26,6 +26,8 @@ pub mod protocol;
 pub mod client;
 pub mod compliance;
 pub mod error;
+pub mod findings;
+pub mod findings_store;
 pub mod host;
 pub mod keyring;
 pub mod paths;

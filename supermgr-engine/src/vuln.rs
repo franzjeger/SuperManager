@@ -23,23 +23,17 @@
 //! consequential CVEs the MSP fleet routinely shows up with.
 
 use chrono::Datelike;
-use serde::{Deserialize, Serialize};
 
 use crate::probes::{PortProbe, TlsInfo};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finding {
-    pub id: String,
-    pub host_ip: String,
-    pub port: Option<u16>,
-    pub service: Option<String>,
-    pub severity: Severity,
-    pub title: String,
-    pub detail: String,
-    pub recommendation: String,
-    pub cve: Option<String>,
-    pub cvss: Option<f32>,
-}
+// Lives in `supermgr-core::findings` now, so the Linux and Windows daemons can
+// record and serve findings without this module's 1300 lines of CVE matching —
+// which need the port prober, which needs the recon enumerators. Same split the
+// compliance move made, for the same reason.
+//
+// Re-exported: `vuln::Finding` still resolves in all eighteen modules that use
+// it, and `PartialEq` came along, which the store's dedup tests wanted anyway.
+pub use supermgr_core::findings::Finding;
 
 // Lives in `supermgr-core::severity` now, so the compliance model can move to
 // core without pulling this module's 1300 lines of CVE matching with it.

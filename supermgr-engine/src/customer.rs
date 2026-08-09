@@ -217,22 +217,13 @@ fn load_path(path: &Path) -> Result<Customer> {
 /// (customer, engagement, findings_store, notify) interpolates
 /// the slug into a filename. Unvalidated slugs were the
 /// path-traversal vector flagged in the security review.
+/// The rules live in `supermgr-core::findings::validate_slug` now, because the
+/// findings store moved to core and validating the slug is the first thing it
+/// does. This wrapper stays so the six `.context(…)` call sites in
+/// `engagement.rs` keep their `anyhow` error, and so there is one definition of
+/// what a legal slug is rather than one per platform.
 pub fn validate_slug(slug: &str) -> Result<()> {
-    if slug.is_empty() {
-        anyhow::bail!("slug must not be empty");
-    }
-    if slug.len() > 64 {
-        anyhow::bail!("slug must be ≤64 chars");
-    }
-    if slug.starts_with('.') || slug.starts_with('-') {
-        anyhow::bail!("slug must not start with '.' or '-'");
-    }
-    for ch in slug.chars() {
-        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
-            anyhow::bail!("slug contains illegal character: {ch:?}");
-        }
-    }
-    Ok(())
+    supermgr_core::findings::validate_slug(slug).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Per-customer save mutex. Mirrors the engagement lock pattern:
