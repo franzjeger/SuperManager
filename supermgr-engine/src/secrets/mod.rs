@@ -18,34 +18,8 @@ pub mod file;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 
-use std::path::PathBuf;
 
-/// Return the default data directory for the current platform.
-pub fn default_data_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        PathBuf::from(home).join("Library/Application Support/SuperManager")
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if nix::unistd::getuid().is_root() {
-            PathBuf::from("/etc/supermgrd")
-        } else {
-            let base = std::env::var("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-                    PathBuf::from(home).join(".local/share")
-                });
-            base.join("supermgrd")
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        PathBuf::from(home).join(".supermanager")
-    }
-}
+// Lives in `supermgr-core::paths` now: the Linux daemon needs the same answer
+// and does not depend on this crate. Re-exported so `secrets::default_data_dir`
+// keeps resolving at every existing call site.
+pub use supermgr_core::paths::default_data_dir;

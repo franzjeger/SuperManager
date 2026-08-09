@@ -15,6 +15,8 @@ rand           = { workspace = true }
 ipnet          = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
+anyhow         = { workspace = true }
+toml           = { workspace = true }
 # SHA-256 fingerprints for the SSH known-hosts store
 sha2           = { workspace = true }
 ssh-key        = { workspace = true }
@@ -32,6 +34,9 @@ security-framework = "3.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 secret-service = { workspace = true }
 zbus           = { workspace = true }
+# `paths::default_data_dir` branches on whether we are root: the daemon
+# writes under /etc/supermgrd, an unprivileged GUI under XDG_DATA_HOME.
+nix            = { version = "0.30", features = ["user"] }
 
 # Windows: Credential Manager (via the `keyring` crate's win-native
 # backend, which wraps `CredReadW` / `CredWriteW` / `CredDeleteW`).

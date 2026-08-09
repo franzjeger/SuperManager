@@ -38,7 +38,7 @@
 use chrono::Utc;
 
 use crate::compliance::{self, BaselineKind, ComplianceRun, Status, TriggerKind};
-use crate::vuln::Severity;
+use crate::severity::Severity;
 
 struct LinuxCheck {
     id: &'static str,
