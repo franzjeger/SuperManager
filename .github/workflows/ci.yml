@@ -205,6 +205,21 @@ jobs:
       # and finding that out here beats finding it out in Windows.
       - name: Verify vendor pins
         run: ./scripts/check-vendor-pins.sh
+
+      # Cargo.lock has to match Cargo.toml. Nothing else in this file passes
+      # `--locked`, so a manifest change committed without its lockfile builds
+      # fine here — cargo silently updates the lock in the working tree and
+      # carries on. Distribution packagers do build with `--locked`, and for
+      # them a stale lock is a hard failure.
+      #
+      # Not hypothetical: enabling reqwest's `form`/`query` features in #120
+      # pulled in `serde_urlencoded` and `ryu`, and only Cargo.toml was
+      # committed. Three green CI runs later, `cargo metadata --locked` on main
+      # exited 101. `metadata` rather than a build, so this costs seconds and
+      # fails before anything compiles.
+      - name: Cargo.lock is in sync with the manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
       # tcpdump is a runtime dependency of the engine's traffic-sniff
       # analysis, and its tests shell out to it. Installed explicitly rather
       # than relying on whatever the runner image happens to ship.

@@ -62,7 +62,10 @@ use core_foundation::string::CFString;
 use core_foundation_sys::base::CFTypeRef;
 use security_framework::passwords_options::PasswordOptions;
 use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound};
-use security_framework_sys::item::{kSecReturnData, kSecUseDataProtectionKeychain, kSecValueData};
+// `kSecUseDataProtectionKeychain` is no longer imported: `dp_query` gets that
+// flag from `PasswordOptions::use_protected_keychain()` now. It still appears in
+// the module docs above, because it is still what goes on the wire.
+use security_framework_sys::item::{kSecReturnData, kSecValueData};
 use security_framework_sys::keychain_item::{
     SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
 };
@@ -120,10 +123,21 @@ impl SecretStore for KeychainSecretStore {
 /// data-protection keychain. Used by every operation below.
 fn dp_query(label: &str) -> Vec<(CFString, CFType)> {
     let mut options = PasswordOptions::new_generic_password(KEYCHAIN_SERVICE, label);
-    options.query.push((
-        unsafe { CFString::wrap_under_get_rule(kSecUseDataProtectionKeychain) },
-        CFBoolean::from(true).into_CFType(),
-    ));
+
+    // `use_protected_keychain()` arrived in security-framework 3.x and is
+    // exactly what this function used to hand-roll: its body is
+    // `push_query(kSecUseDataProtectionKeychain, CFBoolean::from(true))`, so the
+    // dictionary handed to SecItem* below is unchanged. Calling the crate's
+    // method means the flag is maintained and tested upstream rather than here.
+    options.use_protected_keychain();
+
+    // Reading `query` is deprecated in 3.x ("should have been private"), and
+    // there is no getter to replace it. It stays because the SecItem* calls
+    // below are ours: the crate's high-level password helpers still do not
+    // expose the data-protection keychain, which is the whole reason this
+    // module exists. Scoped to this one expression so a future deprecation
+    // elsewhere is not silenced along with it.
+    #[allow(deprecated)]
     options.query
 }
 
