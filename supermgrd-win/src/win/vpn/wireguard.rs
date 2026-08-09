@@ -53,7 +53,11 @@ use super::{VpnBackend, VpnError};
 /// exactly once per process — repeated `load()` calls leak resources and
 /// can crash the driver. `OnceLock` gives us a thread-safe lazy init that
 /// surfaces errors instead of panicking.
-static WG_LIB: OnceLock<Arc<wireguard_nt::dll>> = OnceLock::new();
+///
+/// `wireguard_nt::Wireguard` replaced 0.4's `Arc<wireguard_nt::dll>`: it is a
+/// `#[derive(Clone)]` newtype around the same `Arc`, so the sharing story here
+/// is unchanged and `.clone()` is still just a refcount bump.
+static WG_LIB: OnceLock<wireguard_nt::Wireguard> = OnceLock::new();
 
 /// State of the currently-active WireGuard tunnel.
 ///
@@ -96,7 +100,7 @@ impl WireGuardBackend {
 
     /// Load `wireguard.dll`. Surfaces a typed [`VpnError::MissingDependency`]
     /// when the driver isn't installed so the GUI can prompt the user.
-    fn ensure_lib() -> Result<Arc<wireguard_nt::dll>, VpnError> {
+    fn ensure_lib() -> Result<wireguard_nt::Wireguard, VpnError> {
         if let Some(lib) = WG_LIB.get() {
             return Ok(lib.clone());
         }
@@ -121,7 +125,7 @@ impl WireGuardBackend {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
-        let loaded: Arc<wireguard_nt::dll> = (|| {
+        let loaded: wireguard_nt::Wireguard = (|| {
             // 1. Bundled in the SuperManager bin\ directory.
             if let Some(ref dir) = exe_dir {
                 let bundled = dir.join("wireguard.dll");
@@ -255,14 +259,23 @@ impl WireGuardBackend {
             .unwrap_or_else(|| format!("supermgr-{}", &profile.id.simple().to_string()[..8]));
 
         // Tear down any leftover same-named adapter from a previous crash.
-        if let Ok(existing) = wireguard_nt::Adapter::open(wg.clone(), &adapter_name) {
+        // `open` and `create` borrow the library in 0.5 instead of taking an
+        // owned `Arc`, so `wg` is no longer consumed and needs no clone.
+        if let Ok(existing) = wireguard_nt::Adapter::open(&wg, &adapter_name) {
             warn!(adapter_name, "tearing down stale WireGuard adapter from prior run");
-            let _ = existing.down();
+            // Not fatal: `create` below is the real gate, and it will fail with
+            // a clearer message if the stale adapter is genuinely stuck. Logged
+            // rather than discarded because it is the first hint of that.
+            if let Err(e) = existing.down() {
+                warn!(adapter_name, "stale adapter would not go down: {e}");
+            }
             drop(existing);
         }
 
-        let adapter = wireguard_nt::Adapter::create(wg, "SuperManager", &adapter_name, None)
-            .map_err(|(e, _wg)| VpnError::Win32(format!("create WireGuard adapter: {e}")))?;
+        // 0.4's `create` handed the `Arc` back inside its error tuple so the
+        // caller could retry; 0.5 borrows, so the error is just an error.
+        let adapter = wireguard_nt::Adapter::create(&wg, "SuperManager", &adapter_name, None)
+            .map_err(|e| VpnError::Win32(format!("create WireGuard adapter: {e}")))?;
 
         adapter
             .set_config(&interface)
@@ -272,9 +285,13 @@ impl WireGuardBackend {
             .set_default_route(&local_addresses, &interface)
             .map_err(|e| VpnError::Win32(format!("set default route: {e}")))?;
 
-        if !adapter.up() {
-            return Err(VpnError::Win32("adapter.up() returned false".into()));
-        }
+        // `up()` returned a bare `bool` in 0.4, which is why this used to
+        // report "returned false" and nothing else — the driver's reason was
+        // discarded at the FFI boundary. 0.5 returns `Result<()>`, so the
+        // failure an operator sees is now the one WireGuardNT actually gave.
+        adapter
+            .up()
+            .map_err(|e| VpnError::Win32(format!("bring WireGuard adapter up: {e}")))?;
 
         info!(adapter_name, peers = wg_cfg.peers.len(), "WireGuard adapter up");
 
@@ -326,7 +343,15 @@ async fn tear_down(active: WgActive) {
     info!(adapter_name = %name, "tearing down WireGuard tunnel");
     // Explicit `down()` for symmetry; `drop` would do the same but
     // logs more clearly when each step happens.
-    let _ = active.adapter.down();
+    //
+    // 0.4 returned a bare `bool` here and the caller discarded it, so the
+    // comment above was aspirational — nothing was logged. 0.5 returns
+    // `Result<()>`, and a failed `down()` means the interface may still be
+    // carrying traffic, which is worth saying out loud even though `drop`
+    // below gets a second attempt at it.
+    if let Err(e) = active.adapter.down() {
+        warn!(adapter_name = %name, "WireGuard down() failed, relying on drop: {e}");
+    }
     drop(active.adapter);
     if dns_overridden {
         if let Err(e) = reset_dns_servers(&name).await {
