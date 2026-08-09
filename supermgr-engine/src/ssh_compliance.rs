@@ -18,8 +18,12 @@
 //!
 //! # Coverage (v1)
 //!
-//! Hand-picked from CIS Linux 4.0 Benchmark — the checks an
-//! attacker exploits most reliably:
+//! Hand-picked from the CIS Distribution Independent Linux Benchmark — the
+//! checks an attacker exploits most reliably. Note that "hand-picked from"
+//! is doing real work in that sentence: several are the CIS *intent* rather
+//! than a CIS control, and only two map to a section. See `cis_reference`.
+//!
+//! Attacker-reliability order:
 //!   - SSH password auth disabled (vs key-only)
 //!   - SSH root login disabled
 //!   - SSH protocol v2 only (rule out v1 fallback)
@@ -317,11 +321,8 @@ pub fn linux_default_checks() -> Vec<compliance::CheckDefinition> {
             // both sides by construction. Drift impossible.
             category: category_for_id(c.id),
             severity: map_severity(c.severity),
-            framework: "CIS Linux 4.0".to_owned(),
-            // CIS Linux 4.0 section references not authored yet.
-            // None renders cleanly (badge hides) in both the
-            // library row and the report.
-            cis_reference: None,
+            framework: LINUX_FRAMEWORK.to_owned(),
+            cis_reference: cis_reference(c.id).map(str::to_owned),
             // `Channel::Cli` for shape consistency with the
             // FortiGate CLI-channel rows. The Linux runner does
             // not consult this field; it hardcodes its own
@@ -359,6 +360,57 @@ pub fn linux_default_checks() -> Vec<compliance::CheckDefinition> {
         .collect()
 }
 
+/// The benchmark these checks are drawn from, named exactly.
+///
+/// Previously "CIS Linux 4.0", which is not a benchmark CIS publishes. Their
+/// Linux benchmarks are per-distribution (Ubuntu 22.04, RHEL 9, …) plus this
+/// distribution-independent one, and versions are `x.y.z`. A framework string
+/// naming a document nobody can look up is worse than useless in a report an
+/// auditor reads — it makes every reference beside it unverifiable too.
+pub const LINUX_FRAMEWORK: &str = "CIS Distribution Independent Linux v2.0.0";
+
+/// The benchmark section a check corresponds to, where one genuinely does.
+///
+/// **Two of seven.** This was checked against the control list rather than
+/// filled in by pattern, and most of the baseline turns out to have no
+/// counterpart in the distribution-independent benchmark:
+///
+/// - `password-auth-disabled` — CIS DIL has **no** PasswordAuthentication
+///   control. 5.2.11 is PermitEmptyPasswords, which is a different setting.
+///   Key-only SSH is a defensible control; it is not this benchmark's.
+/// - `core-pattern-safe` — 1.5.1 "Ensure core dumps are restricted" is the
+///   neighbourhood, but it checks `fs.suid_dumpable` and a limits entry, not
+///   `kernel.core_pattern`. Piping a core dump to a program is a different
+///   failure, and citing 1.5.1 would claim we verified something we did not.
+/// - `unattended-upgrades-active` — 1.8 is "updates, patches and additional
+///   security software are installed", i.e. that patching happened, not that
+///   it is automated. 1.2.x is repositories and GPG keys.
+/// - `journald-running` — 4.2.2.x configure journald (forward to rsyslog,
+///   compress, persist) and 4.2.1.2 is *rsyslog* enabled-and-running. None of
+///   them says "journald is up", which is what we check.
+/// - `firewall.active` — 3.5.2.1 "Ensure default deny firewall policy" is the
+///   closest, and deliberately not cited: it verifies INPUT/OUTPUT/FORWARD are
+///   DROP, while this check only verifies a firewall is *active*. A PASS
+///   labelled 3.5.2.1 would tell an auditor default-deny was confirmed. It
+///   was not. Tightening the check to match the control is the way to earn
+///   that reference.
+///
+/// Leaving those five `None` is the honest outcome, and the reasoning is here
+/// so the next person reads "checked, no counterpart" rather than "not done
+/// yet" and fills the gap with something plausible.
+///
+/// Sources: the control ids and titles were read from the `dev-sec/cis-dil-benchmark`
+/// InSpec profile, which encodes the benchmark's own numbering.
+fn cis_reference(check_id: &str) -> Option<&'static str> {
+    match check_id {
+        // "Ensure SSH Protocol is set to 2"
+        "linux.ssh.protocol-v2-only" => Some("5.2.4"),
+        // "Ensure SSH root login is disabled"
+        "linux.ssh.root-login-disabled" => Some("5.2.10"),
+        _ => None,
+    }
+}
+
 /// Authored *intent* descriptions for each Linux check. Distinct
 /// from `LinuxCheck.detail_on_fail` (which is what's-wrong text
 /// the runner stamps into `CheckResult.detail`). The library
@@ -379,7 +431,7 @@ fn linux_description(check_id: &str) -> &'static str {
         // description. The compile-time pair (every LinuxCheck has
         // a match arm here) is tested below; this fallback only
         // fires if a new check id is added without authoring text.
-        _ => "Linux baseline check. (No detailed description authored — see CIS Linux 4.0 documentation.)",
+        _ => "Linux baseline check. (No detailed description authored — see the CIS Distribution Independent Linux Benchmark.)",
     }
 }
 
@@ -400,6 +452,65 @@ pub fn check_titles() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_two_checks_with_a_real_cis_control_carry_a_reference() {
+        // The point of this test is to stop the gap being "helpfully" filled.
+        // Five of these checks have no counterpart in the CIS Distribution
+        // Independent Linux Benchmark — that was established by reading its
+        // control list, not assumed — and a plausible-looking section number
+        // beside a PASS tells an auditor we verified something we did not.
+        //
+        // If a future version of the benchmark grows one of these controls,
+        // update `cis_reference` and this list together.
+        let with_ref: Vec<(&str, &str)> = LINUX_CHECKS
+            .iter()
+            .filter_map(|c| cis_reference(c.id).map(|r| (c.id, r)))
+            .collect();
+        assert_eq!(
+            with_ref,
+            [
+                ("linux.ssh.root-login-disabled", "5.2.10"),
+                ("linux.ssh.protocol-v2-only", "5.2.4"),
+            ],
+            "the set of checks claiming a CIS section changed"
+        );
+    }
+
+    #[test]
+    fn the_firewall_check_does_not_claim_the_default_deny_control() {
+        // 3.5.2.1 verifies INPUT/OUTPUT/FORWARD are DROP. This check only
+        // verifies that some firewall is active, which is weaker. Citing it
+        // would be the most tempting of the five and the most misleading.
+        assert_eq!(cis_reference("linux.firewall.active"), None);
+    }
+
+    #[test]
+    fn the_framework_names_a_benchmark_that_exists() {
+        // "CIS Linux 4.0" was not a document anyone could look up, which made
+        // every reference beside it unverifiable too. Version included
+        // because section numbers move between benchmark versions.
+        assert!(LINUX_FRAMEWORK.contains("Distribution Independent"));
+        assert!(
+            LINUX_FRAMEWORK.contains("v2.0.0"),
+            "the version must be named — 5.2.10 is only meaningful against one"
+        );
+    }
+
+    #[test]
+    fn every_reference_is_a_section_number_and_nothing_else() {
+        // A reference is rendered raw into a badge and a report column. Prose
+        // or a URL there would look like a citation without being one.
+        for check in LINUX_CHECKS {
+            if let Some(r) = cis_reference(check.id) {
+                assert!(
+                    r.chars().all(|c| c.is_ascii_digit() || c == '.'),
+                    "{}: {r:?} is not a bare section number",
+                    check.id
+                );
+            }
+        }
+    }
 
     #[test]
     fn check_count_matches_array_length() {

@@ -804,7 +804,8 @@ struct ComplianceHostView: View {
     }
 
     /// "No scans yet" state with baseline-specific copy. FortiGate
-    /// → CIS FortiOS L1; Linux → CIS Linux 4.0. Switch is exhaustive
+    /// → CIS FortiOS L1; Linux → CIS Distribution Independent Linux.
+    /// Switch is exhaustive
     /// at the call site (this is only invoked from
     /// `fortigateOrLinuxBody`); the `.notApplicable` branch
     /// never reaches here but the switch stays positive-only.
@@ -830,7 +831,7 @@ struct ComplianceHostView: View {
         case .fortigateBaseline:
             return "Click 'Run scan' to evaluate this host against the CIS FortiOS 7.4 Level 1 baseline."
         case .linuxBaseline:
-            return "Click 'Run scan' to evaluate this host against the CIS Linux 4.0 baseline (7 checks over SSH)."
+            return "Click 'Run scan' to evaluate this host against the CIS Distribution Independent Linux baseline (7 checks over SSH)."
         case .notApplicable:
             // Unreachable — `emptyStateCard` is only called from
             // `fortigateOrLinuxBody`, which is only invoked when
@@ -902,10 +903,12 @@ struct ComplianceHostView: View {
     /// and Remediation columns). The deviceType-gated
     /// disabled-with-tooltip shipping in 1.12b is removed.
     ///
-    /// One column is still blank on Linux: `linux.*` library rows
-    /// carry `cisReference: nil` because CIS Linux 4.0 section
-    /// numbers aren't authored yet, so that badge hides. Everything
-    /// else in the report resolves.
+    /// The CIS badge renders on Linux for two of the seven checks —
+    /// 5.2.4 and 5.2.10 — and hides for the rest, which have no
+    /// counterpart in the benchmark. That is a resolved question, not
+    /// an unfinished one: see `ssh_compliance::cis_reference` for why
+    /// each of the five is absent, including why the firewall check
+    /// deliberately does not claim 3.5.2.1.
     ///
     /// Allowlist switch retained: `.notApplicable` hosts don't reach
     /// this code path (no Run-scan button, no run, so
