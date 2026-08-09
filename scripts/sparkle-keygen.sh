@@ -24,9 +24,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
 # Look for `generate_keys` inside DerivedData. SwiftPM downloads
 # Sparkle's xcframework as part of the package resolution, and the
 # CLI tools live alongside the framework bundle.

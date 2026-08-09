@@ -32,7 +32,9 @@ WORKSPACE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_LABEL="com.sybr.supermanager.helper"
 HELPER_BIN="/Library/PrivilegedHelperTools/${HELPER_LABEL}"
 PLIST_DST="/Library/LaunchDaemons/${HELPER_LABEL}.plist"
-SOURCE_PLIST="$WORKSPACE/SuperManagerMac/Signing/${HELPER_LABEL}.plist"
+# No SOURCE_PLIST: the bundled plist is not what gets installed. Step 2 below
+# generates a fresh one because the bundled copy uses `BundleProgram`, which
+# does not apply to a dev install. The variable outlived that change.
 
 # 1. Build the helper with dev-rpc enabled.
 echo "→ Building helper with dev-rpc feature…"

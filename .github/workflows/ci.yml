@@ -10,6 +10,92 @@ permissions:
   contents: read
 
 jobs:
+  # Shell scripts — 39 kB of install and release automation that until now was
+  # only ever executed by a user hitting a bug in it.
+  #
+  # Four install defects landed in one week (#173, #174, #175, and a shell
+  # dialect one), all found in production because nothing here was checked.
+  # Two more were dead variables nobody noticed. That is the gap this closes.
+  #
+  # The gate is `shellcheck -S style`, the strictest level, because the scripts
+  # are already clean at it — three findings were fixed to get there rather than
+  # loosening the gate to accommodate them. Starting strict is the only way it
+  # stays strict; a gate set to `error` would have passed all six defects above.
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `git ls-files` rather than a hardcoded list: a script added under a new
+      # directory is exactly the one nobody remembers to add to CI, and a gate
+      # that silently skips files reads as coverage without being it.
+      - name: Lint every tracked shell script
+        run: |
+          set -euo pipefail
+          # Preinstalled on GitHub's ubuntu images; installed here rather than
+          # assumed, so a runner-image change fails the lint instead of the job.
+          command -v shellcheck >/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+          shellcheck --version | head -2
+          mapfile -d '' -t files < <(git ls-files -z '*.sh')
+          echo "checking ${#files[@]} scripts"
+          printf '  %s\n' "${files[@]}"
+          shellcheck -S style -f gcc "${files[@]}"
+
+      # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
+      - name: Parse every tracked shell script
+        run: |
+          set -euo pipefail
+          mapfile -d '' -t files < <(git ls-files -z '*.sh')
+          for f in "${files[@]}"; do bash -n "$f"; done
+
+      # The macOS installer's two refusals. Both exit 1, so the message is what
+      # distinguishes them — asserting only the code would let either guard
+      # rot into the other's error and still pass.
+      #
+      # The bash guard is the one that matters most: the shebang is not
+      # consulted for a piped script, so `curl … | sh` runs this under dash and
+      # used to abort with an "unbound variable" from a shell nobody chose.
+      #
+      # `/bin/dash` explicitly, not `sh`. `/bin/sh` is dash on this runner but
+      # bash on Arch and several other distros, and under bash the guard
+      # correctly does *not* fire — so an `sh`-based test would pass by
+      # verifying nothing on any machine where that symlink differs. Asserting
+      # the interpreter leaves BASH_VERSION unset is what makes the rest of the
+      # step mean something.
+      - name: install.sh refuses a non-bash interpreter
+        run: |
+          set -euo pipefail
+          [ -x /bin/dash ] || { echo "no /bin/dash to test with"; exit 1; }
+          /bin/dash -c '[ -z "${BASH_VERSION:-}" ]' \
+            || { echo "/bin/dash sets BASH_VERSION — this test would be vacuous"; exit 1; }
+          out="$(/bin/dash scripts/install.sh 2>&1 || true)"
+          echo "$out"
+          /bin/dash scripts/install.sh >/dev/null 2>&1 && { echo "expected non-zero exit"; exit 1; }
+          grep -q "needs bash" <<<"$out" || { echo "wrong guard fired"; exit 1; }
+
+      - name: install.sh refuses to run on Linux
+        run: |
+          set -euo pipefail
+          out="$(bash scripts/install.sh 2>&1 || true)"
+          bash scripts/install.sh >/dev/null 2>&1 && { echo "expected non-zero exit"; exit 1; }
+          echo "$out"
+          grep -q "install-linux.sh" <<<"$out" \
+            || { echo "should point Linux users at the Linux installer"; exit 1; }
+
+      # `--print-deps` documents itself as changing nothing, which makes it a
+      # free smoke test of distro detection and the package tables. It runs the
+      # `/etc/os-release` parse and the family `case` for real.
+      - name: install-linux.sh dry-run paths
+        run: |
+          set -euo pipefail
+          bash scripts/install-linux.sh --print-deps
+          bash scripts/install-linux.sh --help >/dev/null
+          bash scripts/install-linux.sh --bogus >/dev/null 2>&1 && {
+              echo "an unknown option must not succeed"; exit 1; }
+          rc=0; bash scripts/install-linux.sh --bogus >/dev/null 2>&1 || rc=$?
+          [ "$rc" = 2 ] || { echo "expected exit 2 for a bad option, got $rc"; exit 1; }
+
   # Linux build — the daemon, the GTK GUI, the shared core, the MCP server
   # and the engine.
   #
@@ -115,6 +201,24 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # The macOS installer, on macOS, under the interpreter it will actually
+      # meet: Apple ships /bin/bash 3.2 and has since 2007, while the `shell`
+      # job above runs bash 5.x. That gap is a real bug class — 3.2 has no
+      # `mapfile`, no associative arrays, no `${x,,}` — and it cannot be caught
+      # on a Linux runner.
+      #
+      # `install.sh` exits early on Linux, so this is also the only place the
+      # release lookup gets exercised: a curl|grep|grep|head|sed pipeline over
+      # the GitHub API that breaks silently if the response shape changes or no
+      # Mac zip has shipped. The dry run stops before the download and before
+      # anything touches /Applications.
+      - name: install.sh dry run under Apple's bash 3.2
+        run: |
+          set -euo pipefail
+          /bin/bash --version | head -1
+          SUPERMGR_INSTALL_DRY_RUN=1 /bin/bash scripts/install.sh
+
       # xcodegen turns `SuperManagerMac/project.yml` → `.xcodeproj`.
       # pandoc is the engagement-report renderer; install so report
       # tests (if/when added) don't get skipped.

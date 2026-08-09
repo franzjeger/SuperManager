@@ -169,6 +169,7 @@ fi
 # the install is affected rather than dumping one flat list.
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC1091  # /etc/os-release is the distro's file, not ours to follow.
 . /etc/os-release 2>/dev/null || die "cannot read /etc/os-release — unknown distribution"
 FAMILY=""
 for id in ${ID:-} ${ID_LIKE:-}; do
