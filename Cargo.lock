@@ -2361,7 +2361,7 @@ dependencies = [
  "gobject-sys 0.20.10",
  "libc",
  "system-deps 7.0.8",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6332,7 +6332,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7342,7 +7342,7 @@ dependencies = [
  "uuid",
  "which",
  "windows-service",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
  "winres",
  "wireguard-nt",
  "zeroize",
