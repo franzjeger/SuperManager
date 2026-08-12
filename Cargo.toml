@@ -80,7 +80,7 @@ ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_cor
 # RSA key generation with bit-size control
 rsa         = { version = "0.9",  features = ["std"] }
 # Async SSH client (pure Rust, tokio-native)
-russh       = "0.46"
+russh       = "0.62"
 # SFTP over russh
 russh-sftp  = "2.0"
 # SSH key loading for russh authentication
