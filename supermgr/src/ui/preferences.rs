@@ -266,8 +266,8 @@ pub fn show_settings_dialog(
     ) {
         rt.spawn(async move {
             use supermgr_core::dbus::DaemonProxy;
-            if let Ok(conn) = zbus::Connection::system().await {
-                if let Ok(proxy) = DaemonProxy::new(&conn).await {
+            if let Ok(conn) = supermgr_core::client::system_connection().await {
+                if let Ok(proxy) = DaemonProxy::new(conn).await {
                     let _ = proxy.set_webhook(url, on_host_down, on_vpn_disconnect).await;
                 }
             }
@@ -333,8 +333,8 @@ pub fn show_settings_dialog(
             let tx = tx.clone();
             rt.spawn(async move {
                 use supermgr_core::dbus::DaemonProxy;
-                if let Ok(conn) = zbus::Connection::system().await {
-                    if let Ok(proxy) = DaemonProxy::new(&conn).await {
+                if let Ok(conn) = supermgr_core::client::system_connection().await {
+                    if let Ok(proxy) = DaemonProxy::new(conn).await {
                         match proxy.test_webhook().await {
                             Ok(_) => {
                                 let _ = tx.send(crate::app::AppMsg::ShowToast(

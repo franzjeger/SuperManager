@@ -113,10 +113,12 @@ async fn run(cmd: &str, args: &[&str]) -> Result<String> {
 }
 
 async fn fetch_public_ip() -> Result<String> {
-    let client = reqwest::Client::builder()
+    let client = supermgr_core::http::default_client();
+    let resp = client
+        .get("https://ifconfig.me")
         .timeout(Duration::from_secs(3))
-        .build()?;
-    let resp = client.get("https://ifconfig.me").send().await?;
+        .send()
+        .await?;
     // Cap response at 1 KB — ifconfig.me returns 16 bytes for an
     // IPv4. Anything bigger is a malicious or misrouted reply.
     let bytes = resp.bytes().await?;

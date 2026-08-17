@@ -2936,17 +2936,7 @@ impl DaemonService {
         info!("fortigate_api: {method} {url}");
         crate::audit::log_event("FG_API", &format!("{method} {url}"));
 
-        let client = match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!("fortigate_api: client build failed: {e:#}");
-                return Err(fdo::Error::Failed(format!("HTTP client build failed: {e}")));
-            }
-        };
+        let client = supermgr_core::http::insecure_client();
 
         let mut req = match method.to_uppercase().as_str() {
             "GET" => client.get(&url),
@@ -3773,11 +3763,7 @@ impl DaemonService {
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
         // Validate the URL by attempting login.
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| fdo::Error::Failed(format!("HTTP client: {e}")))?;
+        let client = supermgr_core::http::insecure_client();
 
         let login_url = format!("{url}/api/auth/login");
         let login_body = serde_json::json!({
@@ -3786,6 +3772,7 @@ impl DaemonService {
         });
         let resp = client.post(&login_url)
             .json(&login_body)
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await
             .map_err(|e| fdo::Error::Failed(format!("UniFi login failed: {e}")))?;
@@ -4184,14 +4171,11 @@ impl DaemonService {
                                 "https://{}:{}/api/v2/monitor/system/status",
                                 host.hostname, api_port,
                             );
-                            let client = reqwest::Client::builder()
-                                .danger_accept_invalid_certs(true)
-                                .timeout(Duration::from_secs(10))
-                                .build()
-                                .map_err(|e| fdo::Error::Failed(format!("HTTP client: {e}")))?;
+                            let client = supermgr_core::http::insecure_client();
 
                             match client.get(&url)
                                 .query(&[("access_token", &token)])
+                                .timeout(Duration::from_secs(10))
                                 .send()
                                 .await
                             {
@@ -4407,16 +4391,13 @@ impl DaemonService {
         info!("fortigate_backup_config: POST {url}");
         crate::audit::log_event("FG_BACKUP", &format!("POST {url}"));
 
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .timeout(std::time::Duration::from_secs(60))
-            .build()
-            .map_err(|e| fdo::Error::Failed(format!("HTTP client build failed: {e}")))?;
+        let client = supermgr_core::http::insecure_client();
 
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Length", "0")
+            .timeout(std::time::Duration::from_secs(60))
             .send()
             .await
             .map_err(|e| {
@@ -6262,7 +6243,7 @@ async fn send_webhook(url: &str, message: &str) {
     if url.is_empty() {
         return;
     }
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
     let body = serde_json::json!({
         "text": message,
         "content": message,

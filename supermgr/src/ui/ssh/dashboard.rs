@@ -309,7 +309,6 @@ fn populate_dashboard(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    eprintln!(">>> populate_dashboard called");
     info!("populate_dashboard called");
 
     // Clear existing cards.
@@ -365,9 +364,9 @@ fn populate_dashboard(
                         let host_id = host_id.clone();
                         let tx = tx.clone();
                         rt.spawn(async move {
-                            let conn = zbus::Connection::system().await.ok();
+                            let conn = supermgr_core::client::system_connection().await.ok();
                             if let Some(conn) = conn {
-                                if let Ok(proxy) = DaemonProxy::new(&conn).await {
+                                if let Ok(proxy) = DaemonProxy::new(conn).await {
                                     match proxy.fortigate_backup_config(&host_id).await {
                                         Ok(path) => {
                                             let _ = tx.send(AppMsg::ShowToast(
@@ -479,8 +478,8 @@ fn populate_dashboard(
             }
 
             let result = async {
-                let conn = zbus::Connection::system().await?;
-                let proxy = DaemonProxy::new(&conn).await?;
+                let conn = supermgr_core::client::system_connection().await?;
+                let proxy = DaemonProxy::new(conn).await?;
 
                 if device_type == DeviceType::UniFi {
                     return fetch_unifi_status(&proxy, &host_id).await;
@@ -645,7 +644,7 @@ fn populate_dashboard(
 async fn fetch_unifi_cloud_devices(
     api_key: &str,
 ) -> anyhow::Result<Vec<(String, String, String, Value)>> {
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
 
     // Fetch hosts (consoles) to get site names.
     let resp = client
@@ -781,7 +780,7 @@ async fn fetch_unifi_cloud_devices(
                 "\u{26a0}\u{fe0f} UniFi devices offline: {}",
                 offline.join(", ")
             );
-            let client = reqwest::Client::new();
+            let client = supermgr_core::http::default_client();
             let payload = serde_json::json!({ "text": &msg, "content": &msg });
             let _ = client.post(&settings.webhook_url)
                 .json(&payload)

@@ -154,19 +154,40 @@ impl SecretStore for LibsecretStore {
         let mut attrs = HashMap::new();
         attrs.insert(ATTR_KEY, label);
 
-        collection
-            .create_item(
-                label,
-                attrs,
-                secret,
-                true,
-                "application/octet-stream",
-            )
+        // Update the existing item in place rather than creating a new one.
+        // Always calling create_item accumulated duplicate items per label,
+        // and retrieve() then returned whichever the service happened to list
+        // first — after a key rotation that could be the pre-rotation secret.
+        let existing = collection
+            .search_items(attrs.clone())
             .await
-            .map_err(|e| SecretError::StoreFailed {
-                label: label.to_owned(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
+
+        match existing.into_iter().next() {
+            Some(item) => item
+                .set_secret(secret, "application/octet-stream")
+                .await
+                .map_err(|e| SecretError::StoreFailed {
+                    label: label.to_owned(),
+                    reason: e.to_string(),
+                }),
+            None => {
+                collection
+                    .create_item(
+                        label,
+                        attrs,
+                        secret,
+                        true,
+                        "application/octet-stream",
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| SecretError::StoreFailed {
+                        label: label.to_owned(),
+                        reason: e.to_string(),
+                    })
+            }
+        }?;
 
         Ok(())
     }
@@ -442,6 +463,27 @@ impl CredentialManagerStore {
     async fn erase_one_best_effort(label: String) {
         let _ = Self::erase_one(label).await;
     }
+
+    /// If `label` currently holds a chunk manifest, delete the numbered
+    /// chunks it references.
+    ///
+    /// Re-storing a *smaller* secret over a previously chunked one (e.g. a
+    /// 32-byte PSK over an RSA-4096 key) would otherwise leave the old
+    /// `{label}:chunk:N` entries in Credential Manager — secret material
+    /// that the logical secret no longer owns.
+    async fn cleanup_chunks_if_present(label: &str) {
+        if let Ok(bytes) = Self::read_one(label.to_owned()).await {
+            if let Ok(s) = std::str::from_utf8(&bytes) {
+                if let Some(rest) = s.strip_prefix(CHUNK_PREFIX) {
+                    if let Ok(n) = rest.parse::<usize>() {
+                        for i in 0..n {
+                            Self::erase_one_best_effort(format!("{label}:chunk:{i}")).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -456,7 +498,10 @@ impl Default for CredentialManagerStore {
 impl SecretStore for CredentialManagerStore {
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
         if secret.len() <= WIN_CRED_MAX_BLOB {
-            // Fits in one entry — direct write.
+            // Fits in one entry — direct write. But if the label currently
+            // holds a chunk manifest, the old chunks would be orphaned, so
+            // clear them before overwriting the primary.
+            Self::cleanup_chunks_if_present(label).await;
             Self::write_one(label.to_owned(), secret.to_vec()).await
         } else {
             // Too large: split into chunks and write a marker at the

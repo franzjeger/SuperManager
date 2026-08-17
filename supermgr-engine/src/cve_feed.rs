@@ -25,7 +25,6 @@
 //! rate-limits. The weekly cadence puts us well inside fair-use.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -91,12 +90,13 @@ pub fn save(cache: &FeedCache) -> Result<()> {
 /// any score/recommendation changes.
 pub async fn refresh() -> Result<u32> {
     let url = "https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=200";
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("SuperManager/1.0 (+https://github.com/franzjeger/SuperManager)")
-        .build()?;
+    let client = supermgr_core::http::default_client();
 
-    let resp = client.get(url).send().await?;
+    let resp = client
+        .get(url)
+        .header("User-Agent", "SuperManager/1.0 (+https://github.com/franzjeger/SuperManager)")
+        .send()
+        .await?;
     if !resp.status().is_success() {
         anyhow::bail!("NVD returned {}", resp.status());
     }

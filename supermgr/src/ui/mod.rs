@@ -1342,12 +1342,10 @@ pub fn build_ui(
         let split_routes_row = vpn_detail.split_routes_row.clone();
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_profile_list.connect_row_activated(move |list, row| {
-            let idx = row.index() as usize;
+            let row_id = row.widget_name().to_string();
             let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg, azure) = {
                 let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-                let mut sorted: Vec<&ProfileSummary> = s.profiles.iter().collect();
-                sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                let entry = sorted.get(idx).copied();
+                let entry = s.profiles.iter().find(|p| p.id.to_string() == row_id);
                 let name = entry.map(|p| p.name.clone());
                 let exists = entry.is_some();
                 let ac = entry.is_some_and(|p| p.auto_connect);
@@ -1398,9 +1396,7 @@ pub fn build_ui(
                 detail_stack.set_visible_child_name("detail");
             }
 
-            if let Some(r) = list.row_at_index(idx as i32) {
-                list.select_row(Some(&r));
-            }
+            list.select_row(Some(row));
 
             let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             rename_btn.set_sensitive(s.selected_profile.is_some());
@@ -1423,56 +1419,61 @@ pub fn build_ui(
         let rt_for_key = rt.clone();
         let tx_for_key = tx.clone();
         ssh_key_list.connect_row_activated(move |_list, row| {
-            let idx = row.index() as usize;
-            let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut sorted: Vec<SshKeySummary> = s.ssh_keys.clone();
-            sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            if let Some(key) = sorted.get(idx) {
-                key_name_label.set_label(&key.name);
-                key_type_badge.set_label(&format!("{:?}", key.key_type));
-                fingerprint_label.set_label(&key.fingerprint);
-                // The row carries the "Tags" label; this is only the values,
-                // and an empty one hides its own row.
-                tags_label.set_label(&key.tags.join(", "));
-                tags_label.set_visible(!key.tags.is_empty());
+            let row_id = row.widget_name().to_string();
+            // Clone the key out of the lock so we can drop the immutable
+            // borrow before mutating `selected_ssh_key` / `selected_ssh_host`.
+            let key = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                s.ssh_keys.iter().find(|k| k.id.to_string() == row_id).cloned()
+            };
+            let Some(key) = key else { return };
+            key_name_label.set_label(&key.name);
+            key_type_badge.set_label(&format!("{:?}", key.key_type));
+            fingerprint_label.set_label(&key.fingerprint);
+            // The row carries the "Tags" label; this is only the values,
+            // and an empty one hides its own row.
+            tags_label.set_label(&key.tags.join(", "));
+            tags_label.set_visible(!key.tags.is_empty());
 
-                // Clear deployed-to list
-                while let Some(child) = deployed_list.first_child() {
-                    deployed_list.remove(&child);
-                }
-                let deployed_row = if key.deployed_count == 0 {
-                    adw::ActionRow::builder()
-                        .title("Not deployed anywhere")
-                        .subtitle("Use Push to Hosts to install it")
-                        .activatable(false)
-                        .build()
-                } else {
-                    adw::ActionRow::builder()
-                        .title(format!("{} host(s)", key.deployed_count))
-                        .activatable(false)
-                        .build()
-                };
-                deployed_list.append(&deployed_row);
+            // Clear deployed-to list
+            while let Some(child) = deployed_list.first_child() {
+                deployed_list.remove(&child);
+            }
+            let deployed_row = if key.deployed_count == 0 {
+                adw::ActionRow::builder()
+                    .title("Not deployed anywhere")
+                    .subtitle("Use Push to Hosts to install it")
+                    .activatable(false)
+                    .build()
+            } else {
+                adw::ActionRow::builder()
+                    .title(format!("{} host(s)", key.deployed_count))
+                    .activatable(false)
+                    .build()
+            };
+            deployed_list.append(&deployed_row);
 
-                key_detail_stack.set_visible_child_name("detail");
-                keys_content_stack.set_visible_child_name("key-detail");
+            key_detail_stack.set_visible_child_name("detail");
+            keys_content_stack.set_visible_child_name("key-detail");
+            {
+                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_key = Some(key.id.to_string());
                 s.selected_ssh_host = None;
-
-                // Fetch public key text asynchronously via the message channel
-                let key_id = key.id.to_string();
-                let tx2 = tx_for_key.clone();
-                rt_for_key.spawn(async move {
-                    match crate::dbus_client::dbus_ssh_export_public_key(key_id).await {
-                        Ok(pubkey) => {
-                            let _ = tx2.send(AppMsg::SshPublicKeyFetched(pubkey));
-                        }
-                        Err(e) => {
-                            tracing::error!("fetch public key: {e}");
-                        }
-                    }
-                });
             }
+
+            // Fetch public key text asynchronously via the message channel
+            let key_id = key.id.to_string();
+            let tx2 = tx_for_key.clone();
+            rt_for_key.spawn(async move {
+                match crate::dbus_client::dbus_ssh_export_public_key(key_id).await {
+                    Ok(pubkey) => {
+                        let _ = tx2.send(AppMsg::SshPublicKeyFetched(pubkey));
+                    }
+                    Err(e) => {
+                        tracing::error!("fetch public key: {e}");
+                    }
+                }
+            });
         });
     }
 
@@ -1497,56 +1498,43 @@ pub fn build_ui(
             if !row.is_selectable() {
                 return;
             }
-            let idx = row.index();
-            let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            // Reconstruct the grouped order to find which host this row maps to.
-            let mut groups: std::collections::BTreeMap<String, Vec<HostSummary>> =
-                std::collections::BTreeMap::new();
-            for host in &s.hosts {
-                let group_name = if host.group.is_empty() {
-                    "Ungrouped".to_owned()
-                } else {
-                    host.group.clone()
-                };
-                groups.entry(group_name).or_default().push(host.clone());
-            }
-            for hosts in groups.values_mut() {
-                hosts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-            }
-            // Flatten with group headers as None.
-            let mut flat: Vec<Option<HostSummary>> = Vec::new();
-            for hosts_in_group in groups.values() {
-                flat.push(None); // group header
-                for h in hosts_in_group {
-                    flat.push(Some(h.clone()));
+            let row_id = row.widget_name().to_string();
+            // Clone the host + full host list out of the lock so we can drop
+            // the immutable borrow before mutating `selected_ssh_host`.
+            let (host, all_hosts) = {
+                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                match s.hosts.iter().find(|h| h.id.to_string() == row_id) {
+                    Some(h) => (h.clone(), s.hosts.clone()),
+                    None => return,
                 }
-            }
-
-            if let Some(Some(host)) = flat.get(idx as usize) {
-                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.hosts);
-                hosts_content_stack.set_visible_child_name("host-detail");
+            };
+            ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, &host, &all_hosts);
+            hosts_content_stack.set_visible_child_name("host-detail");
+            {
+                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
+            }
 
-                // Fetch the recorded host-key fingerprint for the Host Key row.
-                ssh::host_detail::refresh_host_key_row(
+            // Fetch the recorded host-key fingerprint for the Host Key row.
+            ssh::host_detail::refresh_host_key_row(
+                host.id.to_string(),
+                host.hostname.clone(),
+                host.port,
+                &rt_sel,
+                &tx_sel,
+            );
+
+            // Auto-refresh FortiGate dashboard if applicable.
+            if host.device_type == supermgr_core::ssh::DeviceType::Fortigate && host.has_api {
+                ssh::host_detail::refresh_fortigate_dashboard(
                     host.id.to_string(),
                     host.hostname.clone(),
-                    host.port,
+                    host.api_port.unwrap_or(443),
                     &rt_sel,
                     &tx_sel,
                 );
-
-                // Auto-refresh FortiGate dashboard if applicable.
-                if host.device_type == supermgr_core::ssh::DeviceType::Fortigate && host.has_api {
-                    ssh::host_detail::refresh_fortigate_dashboard(
-                        host.id.to_string(),
-                        host.hostname.clone(),
-                        host.api_port.unwrap_or(443),
-                        &rt_sel,
-                        &tx_sel,
-                    );
-                }
+            }
 
                 // Refresh port forward active status.
                 if !host.port_forwards.is_empty() {
@@ -1557,7 +1545,6 @@ pub fn build_ui(
                         }
                     });
                 }
-            }
         });
     }
 
@@ -1666,8 +1653,8 @@ pub fn build_ui(
                 let tx = tx.clone();
                 rt.spawn(async move {
                     let result = async {
-                        let conn = zbus::Connection::system().await?;
-                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await?;
+                        let conn = supermgr_core::client::system_connection().await?;
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(conn).await?;
                         let filename = proxy.fortigate_backup_config(&host_id).await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                         Ok::<String, anyhow::Error>(filename)
@@ -1721,8 +1708,8 @@ pub fn build_ui(
                 let tx = tx.clone();
                 toast_overlay.add_toast(adw::Toast::new("Generating API token via SSH..."));
                 rt.spawn(async move {
-                    let conn = zbus::Connection::system().await.ok();
-                    let proxy = if let Some(c) = &conn {
+                    let conn = supermgr_core::client::system_connection().await.ok();
+                    let proxy = if let Some(c) = conn {
                         supermgr_core::dbus::DaemonProxy::new(c).await.ok()
                     } else { None };
                     if let Some(proxy) = proxy {
@@ -1755,8 +1742,8 @@ pub fn build_ui(
             if let Some(host_id) = host_id {
                 let tx = tx.clone();
                 rt.spawn(async move {
-                    let conn = zbus::Connection::system().await.ok();
-                    let proxy = if let Some(c) = &conn {
+                    let conn = supermgr_core::client::system_connection().await.ok();
+                    let proxy = if let Some(c) = conn {
                         supermgr_core::dbus::DaemonProxy::new(c).await.ok()
                     } else { None };
                     if let Some(proxy) = proxy {
@@ -1797,9 +1784,9 @@ pub fn build_ui(
                 let tx = tx.clone();
                 rt.spawn(async move {
                     let result: Result<String, String> = async {
-                        let conn = zbus::Connection::system().await
+                        let conn = supermgr_core::client::system_connection().await
                             .map_err(|e| format!("D-Bus connect: {e}"))?;
-                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(conn).await
                             .map_err(|e| format!("D-Bus proxy: {e}"))?;
                         proxy.fortigate_get_api_token(&host_id).await
                             .map_err(|e| format!("{e}"))
@@ -2386,8 +2373,8 @@ pub fn build_ui(
                 let rt = rt.clone();
                 rt.spawn(async move {
                     let pw = async {
-                        let conn = zbus::Connection::system().await.ok()?;
-                        let proxy = supermgr_core::dbus::DaemonProxy::new(&conn).await.ok()?;
+                        let conn = supermgr_core::client::system_connection().await.ok()?;
+                        let proxy = supermgr_core::dbus::DaemonProxy::new(conn).await.ok()?;
                         proxy.ssh_get_password(&host_id).await.ok()
                     }.await;
                     let result = ssh::host_detail::launch_rdp(&hostname, port, &username, pw.as_deref());
@@ -2651,14 +2638,14 @@ pub fn build_ui(
                 let tx = tx.clone();
                 let _toast_overlay = toast_overlay.clone();
                 rt.spawn(async move {
-                    let conn = match zbus::Connection::system().await {
+                    let conn = match supermgr_core::client::system_connection().await {
                         Ok(c) => c,
                         Err(e) => {
                             let _ = tx.send(AppMsg::OperationFailed(format!("D-Bus: {e}")));
                             return;
                         }
                     };
-                    let proxy = match supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                    let proxy = match supermgr_core::dbus::DaemonProxy::new(conn).await {
                         Ok(p) => p,
                         Err(e) => {
                             let _ = tx.send(AppMsg::OperationFailed(format!("proxy: {e}")));
@@ -2735,14 +2722,14 @@ pub fn build_ui(
                 let tx = tx.clone();
                 let _toast_overlay = toast_overlay.clone();
                 rt.spawn(async move {
-                    let conn = match zbus::Connection::system().await {
+                    let conn = match supermgr_core::client::system_connection().await {
                         Ok(c) => c,
                         Err(e) => {
                             let _ = tx.send(AppMsg::OperationFailed(format!("D-Bus: {e}")));
                             return;
                         }
                     };
-                    let proxy = match supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                    let proxy = match supermgr_core::dbus::DaemonProxy::new(conn).await {
                         Ok(p) => p,
                         Err(e) => {
                             let _ = tx.send(AppMsg::OperationFailed(format!("proxy: {e}")));
@@ -4079,7 +4066,18 @@ fn render_notifications(
     notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
 }
 
-/// Push a notification into the store and redraw the popover from it.
+/// Push a notification into the store and prepend the new row to the
+/// popover.
+///
+/// The backing store already keeps at most [`crate::app::NOTIFICATION_HISTORY_LIMIT`]
+/// entries, newest first. The old implementation called
+/// [`render_notifications`] on every push, which tore down and rebuilt the
+/// entire `ListBox` (up to 100 rows) for a single new event — O(N) per
+/// notification. Now we build just the one new row and insert it at the
+/// front, then trim the tail if the list has grown past the cap. O(1).
+///
+/// The "Nothing to report" placeholder that [`render_notifications`] leaves
+/// behind is removed on the first real notification.
 fn push_notification(
     app_state: &Arc<Mutex<AppState>>,
     notif_list: &gtk4::ListBox,
@@ -4087,11 +4085,49 @@ fn push_notification(
     icon: &'static str,
     message: &str,
 ) {
-    {
+    // Capture the new notification so we can build its row after releasing
+    // the lock (we must not hold the lock while touching GTK widgets).
+    let notification = {
         let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
         s.push_notification(icon, message);
+        s.notifications.first().cloned()
+    };
+    let Some(notification) = notification else { return };
+
+    // Drop the empty-state placeholder if it's still there.
+    if let Some(first) = notif_list
+        .first_child()
+        .and_then(|c| c.downcast_ref::<adw::ActionRow>().cloned())
+    {
+        if first.title() == "Nothing to report" {
+            notif_list.remove(&first);
+        }
     }
-    render_notifications(app_state, notif_list, notif_btn);
+
+    notif_list.insert(&notification_row(&notification), 0);
+
+    // Keep the widget list bounded in step with the store (gtk4 0.9 has no
+    // `n_children`, so count by walking the child chain).
+    let limit = crate::app::NOTIFICATION_HISTORY_LIMIT;
+    let mut count = {
+        let mut n = 0usize;
+        let mut cur = notif_list.first_child();
+        while let Some(c) = cur {
+            n += 1;
+            cur = c.next_sibling();
+        }
+        n
+    };
+    while count > limit {
+        if let Some(last) = notif_list.last_child() {
+            notif_list.remove(&last);
+            count -= 1;
+        } else {
+            break;
+        }
+    }
+
+    notif_btn.set_icon_name(design::icon_name(design::icons::NOTIFICATIONS));
 }
 
 fn lock_session(outer_stack: &gtk4::Stack, lock_page: &lock::LockPage) {

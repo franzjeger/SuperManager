@@ -31,8 +31,6 @@
 //! Endpoints used here were verified against OPNsense 26.1.6_2 (FreeBSD 14.3)
 //! on 2026-04-28. The official docs are at <https://docs.opnsense.org/development/api.html>.
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -96,11 +94,8 @@ pub struct InterfaceSummary {
 /// Self-signed certs are common on home appliances, so verification is
 /// disabled by default. A 30 s connect+read timeout keeps the daemon from
 /// blocking forever if the box is unreachable.
-fn http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(30))
-        .build()
+fn http_client() -> &'static reqwest::Client {
+    supermgr_core::http::insecure_client()
 }
 
 /// Issue a Basic-Auth request to an OPNsense API endpoint and return the raw
@@ -117,7 +112,7 @@ pub async fn request(
     let url = format!("https://{hostname}:{port}{path}");
     debug!("opnsense::request {method} {url}");
 
-    let client = http_client().map_err(|e| format!("HTTP client build failed: {e}"))?;
+    let client = http_client();
 
     let mut req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(&url),

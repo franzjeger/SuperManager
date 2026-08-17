@@ -47,12 +47,29 @@ fn baselines_dir(customer_slug: &str) -> PathBuf {
     p
 }
 
+/// Reduce an arbitrary host string to a safe, stable file-name component.
+///
+/// IPv4 is just digits + dots, but IPv6 contains colons (`2001:db8::1`) and
+/// bracketed/zone forms (`fe80::1%eth0`) — colons are invalid on Windows and
+/// trip up a bunch of tooling, and `%` is a shell metacharacter. Rather than
+/// enumerate the bad characters, allow only what we know is safe
+/// (alphanumerics, dot, hyphen) and map everything else to `_`. The mapping
+/// is deterministic, so `load`/`save`/`reconcile_host` all agree on the name.
+fn sanitize_filename(host_ip: &str) -> String {
+    let s: String = host_ip
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' })
+        .collect();
+    if s.is_empty() {
+        "host".to_owned()
+    } else {
+        s
+    }
+}
+
 fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
     let mut p = baselines_dir(customer_slug);
-    // Use the IP itself as the file name — IPs are filesystem-safe
-    // (just digits + dots / colons). Validation upstream prevents
-    // arbitrary paths from leaking into this name.
-    p.push(format!("{}.json", host_ip.replace('/', "_")));
+    p.push(format!("{}.json", sanitize_filename(host_ip)));
     p
 }
 
@@ -276,5 +293,30 @@ mod tests {
         let loaded = load(&scope, "10.0.0.1");
         assert_eq!(loaded.stable_ports, vec![22]);
         cleanup(&scope);
+    }
+
+    #[test]
+    fn ipv6_host_roundtrips() {
+        // IPv6 contains colons — the file name must be sanitized and
+        // load/save must agree on the same path.
+        let scope = unique_scope();
+        reconcile_host(&scope, "2001:db8::1", &[22, 80]).unwrap();
+        reconcile_host(&scope, "2001:db8::1", &[22, 80]).unwrap();
+        let loaded = load(&scope, "2001:db8::1");
+        assert_eq!(loaded.stable_ports, vec![22, 80]);
+        // The file name must not contain a colon.
+        let path = baseline_path(&scope, "2001:db8::1");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(!name.contains(':'), "file name must be colon-free: {name}");
+        cleanup(&scope);
+    }
+
+    #[test]
+    fn sanitize_filename_is_deterministic_and_safe() {
+        assert_eq!(sanitize_filename("10.0.0.1"), "10.0.0.1");
+        assert_eq!(sanitize_filename("2001:db8::1"), "2001_db8__1");
+        assert_eq!(sanitize_filename("fe80::1%eth0"), "fe80__1_eth0");
+        assert!(!sanitize_filename("a/b\\c").contains(|c| c == '/' || c == '\\'));
+        assert_eq!(sanitize_filename(""), "host");
     }
 }

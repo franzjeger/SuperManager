@@ -134,6 +134,7 @@ pub fn populate_ssh_key_list(
             format!("Deployed to {} host(s)", key.deployed_count)
         }));
         row.add_suffix(&deployed);
+        row.set_widget_name(&key.id.to_string());
 
         // Delete button.
         let delete_btn = gtk4::Button::builder()

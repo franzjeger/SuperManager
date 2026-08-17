@@ -637,6 +637,7 @@ pub fn populate_ssh_host_list(
                 row.add_controller(gesture);
             }
 
+            row.set_widget_name(&host.id.to_string());
             list_box.append(&row);
             host_row_map.push(Some(host.id.to_string()));
             _row_idx += 1;

@@ -60,6 +60,7 @@ mod openvpn;
 // Re-enable in the Developer-ID-signed release flow only. See build.rs.
 // mod power;
 mod route_guardian;
+mod secure_file;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;

@@ -185,23 +185,13 @@ impl WireGuard {
             }
         }
 
-        // Make sure the parent dir exists with restrictive mode.
-        std::fs::create_dir_all(WG_CONF_DIR)
+        // The conf embeds the WireGuard private key. Create the dir at 0700
+        // and the file at 0600 in one step each, so the key never exists
+        // world-readable (the old write-then-chmod left a 0644 window).
+        crate::secure_file::ensure_private_dir(WG_CONF_DIR, 0o700)
             .with_context(|| format!("create {WG_CONF_DIR}"))?;
-        std::fs::set_permissions(
-            WG_CONF_DIR,
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )
-        .with_context(|| format!("chmod 700 {WG_CONF_DIR}"))?;
-
-        // Write the conf with mode 0600 + root:wheel ownership.
-        std::fs::write(&conf_path, &args.conf_content)
+        crate::secure_file::write_private(&conf_path, args.conf_content.as_bytes())
             .with_context(|| format!("write {}", conf_path.display()))?;
-        std::fs::set_permissions(
-            &conf_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .with_context(|| format!("chmod 600 {}", conf_path.display()))?;
 
         // Run `wg-quick up /etc/wireguard/<name>.conf` — absolute path,
         // not `wg-quick up <name>`. wg-quick on Mac (brew build) has

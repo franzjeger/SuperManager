@@ -355,19 +355,39 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
     // For each type, run `dns-sd -B <type>` for ~1 second, parse
     // discovered instance names. We can't do `dns-sd -L` inline
     // safely (it never exits) — for v1 we just record presence.
-    let mut hosts: HashMap<String, DiscoveredHost> = HashMap::new();
+    //
+    // The 22 service types are browsed CONCURRENTLY (join_all): each
+    // browse is an independent `dns-sd` subprocess with its own 800 ms
+    // budget, so wall-clock cost is ~one browse (≤ ~1.5 s) instead of
+    // 22 × 1.5 s ≈ 33 s. mDNS responses arrive in <1 s, so the extra
+    // parallelism is pure win.
     let now = chrono::Utc::now();
-
+    // Spawn one task per service type and await them all — concurrent, but
+    // no extra dependency (futures-util isn't a direct crate here).
+    let mut handles = Vec::with_capacity(interesting_types.len());
     for service_type in &interesting_types {
-        let result = tokio::time::timeout(
-            Duration::from_millis(800),
-            run_dns_sd_browse(service_type),
-        )
-        .await;
-        let entries = match result {
-            Ok(Ok(v)) => v,
-            _ => continue,
-        };
+        let st = *service_type;
+        handles.push(tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_millis(800),
+                run_dns_sd_browse(st),
+            )
+            .await;
+            match result {
+                Ok(Ok(v)) => (st, v),
+                _ => (st, Vec::new()),
+            }
+        }));
+    }
+    let mut browse_results = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(r) = h.await {
+            browse_results.push(r);
+        }
+    }
+
+    let mut hosts: HashMap<String, DiscoveredHost> = HashMap::new();
+    for (service_type, entries) in browse_results {
         for entry in entries {
             // entry: (instance_name, hostname-ish, ip, port)
             let key = entry.ip.clone().unwrap_or_else(|| entry.instance.clone());
@@ -386,7 +406,7 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
             host.services.push(DiscoveredService {
                 port: entry.port.unwrap_or(0),
                 protocol: "tcp".into(),
-                service_type: (*service_type).to_owned(),
+                service_type: service_type.to_owned(),
                 instance_name: Some(entry.instance.clone()),
                 txt_records: entry.txt_records,
             });
@@ -394,11 +414,8 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
                 host.hostname = entry.host.clone();
             }
         }
-        // Tiny cooperative yield so we don't monopolise the
-        // executor when many service types are queried in a row.
-        tokio::task::yield_now().await;
-        let _ = timeout;
     }
+    let _ = timeout;
 
     Ok(hosts.into_values().collect())
 }

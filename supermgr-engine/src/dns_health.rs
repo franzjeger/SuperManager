@@ -30,6 +30,14 @@ pub struct DnsHealthReport {
     pub dnssec: DnssecState,
     pub mx_records: Vec<String>,
     pub findings: Vec<Finding>,
+    /// Names of lookups that could not be completed (timeout, spawn
+    /// failure, non-zero exit). A finding for a check in this list is
+    /// intentionally NOT emitted — an absent record and a failed query
+    /// must not be reported the same way, or a transient DNS outage is
+    /// indistinguishable from "SPF/DNSSEC missing" and gets shipped to
+    /// the customer and PagerDuty as a real gap.
+    #[serde(default)]
+    pub query_failures: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,27 +74,52 @@ pub enum DnssecState {
 /// Run the full audit for a single domain.
 pub async fn audit(domain: &str) -> DnsHealthReport {
     let domain = domain.trim().trim_end_matches('.');
-    let (spf, dmarc, mta_sts, dnssec, mx, dkim) = tokio::join!(
-        check_spf(domain),
-        check_dmarc(domain),
-        check_mta_sts(domain),
-        check_dnssec(domain),
-        list_mx(domain),
-        find_dkim_selectors(domain),
-    );
+    let ((spf, spf_err), (dmarc, dmarc_err), (mta_sts, mta_err), (dnssec, dnssec_err), (mx, mx_err), dkim) =
+        tokio::join!(
+            check_spf(domain),
+            check_dmarc(domain),
+            check_mta_sts(domain),
+            check_dnssec(domain),
+            list_mx(domain),
+            find_dkim_selectors(domain),
+        );
+
+    // A check whose lookup failed is recorded, not reported as a gap.
+    let mut query_failures: Vec<String> = Vec::new();
+    if let Some(ref e) = spf_err { query_failures.push(format!("spf: {e}")); }
+    if let Some(ref e) = dmarc_err { query_failures.push(format!("dmarc: {e}")); }
+    if let Some(ref e) = mta_err { query_failures.push(format!("mta-sts: {e}")); }
+    if let Some(ref e) = dnssec_err { query_failures.push(format!("dnssec: {e}")); }
+    if let Some(ref e) = mx_err { query_failures.push(format!("mx: {e}")); }
+    if !dkim.any_succeeded {
+        if let Some(ref e) = dkim.first_error { query_failures.push(format!("dkim: {e}")); }
+    }
 
     let mut findings: Vec<Finding> = Vec::new();
-    derive_findings(domain, &spf, &dmarc, &mta_sts, &dnssec, &dkim, &mut findings);
+    derive_findings(
+        domain,
+        &spf,
+        &dmarc,
+        &mta_sts,
+        &dnssec,
+        &dkim,
+        spf_err.is_some(),
+        dmarc_err.is_some(),
+        mta_err.is_some(),
+        dnssec_err.is_some(),
+        &mut findings,
+    );
 
     DnsHealthReport {
         domain: domain.to_owned(),
         spf,
-        dkim_selectors_found: dkim,
+        dkim_selectors_found: dkim.found,
         dmarc,
         mta_sts,
         dnssec,
         mx_records: mx,
         findings,
+        query_failures,
     }
 }
 
@@ -94,22 +127,25 @@ pub async fn audit(domain: &str) -> DnsHealthReport {
 // Per-record checks
 // ---------------------------------------------------------------------------
 
-async fn check_spf(domain: &str) -> SpfState {
-    let txt = dig_txt(domain).await;
+async fn check_spf(domain: &str) -> (SpfState, Option<DigError>) {
+    let txt = match dig_txt(domain).await {
+        Ok(t) => t,
+        Err(e) => return (SpfState::Missing, Some(e)),
+    };
     let spf: Vec<String> = txt
         .iter()
         .filter(|r| r.to_lowercase().starts_with("v=spf1"))
         .cloned()
         .collect();
     if spf.is_empty() {
-        return SpfState::Missing;
+        return (SpfState::Missing, None);
     }
     if spf.len() > 1 {
-        return SpfState::Multiple { records: spf };
+        return (SpfState::Multiple { records: spf }, None);
     }
     let record = spf.into_iter().next().unwrap();
     let lower = record.to_lowercase();
-    if lower.contains(" -all") || lower.ends_with("-all") {
+    let state = if lower.contains(" -all") || lower.ends_with("-all") {
         SpfState::Strict { record }
     } else if lower.contains(" ~all") || lower.ends_with("~all") {
         SpfState::Soft { record }
@@ -119,62 +155,85 @@ async fn check_spf(domain: &str) -> SpfState {
         SpfState::Neutral { record }
     } else {
         SpfState::NoTerminator { record }
-    }
+    };
+    (state, None)
 }
 
-async fn check_dmarc(domain: &str) -> DmarcState {
+async fn check_dmarc(domain: &str) -> (DmarcState, Option<DigError>) {
     let target = format!("_dmarc.{domain}");
-    let records: Vec<String> = dig_txt(&target)
-        .await
-        .into_iter()
-        .filter(|r| r.to_lowercase().contains("v=dmarc1"))
-        .collect();
+    let records: Vec<String> = match dig_txt(&target).await {
+        Ok(r) => r,
+        Err(e) => return (DmarcState::Missing, Some(e)),
+    }
+    .into_iter()
+    .filter(|r| r.to_lowercase().contains("v=dmarc1"))
+    .collect();
     let Some(record) = records.into_iter().next() else {
-        return DmarcState::Missing;
+        return (DmarcState::Missing, None);
     };
     let lower = record.to_lowercase();
-    if lower.contains("p=reject") {
+    let state = if lower.contains("p=reject") {
         DmarcState::Reject { record }
     } else if lower.contains("p=quarantine") {
         DmarcState::Quarantine { record }
     } else {
         DmarcState::None { record }
-    }
+    };
+    (state, None)
 }
 
-async fn check_mta_sts(domain: &str) -> MtaStsState {
+async fn check_mta_sts(domain: &str) -> (MtaStsState, Option<DigError>) {
     let target = format!("_mta-sts.{domain}");
-    let records: Vec<String> = dig_txt(&target).await;
+    let records: Vec<String> = match dig_txt(&target).await {
+        Ok(r) => r,
+        Err(e) => return (MtaStsState::Missing, Some(e)),
+    };
     let mta = records.iter().find(|r| r.to_lowercase().contains("v=stsv1"));
     match mta {
-        None => MtaStsState::Missing,
+        None => (MtaStsState::Missing, None),
         Some(r) => {
             // Mode is set in the policy file at https://mta-sts.<domain>/.well-known/mta-sts.txt,
             // but the TXT record only confirms the policy version + ID.
             // We surface the TXT presence; mode would need an HTTP fetch.
             let _ = r;
-            MtaStsState::Present { mode: "TXT-published".into() }
+            (MtaStsState::Present { mode: "TXT-published".into() }, None)
         }
     }
 }
 
-async fn check_dnssec(domain: &str) -> DnssecState {
+async fn check_dnssec(domain: &str) -> (DnssecState, Option<DigError>) {
     // DS records live at the parent zone — `dig DS <domain>` asks
     // the parent. Count of records ≥ 1 indicates DNSSEC delegation.
-    let res = dig(domain, "DS").await;
+    let res = match dig(domain, "DS").await {
+        Ok(r) => r,
+        Err(e) => return (DnssecState::Disabled, Some(e)),
+    };
     let count = res.iter().filter(|line| !line.is_empty()).count() as u32;
-    if count == 0 {
+    let state = if count == 0 {
         DnssecState::Disabled
     } else {
         DnssecState::Enabled { ds_count: count }
+    };
+    (state, None)
+}
+
+async fn list_mx(domain: &str) -> (Vec<String>, Option<DigError>) {
+    match dig(domain, "MX").await {
+        Ok(r) => (r, None),
+        Err(e) => (Vec::new(), Some(e)),
     }
 }
 
-async fn list_mx(domain: &str) -> Vec<String> {
-    dig(domain, "MX").await
+/// DKIM probe result. `any_succeeded` distinguishes "we looked and found
+/// nothing" (a real gap) from "every probe failed" (a DNS outage — not a
+/// gap).
+struct DkimProbe {
+    found: Vec<String>,
+    any_succeeded: bool,
+    first_error: Option<DigError>,
 }
 
-async fn find_dkim_selectors(domain: &str) -> Vec<String> {
+async fn find_dkim_selectors(domain: &str) -> DkimProbe {
     // Try the most common selectors used by major mail providers.
     // No exhaustive enumeration — that would require an authoritative
     // source. This catches Microsoft 365, Google Workspace, Mailchimp,
@@ -191,14 +250,25 @@ async fn find_dkim_selectors(domain: &str) -> Vec<String> {
         "ml",                                // MailerLite
     ];
     let mut found: Vec<String> = Vec::new();
+    let mut any_succeeded = false;
+    let mut first_error: Option<DigError> = None;
     for sel in SELECTORS {
         let target = format!("{sel}._domainkey.{domain}");
-        let txt = dig_txt(&target).await;
-        if txt.iter().any(|r| r.to_lowercase().contains("v=dkim1")) {
-            found.push((*sel).to_owned());
+        match dig_txt(&target).await {
+            Ok(txt) => {
+                any_succeeded = true;
+                if txt.iter().any(|r| r.to_lowercase().contains("v=dkim1")) {
+                    found.push((*sel).to_owned());
+                }
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
         }
     }
-    found
+    DkimProbe { found, any_succeeded, first_error }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +281,11 @@ fn derive_findings(
     dmarc: &DmarcState,
     mta_sts: &MtaStsState,
     dnssec: &DnssecState,
-    dkim: &[String],
+    dkim: &DkimProbe,
+    spf_failed: bool,
+    dmarc_failed: bool,
+    mta_failed: bool,
+    dnssec_failed: bool,
     out: &mut Vec<Finding>,
 ) {
     let mk = |id: &str, sev: Severity, cvss: f32, title: String, detail: String, rec: String| Finding {
@@ -227,8 +301,9 @@ fn derive_findings(
         cvss: Some(cvss),
     };
 
-    // --- SPF ---
-    match spf {
+    // --- SPF --- (suppressed if the lookup itself failed)
+    if !spf_failed {
+        match spf {
         SpfState::Missing => out.push(mk(
             "dns.spf-missing",
             Severity::High,
@@ -262,10 +337,12 @@ fn derive_findings(
             "Append `-all` (strict) or `~all` (during rollout) to the record.".into(),
         )),
         SpfState::Soft { .. } | SpfState::Strict { .. } => {} // OK
+        }
     }
 
-    // --- DMARC ---
-    match dmarc {
+    // --- DMARC --- (suppressed if the lookup itself failed)
+    if !dmarc_failed {
+        match dmarc {
         DmarcState::Missing => out.push(mk(
             "dns.dmarc-missing",
             Severity::High,
@@ -283,10 +360,11 @@ fn derive_findings(
             "After auditing aggregate reports for ~30 days, escalate to `p=quarantine` and then `p=reject`.".into(),
         )),
         DmarcState::Quarantine { .. } | DmarcState::Reject { .. } => {}
+        }
     }
 
-    // --- DKIM ---
-    if dkim.is_empty() {
+    // --- DKIM --- (suppressed if every probe failed — a DNS outage is not a gap)
+    if dkim.any_succeeded && dkim.found.is_empty() {
         out.push(mk(
             "dns.dkim-missing",
             Severity::Medium,
@@ -297,8 +375,8 @@ fn derive_findings(
         ));
     }
 
-    // --- MTA-STS ---
-    if matches!(mta_sts, MtaStsState::Missing) {
+    // --- MTA-STS --- (suppressed if the lookup itself failed)
+    if !mta_failed && matches!(mta_sts, MtaStsState::Missing) {
         out.push(mk(
             "dns.mta-sts-missing",
             Severity::Low,
@@ -309,8 +387,8 @@ fn derive_findings(
         ));
     }
 
-    // --- DNSSEC ---
-    if matches!(dnssec, DnssecState::Disabled) {
+    // --- DNSSEC --- (suppressed if the lookup itself failed)
+    if !dnssec_failed && matches!(dnssec, DnssecState::Disabled) {
         out.push(mk(
             "dns.dnssec-disabled",
             Severity::Low,
@@ -326,13 +404,13 @@ fn derive_findings(
 // dig helpers
 // ---------------------------------------------------------------------------
 
-async fn dig_txt(name: &str) -> Vec<String> {
-    let lines = dig(name, "TXT").await;
+async fn dig_txt(name: &str) -> Result<Vec<String>, DigError> {
+    let lines = dig(name, "TXT").await?;
     // dig +short TXT returns lines like:
     //   "v=spf1 include:_spf.google.com -all"
     // Each value is double-quoted; multi-string TXTs come as several
     // adjacent quoted segments. Strip and concatenate.
-    lines
+    Ok(lines
         .into_iter()
         .map(|l| {
             // Concatenate all "..." segments on a line.
@@ -354,10 +432,15 @@ async fn dig_txt(name: &str) -> Vec<String> {
             }
         })
         .filter(|s| !s.is_empty())
-        .collect()
+        .collect())
 }
 
-async fn dig(name: &str, rrtype: &str) -> Vec<String> {
+/// A `dig` lookup that could not be completed. Kept as a plain string so
+/// the report can carry it verbatim; the cause is one of timeout, spawn
+/// failure, or a non-zero exit (SERVFAIL / NXDOMAIN handled by the caller).
+type DigError = String;
+
+async fn dig(name: &str, rrtype: &str) -> Result<Vec<String>, DigError> {
     let res = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new("dig")
@@ -365,18 +448,21 @@ async fn dig(name: &str, rrtype: &str) -> Vec<String> {
             .output(),
     )
     .await;
-    let Ok(Ok(out)) = res else {
-        return Vec::new();
+    let out = match res {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(format!("dig {rrtype} {name}: {e}")),
+        Err(_) => return Err(format!("dig {rrtype} {name}: timed out after 4s")),
     };
     if !out.status.success() {
-        return Vec::new();
+        let code = out.status.code().unwrap_or(-1);
+        return Err(format!("dig {rrtype} {name}: exit {code}"));
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    s.lines()
+    Ok(s.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -465,6 +551,10 @@ mod tests {
         }
     }
 
+    fn dkim(found: Vec<String>, any_succeeded: bool) -> DkimProbe {
+        DkimProbe { found, any_succeeded, first_error: None }
+    }
+
     #[test]
     fn derive_findings_flags_missing_spf_high() {
         let mut out = Vec::new();
@@ -474,7 +564,8 @@ mod tests {
             &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
-            &["selector1".into()],
+            &dkim(vec!["selector1".into()], true),
+            false, false, false, false,
             &mut out,
         );
         assert!(out.iter().any(|f| f.id == "dns.spf-missing"));
@@ -491,7 +582,8 @@ mod tests {
             &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
-            &["selector1".into()],
+            &dkim(vec!["selector1".into()], true),
+            false, false, false, false,
             &mut out,
         );
         let spf = out.iter().find(|f| f.id == "dns.spf-permissive").unwrap();
@@ -507,7 +599,8 @@ mod tests {
             &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
-            &["selector1".into()],
+            &dkim(vec!["selector1".into()], true),
+            false, false, false, false,
             &mut out,
         );
         assert!(out.is_empty(), "fully-locked-down DNS should produce no findings");
@@ -522,9 +615,44 @@ mod tests {
             &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
-            &[],  // no DKIM selectors
+            &dkim(Vec::new(), true),  // probes succeeded, none found
+            false, false, false, false,
             &mut out,
         );
         assert!(out.iter().any(|f| f.id == "dns.dkim-missing"));
+    }
+
+    #[test]
+    fn derive_findings_suppresses_spf_when_lookup_failed() {
+        // A failed SPF lookup must NOT be reported as "SPF missing".
+        let mut out = Vec::new();
+        derive_findings(
+            "example.com",
+            &SpfState::Missing,
+            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &MtaStsState::Present { mode: "TXT".into() },
+            &DnssecState::Enabled { ds_count: 1 },
+            &dkim(vec!["selector1".into()], true),
+            true, false, false, false,  // spf_failed
+            &mut out,
+        );
+        assert!(!out.iter().any(|f| f.id == "dns.spf-missing"));
+    }
+
+    #[test]
+    fn derive_findings_suppresses_dkim_when_all_probes_failed() {
+        // Every DKIM probe failed (DNS outage) — not a gap, no finding.
+        let mut out = Vec::new();
+        derive_findings(
+            "example.com",
+            &SpfState::Strict { record: "v=spf1 -all".into() },
+            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &MtaStsState::Present { mode: "TXT".into() },
+            &DnssecState::Enabled { ds_count: 1 },
+            &dkim(Vec::new(), false),  // no probe succeeded
+            false, false, false, false,
+            &mut out,
+        );
+        assert!(!out.iter().any(|f| f.id == "dns.dkim-missing"));
     }
 }

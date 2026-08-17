@@ -363,16 +363,15 @@ impl Strongswan {
                 "split-tunnel mode requires at least one route — got an empty list"
             ));
         }
-        tokio::fs::write(&conf_path, conf)
-            .await
+        // Both files live under root-owned /etc/swanctl, but write them at
+        // 0600 in one step so neither ever exists world-readable. The
+        // secrets file carries the EAP password and group PSK.
+        crate::secure_file::write_private(&conf_path, conf.as_bytes())
             .with_context(|| format!("write {}", conf_path.display()))?;
 
         let secrets = build_swanctl_secrets(args);
-        tokio::fs::write(&secrets_path, secrets)
-            .await
+        crate::secure_file::write_private(&secrets_path, secrets.as_bytes())
             .with_context(|| format!("write {}", secrets_path.display()))?;
-        // Keep credentials private even though we are root.
-        tokio::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600)).await.ok();
 
         run(self.swanctl.as_ref().unwrap(), &["--load-all"]).await?;
 
@@ -763,8 +762,6 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     }
     None
 }
-
-use std::os::unix::fs::PermissionsExt;
 
 async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new(bin).args(args).output().await?;

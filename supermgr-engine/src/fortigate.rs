@@ -28,7 +28,6 @@
 //! responses.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use supermgr_core::keyring::SecretStore;
@@ -38,12 +37,6 @@ use tracing::{info, warn};
 
 use crate::ssh::connection::SshSession;
 use crate::state::DaemonState;
-
-/// Default HTTP client timeout for FortiGate REST calls. FortiOS itself
-/// usually answers in <1 s on healthy hardware, but DNS lookups + slow
-/// WAN paths put us comfortably past that. 30 s mirrors the Linux
-/// daemon's fortigate_api so behaviour is consistent.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Outcome of a `fortigate_api` call. `status` is the raw HTTP status
 /// code (200, 401, 500, …); `body` is the response body (JSON for
@@ -112,11 +105,7 @@ pub async fn api_request(
     // would require pinning a fingerprint per host (a feature we'll
     // add in a later phase). The token-bearer auth in the header is
     // what actually authenticates the request.
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .context("build HTTP client")?;
+    let client = supermgr_core::http::insecure_client();
 
     let mut req = match method.to_uppercase().as_str() {
         "GET" => client.get(&url),

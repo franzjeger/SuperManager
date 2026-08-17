@@ -3182,7 +3182,7 @@ async fn send_provisioning_subscription(prompt: &str) -> anyhow::Result<String> 
 
 /// Send a provisioning prompt via the Anthropic API (API key mode).
 async fn send_provisioning_api(api_key: &str, prompt: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
     let body = serde_json::json!({
         "model": "claude-sonnet-4-20250514",
         "max_tokens": 8192,
@@ -3228,12 +3228,12 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
         anyhow::bail!("No configuration generated yet");
     }
 
-    let conn = zbus::Connection::system()
+    let conn = supermgr_core::client::system_connection()
         .await
         .context("D-Bus connection failed — is the daemon running?")?;
 
     // Use the daemon's SshExecute method to push config line by line
-    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn)
+    let proxy = supermgr_core::dbus::DaemonProxy::new(conn)
         .await
         .context("DaemonProxy creation failed")?;
 
@@ -3261,8 +3261,8 @@ async fn save_config_version_dbus(
     config: &str,
 ) -> anyhow::Result<String> {
     use supermgr_core::dbus::DaemonProxy;
-    let conn = zbus::Connection::system().await?;
-    let proxy = DaemonProxy::new(&conn).await?;
+    let conn = supermgr_core::client::system_connection().await?;
+    let proxy = DaemonProxy::new(conn).await?;
     let filename = proxy.save_config_version(customer, device_type, config).await?;
     Ok(filename)
 }
@@ -3270,8 +3270,8 @@ async fn save_config_version_dbus(
 /// List config versions for a customer via D-Bus.
 async fn list_config_versions_dbus(customer: &str) -> anyhow::Result<String> {
     use supermgr_core::dbus::DaemonProxy;
-    let conn = zbus::Connection::system().await?;
-    let proxy = DaemonProxy::new(&conn).await?;
+    let conn = supermgr_core::client::system_connection().await?;
+    let proxy = DaemonProxy::new(conn).await?;
     let json = proxy.list_config_versions(customer).await?;
     Ok(json)
 }
@@ -3279,8 +3279,8 @@ async fn list_config_versions_dbus(customer: &str) -> anyhow::Result<String> {
 /// Retrieve a config version by filename via D-Bus.
 async fn get_config_version_dbus(filename: &str) -> anyhow::Result<String> {
     use supermgr_core::dbus::DaemonProxy;
-    let conn = zbus::Connection::system().await?;
-    let proxy = DaemonProxy::new(&conn).await?;
+    let conn = supermgr_core::client::system_connection().await?;
+    let proxy = DaemonProxy::new(conn).await?;
     let config = proxy.get_config_version(filename).await?;
     Ok(config)
 }
@@ -4121,11 +4121,11 @@ fn crc32_simple(data: &[u8]) -> u32 {
 async fn fetch_device_config(host_id: &str, device_type: &str) -> anyhow::Result<String> {
     use anyhow::Context;
 
-    let conn = zbus::Connection::system()
+    let conn = supermgr_core::client::system_connection()
         .await
         .context("D-Bus connection failed — is the daemon running?")?;
 
-    let proxy = supermgr_core::dbus::DaemonProxy::new(&conn)
+    let proxy = supermgr_core::dbus::DaemonProxy::new(conn)
         .await
         .context("DaemonProxy creation failed")?;
 

@@ -47,7 +47,7 @@ async fn tick() -> anyhow::Result<()> {
 
     let engagements = engagement::list_all()?;
     let now = Utc::now();
-    for mut e in engagements {
+    for e in engagements {
         let Some(schedule) = e.schedule.clone() else {
             continue;
         };
@@ -97,15 +97,30 @@ async fn tick() -> anyhow::Result<()> {
             Err(err) => warn!("scheduler: {} failed: {err:#}", engagement_id),
         }
 
-        // Advance schedule and persist.
-        let new_next = schedule.cadence.advance(now);
-        e.schedule = Some(engagement::Schedule {
-            cadence: schedule.cadence,
-            next_scan_at: new_next,
-            last_scan_at: Some(now),
-        });
-        if let Err(err) = engagement::save(&e) {
-            warn!("scheduler: persist {} failed: {err:#}", e.id);
+        // Advance the schedule and persist — but against a FRESH copy of the
+        // engagement, not the one we read at the top of the tick. A scan can
+        // run for minutes; if the user edited the engagement (renamed it,
+        // changed scope, or cleared the schedule) during that window, writing
+        // back the stale `e` would clobber their changes. Reload, and apply
+        // only the schedule advancement to the current on-disk state.
+        match engagement::load(&engagement_id) {
+            Ok(mut fresh) => {
+                // If the user cleared the schedule mid-scan, respect it and
+                // do not re-arm it.
+                if let Some(current) = fresh.schedule.as_ref() {
+                    let new_next = current.cadence.advance(now);
+                    fresh.schedule = Some(engagement::Schedule {
+                        cadence: current.cadence,
+                        next_scan_at: new_next,
+                        last_scan_at: Some(now),
+                    });
+                }
+                if let Err(err) = engagement::save(&fresh) {
+                    warn!("scheduler: persist {} failed: {err:#}", engagement_id);
+                }
+            }
+            // Engagement deleted mid-scan — nothing to persist.
+            Err(_) => info!("scheduler: {} no longer exists, skipping persist", engagement_id),
         }
     }
     Ok(())

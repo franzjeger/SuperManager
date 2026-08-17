@@ -24,7 +24,6 @@
 //! the operator is responsible for.
 
 use std::collections::HashSet;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -48,12 +47,14 @@ pub async fn enumerate(domain: &str) -> Result<SubdomainResult> {
     }
     let url = format!("https://crt.sh/?q=%.{domain}&output=json");
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent("SuperManager/1.0 (Subdomain enum via CT logs)")
-        .build()?;
+    let client = supermgr_core::http::default_client();
 
-    let resp = client.get(&url).send().await.context("crt.sh GET")?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "SuperManager/1.0 (Subdomain enum via CT logs)")
+        .send()
+        .await
+        .context("crt.sh GET")?;
     if !resp.status().is_success() {
         anyhow::bail!("crt.sh returned {}", resp.status());
     }

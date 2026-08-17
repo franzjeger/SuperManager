@@ -836,8 +836,8 @@ pub fn refresh_host_key_row(
     let tx = tx.clone();
     rt.spawn(async move {
         let fingerprint = async {
-            let conn = zbus::Connection::system().await?;
-            let proxy = DaemonProxy::new(&conn).await?;
+            let conn = supermgr_core::client::system_connection().await?;
+            let proxy = DaemonProxy::new(conn).await?;
             let json = proxy.ssh_list_known_hosts().await?;
             let map: std::collections::HashMap<String, String> = serde_json::from_str(&json)?;
             Ok::<_, anyhow::Error>(map.get(&format!("{hostname}:{port}")).cloned())
@@ -926,8 +926,8 @@ pub fn refresh_fortigate_dashboard(
         }
 
         let result = async {
-            let conn = zbus::Connection::system().await?;
-            let proxy = DaemonProxy::new(&conn).await?;
+            let conn = supermgr_core::client::system_connection().await?;
+            let proxy = DaemonProxy::new(conn).await?;
             // Fetch system status (hostname, firmware, serial).
             let resp = proxy
                 .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/status", "")
@@ -1307,8 +1307,8 @@ pub fn run_fortigate_compliance(
     let tx = tx.clone();
     rt.spawn(async move {
         let result = async {
-            let conn = zbus::Connection::system().await?;
-            let proxy = DaemonProxy::new(&conn).await?;
+            let conn = supermgr_core::client::system_connection().await?;
+            let proxy = DaemonProxy::new(conn).await?;
             let resp = proxy
                 .fortigate_compliance_check(&host_id)
                 .await

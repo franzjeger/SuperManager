@@ -244,7 +244,7 @@ async fn pkce_auth_code_flow(
     info!("Azure: authorization code received, exchanging for tokens");
 
     // ── Token exchange ────────────────────────────────────────────────────────
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
     let token_url =
         format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
 
@@ -362,7 +362,7 @@ async fn try_refresh_token(
     audience: &str,
     refresh_token: &str,
 ) -> Result<(String, String), BackendError> {
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
     let token_url =
         format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
     let scope = format!("{audience}/.default openid offline_access profile");

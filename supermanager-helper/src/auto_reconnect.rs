@@ -260,10 +260,13 @@ pub async fn unguard_routes(profile_id: &str) -> Result<()> {
 }
 
 fn persist(map: &HashMap<String, WatchedProfile>) -> Result<()> {
-    let parent = Path::new(STATE_PATH).parent().unwrap();
-    fs::create_dir_all(parent).context("creating state dir")?;
+    let path = Path::new(STATE_PATH);
     let json = serde_json::to_string_pretty(map).context("encoding json")?;
-    fs::write(STATE_PATH, json).context("writing state file")?;
+    // The connect args embed the EAP password, group PSK and OpenVPN
+    // password — write them at 0600 in one step so they never exist
+    // world-readable (the old fs::write left them 0644 until the next write).
+    crate::secure_file::write_private_in_dir(path, json.as_bytes(), 0o700)
+        .context("writing state file")?;
     Ok(())
 }
 

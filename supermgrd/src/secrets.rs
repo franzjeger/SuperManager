@@ -28,9 +28,12 @@
 //! renamed over the target, so the main file is never partially written and
 //! is never world-readable.
 
-use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+
+use crate::secure_file;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 // ---------------------------------------------------------------------------
@@ -73,8 +76,11 @@ fn secrets_path() -> PathBuf {
 /// does not exist yet.
 async fn read_map() -> Result<HashMap<String, String>> {
     let path = secrets_path();
-    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        return Ok(HashMap::new());
+    match tokio::fs::try_exists(&path).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(HashMap::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(e) => return Err(e).with_context(|| format!("stat secrets file {}", path.display())),
     }
     let text = tokio::fs::read_to_string(&path)
         .await
@@ -100,16 +106,25 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
             .with_context(|| format!("create secrets directory {}", dir.display()))?;
     }
 
-    let tmp = path.with_extension("tmp");
+    // Write to a unique tmp sibling so concurrent writers can't clobber
+    // each other's in-flight bytes, then rename over the target.
+    let base = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("secrets.json");
+    let tmp = path.with_file_name(format!("{base}.{}.{}.tmp", std::process::id(), rand::random::<u32>()));
     let text = serde_json::to_string_pretty(map).context("serialise secrets map")?;
 
-    tokio::fs::write(&tmp, text.as_bytes())
+    // `write_private` creates the file at 0600 in one step (O_CREAT|O_EXCL
+    // with mode 0600), so the secret never exists at a wider mode. This is
+    // the same guarantee the VPN backends rely on — see secure_file. It is
+    // a blocking syscall, so run it off the async worker.
+    let tmp_for_io = tmp.clone();
+    let bytes = text.into_bytes();
+    tokio::task::spawn_blocking(move || secure_file::write_private(&tmp_for_io, &bytes, None))
         .await
+        .with_context(|| format!("spawn write of {}", tmp.display()))?
         .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
-
-    // chmod 600 — must happen before rename.
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", tmp.display()))?;
 
     tokio::fs::rename(&tmp, &path)
         .await
@@ -122,8 +137,18 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Process-wide lock serialising read-modify-write cycles.
+///
+/// Each mutating call does `read_map` → mutate → `write_map`. Without a lock
+/// two concurrent calls read the same snapshot, and one `rename` silently
+/// wins — the other caller's secret is lost. Holding this across the whole
+/// cycle makes the store behave like a single-writer file.
+static MUTEX: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Persist `value` bytes under `label`, replacing any existing entry.
 pub async fn store_secret(label: &str, value: &[u8]) -> Result<()> {
+    let _guard = MUTEX.lock().await;
     let mut map = read_map().await?;
     map.insert(label.to_owned(), STANDARD.encode(value));
     write_map(&map).await
@@ -151,6 +176,7 @@ pub async fn read_all_secrets() -> Result<HashMap<String, String>> {
 /// Store a pre-encoded (base64) secret directly — used by backup import
 /// to avoid double-encoding.
 pub async fn store_secret_raw(label: &str, base64_value: &str) -> Result<()> {
+    let _guard = MUTEX.lock().await;
     let mut map = read_map().await?;
     map.insert(label.to_owned(), base64_value.to_owned());
     write_map(&map).await
@@ -158,6 +184,7 @@ pub async fn store_secret_raw(label: &str, base64_value: &str) -> Result<()> {
 
 /// Remove the entry for `label`.  No-op if the label does not exist.
 pub async fn delete_secret(label: &str) -> Result<()> {
+    let _guard = MUTEX.lock().await;
     let mut map = read_map().await?;
     if map.remove(label).is_some() {
         write_map(&map).await?;

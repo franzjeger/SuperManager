@@ -37,8 +37,6 @@
 //! - <https://docs.sophos.com/nsg/sophos-firewall/22.0/Help/en-us/webhelp/onlinehelp/AdministratorHelp/Administration/API/APIConfiguration/index.html>
 //! - <https://docs.sophos.com/nsg/sophos-firewall/21.5/Help/en-us/webhelp/onlinehelp/AdministratorHelp/BackupAndFirmware/API/APIXMLTags/index.html>
 
-use std::time::Duration;
-
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
@@ -106,11 +104,8 @@ pub fn wrap_request(creds: &Credentials, inner_xml: &str) -> String {
 ///
 /// Self-signed certs on Sophos appliances are the norm, so verification is
 /// disabled. 30 s combined connect+read timeout matches the OPNsense client.
-fn http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(30))
-        .build()
+fn http_client() -> &'static reqwest::Client {
+    supermgr_core::http::insecure_client()
 }
 
 /// Send an XML Configuration API request.
@@ -132,7 +127,7 @@ pub async fn xml_request(
     let envelope = wrap_request(creds, inner_xml);
     debug!("sophos::xml_request -> {url}");
 
-    let client = http_client().map_err(|e| format!("HTTP client build failed: {e}"))?;
+    let client = http_client();
 
     // Sophos accepts the payload via `reqxml` form parameter on POST.
     let resp = client

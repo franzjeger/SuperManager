@@ -13,6 +13,9 @@ chrono         = { workspace = true }
 # Key-pair generation in `ssh::keygen`
 rand           = { workspace = true }
 ipnet          = { workspace = true }
+# Shared long-lived HTTP clients (see `http` module) so the daemon and GUI
+# reuse one connection pool instead of building a new one per request.
+reqwest        = { workspace = true }
 serde          = { workspace = true }
 serde_json     = { workspace = true }
 anyhow         = { workspace = true }

@@ -459,6 +459,7 @@ pub fn populate_vpn_sidebar(
             row.add_controller(gesture);
         }
 
+        row.set_widget_name(&profile.id.to_string());
         list_box.append(&row);
     }
 

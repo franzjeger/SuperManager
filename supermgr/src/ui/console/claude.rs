@@ -31,16 +31,6 @@ pub fn use_subscription() -> bool {
     crate::settings::AppSettings::load().use_claude_subscription
 }
 
-/// Check if Claude Code CLI is available.
-#[allow(dead_code)]
-pub fn has_claude_cli() -> bool {
-    std::process::Command::new("claude")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Path to the MCP server binary (next to the GUI binary, or in /usr/bin).
 fn mcp_binary_path() -> String {
     if let Ok(exe) = std::env::current_exe() {
@@ -412,21 +402,21 @@ pub async fn send_message(
 ) -> Result<Vec<Value>> {
     // Try D-Bus connection; if it fails (daemon restarted), notify the user
     // and retry once after a short delay.
-    let conn = match zbus::Connection::system().await {
+    let conn = match supermgr_core::client::system_connection().await {
         Ok(c) => c,
         Err(_) => {
             let _ = tx.send(AppMsg::ConsoleResponse(
                 "\nDaemon connection lost — reconnecting...\n".into(),
             ));
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            zbus::Connection::system()
+            supermgr_core::client::system_connection()
                 .await
                 .context("D-Bus reconnect failed — is the daemon running?")?
         }
     };
-    let proxy = DaemonProxy::new(&conn).await.context("DaemonProxy")?;
+    let proxy = DaemonProxy::new(conn).await.context("DaemonProxy")?;
 
-    let client = reqwest::Client::new();
+    let client = supermgr_core::http::default_client();
 
     // Build the full system prompt with injected state context.
     let full_system = format!("{SYSTEM_PROMPT}\n\n## Current State\n{context}");

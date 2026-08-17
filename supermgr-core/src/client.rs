@@ -22,6 +22,27 @@ pub type DaemonClient = crate::dbus::DaemonProxy<'static>;
 #[cfg(target_os = "windows")]
 pub use crate::pipe::PipeClient as DaemonClient;
 
+/// A process-wide cached system-bus D-Bus connection.
+///
+/// `zbus::Connection::system()` opens a new Unix socket and performs the
+/// D-Bus SASL (`EXTERNAL`) authentication handshake every time it is called.
+/// The GTK app made that call once per D-Bus operation (87 call sites),
+/// paying socket setup + auth latency on every button click and refresh.
+/// This caches one live connection per process so a `DaemonProxy` can be
+/// rebuilt cheaply from it without re-opening the bus.
+///
+/// `tokio::sync::OnceCell` is used rather than `std::sync::OnceLock` because
+/// the connection is created asynchronously and the cell must be initialized
+/// from within a tokio runtime (the GTK app drives all D-Bus calls from its
+/// multi-thread runtime). Failed initializations are *not* cached by
+/// `get_or_try_init`, so a daemon that is still starting up can be retried
+/// on the next call — matching the previous per-call retry behaviour.
+#[cfg(target_os = "linux")]
+pub async fn system_connection() -> Result<&'static zbus::Connection, zbus::Error> {
+    static CONN: tokio::sync::OnceCell<zbus::Connection> = tokio::sync::OnceCell::const_new();
+    CONN.get_or_try_init(|| async { zbus::Connection::system().await }).await
+}
+
 /// Connect to the local daemon.
 ///
 /// On Linux this acquires a system-bus connection and creates a `DaemonProxy`.
@@ -29,14 +50,10 @@ pub use crate::pipe::PipeClient as DaemonClient;
 /// in a string-typed wrapper to keep the API uniform across transports.
 #[cfg(target_os = "linux")]
 pub async fn connect() -> Result<DaemonClient, String> {
-    let conn = zbus::Connection::system()
+    let conn = system_connection()
         .await
-        .map_err(|e| format!("D-Bus system connection failed (is supermgrd running?): {e}"))?;
-    // Leak the connection so the proxy can carry a `'static` lifetime.
-    // Daemons are process-singletons; a single leaked connection per process
-    // is the standard zbus pattern for "long-lived proxy".
-    let conn_static: &'static zbus::Connection = Box::leak(Box::new(conn));
-    let proxy = crate::dbus::DaemonProxy::new(conn_static)
+        .map_err(|e| e.to_string())?;
+    let proxy = crate::dbus::DaemonProxy::new(conn)
         .await
         .map_err(|e| format!("failed to create DaemonProxy: {e}"))?;
     Ok(proxy)

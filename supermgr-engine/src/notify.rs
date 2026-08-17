@@ -138,13 +138,11 @@ pub async fn notify_scan_diff(customer_slug: &str, diff: &ScanDiff) -> Result<bo
     }
 
     let payload = build_payload(customer_slug, diff, &alarming_new, &alarming_regressed);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("build notify client")?;
+    let client = supermgr_core::http::default_client();
     let resp = client
         .post(&url)
         .json(&payload)
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .context("post webhook")?;
@@ -219,10 +217,7 @@ async fn pagerduty_event(
     customer_slug: &str,
     findings: &[&PersistedFinding],
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("build pagerduty client")?;
+    let client = supermgr_core::http::default_client();
 
     for f in findings {
         let dedup_key = format!("supermgr:{customer_slug}:{}", f.key);
@@ -248,6 +243,7 @@ async fn pagerduty_event(
         let resp = client
             .post("https://events.pagerduty.com/v2/enqueue")
             .json(&payload)
+            .timeout(Duration::from_secs(10))
             .send()
             .await
             .context("post pagerduty")?;
@@ -266,10 +262,7 @@ async fn opsgenie_alert(
     customer_slug: &str,
     findings: &[&PersistedFinding],
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("build opsgenie client")?;
+    let client = supermgr_core::http::default_client();
 
     for f in findings {
         let alias = format!("supermgr-{customer_slug}-{}", f.key);
@@ -295,6 +288,7 @@ async fn opsgenie_alert(
             .post("https://api.opsgenie.com/v2/alerts")
             .header("Authorization", format!("GenieKey {api_key}"))
             .json(&payload)
+            .timeout(Duration::from_secs(10))
             .send()
             .await
             .context("post opsgenie")?;

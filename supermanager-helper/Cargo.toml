@@ -29,6 +29,9 @@ libc               = "0.2"
 # (kernel's IFNAMSIZ-1 limit). Workspace already pins SHA-256.
 sha2               = { workspace = true }
 
+[dev-dependencies]
+tempfile = "3"
+
 # Helper needs `unsafe` for libc::geteuid / chown / getgrnam — there's no
 # safe-Rust equivalent for "what is my effective UID" or chown-by-path.
 # Inheriting the workspace lints would `forbid` unsafe; we explicitly allow it

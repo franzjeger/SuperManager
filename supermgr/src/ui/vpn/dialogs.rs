@@ -1153,9 +1153,9 @@ pub fn show_logs_dialog(
             text_view.buffer().set_text("");
             // Clear daemon log buffer so old entries don't come back.
             rt.spawn(async {
-                let conn = zbus::Connection::system().await.ok();
+                let conn = supermgr_core::client::system_connection().await.ok();
                 if let Some(conn) = conn {
-                    if let Ok(proxy) = supermgr_core::dbus::DaemonProxy::new(&conn).await {
+                    if let Ok(proxy) = supermgr_core::dbus::DaemonProxy::new(conn).await {
                         let _ = proxy.clear_logs().await;
                     }
                 }

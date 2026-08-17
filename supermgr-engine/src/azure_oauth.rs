@@ -97,9 +97,7 @@ pub async fn start_device_flow(
     tenant: &str,
     audience: &str,
 ) -> anyhow::Result<DeviceCodeStart> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = supermgr_core::http::default_client();
 
     let scope = format!("{audience}/.default offline_access openid profile");
     let body = format!(
@@ -112,6 +110,7 @@ pub async fn start_device_flow(
         .post(devicecode_url(tenant))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?;
 
@@ -134,9 +133,7 @@ pub async fn poll_token(
     tenant: &str,
     device_code: &str,
 ) -> anyhow::Result<DeviceCodePoll> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = supermgr_core::http::default_client();
 
     let body = format!(
         "grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id={}&device_code={}",
@@ -148,6 +145,7 @@ pub async fn poll_token(
         .post(token_url(tenant))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?;
 

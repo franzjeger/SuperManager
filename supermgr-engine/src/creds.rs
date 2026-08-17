@@ -125,10 +125,14 @@ pub async fn ssh_test_defaults(host: &str, port: u16) -> Vec<Finding> {
                     port: Some(port),
                     service: Some("ssh".into()),
                     severity: Severity::Critical,
+                    // The password is deliberately NOT in the title: findings
+                    // are shipped to the customer, PagerDuty and written to
+                    // disk, and a credential string there is a leak. The
+                    // `detail` below names the credential source so the
+                    // operator still knows exactly which default matched.
                     title: format!(
-                        "SSH accepts default credentials: {}:{}",
-                        pair.username,
-                        if pair.password.is_empty() { "(empty)" } else { &pair.password }
+                        "SSH accepts default credentials for user '{}'",
+                        pair.username
                     ),
                     detail: format!(
                         "Authenticated as '{}' using {}. This is a complete compromise of remote management.",
@@ -262,10 +266,14 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
                     port: Some(port),
                     service: Some(if tls { "https" } else { "http" }.into()),
                     severity: Severity::Critical,
+                    // The password is deliberately NOT in the title: findings
+                    // are shipped to the customer, PagerDuty and written to
+                    // disk, and a credential string there is a leak. The
+                    // `detail` below names the credential source so the
+                    // operator still knows exactly which default matched.
                     title: format!(
-                        "HTTP basic-auth accepts default credentials: {}:{}",
-                        pair.username,
-                        if pair.password.is_empty() { "(empty)" } else { &pair.password }
+                        "HTTP basic-auth accepts default credentials for user '{}'",
+                        pair.username
                     ),
                     detail: format!(
                         "{} returns {status} with basic-auth {}. Likely compromisable web admin.",

@@ -250,7 +250,15 @@ pub fn save_store(
             reason: format!("create dir {}: {e}", dir.display()),
         })?;
     let path = store_file(customer_slug);
-    let tmp = path.with_extension("json.tmp");
+    // Unique tmp name per call: a fixed name lets two concurrent writers for
+    // the same scope clobber each other's in-flight bytes before the rename.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(
+        "findings.{}.{}.tmp",
+        std::process::id(),
+        nonce
+    ));
     let bytes = serde_json::to_vec_pretty(store)
         .map_err(|e| FindingsError::Io {
             reason: format!("serialize: {e}"),
@@ -399,6 +407,13 @@ pub fn set_disposition(
     by: &str,
     note: &str,
 ) -> Result<PersistedFinding> {
+    // Same per-scope lock `reconcile` holds across its load→modify→save
+    // cycle. Without it a background scan and an operator's disposition
+    // change for the same customer race: each reads the other's stale
+    // snapshot and one rename silently wins, dropping the audit history.
+    let lock = scope_lock(customer_slug);
+    let _guard = lock.lock().expect("scope lock poisoned");
+
     let mut store = load_store(customer_slug)?;
     let existing = store
         .findings
