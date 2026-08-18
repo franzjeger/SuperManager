@@ -69,8 +69,17 @@ pub fn load() -> FeedCache {
         return FeedCache::default();
     }
     match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => FeedCache::default(),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(cache) => cache,
+            Err(e) => {
+                tracing::warn!("cve_feed cache at {path:?} is corrupt ({e}); starting empty");
+                FeedCache::default()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("cve_feed cache at {path:?} unreadable ({e}); starting empty");
+            FeedCache::default()
+        }
     }
 }
 

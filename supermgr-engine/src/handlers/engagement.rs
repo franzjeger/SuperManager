@@ -121,7 +121,16 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("failed to load findings: {e:#}"),
+                )
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {
@@ -152,7 +161,16 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("failed to load findings: {e:#}"),
+                )
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {
@@ -183,7 +201,16 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("failed to load findings: {e:#}"),
+                )
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {

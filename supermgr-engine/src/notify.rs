@@ -54,8 +54,17 @@ pub fn load_config() -> NotifyConfig {
         return NotifyConfig::default();
     }
     match std::fs::read_to_string(&path) {
-        Ok(s) => toml::from_str(&s).unwrap_or_default(),
-        Err(_) => NotifyConfig::default(),
+        Ok(s) => match toml::from_str(&s) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!("notify config at {path:?} is corrupt ({e}); alerting disabled until fixed");
+                NotifyConfig::default()
+            }
+        },
+        Err(e) => {
+            tracing::warn!("notify config at {path:?} unreadable ({e}); alerting disabled until fixed");
+            NotifyConfig::default()
+        }
     }
 }
 

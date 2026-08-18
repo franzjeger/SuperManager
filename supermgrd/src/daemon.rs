@@ -1373,7 +1373,8 @@ impl DaemonService {
                                 &peer.public_key[..8.min(peer.public_key.len())]
                             );
                             if let Ok(existing) = secrets::retrieve_secret(old_psk.label()).await {
-                                let _ = secrets::store_secret(&new_psk_label, &existing).await;
+                                secrets::store_secret(&new_psk_label, &existing).await
+                                    .map_err(|e| fdo::Error::Failed(format!("store secret: {e}")))?;
                             }
                             peer.preshared_key = Some(SecretRef::new(new_psk_label));
                         }
@@ -2189,7 +2190,12 @@ impl DaemonService {
         // Apply only the fields present in the update.
         if let Some(v) = updates.get("label").and_then(|v| v.as_str()) { host.label = v.to_owned(); }
         if let Some(v) = updates.get("hostname").and_then(|v| v.as_str()) { host.hostname = v.to_owned(); }
-        if let Some(v) = updates.get("port").and_then(|v| v.as_u64()) { host.port = v as u16; }
+        if let Some(v) = updates.get("port").and_then(|v| v.as_u64()) {
+            if !(1..=65535).contains(&v) {
+                return Err(fdo::Error::InvalidArgs(format!("port {v} out of range 1-65535")));
+            }
+            host.port = v as u16;
+        }
         if let Some(v) = updates.get("username").and_then(|v| v.as_str()) { host.username = v.to_owned(); }
         if let Some(v) = updates.get("group").and_then(|v| v.as_str()) { host.group = v.to_owned(); }
         if let Some(v) = updates.get("device_type").and_then(|v| v.as_str()) {
@@ -2228,14 +2234,27 @@ impl DaemonService {
             host.proxy_jump = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         }
         if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
+            if v > 0 && !(1..=65535).contains(&v) {
+                return Err(fdo::Error::InvalidArgs(format!("api_port {v} out of range 1-65535")));
+            }
             host.api_port = Some(v as u16);
         }
         // RDP/VNC ports: 0 or null means "not configured".
         if let Some(v) = updates.get("rdp_port") {
-            host.rdp_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+            match v.as_u64().filter(|&p| p > 0) {
+                Some(p) if !(1..=65535).contains(&p) => {
+                    return Err(fdo::Error::InvalidArgs(format!("rdp_port {p} out of range 1-65535")));
+                }
+                other => host.rdp_port = other.map(|p| p as u16),
+            }
         }
         if let Some(v) = updates.get("vnc_port") {
-            host.vnc_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+            match v.as_u64().filter(|&p| p > 0) {
+                Some(p) if !(1..=65535).contains(&p) => {
+                    return Err(fdo::Error::InvalidArgs(format!("vnc_port {p} out of range 1-65535")));
+                }
+                other => host.vnc_port = other.map(|p| p as u16),
+            }
         }
         if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
             host.pinned = v;
@@ -2337,6 +2356,10 @@ impl DaemonService {
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
         let host = state.hosts.remove(&id);
+        // Drop the cached reachability too, otherwise the entry lingers in
+        // `host_health` forever (the health task only ever inserts for live
+        // hosts) and the GUI shows a phantom host.
+        state.host_health.remove(&id);
         let _ = state.delete_host_file(id);
         drop(state);
 

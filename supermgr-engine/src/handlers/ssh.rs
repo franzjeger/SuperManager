@@ -355,7 +355,9 @@ impl EngineServer {
             None => return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {}", p.host_id)),
         };
 
-        merge_host_update(&mut host, &incoming);
+        if let Err(e) = merge_host_update(&mut host, &incoming) {
+            return Response::err(id, protocol::INVALID_PARAMS, e);
+        }
         host.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.save_ssh_host(&host) {
@@ -398,6 +400,9 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         let removed = state.ssh_hosts.remove(&host_id);
         if removed.is_some() {
+            // Drop the cached reachability too, otherwise the entry lingers in
+            // `host_health` forever and the GUI shows a phantom host.
+            state.host_health.remove(&host_id);
             let _ = state.delete_ssh_host_file(host_id);
         }
         drop(state);

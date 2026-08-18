@@ -681,7 +681,7 @@ pub(crate) fn parse_ipnet_list(v: Option<&serde_json::Value>) -> Vec<ipnet::IpNe
 /// approach silently destroyed those fields on every edit, which meant
 /// editing a host's port wiped its stored password. We now whitelist the
 /// editable fields explicitly.
-pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
+pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) -> Result<(), String> {
     if let Some(s) = incoming.get("label").and_then(|v| v.as_str()) {
         host.label = s.to_owned();
     }
@@ -689,6 +689,9 @@ pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
         host.hostname = s.to_owned();
     }
     if let Some(n) = incoming.get("port").and_then(|v| v.as_u64()) {
+        if !(1..=65535).contains(&n) {
+            return Err(format!("port {n} out of range 1-65535"));
+        }
         host.port = n as u16;
     }
     if let Some(s) = incoming.get("username").and_then(|v| v.as_str()) {
@@ -713,6 +716,7 @@ pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) {
     if let Some(v) = incoming.get("vpn_profile_id") {
         host.vpn_profile_id = serde_json::from_value(v.clone()).ok();
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -890,7 +894,7 @@ mod tests {
             "auth_method": "password",
             "auth_key_id": null,
         });
-        merge_host_update(&mut host, &incoming);
+        merge_host_update(&mut host, &incoming).unwrap();
 
         // Editable fields took the new value
         assert_eq!(host.label, "new-label");
@@ -933,7 +937,7 @@ mod tests {
             "auth_cert_ref": "supermgr/ssh/host/somebody-elses-host/certificate",
             "auth_password_ref": "supermgr/ssh/host/somebody-elses-host/password",
         });
-        merge_host_update(&mut host, &incoming);
+        merge_host_update(&mut host, &incoming).unwrap();
 
         assert_eq!(
             host.auth_cert_ref.as_ref().map(|s| &s.0),
@@ -957,7 +961,7 @@ mod tests {
             "weird_field": "hello",
             "another_unknown": 42,
         });
-        merge_host_update(&mut host, &incoming);
+        merge_host_update(&mut host, &incoming).unwrap();
         assert_eq!(host.label, original_label, "unknown fields should be a no-op");
     }
 
@@ -967,7 +971,7 @@ mod tests {
         let mut host = full_host();
         host.auth_key_id = Some(uuid::Uuid::nil());
         let incoming = serde_json::json!({ "auth_key_id": null });
-        merge_host_update(&mut host, &incoming);
+        merge_host_update(&mut host, &incoming).unwrap();
         assert!(host.auth_key_id.is_none());
     }
 }

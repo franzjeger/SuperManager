@@ -32,7 +32,10 @@ impl FileSecretStore {
     }
 
     async fn read_map(&self) -> Result<HashMap<String, String>> {
-        if !tokio::fs::try_exists(&self.path).await.unwrap_or(false) {
+        let exists = tokio::fs::try_exists(&self.path)
+            .await
+            .with_context(|| format!("stat secrets file {}", self.path.display()))?;
+        if !exists {
             return Ok(HashMap::new());
         }
         let text = tokio::fs::read_to_string(&self.path)

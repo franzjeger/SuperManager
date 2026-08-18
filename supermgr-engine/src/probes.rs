@@ -682,6 +682,7 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("spawn openssl: {e}"))?;
 
@@ -766,6 +767,7 @@ async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("spawn openssl cipher {family}: {e}"))?;
     if let Some(stdin) = child.stdin.as_mut() {
@@ -880,6 +882,7 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("spawn openssl proto {proto_flag}: {e}"))?;
     if let Some(stdin) = child.stdin.as_mut() {

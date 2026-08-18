@@ -196,7 +196,7 @@ pub fn reconcile_host(
         stable_since: baseline.stable_since.or(Some(now)),
         updated_at: now,
     };
-    save(customer_slug, host_ip, &new_baseline).ok();
+    save(customer_slug, host_ip, &new_baseline)?;
 
     let _ = baseline.stable_since.is_some();  // touch to avoid dead-code lint
     Ok(findings)

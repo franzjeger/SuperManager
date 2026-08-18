@@ -240,7 +240,10 @@ fn dp_delete(label: &str) -> Result<(), SecretError> {
 pub async fn migrate_from_file(secrets_json_path: &std::path::Path) -> anyhow::Result<()> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    if !tokio::fs::try_exists(secrets_json_path).await.unwrap_or(false) {
+    let exists = tokio::fs::try_exists(secrets_json_path)
+        .await
+        .with_context(|| format!("stat {}", secrets_json_path.display()))?;
+    if !exists {
         return Ok(());
     }
 

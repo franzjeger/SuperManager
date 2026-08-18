@@ -140,7 +140,16 @@ impl EngineServer {
                 return r;
             }
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("failed to load findings: {e:#}"),
+                )
+            }
+        };
         // Pull host zones from the most recent inventory snapshot —
         // best-effort; missing inventory just means no exposure
         // multiplier (factor stays 1.0).

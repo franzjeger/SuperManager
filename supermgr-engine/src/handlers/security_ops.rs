@@ -13,7 +13,16 @@ impl EngineServer {
         let host_filter = params.get("host").and_then(|v| v.as_str()).map(str::to_owned);
         let key_filter = params.get("key").and_then(|v| v.as_str()).map(str::to_owned);
 
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("failed to load findings: {e:#}"),
+                )
+            }
+        };
         let selected: Vec<crate::vuln::Finding> = findings
             .into_iter()
             .filter(|f| {
