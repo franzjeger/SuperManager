@@ -490,11 +490,19 @@ impl EngineServer {
         }
 
         let secret_label = format!("supermgr/ssh/host/{host_id}/certificate");
+        let mut state = self.state.lock().await;
+        // Check the host exists BEFORE storing the secret. Storing first
+        // and returning success for an unknown host_id (a stale id, or a
+        // host removed between list and set) left a certificate secret no
+        // Host references — which the secret_labels()-driven cleanup on
+        // host delete never reaches. Held under the one lock so the host
+        // cannot vanish between the check and the update.
+        if !state.ssh_hosts.contains_key(&host_id) {
+            return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned());
+        }
         if let Err(e) = self.secrets.store(&secret_label, certificate.as_bytes()).await {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
-
-        let mut state = self.state.lock().await;
         if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
             host.auth_cert_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             host.updated_at = chrono::Utc::now();
@@ -581,11 +589,16 @@ impl EngineServer {
             .unwrap_or(443);
 
         let label = format!("ssh/{}/fortigate-api-token", host_id.simple());
+        let mut state = self.state.lock().await;
+        // Check the host exists before storing — same reason as
+        // set_certificate. This handler already errored on a missing host,
+        // but only after storing the token, orphaning it.
+        if !state.ssh_hosts.contains_key(&host_id) {
+            return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned());
+        }
         if let Err(e) = self.secrets.store(&label, token.as_bytes()).await {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store token: {e}"));
         }
-
-        let mut state = self.state.lock().await;
         let host = match state.ssh_hosts.get_mut(&host_id) {
             Some(h) => h,
             None => return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned()),
