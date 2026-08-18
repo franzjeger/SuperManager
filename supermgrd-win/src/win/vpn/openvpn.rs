@@ -58,10 +58,6 @@ struct OvpnActive {
     /// Writer half of the management TCP connection. Disconnect uses
     /// it to send `signal SIGTERM`.
     mgmt_writer: tokio::net::tcp::OwnedWriteHalf,
-    /// Path to the temporary auth-user-pass file we created, if any.
-    /// Cleaned up on disconnect — leaving it would leave plaintext
-    /// credentials on disk.
-    auth_file: Option<PathBuf>,
 }
 
 /// Windows OpenVPN backend.
@@ -177,7 +173,13 @@ impl OpenVpnBackend {
         let openvpn_exe = locate_openvpn()?;
         let mgmt_port = pick_free_port().await?;
 
-        let auth_file = if let (Some(username), Some(password_ref)) =
+        // Credentials are supplied over the management interface's password
+        // query (answered in `wait_for_connected`), never written to disk.
+        // The previous implementation wrote them to
+        // `C:\ProgramData\SuperManager\runtime\openvpn-<id>.auth`, and
+        // ProgramData leaves that file readable by every authenticated local
+        // user for as long as the tunnel is up.
+        let auth_creds: Option<(String, String)> = if let (Some(username), Some(password_ref)) =
             (&cfg.username, &cfg.password)
         {
             let store = self.secret_store.as_ref().ok_or_else(|| {
@@ -195,15 +197,7 @@ impl OpenVpnBackend {
             let password_str = std::str::from_utf8(&password).map_err(|_| {
                 VpnError::MissingDependency("stored OpenVPN password is not valid UTF-8".into())
             })?;
-            let runtime_dir = PathBuf::from(r"C:\ProgramData\SuperManager\runtime");
-            std::fs::create_dir_all(&runtime_dir).map_err(VpnError::Io)?;
-            let auth_path = runtime_dir.join(format!("openvpn-{}.auth", profile.id.simple()));
-            std::fs::write(
-                &auth_path,
-                format!("{username}\n{password_str}\n"),
-            )
-            .map_err(VpnError::Io)?;
-            Some(auth_path)
+            Some((username.clone(), password_str.to_owned()))
         } else {
             None
         };
@@ -224,8 +218,13 @@ impl OpenVpnBackend {
             .arg("stdin")
             .arg("--management-hold")
             .arg("--management-query-passwords");
-        if let Some(p) = &auth_file {
-            command.arg("--auth-user-pass").arg(p);
+        if auth_creds.is_some() {
+            // No file argument: with --management-query-passwords this makes
+            // OpenVPN request the credentials over the management interface,
+            // which we answer in memory. A CLI --auth-user-pass overrides any
+            // auth-user-pass directive in the config, preserving the previous
+            // "we supply the credentials" behaviour without the file.
+            command.arg("--auth-user-pass");
         }
         command
             .stdout(std::process::Stdio::piped())
@@ -258,7 +257,6 @@ impl OpenVpnBackend {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 let _ = child.kill().await;
-                cleanup_auth(&auth_file);
                 return Err(VpnError::Subprocess {
                     code: -1,
                     stderr: format!("connect to management socket: {e}"),
@@ -266,7 +264,6 @@ impl OpenVpnBackend {
             }
             Err(_) => {
                 let _ = child.kill().await;
-                cleanup_auth(&auth_file);
                 return Err(VpnError::Subprocess {
                     code: -1,
                     stderr: "openvpn did not open management socket within 5 s".into(),
@@ -283,17 +280,15 @@ impl OpenVpnBackend {
         write_mgmt(&mut writer, "state on\n").await?;
         write_mgmt(&mut writer, "hold release\n").await?;
 
-        let success = timeout(HANDSHAKE_TIMEOUT, wait_for_connected(&mut reader)).await;
+        let success = timeout(HANDSHAKE_TIMEOUT, wait_for_connected(&mut reader, &mut writer, auth_creds.as_ref())).await;
         match success {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let _ = child.kill().await;
-                cleanup_auth(&auth_file);
                 return Err(e);
             }
             Err(_) => {
                 let _ = child.kill().await;
-                cleanup_auth(&auth_file);
                 return Err(VpnError::Subprocess {
                     code: -1,
                     stderr: format!("openvpn handshake exceeded {HANDSHAKE_TIMEOUT:?}"),
@@ -322,7 +317,6 @@ impl OpenVpnBackend {
             profile_id: profile.id,
             child,
             mgmt_writer: writer,
-            auth_file,
         });
         Ok(())
     }
@@ -383,6 +377,16 @@ async fn connect_mgmt(addr: SocketAddr) -> Result<TcpStream, std::io::Error> {
     }))
 }
 
+/// Escape a string for the OpenVPN management interface's quoted-string
+/// form. Inside `"..."`, backslash and double-quote must be backslash-
+/// escaped, backslashes first. A password containing `"` would otherwise
+/// close the argument early and corrupt the credential — a hazard the
+/// old file-based path never had, introduced by moving to the socket and
+/// contained here.
+fn mgmt_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 async fn write_mgmt(
     w: &mut tokio::net::tcp::OwnedWriteHalf,
     line: &str,
@@ -395,6 +399,8 @@ async fn write_mgmt(
 /// error variants).
 async fn wait_for_connected(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    auth_creds: Option<&(String, String)>,
 ) -> Result<(), VpnError> {
     let mut line = String::new();
     loop {
@@ -427,6 +433,24 @@ async fn wait_for_connected(
                 code: -1,
                 stderr: format!("openvpn fatal: {rest}"),
             });
+        } else if trimmed.starts_with(">PASSWORD:Need 'Auth'") {
+            // OpenVPN is requesting auth-user-pass credentials over the
+            // management interface (we pass --auth-user-pass with no file).
+            // Answer from memory. The quoted-string form needs backslash and
+            // double-quote escaped, or a password containing `"` would
+            // terminate the argument early.
+            match auth_creds {
+                Some((user, pass)) => {
+                    write_mgmt(writer, &format!("username \"Auth\" \"{}\"\n", mgmt_escape(user))).await?;
+                    write_mgmt(writer, &format!("password \"Auth\" \"{}\"\n", mgmt_escape(pass))).await?;
+                }
+                None => {
+                    return Err(VpnError::Subprocess {
+                        code: -1,
+                        stderr: "server requires auth-user-pass but the profile has no stored credentials".into(),
+                    });
+                }
+            }
         } else if trimmed.starts_with(">PASSWORD:Verification Failed") {
             return Err(VpnError::Subprocess {
                 code: -1,
@@ -448,13 +472,31 @@ async fn tear_down(mut active: OvpnActive) {
             let _ = active.child.kill().await;
         }
     }
-    cleanup_auth(&active.auth_file);
 }
 
-fn cleanup_auth(path: &Option<PathBuf>) {
-    if let Some(p) = path {
-        if let Err(e) = std::fs::remove_file(p) {
-            warn!("remove openvpn auth file {}: {e}", p.display());
-        }
+
+#[cfg(test)]
+mod tests {
+    use super::mgmt_escape;
+
+    #[test]
+    fn plain_credential_is_unchanged() {
+        assert_eq!(mgmt_escape("hunter2"), "hunter2");
+    }
+
+    /// A password with a double-quote must not be able to terminate the
+    /// management argument early — that would corrupt auth or, worse,
+    /// let a crafted password inject a management command.
+    #[test]
+    fn double_quote_is_escaped() {
+        assert_eq!(mgmt_escape(r#"pa"ss"#), r#"pa\"ss"#);
+    }
+
+    /// Backslashes are escaped first, so `\` followed by `"` does not
+    /// collapse into an escaped quote by accident.
+    #[test]
+    fn backslash_is_escaped_before_quote() {
+        assert_eq!(mgmt_escape(r#"a\b"#), r#"a\\b"#);
+        assert_eq!(mgmt_escape(r#"\""#), r#"\\\""#);
     }
 }
