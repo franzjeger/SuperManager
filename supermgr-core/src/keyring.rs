@@ -363,8 +363,23 @@ const WIN_CRED_MAX_BLOB: usize = 2400;
 /// ASCII prefix written into the primary credential entry when a secret has
 /// been split across multiple chunks.  Real secrets (PEM keys, passwords,
 /// PSKs) never start with this string.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 const CHUNK_PREFIX: &str = "SMCHNK:";
+
+/// If `primary` is a chunk manifest (`SMCHNK:<n>`), its chunk count.
+///
+/// One parser shared by `store`, `retrieve` and `delete` so the marker
+/// format lives in a single place — the three inlined copies had already
+/// drifted into subtly different control flow. Gated to compile where it
+/// is used: the Windows store, and the tests on any host.
+#[cfg(any(target_os = "windows", test))]
+fn parse_chunk_count(primary: &[u8]) -> Option<usize> {
+    std::str::from_utf8(primary)
+        .ok()?
+        .strip_prefix(CHUNK_PREFIX)?
+        .parse()
+        .ok()
+}
 
 #[cfg(target_os = "windows")]
 const WIN_KEYRING_SERVICE: &str = "com.sybr.supermanager";
@@ -455,6 +470,22 @@ impl Default for CredentialManagerStore {
 #[async_trait]
 impl SecretStore for CredentialManagerStore {
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
+        // Remove any prior representation's chunks before writing the new
+        // one. Each store writes a marker naming exactly N chunks, so the
+        // current primary says precisely what the last store left behind:
+        // a marker => that many chunk entries, raw bytes => none. Without
+        // this, replacing a chunked secret with a smaller or single-entry
+        // one orphaned the tail chunks — plaintext key fragments that
+        // `delete` then never reached, because it saw a non-marker primary
+        // and erased only that.
+        if let Ok(existing) = Self::read_one(label.to_owned()).await {
+            if let Some(n) = parse_chunk_count(&existing) {
+                for i in 0..n {
+                    Self::erase_one_best_effort(format!("{label}:chunk:{i}")).await;
+                }
+            }
+        }
+
         if secret.len() <= WIN_CRED_MAX_BLOB {
             // Fits in one entry — direct write.
             Self::write_one(label.to_owned(), secret.to_vec()).await
@@ -478,19 +509,14 @@ impl SecretStore for CredentialManagerStore {
     async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
         let primary = Self::read_one(label.to_owned()).await?;
 
-        // Check whether this entry is a chunk manifest.
-        if let Ok(s) = std::str::from_utf8(&primary) {
-            if let Some(rest) = s.strip_prefix(CHUNK_PREFIX) {
-                if let Ok(n) = rest.parse::<usize>() {
-                    let mut assembled: Vec<u8> = Vec::new();
-                    for i in 0..n {
-                        let chunk =
-                            Self::read_one(format!("{label}:chunk:{i}")).await?;
-                        assembled.extend_from_slice(&chunk);
-                    }
-                    return Ok(ZeroizingSecret::from_vec(assembled));
-                }
+        // Reassemble if this entry is a chunk manifest.
+        if let Some(n) = parse_chunk_count(&primary) {
+            let mut assembled: Vec<u8> = Vec::new();
+            for i in 0..n {
+                let chunk = Self::read_one(format!("{label}:chunk:{i}")).await?;
+                assembled.extend_from_slice(&chunk);
             }
+            return Ok(ZeroizingSecret::from_vec(assembled));
         }
 
         Ok(ZeroizingSecret::from_vec(primary))
@@ -500,16 +526,9 @@ impl SecretStore for CredentialManagerStore {
         // Peek at the primary entry to determine whether it is chunked.
         match Self::read_one(label.to_owned()).await {
             Ok(bytes) => {
-                if let Ok(s) = std::str::from_utf8(&bytes) {
-                    if let Some(rest) = s.strip_prefix(CHUNK_PREFIX) {
-                        if let Ok(n) = rest.parse::<usize>() {
-                            for i in 0..n {
-                                Self::erase_one_best_effort(
-                                    format!("{label}:chunk:{i}"),
-                                )
-                                .await;
-                            }
-                        }
+                if let Some(n) = parse_chunk_count(&bytes) {
+                    for i in 0..n {
+                        Self::erase_one_best_effort(format!("{label}:chunk:{i}")).await;
                     }
                 }
             }
@@ -524,5 +543,42 @@ impl SecretStore for CredentialManagerStore {
             }
         }
         Self::erase_one(label.to_owned()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_valid_marker() {
+        assert_eq!(parse_chunk_count(b"SMCHNK:3"), Some(3));
+        assert_eq!(parse_chunk_count(b"SMCHNK:0"), Some(0));
+        assert_eq!(parse_chunk_count(b"SMCHNK:12"), Some(12));
+    }
+
+    /// A real secret is not a marker. PEM keys, passwords and PSKs never
+    /// start with the prefix, so they read back as a single blob.
+    #[test]
+    fn a_real_secret_is_not_a_marker() {
+        assert_eq!(parse_chunk_count(b"-----BEGIN OPENSSH PRIVATE KEY-----"), None);
+        assert_eq!(parse_chunk_count(b"hunter2"), None);
+        assert_eq!(parse_chunk_count(b""), None);
+    }
+
+    /// A truncated or non-numeric marker must not parse — treating it as
+    /// chunk-count 0 or panicking would both be wrong.
+    #[test]
+    fn a_malformed_marker_is_not_a_count() {
+        assert_eq!(parse_chunk_count(b"SMCHNK:"), None);
+        assert_eq!(parse_chunk_count(b"SMCHNK:abc"), None);
+        assert_eq!(parse_chunk_count(b"SMCHNK:-1"), None);
+    }
+
+    /// Binary secret bytes that aren't valid UTF-8 must not be mistaken
+    /// for a marker.
+    #[test]
+    fn non_utf8_bytes_are_not_a_marker() {
+        assert_eq!(parse_chunk_count(&[0xff, 0xfe, 0x00, 0x01]), None);
     }
 }
