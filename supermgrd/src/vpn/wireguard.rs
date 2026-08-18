@@ -1239,42 +1239,27 @@ impl VpnBackend for WireGuardBackend {
                 std::borrow::Cow::Owned(cfg)
             }
         } else {
-            // Split-tunnel: use explicit split_routes if configured, otherwise
-            // strip catch-alls from AllowedIPs and keep specific prefixes.
+            // Split-tunnel: reconcile each peer's AllowedIPs through the
+            // shared core function, exactly as the macOS engine does, so a
+            // profile routes identically on both platforms. This branch used
+            // to replace every peer's AllowedIPs with `split_routes` alone,
+            // which silently dropped peer-specific prefixes (e.g. the
+            // gateway's own LAN) that the engine keeps — a host reachable
+            // from the macOS build was unreachable from this one on the same
+            // profile. `effective_allowed_ips` also carries the "split tunnel
+            // but no routes" refusal, so the manual check is gone with it.
             let mut cfg = wg_cfg.clone();
-            if !wg_cfg.split_routes.is_empty() {
-                // Replace every peer's AllowedIPs with the configured split routes.
-                for peer in &mut cfg.peers {
-                    peer.allowed_ips = wg_cfg.split_routes.clone();
-                }
-                std::borrow::Cow::Owned(cfg)
-            } else {
-                // Fall back: strip catch-alls, keep explicit prefixes.
-                let has_catch_all = wg_cfg.peers.iter().any(|p| {
-                    p.allowed_ips.iter().any(|ip| {
-                        let s = ip.to_string();
-                        s == "0.0.0.0/0" || s == "::/0"
-                    })
-                });
-                if has_catch_all {
-                    for peer in &mut cfg.peers {
-                        peer.allowed_ips.retain(|ip| {
-                            let s = ip.to_string();
-                            s != "0.0.0.0/0" && s != "::/0"
-                        });
-                    }
-                }
-                // If no routes remain after stripping, refuse to connect.
-                let has_routes = cfg.peers.iter().any(|p| !p.allowed_ips.is_empty());
-                if !has_routes {
-                    return Err(BackendError::Config(
-                        "split-tunnel is enabled but no routes are configured — \
-                         add subnets to 'split_routes' in the WireGuard profile, \
-                         or disable split-tunnel".into(),
-                    ));
-                }
-                std::borrow::Cow::Owned(cfg)
+            let pid = profile.id.simple().to_string();
+            for peer in &mut cfg.peers {
+                peer.allowed_ips = supermgr_core::vpn::profile::effective_allowed_ips(
+                    &peer.allowed_ips,
+                    &wg_cfg.split_routes,
+                    false,
+                    &pid,
+                )
+                .map_err(BackendError::Config)?;
             }
+            std::borrow::Cow::Owned(cfg)
         };
         let wg_cfg = effective_cfg.as_ref();
 

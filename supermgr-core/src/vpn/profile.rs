@@ -951,9 +951,118 @@ impl ZeroingKey {
     }
 }
 
+/// The AllowedIPs a WireGuard peer should actually be configured with,
+/// reconciling `Profile.full_tunnel` and the profile's `split_routes`
+/// against the peer's stored list.
+///
+/// Shared by the macOS engine (which renders a `wg-quick` config) and the
+/// Linux daemon (which programs the kernel interface) so a profile routes
+/// identically on both. It used to live only in the engine; the daemon
+/// had its own split-tunnel logic that replaced a peer's AllowedIPs with
+/// `split_routes` alone, dropping peer-specific prefixes — e.g. the
+/// gateway's own LAN, reachable only through the tunnel — that the engine
+/// keeps. One function is the only way the two platforms cannot drift.
+///
+/// - Full tunnel: the peer's list is passed through unchanged.
+/// - Split tunnel: catch-alls (`0.0.0.0/0`, `::/0`, any prefix-length-0
+///   entry) are dropped and `split_routes` takes their place; specific
+///   peer prefixes are kept alongside, since those were never what made
+///   the tunnel global. A split-tunnel profile that would be left with no
+///   routes at all is an error the operator must see, not a silently
+///   empty tunnel.
+#[must_use = "the returned AllowedIPs must be applied; ignoring them keeps the old routing"]
+pub fn effective_allowed_ips(
+    peer_allowed: &[IpNet],
+    split_routes: &[IpNet],
+    full_tunnel: bool,
+    profile_id: &str,
+) -> Result<Vec<IpNet>, String> {
+    if full_tunnel {
+        return Ok(peer_allowed.to_vec());
+    }
+
+    let is_catch_all = |n: &IpNet| n.prefix_len() == 0;
+    let specific: Vec<IpNet> = peer_allowed
+        .iter()
+        .filter(|n| !is_catch_all(n))
+        .copied()
+        .collect();
+
+    // `split_routes` is the operator's explicit statement of intent and
+    // replaces the catch-all; peer-level specifics are kept alongside it.
+    let mut out = split_routes.to_vec();
+    for n in specific {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(format!(
+            "profile {profile_id} is set to split tunnel but has no routes: \
+             its AllowedIPs are catch-all only and split_routes is empty. \
+             Add the prefixes the tunnel should carry, or switch it back \
+             to full tunnel."
+        ));
+    }
+
+    if out.len() != peer_allowed.len() {
+        tracing::info!(
+            profile = %profile_id,
+            "wireguard: split tunnel — AllowedIPs {:?} replace the catch-all",
+            out.iter().map(std::string::ToString::to_string).collect::<Vec<_>>()
+        );
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ip(s: &str) -> IpNet { s.parse().unwrap() }
+
+    #[test]
+    fn full_tunnel_passes_the_peer_list_through() {
+        let peer = vec![ip("0.0.0.0/0"), ip("::/0")];
+        assert_eq!(effective_allowed_ips(&peer, &[], true, "p").unwrap(), peer);
+    }
+
+    /// The regression the shared function exists to prevent: split tunnel
+    /// must strip the catch-all and substitute split_routes.
+    #[test]
+    fn split_tunnel_replaces_catch_all_with_split_routes() {
+        let peer = vec![ip("0.0.0.0/0"), ip("::/0")];
+        let split = vec![ip("10.0.0.0/8")];
+        let got = effective_allowed_ips(&peer, &split, false, "p").unwrap();
+        assert_eq!(got, split);
+        assert!(!got.iter().any(|n| n.prefix_len() == 0));
+    }
+
+    /// The exact cross-platform divergence from the review: a peer-specific
+    /// prefix (the gateway LAN) must survive alongside split_routes, not be
+    /// dropped the way the Linux daemon used to drop it.
+    #[test]
+    fn split_tunnel_keeps_specific_peer_prefixes() {
+        let peer = vec![ip("0.0.0.0/0"), ip("192.168.4.0/24")];
+        let got = effective_allowed_ips(&peer, &[ip("10.0.0.0/8")], false, "p").unwrap();
+        assert!(got.contains(&ip("192.168.4.0/24")));
+        assert!(got.contains(&ip("10.0.0.0/8")));
+        assert!(!got.contains(&ip("0.0.0.0/0")));
+    }
+
+    #[test]
+    fn split_tunnel_without_routes_is_an_error() {
+        let peer = vec![ip("0.0.0.0/0"), ip("::/0")];
+        let err = effective_allowed_ips(&peer, &[], false, "abc").unwrap_err();
+        assert!(err.contains("abc") && err.contains("split tunnel"), "{err}");
+    }
+
+    #[test]
+    fn split_tunnel_with_only_specific_prefixes_is_fine() {
+        let peer = vec![ip("192.168.4.0/24")];
+        assert_eq!(effective_allowed_ips(&peer, &[], false, "p").unwrap(), peer);
+    }
 
     #[test]
     fn profile_config_backend_name() {
