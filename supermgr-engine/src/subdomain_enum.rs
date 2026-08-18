@@ -45,12 +45,20 @@ pub async fn enumerate(domain: &str) -> Result<SubdomainResult> {
     if domain.is_empty() || !domain.contains('.') {
         anyhow::bail!("invalid domain: {domain}");
     }
-    let url = format!("https://crt.sh/?q=%.{domain}&output=json");
+    // Build the query with `Url`'s builder so the domain is percent-encoded.
+    // Interpolating it raw into a `?q=…&output=json` string would let a
+    // domain containing `&` or `#` inject extra query parameters or truncate
+    // the query.
+    let mut url = reqwest::Url::parse("https://crt.sh/")
+        .context("parse crt.sh base URL")?;
+    url.query_pairs_mut()
+        .append_pair("q", &format!(".{domain}"))
+        .append_pair("output", "json");
 
     let client = supermgr_core::http::default_client();
 
     let resp = client
-        .get(&url)
+        .get(url)
         .header("User-Agent", "SuperManager/1.0 (Subdomain enum via CT logs)")
         .send()
         .await

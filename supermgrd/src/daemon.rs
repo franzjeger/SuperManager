@@ -450,6 +450,19 @@ fn write_credential_at(path: &std::path::Path, bytes: &[u8], uid: u32) -> std::i
 /// contain is as much the point as what it must: the key path is passed
 /// straight to `ssh -i`, with no `cp`/`chmod` dance through a predictable
 /// world-writable path.
+/// Allowlist of characters safe to interpolate into the shell command the
+/// GTK client runs via `sh -c`. This is deliberately narrow — letters,
+/// digits, and the punctuation that legitimately appears in usernames,
+/// hostnames (incl. IPv6), and `user@host:port` jump specs. Anything else
+/// (spaces, `$`, backtick, `;`, `&`, `|`, quotes, newlines, …) is rejected,
+/// which closes the command-injection path where a host record's
+/// `username`/`hostname`/`proxy_jump` field is attacker-controlled.
+fn is_shell_safe_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'@' | b'%'))
+}
+
 fn build_ssh_command(
     port: u16,
     username: &str,
@@ -457,25 +470,40 @@ fn build_ssh_command(
     proxy_jump: Option<&str>,
     password_file: Option<&std::path::Path>,
     key_file: Option<&std::path::Path>,
-) -> String {
+) -> Result<String, String> {
+    // Validate every user-supplied token before it touches the shell. The
+    // credential file paths are daemon-generated (in /run/supermgrd-ssh/)
+    // and are not validated here.
+    if !is_shell_safe_token(username) {
+        return Err(format!("invalid username: {username:?}"));
+    }
+    if !is_shell_safe_token(hostname) {
+        return Err(format!("invalid hostname: {hostname:?}"));
+    }
+    if let Some(j) = proxy_jump {
+        if !is_shell_safe_token(j) {
+            return Err(format!("invalid proxy jump: {j:?}"));
+        }
+    }
+
     let jump = proxy_jump.map_or_else(String::new, |j| format!(" -J {j}"));
 
     if let Some(key) = key_file {
-        return format!(
+        return Ok(format!(
             "ssh -p {port}{jump} -i {key} -o IdentitiesOnly=yes {username}@{hostname}",
             key = key.display()
-        );
+        ));
     }
 
     if let Some(pw) = password_file {
-        return format!(
+        return Ok(format!(
             "sshpass -f {pw} ssh -p {port}{jump} -o PreferredAuthentications=password \
-             -o PubkeyAuthentication=no {username}@{hostname}",
+              -o PubkeyAuthentication=no {username}@{hostname}",
             pw = pw.display()
-        );
+        ));
     }
 
-    format!("ssh -p {port}{jump} {username}@{hostname}")
+    Ok(format!("ssh -p {port}{jump} {username}@{hostname}"))
 }
 
 /// Resolve the uid behind a D-Bus message.
@@ -2237,7 +2265,11 @@ impl DaemonService {
             if v > 0 && !(1..=65535).contains(&v) {
                 return Err(fdo::Error::InvalidArgs(format!("api_port {v} out of range 1-65535")));
             }
-            host.api_port = Some(v as u16);
+            // 0 means "not configured" — clear it rather than storing
+            // Some(0), which would defeat the `unwrap_or(443)`/`unwrap_or(4444)`
+            // defaults downstream. (A JSON `null` is skipped by `as_u64`,
+            // preserving the existing value, matching the prior behaviour.)
+            host.api_port = (v > 0).then(|| v as u16);
         }
         // RDP/VNC ports: 0 or null means "not configured".
         if let Some(v) = updates.get("rdp_port") {
@@ -3267,7 +3299,8 @@ impl DaemonService {
             proxy_jump_str.as_deref(),
             password_file.as_deref(),
             key_file.as_deref(),
-        );
+        )
+        .map_err(|e| fdo::Error::InvalidArgs(e))?;
 
         // Remove the credential files a minute later. `ssh` and `sshpass` both
         // read theirs at startup, so the session outlives the file. The window
@@ -5538,6 +5571,30 @@ fn sanitize_fortigate_host(raw: &str) -> String {
     s.trim_end_matches(':').to_owned()
 }
 
+/// A value safe to place in an nft rule as a destination address: a bare
+/// IPv4/IPv6 address or a CIDR block. Anything else (`;`, newlines, quotes,
+/// spaces) would inject extra nft statements into the script.
+fn is_nft_address(s: &str) -> bool {
+    let (addr, mask) = match s.split_once('/') {
+        Some((a, m)) => (a, Some(m)),
+        None => (s, None),
+    };
+    if addr.parse::<std::net::IpAddr>().is_err() {
+        return false;
+    }
+    // CIDR prefix length, if present, must be all digits.
+    if let Some(mask) = mask {
+        return mask.chars().all(|c| c.is_ascii_digit());
+    }
+    true
+}
+
+/// A valid POSIX network-interface name (letters, digits, `_`, `-`). nft
+/// quotes the value, but a `"` inside would still break out of the quotes.
+fn is_nft_iface(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 /// Install an nftables kill-switch that drops all non-VPN traffic.
 ///
 /// All rules are applied atomically via a single `nft -f -` invocation so
@@ -5565,33 +5622,46 @@ async fn install_kill_switch(mode: &KillSwitchMode) {
          \t\toif lo accept;\n",
     );
 
+    // Append a single `daddr <ip> accept` rule, picking the right
+    // address-family keyword. Returns false (and logs) when the value is
+    // not a valid IP/CIDR, so a malformed entry can't inject nft rules.
+    let mut add_daddr = |script: &mut String, ip: &str| -> bool {
+        if !is_nft_address(ip) {
+            warn!("kill-switch: skipping invalid allow address {ip:?}");
+            return false;
+        }
+        if ip.contains(':') {
+            script.push_str(&format!("\t\tip6 daddr {ip} accept;\n"));
+        } else {
+            script.push_str(&format!("\t\tip daddr {ip} accept;\n"));
+        }
+        true
+    };
+
     match &mode {
         KillSwitchMode::Interface { iface, allowed_ips } => {
             if !iface.is_empty() {
-                script.push_str(&format!("\t\toif \"{iface}\" accept;\n"));
+                if is_nft_iface(iface) {
+                    script.push_str(&format!("\t\toif \"{iface}\" accept;\n"));
+                } else {
+                    warn!("kill-switch: skipping invalid interface name {iface:?}");
+                }
             }
             for ip in allowed_ips {
-                // Distinguish IPv4 vs IPv6 for the nft address-family keyword.
-                if ip.contains(':') {
-                    script.push_str(&format!("\t\tip6 daddr {ip} accept;\n"));
-                } else {
-                    script.push_str(&format!("\t\tip daddr {ip} accept;\n"));
-                }
+                add_daddr(&mut script, ip);
             }
         }
         KillSwitchMode::IPsec { server_ip, allowed_ips } => {
             // Allow IKE key-exchange packets to reach the VPN server.
-            script.push_str(&format!("\t\tip daddr {server_ip} accept;\n"));
+            if !add_daddr(&mut script, server_ip) {
+                warn!("kill-switch: IPsec mode has no valid server IP; IKE will be dropped");
+            }
             // Allow all traffic that the kernel's xfrm/IPsec policy will
             // encrypt and send through the tunnel.
             script.push_str("\t\trt ipsec exists accept;\n");
             // Allow extra IPs (e.g. local DNS servers not routed via IPsec).
             for ip in allowed_ips {
-                if ip.contains(':') {
-                    script.push_str(&format!("\t\tip6 daddr {ip} accept;\n"));
-                } else {
-                    script.push_str(&format!("\t\tip daddr {ip} accept;\n"));
-                }
+                add_daddr(&mut script, ip);
             }
         }
     }
@@ -7315,7 +7385,8 @@ mod tests {
                 None,
                 None,
                 Some(std::path::Path::new("/run/supermgrd-ssh/key_deadbeef")),
-            );
+            )
+            .unwrap();
 
             assert!(cmd.contains("-i /run/supermgrd-ssh/key_deadbeef"), "{cmd}");
             assert!(cmd.contains("-o IdentitiesOnly=yes"), "{cmd}");
@@ -7333,7 +7404,8 @@ mod tests {
                 None,
                 Some(std::path::Path::new("/run/supermgrd-ssh/pw_c0ffee")),
                 None,
-            );
+            )
+            .unwrap();
 
             assert!(cmd.starts_with("sshpass -f /run/supermgrd-ssh/pw_c0ffee ssh "), "{cmd}");
             assert!(cmd.contains("-o PubkeyAuthentication=no"), "{cmd}");
@@ -7344,7 +7416,7 @@ mod tests {
         #[test]
         fn no_credential_means_a_plain_ssh() {
             // Agent or on-box key: nothing is written, so nothing is exposed.
-            let cmd = build_ssh_command(22, "u", "h", None, None, None);
+            let cmd = build_ssh_command(22, "u", "h", None, None, None).unwrap();
             assert_eq!(cmd, "ssh -p 22 u@h");
         }
 
@@ -7355,9 +7427,9 @@ mod tests {
             let pw = std::path::Path::new("/run/supermgrd-ssh/pw_1");
 
             for cmd in [
-                build_ssh_command(22, "u", "h", jump, None, Some(key)),
-                build_ssh_command(22, "u", "h", jump, Some(pw), None),
-                build_ssh_command(22, "u", "h", jump, None, None),
+                build_ssh_command(22, "u", "h", jump, None, Some(key)).unwrap(),
+                build_ssh_command(22, "u", "h", jump, Some(pw), None).unwrap(),
+                build_ssh_command(22, "u", "h", jump, None, None).unwrap(),
             ] {
                 assert!(cmd.contains(" -J bastion@jump:22"), "jump host dropped: {cmd}");
             }
@@ -7374,9 +7446,31 @@ mod tests {
                 None,
                 Some(std::path::Path::new("/run/supermgrd-ssh/pw_1")),
                 None,
-            );
+            )
+            .unwrap();
             assert!(!cmd.contains("SSHPASS"), "{cmd}");
             assert!(cmd.contains("-f "), "sshpass must read from the file: {cmd}");
+        }
+
+        #[test]
+        fn shell_metacharacters_in_host_fields_are_rejected() {
+            // The command is run via `sh -c` on the client, so a host record
+            // whose username/hostname carries shell metacharacters is a
+            // command-injection vector. These must be refused, not emitted.
+            let key = std::path::Path::new("/run/supermgrd-ssh/key_1");
+
+            let bad_username = build_ssh_command(22, "u;reboot", "h", None, None, Some(key));
+            assert!(bad_username.is_err(), "username with ';' must be rejected");
+
+            let bad_hostname = build_ssh_command(22, "u", "h $(curl evil)", None, None, Some(key));
+            assert!(bad_hostname.is_err(), "hostname with command substitution must be rejected");
+
+            let bad_jump = build_ssh_command(22, "u", "h", Some("j;rm -rf /"), None, Some(key));
+            assert!(bad_jump.is_err(), "jump host with ';' must be rejected");
+
+            // Legit values — IPv6, user@host:port jump — still pass.
+            assert!(build_ssh_command(22, "u", "2001:db8::1", None, None, Some(key)).is_ok());
+            assert!(build_ssh_command(22, "u", "h", Some("bastion@jump:22"), None, Some(key)).is_ok());
         }
     }
 }

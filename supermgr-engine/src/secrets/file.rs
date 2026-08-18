@@ -5,6 +5,7 @@
 //! alternative to system keyrings.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -46,30 +47,47 @@ impl FileSecretStore {
     }
 
     async fn write_map(&self, map: &HashMap<String, String>) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .with_context(|| format!("create secrets directory {}", dir.display()))?;
-        }
-
-        let tmp = self.path.with_extension("tmp");
-        let text = serde_json::to_string_pretty(map).context("serialise secrets map")?;
-
-        tokio::fs::write(&tmp, text.as_bytes())
+        let dir = self
+            .path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        tokio::fs::create_dir_all(&dir)
             .await
-            .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
+            .with_context(|| format!("create secrets directory {}", dir.display()))?;
 
-        // Set restrictive permissions (Unix only).
+        let text = serde_json::to_string_pretty(map).context("serialise secrets map")?;
+        let tmp = dir.join(format!("secrets.{}.tmp", uuid::Uuid::new_v4()));
+
+        // Create the temp file with O_EXCL and 0600 *at creation*, in the
+        // same directory as the target (so the rename is atomic on the same
+        // filesystem). O_EXCL refuses to follow a pre-existing symlink at
+        // the temp path — closing the symlink-attack surface a predictable
+        // `secrets.tmp` name had — and the file never exists at 0644.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.read(true).write(true).create_new(true).truncate(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("chmod 600 {}", tmp.display()))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
         }
+        let file = opts
+            .open(&tmp)
+            .with_context(|| format!("create secrets tmp file {}", tmp.display()))?;
+        let mut file = std::io::BufWriter::new(file);
+        file.write_all(text.as_bytes())
+            .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
+        file.flush()
+            .with_context(|| format!("flush secrets tmp file {}", tmp.display()))?;
+        drop(file);
 
-        tokio::fs::rename(&tmp, &self.path)
-            .await
-            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
+        std::fs::rename(&tmp, &self.path).with_context(|| {
+            format!(
+                "rename {} -> {}",
+                tmp.display(),
+                self.path.display()
+            )
+        })?;
 
         Ok(())
     }

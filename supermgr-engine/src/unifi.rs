@@ -78,6 +78,27 @@ async fn tcp_preflight(host: &str, port: u16) -> Result<()> {
     }
 }
 
+/// Shell-quote a value so it is passed to a remote shell as a single
+/// literal word. Single quotes are the portable choice (POSIX `ash`/`sh`
+/// both honour them); any embedded single quote is escaped as `'\''`.
+///
+/// This is what makes it safe to interpolate a user-supplied URL into a
+/// command string that the device's shell will parse — without it, a URL
+/// like `http://h/inform?x=$(reboot)` would be command-substituted.
+fn shell_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Run `set-inform <inform_url>` on the device via SSH. Used
 /// for first-time adoption (factory defaults) or to repoint a
 /// device at a different controller.
@@ -146,11 +167,17 @@ pub async fn set_inform(
     // the whole probe — saves a round-trip per failed try and
     // ensures the device's chosen variant runs in its own
     // shell environment.
+    // The command runs through the device's shell, so the URL must be a
+    // single literal word. A `reqwest::Url` can still carry shell
+    // metacharacters (e.g. `http://h/inform?x=$(reboot)`), so quote it the
+    // standard way — single quotes with any embedded quote escaped — rather
+    // than interpolating it raw.
+    let url_q = shell_quote(url);
     let cmd = format!(
-        "mca-cli-op set-inform {url} 2>/dev/null \
-            || /sbin/set-inform {url} 2>/dev/null \
-            || /usr/bin/syswrapper.sh set-inform {url} 2>/dev/null \
-            || set-inform {url}"
+        "mca-cli-op set-inform {url_q} 2>/dev/null \
+            || /sbin/set-inform {url_q} 2>/dev/null \
+            || /usr/bin/syswrapper.sh set-inform {url_q} 2>/dev/null \
+            || set-inform {url_q}"
     );
     info!("unifi set_inform: {cmd}");
     let (exit, stdout, stderr) = session

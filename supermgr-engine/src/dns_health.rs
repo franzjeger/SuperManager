@@ -171,15 +171,30 @@ async fn check_dmarc(domain: &str) -> (DmarcState, Option<DigError>) {
     let Some(record) = records.into_iter().next() else {
         return (DmarcState::Missing, None);
     };
-    let lower = record.to_lowercase();
-    let state = if lower.contains("p=reject") {
-        DmarcState::Reject { record }
-    } else if lower.contains("p=quarantine") {
-        DmarcState::Quarantine { record }
-    } else {
-        DmarcState::None { record }
+    let state = match dmarc_policy(&record).as_str() {
+        "reject" => DmarcState::Reject { record },
+        "quarantine" => DmarcState::Quarantine { record },
+        _ => DmarcState::None { record },
     };
     (state, None)
+}
+
+/// Extract the apex DMARC policy (`p` tag) from a record string.
+///
+/// DMARC records are `;`-separated tags (`v=DMARC1; p=none; sp=reject; …`).
+/// We match the `p` key exactly — a substring check like
+/// `contains("p=reject")` would also fire on `sp=reject` and report a
+/// monitor-only domain as rejecting. Returns the empty string when the
+/// record has no `p` tag.
+fn dmarc_policy(record: &str) -> String {
+    record
+        .split(';')
+        .find_map(|tag| {
+            let tag = tag.trim();
+            let (k, v) = tag.split_once('=')?;
+            (k.trim().eq("p")).then_some(v.trim().to_lowercase())
+        })
+        .unwrap_or_default()
 }
 
 async fn check_mta_sts(domain: &str) -> (MtaStsState, Option<DigError>) {
@@ -531,6 +546,19 @@ mod tests {
             classify_spf("v=spf1 include:_spf.google.com"),
             SpfState::NoTerminator { .. }
         ));
+    }
+
+    #[test]
+    fn dmarc_policy_matches_the_p_tag_not_sp() {
+        // The apex policy is the `p` tag. A substring match on "p=reject"
+        // would wrongly fire on `sp=reject` (subdomain policy) and report a
+        // monitor-only domain as rejecting.
+        assert_eq!(dmarc_policy("v=DMARC1; p=none; sp=reject"), "none");
+        assert_eq!(dmarc_policy("v=DMARC1; p=quarantine; sp=reject"), "quarantine");
+        assert_eq!(dmarc_policy("v=DMARC1; p=reject; sp=none"), "reject");
+        assert_eq!(dmarc_policy("v=DMARC1; p=REJECT"), "reject");
+        assert_eq!(dmarc_policy("v=DMARC1; sp=reject"), ""); // no apex policy
+        assert_eq!(dmarc_policy("v=DMARC1; p = reject"), "reject"); // spaces
     }
 
     #[test]

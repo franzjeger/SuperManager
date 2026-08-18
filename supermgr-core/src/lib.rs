@@ -33,6 +33,7 @@ pub mod http;
 pub mod keyring;
 pub mod paths;
 pub mod secret_lifecycle;
+pub mod secure_file;
 pub mod severity;
 pub mod ssh;
 pub mod ssh_compliance;

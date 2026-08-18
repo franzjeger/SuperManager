@@ -218,26 +218,15 @@ impl KnownHostsStore {
     }
 
     fn persist(&self, snapshot: &HashMap<String, String>) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
-        }
-        let tmp = self.path.with_extension("json.tmp");
         let text =
             serde_json::to_string_pretty(snapshot).map_err(|source| KnownHostsError::Corrupt {
                 path: self.path.display().to_string(),
                 source,
             })?;
-        // Write-then-rename so a crash mid-write can't leave a truncated
-        // file that fails to parse on the next open.
-        std::fs::write(&tmp, &text).map_err(|e| io_error(&tmp, e))?;
-        // 0600 — owner read/write only; same posture as secrets.json.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| io_error(&tmp, e))?;
-        }
-        std::fs::rename(&tmp, &self.path).map_err(|e| io_error(&self.path, e))?;
+        // 0600 at creation, atomic rename — same posture as secrets.json,
+        // without the 0644 window a write-then-chmod would leave.
+        crate::secure_file::write_private(&self.path, text.as_bytes())
+            .map_err(|e| io_error(&self.path, e))?;
         Ok(())
     }
 }

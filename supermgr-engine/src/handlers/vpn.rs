@@ -441,14 +441,10 @@ impl EngineServer {
         }
         let mut xml_path = xml_dir;
         xml_path.push(format!("{new_id}.azurevpnconfig"));
-        if let Err(e) = std::fs::write(&xml_path, content.as_bytes()) {
+        // 0600 at creation — the XML embeds the gateway's tls-crypt key, so
+        // it must never exist at the umask's 0644 for a moment.
+        if let Err(e) = supermgr_core::secure_file::write_private(&xml_path, content.as_bytes()) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("write xml: {e}"));
-        }
-        // 0600 — the XML embeds the gateway's tls-crypt key.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&xml_path, std::fs::Permissions::from_mode(0o600));
         }
 
         let profile = Profile {
@@ -605,15 +601,10 @@ impl EngineServer {
         // internal-only gateway black-holes all public internet + DNS (froze the
         // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
         // internal access while public traffic stays on the local uplink.
-        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
-                if let Err(e) = std::fs::write(&path, body.as_bytes()) {
+                let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
+                // 0600 at creation — the file holds the tls-crypt key.
+                if let Err(e) = supermgr_core::secure_file::write_private(&path, body.as_bytes()) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("write ovpn: {e}"));
-                }
-                // 0600 — the file holds the tls-crypt key.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
                 Response::ok(id, serde_json::json!({
                     "state": "authorized",
