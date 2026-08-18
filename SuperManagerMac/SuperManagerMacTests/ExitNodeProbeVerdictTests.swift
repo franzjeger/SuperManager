@@ -28,7 +28,7 @@ final class ExitNodeProbeVerdictTests: XCTestCase {
     func testFourFailuresThenSuccessIsDegradedNotHealthy() {
         let verdict = ExitNodeProbeVerdict.evaluate([false, false, false, false, true])
         XCTAssertNotEqual(verdict, .healthy, "a path that took 5 attempts is not healthy")
-        XCTAssertEqual(verdict, .degraded(secondsToFirstResponse: 10, failures: 4))
+        XCTAssertEqual(verdict, .degraded(secondsToFirstResponse: 18, failures: 4))
     }
 
     /// A single success with nothing after it is the fluke the old rule
@@ -50,7 +50,7 @@ final class ExitNodeProbeVerdictTests: XCTestCase {
     func testOneFailureThenTwoConsecutiveIsDegraded() {
         XCTAssertEqual(
             ExitNodeProbeVerdict.evaluate([false, true, true]),
-            .degraded(secondsToFirstResponse: 4, failures: 1))
+            .degraded(secondsToFirstResponse: 6, failures: 1))
     }
 
     // MARK: - Early exit
@@ -79,7 +79,11 @@ final class ExitNodeProbeVerdictTests: XCTestCase {
                 ExitNodeProbeVerdict.evaluate([false, false, true]) else {
             return XCTFail("expected degraded")
         }
-        XCTAssertEqual(seconds, 3 * ExitNodeProbeVerdict.probeIntervalSeconds)
+        XCTAssertEqual(
+            seconds,
+            2 * (ExitNodeProbeVerdict.probeIntervalSeconds
+                 + ExitNodeProbeVerdict.probeTimeoutSeconds)
+                + ExitNodeProbeVerdict.probeIntervalSeconds)
     }
 
     func testFailureCountIncludesFailuresAfterFirstSuccess() {
