@@ -1579,42 +1579,151 @@ pub fn ensure_plist_current() {
         return; // not installed — nothing to bring up to date
     };
     let wanted = render_launchd_plist();
-    if existing == wanted {
-        return;
-    }
-    if let Err(e) = fs::write(path, &wanted) {
-        tracing::warn!("tailscaled plist refresh: write failed: {e}");
-        return;
-    }
-    let _ = Command::new("/bin/chmod").args(["0644", LAUNCH_DAEMON_PLIST]).status();
-    let _ = Command::new("/usr/sbin/chown")
-        .args(["root:wheel", LAUNCH_DAEMON_PLIST])
-        .status();
+    let plist_current = existing == wanted;
 
-    // A plain `kickstart -k` restarts the binary but launchd keeps the
-    // job's cached environment from the old plist, so the new
-    // EnvironmentVariables would not take effect. Re-bootstrap.
+    match plist_action(plist_current, daemon_is_loaded()) {
+        PlistAction::Skip => {}
+        PlistAction::ReloadOnly => reload_daemon(),
+        PlistAction::WriteThenReload => {
+            if let Err(e) = fs::write(path, &wanted) {
+                tracing::warn!("tailscaled plist refresh: write failed: {e}");
+                return;
+            }
+            let _ = Command::new("/bin/chmod").args(["0644", LAUNCH_DAEMON_PLIST]).status();
+            let _ = Command::new("/usr/sbin/chown")
+                .args(["root:wheel", LAUNCH_DAEMON_PLIST])
+                .status();
+            reload_daemon();
+        }
+    }
+}
+
+/// What [`ensure_plist_current`] should do, given whether the on-disk
+/// plist already matches the template and whether the launchd job is
+/// currently loaded.
+///
+/// The case that matters is `(current, not loaded)`. A previous refresh
+/// that wrote the plist and then lost the bootout/bootstrap race leaves
+/// the daemon booted out with a plist that already matches the template.
+/// The old guard checked only `current` and early-returned here, so
+/// nothing ever re-bootstrapped it: tailscaled — the machine's remote
+/// access on an MSP-managed host — stayed down until a reboot. Requiring
+/// the job to be loaded too makes the next helper start heal it, and
+/// splitting the decision out from the launchctl plumbing makes that
+/// invariant testable.
+#[derive(Debug, PartialEq, Eq)]
+enum PlistAction {
+    /// Plist matches and the daemon is loaded — nothing to do.
+    Skip,
+    /// Plist already matches but the daemon is not loaded — re-bootstrap
+    /// without rewriting the file (the heal path).
+    ReloadOnly,
+    /// Plist differs — write it, then reload so the new environment takes
+    /// effect.
+    WriteThenReload,
+}
+
+fn plist_action(plist_current: bool, daemon_loaded: bool) -> PlistAction {
+    match (plist_current, daemon_loaded) {
+        (true, true) => PlistAction::Skip,
+        (true, false) => PlistAction::ReloadOnly,
+        (false, _) => PlistAction::WriteThenReload,
+    }
+}
+
+/// Whether the tailscaled launchd job is currently bootstrapped.
+/// `launchctl print system/<label>` exits 0 when the job exists (in any
+/// state) and non-zero when it has been booted out — which is exactly
+/// the condition [`ensure_plist_current`] must not paper over.
+fn daemon_is_loaded() -> bool {
+    Command::new("/bin/launchctl")
+        .args(["print", &format!("system/{LAUNCH_LABEL}")])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// bootout + bootstrap, with the teardown race handled and the result
+/// verified.
+///
+/// A plain `kickstart -k` restarts the binary but launchd keeps the
+/// job's cached environment from the old plist, so a changed
+/// `EnvironmentVariables` would not take effect — hence bootout then
+/// bootstrap. But `launchctl bootout` can return before launchd has
+/// finished tearing the job down, and an immediate `bootstrap` then
+/// fails with `Bootstrap failed: 5: Input/output error`. The old code
+/// ran the pair once and only logged a warning on failure, leaving the
+/// daemon booted out. Retry across the race, then confirm the job is
+/// actually loaded rather than trusting a bootstrap that "succeeded"
+/// but left nothing behind.
+fn reload_daemon() {
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", "system", LAUNCH_DAEMON_PLIST])
         .output();
-    let out = Command::new("/bin/launchctl")
-        .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            tracing::info!("tailscaled plist refreshed and daemon re-bootstrapped");
+
+    let mut last_err = String::new();
+    let mut bootstrapped = false;
+    for attempt in 1..=5u32 {
+        match Command::new("/bin/launchctl")
+            .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                bootstrapped = true;
+                break;
+            }
+            Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+            Err(e) => last_err = e.to_string(),
         }
-        Ok(o) => tracing::warn!(
-            "tailscaled plist refreshed but re-bootstrap failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("tailscaled plist refreshed but re-bootstrap spawn failed: {e}"),
+        // The teardown race clears in well under a second; back off a
+        // little longer each time rather than hammering launchd.
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) * 300));
+        }
+    }
+
+    // Belt-and-suspenders: if the job did load, make sure a stale
+    // instance is replaced with one running the new plist; if it did
+    // not, this is a harmless no-op.
+    let _ = Command::new("/bin/launchctl")
+        .args(["kickstart", "-k", &format!("system/{LAUNCH_LABEL}")])
+        .status();
+
+    if daemon_is_loaded() {
+        tracing::info!("tailscaled reloaded; launchd job is present");
+    } else {
+        tracing::error!(
+            bootstrapped,
+            "tailscaled reload left no launchd job (last bootstrap error: {last_err});              remote access via this daemon is down until a reinstall or reboot"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the reload rework: a plist that already matches
+    /// the template but a daemon that is NOT loaded must still reload.
+    /// That is the state a prior lost bootstrap race leaves behind, and
+    /// the old guard (plist-current only) sat in it forever.
+    #[test]
+    fn current_plist_but_dead_daemon_still_reloads() {
+        assert_eq!(plist_action(true, false), PlistAction::ReloadOnly);
+    }
+
+    #[test]
+    fn current_plist_and_live_daemon_is_a_noop() {
+        assert_eq!(plist_action(true, true), PlistAction::Skip);
+    }
+
+    /// A changed plist reloads regardless of the daemon's current state —
+    /// the new EnvironmentVariables only take effect after a re-bootstrap.
+    #[test]
+    fn changed_plist_always_writes_and_reloads() {
+        assert_eq!(plist_action(false, true), PlistAction::WriteThenReload);
+        assert_eq!(plist_action(false, false), PlistAction::WriteThenReload);
+    }
+
 
     /// The watchdog pause both wake paths arm before scheduling reconciles
     /// (`connectivity_watchdog::pause_for(45)`, main.rs wake detector and the
