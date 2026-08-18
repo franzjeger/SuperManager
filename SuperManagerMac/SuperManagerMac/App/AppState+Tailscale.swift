@@ -596,15 +596,19 @@ enum ExitNodeProbeVerdict: Equatable {
     /// Answered immediately and stayed up.
     case healthy
     /// Forwards traffic, but took a while or flaked on the way.
-    /// `secondsToFirstResponse` is wall-clock from the first probe;
-    /// `failures` counts every probe that did not answer.
+    /// `secondsToFirstResponse` estimates the wall-clock seconds until the
+    /// first answer; `failures` counts every probe that did not answer.
     case degraded(secondsToFirstResponse: Int, failures: Int)
     /// Nothing got through. Caller reverts.
     case dead
 
-    /// Probes are spaced this far apart, which is what turns a probe
-    /// index into the seconds figure shown to the user.
+    /// Probes are spaced this far apart (the sleep before each probe).
     static let probeIntervalSeconds = 2
+    /// How long a single probe can take before it counts as a miss. Must
+    /// match the `nc -G/-w` timeout in `probeInternet`; a failed probe
+    /// burns roughly this long, which is what the seconds estimate below
+    /// has to account for.
+    static let probeTimeoutSeconds = 2
     /// Upper bound on probing before we grade what we have.
     static let maxAttempts = 6
     /// Consecutive successes that count as a settled path.
@@ -629,8 +633,17 @@ enum ExitNodeProbeVerdict: Equatable {
         if failures == 0 && settled(results) {
             return .healthy
         }
+        // Each attempt before the first success is a full interval (the
+        // sleep) plus a probe that ran to its timeout; the successful probe
+        // returns fast, so only its preceding sleep is added. The previous
+        // `(firstOk + 1) * probeIntervalSeconds` counted the sleeps only and
+        // ignored the failed probes' timeouts, undercounting by exactly the
+        // part that makes a degraded path feel slow (a 4-miss path took
+        // ~18s but reported 10). Still an estimate — a near-upper-bound.
+        let secondsToFirstResponse =
+            firstOk * (probeIntervalSeconds + probeTimeoutSeconds) + probeIntervalSeconds
         return .degraded(
-            secondsToFirstResponse: (firstOk + 1) * probeIntervalSeconds,
+            secondsToFirstResponse: secondsToFirstResponse,
             failures: failures
         )
     }

@@ -254,7 +254,13 @@ impl SshSession {
         // Certificate auth first when we have one. Every failure mode
         // here is non-fatal on purpose — see `connect_certificate`.
         if let Some(cert_data) = cert_pem {
-            match ssh_key::Certificate::from_openssh(cert_data) {
+            // Trim before parsing. `validate_openssh_certificate` accepts a
+            // cert with surrounding whitespace (it validates `cert.trim()`),
+            // but the value is stored untrimmed and `ssh_key::from_openssh`
+            // only trims the END — leading whitespace makes it fail to parse
+            // here, and the non-fatal fallback below then silently drops to
+            // plain pubkey auth despite a cert that validated fine on save.
+            match ssh_key::Certificate::from_openssh(cert_data.trim()) {
                 Ok(cert) => match handle
                     .authenticate_openssh_cert(username, Arc::clone(&key_pair), cert)
                     .await
