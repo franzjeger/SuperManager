@@ -12,7 +12,7 @@
 //!
 //! # What it detects
 //!
-//! **TLS ClientHello downgrade attempts.** A ClientHello whose
+//! **TLS `ClientHello` downgrade attempts.** A `ClientHello` whose
 //! `legacy_version` field is less than 0x0303 (TLS 1.2) is a
 //! client that's either ancient or actively attempting to
 //! downgrade the handshake. The `tls_audit` server-side probe
@@ -35,8 +35,8 @@ use anyhow::{anyhow, Result};
 
 use crate::vuln::{Finding, Severity};
 
-/// A single TLS ClientHello observed in the capture, with the
-/// connection 5-tuple and the legacy_version field extracted.
+/// A single TLS `ClientHello` observed in the capture, with the
+/// connection 5-tuple and the `legacy_version` field extracted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsClientHello {
     pub src_ip: String,
@@ -44,16 +44,17 @@ pub struct TlsClientHello {
     pub dst_ip: String,
     pub dst_port: u16,
     /// Wire-format version bytes: 0x0301 = TLS 1.0, 0x0302 = 1.1,
-    /// 0x0303 = 1.2 / 1.3 (real version in supported_versions ext).
+    /// 0x0303 = 1.2 / 1.3 (real version in `supported_versions` ext).
     pub legacy_version: u16,
 }
 
 impl TlsClientHello {
     /// Pretty version name for the wire-format field. TLS 1.3
-    /// ClientHellos use 0x0303 as legacy_version for compat —
+    /// `ClientHellos` use 0x0303 as `legacy_version` for compat —
     /// we surface "TLS 1.2+" because we can't distinguish 1.2
-    /// from 1.3 without parsing the supported_versions extension
+    /// from 1.3 without parsing the `supported_versions` extension
     /// (out of MVP scope).
+    #[must_use]
     pub fn version_label(&self) -> &'static str {
         match self.legacy_version {
             0x0300 => "SSLv3",
@@ -65,14 +66,15 @@ impl TlsClientHello {
     }
 
     /// True if this is a deprecated-protocol attempt.
+    #[must_use]
     pub fn is_downgrade(&self) -> bool {
         self.legacy_version < 0x0303
     }
 }
 
 /// Parse a pcap file (running tcpdump capture or completed) for
-/// TLS ClientHellos that attempt a deprecated protocol version.
-/// Returns one finding per (client_ip, version) cluster.
+/// TLS `ClientHellos` that attempt a deprecated protocol version.
+/// Returns one finding per (`client_ip`, version) cluster.
 pub async fn detect_tls_downgrade_clients(pcap_path: &Path) -> Result<Vec<Finding>> {
     let bytes = tokio::fs::read(pcap_path)
         .await
@@ -195,7 +197,7 @@ fn parse_pcap_for_clienthellos(bytes: &[u8]) -> Vec<TlsClientHello> {
     out
 }
 
-/// Parse one Ethernet+IPv4+TCP packet for a TLS ClientHello in
+/// Parse one Ethernet+IPv4+TCP packet for a TLS `ClientHello` in
 /// the TCP payload. Returns `None` for any layer mismatch (IPv6,
 /// fragments, non-TCP, etc.).
 fn parse_packet_for_clienthello(eth: &[u8]) -> Option<TlsClientHello> {
@@ -366,8 +368,8 @@ mod tests {
         frame
     }
 
-    /// Build a minimal TLS ClientHello payload with the given
-    /// legacy_version. We only need bytes through legacy_version
+    /// Build a minimal TLS `ClientHello` payload with the given
+    /// `legacy_version`. We only need bytes through `legacy_version`
     /// — everything after is ignored by our parser.
     fn build_clienthello(legacy_version: u16) -> Vec<u8> {
         let mut p = Vec::new();
@@ -489,10 +491,10 @@ mod tests {
         assert!(hellos.is_empty());
     }
 
-    /// End-to-end: detect_tls_downgrade_clients on a synthetic
+    /// End-to-end: `detect_tls_downgrade_clients` on a synthetic
     /// pcap with TWO downgrade attempts from the same client
     /// (one TLS 1.0, one TLS 1.1) should produce 2 findings —
-    /// the cluster key is (src_ip, version), so different
+    /// the cluster key is (`src_ip`, version), so different
     /// versions don't merge.
     #[tokio::test]
     async fn detect_two_versions_from_same_client_yields_two_findings() {

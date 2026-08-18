@@ -1,8 +1,8 @@
-//! WireGuard tunnel control for SuperManager's privileged helper.
+//! `WireGuard` tunnel control for `SuperManager`'s privileged helper.
 //!
 //! ## Architecture
 //!
-//! macOS doesn't have a kernel-mode WireGuard. The supported user-mode
+//! macOS doesn't have a kernel-mode `WireGuard`. The supported user-mode
 //! implementation is **`wireguard-go`**, driven by the **`wg-quick`**
 //! script that ships with `wireguard-tools`. Both come from
 //! `brew install wireguard-tools` (the `wireguard-go` binary is pulled
@@ -26,7 +26,7 @@
 //!
 //! `/etc/wireguard/supermgr-<sanitized-profile-id>.conf`, mode 0600,
 //! root:wheel. The leading `supermgr-` prefix is so multiple
-//! WireGuard sources (e.g. the user's own pre-existing `wg0.conf`)
+//! `WireGuard` sources (e.g. the user's own pre-existing `wg0.conf`)
 //! coexist without collision. The conf file is removed on disconnect
 //! so credentials don't linger.
 //!
@@ -56,7 +56,7 @@ const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 /// Absolute paths sidestep the resolver entirely.
 const WG_CONF_DIR: &str = "/etc/wireguard";
 
-/// Lifetime-of-process WireGuard controller. Not much state here yet
+/// Lifetime-of-process `WireGuard` controller. Not much state here yet
 /// — `wg-quick` itself is what tracks active interfaces — but
 /// keeping this as a struct mirrors the `Strongswan` shape so the
 /// dispatch in `main.rs` stays uniform.
@@ -327,8 +327,7 @@ impl WireGuard {
         // Final verdict: success iff the interface is gone now.
         let final_alive = utun_name_before
             .as_deref()
-            .map(interface_exists)
-            .unwrap_or(false);
+            .is_some_and(interface_exists);
         Ok(WgDisconnectResult {
             success: !final_alive,
             message: if final_alive {
@@ -507,8 +506,8 @@ fn path_for_wg_quick(wg_quick: &Path) -> String {
 /// Sanitize a UUID-shaped profile id into a name that's both
 /// filesystem-safe and accepted by `utun`. The kernel's interface
 /// name limit is 15 chars (IFNAMSIZ-1). UUIDs are way over that, so
-/// we hash to 8 hex chars and prefix with "smwg" (sm = SuperManager,
-/// wg = WireGuard) for a tight, human-readable interface name.
+/// we hash to 8 hex chars and prefix with "smwg" (sm = `SuperManager`,
+/// wg = `WireGuard`) for a tight, human-readable interface name.
 fn interface_name(profile_id: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -556,8 +555,7 @@ fn interface_exists(name: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
     }
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from

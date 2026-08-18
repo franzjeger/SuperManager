@@ -1,9 +1,9 @@
-//! UniFi Controller integration — set-inform, controller setup,
+//! `UniFi` Controller integration — set-inform, controller setup,
 //! REST proxy.
 //!
 //! # Adoption flow
 //!
-//! UniFi devices ship in factory-default mode and listen for
+//! `UniFi` devices ship in factory-default mode and listen for
 //! adoption messages on TCP 8080. To pull a device into a
 //! controller you SSH in (default creds: `ubnt:ubnt` for older
 //! gear, `ubnt` + customer-supplied for newer) and run:
@@ -27,7 +27,7 @@
 //!
 //! # Why credentials, not API keys
 //!
-//! UniFi v8+ supports API keys via "Settings → System →
+//! `UniFi` v8+ supports API keys via "Settings → System →
 //! Advanced → API". Older controllers (v6/v7) only do
 //! username/password. To support both v6+ controllers without
 //! per-version branching, we use username/password — the cookie
@@ -104,7 +104,7 @@ fn shell_quote(s: &str) -> String {
 /// device at a different controller.
 ///
 /// `ssh_username` and `ssh_password` are the device-level
-/// credentials — not the controller's. UniFi factory default
+/// credentials — not the controller's. `UniFi` factory default
 /// is `ubnt`/`ubnt`. After adoption these change to the
 /// controller's adopted-device credentials.
 pub async fn set_inform(
@@ -193,7 +193,7 @@ pub async fn set_inform(
     Ok(stdout.trim().to_owned())
 }
 
-/// Persist the UniFi controller URL + credentials for a host.
+/// Persist the `UniFi` controller URL + credentials for a host.
 /// Authenticates first to fail-fast on bad creds; only saves on
 /// success. Credentials are stored as JSON in the macOS keychain.
 pub async fn set_controller(
@@ -296,7 +296,7 @@ pub struct ApiResponse {
     pub body: String,
 }
 
-/// Generic UniFi REST proxy. Logs in (cookie jar carries the
+/// Generic `UniFi` REST proxy. Logs in (cookie jar carries the
 /// session forward), then forwards the call. Returns the
 /// HTTP status alongside the body so callers can branch on
 /// 4xx without losing the controller's error text.

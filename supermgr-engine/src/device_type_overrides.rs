@@ -4,7 +4,7 @@
 //! sometimes — Ubiquiti owns dozens of OUI prefixes that we
 //! can't possibly all curate, and the IEEE registry isn't
 //! shipped with macOS. When the operator hits a row mis-
-//! classified as "Linux" that's actually a UniFi AP (or vice
+//! classified as "Linux" that's actually a `UniFi` AP (or vice
 //! versa), this module lets them say so once and have every
 //! future scan remember.
 //!
@@ -28,7 +28,7 @@ use tokio::sync::RwLock;
 ///
 ///   - `mac` — exact MAC address match. Wins over prefix.
 ///   - `oui` — three-octet OUI prefix match. Lets the
-///             operator classify every UniFi device on a
+///             operator classify every `UniFi` device on a
 ///             newly-encountered Ubiquiti OUI in one stroke
 ///             instead of repeating per host.
 ///
@@ -66,6 +66,7 @@ pub enum OverrideScope {
 }
 
 impl OverrideScope {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Mac => "mac",
@@ -95,6 +96,7 @@ impl DeviceTypeOverrides {
     /// Tolerates the legacy flat `[overrides]` table shape
     /// from earlier builds — those entries migrate into
     /// `by_mac` on the next save.
+    #[must_use]
     pub fn open(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join("device_type_overrides.toml");
         let mut inner = Inner::default();

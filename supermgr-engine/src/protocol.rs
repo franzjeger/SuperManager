@@ -56,6 +56,7 @@ pub struct Notification {
 
 impl Response {
     /// Create a success response.
+    #[must_use]
     pub fn ok(id: u64, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: "2.0".into(),
@@ -91,6 +92,7 @@ impl Response {
     /// vs. retry-button) without regex-matching the human message.
     /// Existing callers that pass raw `(code, message)` still work
     /// — they just don't carry the structured `data` payload.
+    #[must_use]
     pub fn err_engine(id: u64, err: &crate::error::EngineError) -> Self {
         Self {
             jsonrpc: "2.0".into(),

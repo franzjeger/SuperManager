@@ -71,8 +71,7 @@ impl EngineServer {
         let port = params
             .get("port")
             .and_then(serde_json::Value::as_u64)
-            .map(|n| n as u16)
-            .unwrap_or(22);
+            .map_or(22, |n| n as u16);
         let service = params
             .get("service")
             .and_then(|v| v.as_str())

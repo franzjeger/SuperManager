@@ -58,12 +58,10 @@ fn secrets_path() -> PathBuf {
         PathBuf::from("/etc/supermgrd/secrets.json")
     } else {
         // Non-root: development / CI path under XDG_DATA_HOME.
-        let base = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_DATA_HOME").map_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                 PathBuf::from(home).join(".local/share")
-            });
+            }, PathBuf::from);
         base.join("supermgrd/secrets.json")
     }
 }

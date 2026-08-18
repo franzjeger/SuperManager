@@ -31,13 +31,13 @@ pub struct NotifyConfig {
     /// Per-customer-slug → Slack/Mattermost incoming webhook URL.
     #[serde(default)]
     pub webhooks: std::collections::HashMap<String, String>,
-    /// Per-customer-slug → PagerDuty Events API v2 routing key.
+    /// Per-customer-slug → `PagerDuty` Events API v2 routing key.
     /// When set, Critical findings (and Critical regressions) page
     /// the on-call rota in addition to any Slack notification.
     #[serde(default)]
     pub pagerduty_keys: std::collections::HashMap<String, String>,
-    /// Per-customer-slug → OpsGenie Genie API key. Same routing
-    /// behaviour as PagerDuty — Critical findings escalate.
+    /// Per-customer-slug → `OpsGenie` Genie API key. Same routing
+    /// behaviour as `PagerDuty` — Critical findings escalate.
     #[serde(default)]
     pub opsgenie_keys: std::collections::HashMap<String, String>,
 }
@@ -217,8 +217,8 @@ fn severity_emoji(s: &Severity) -> &'static str {
     }
 }
 
-/// PagerDuty Events API v2 — fires a `trigger` event with one
-/// summary per finding. The dedup_key folds repeated detections
+/// `PagerDuty` Events API v2 — fires a `trigger` event with one
+/// summary per finding. The `dedup_key` folds repeated detections
 /// of the same finding into a single PD incident so we don't
 /// fan-out 1 incident per scan.
 async fn pagerduty_event(
@@ -263,7 +263,7 @@ async fn pagerduty_event(
     Ok(())
 }
 
-/// OpsGenie Alert API. Same as PagerDuty: one alert per finding,
+/// `OpsGenie` Alert API. Same as `PagerDuty`: one alert per finding,
 /// alias = stable dedup-key so re-detections fold into the
 /// existing alert.
 async fn opsgenie_alert(

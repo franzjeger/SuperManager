@@ -243,7 +243,7 @@ fn pick_cvss(metrics: &serde_json::Value) -> Option<(Severity, f32)> {
         if let Some(arr) = metrics.get(key).and_then(|v| v.as_array()) {
             if let Some(first) = arr.first() {
                 let cvss = first.get("cvssData").and_then(|d| d.get("baseScore"))
-                    .and_then(|s| s.as_f64()).unwrap_or(5.0) as f32;
+                    .and_then(serde_json::Value::as_f64).unwrap_or(5.0) as f32;
                 let sev = match cvss {
                     s if s >= 9.0 => Severity::Critical,
                     s if s >= 7.0 => Severity::High,
@@ -260,7 +260,8 @@ fn pick_cvss(metrics: &serde_json::Value) -> Option<(Severity, f32)> {
 
 /// Match a banner string against feed entries. Returns finding
 /// metadata for hits — caller assembles the actual `Finding`
-/// because it has the host_ip + port context.
+/// because it has the `host_ip` + port context.
+#[must_use]
 pub fn match_banner(banner: &str) -> Vec<&'static FeedEntry> {
     // Lazy static-feeling pattern: re-load on each match call —
     // simple, and findings_store is already disk-bound so the
@@ -380,6 +381,7 @@ fn is_too_generic_keyword(k: &str) -> bool {
 
 /// Public matcher with explicit cache passed in (avoids leaking
 /// a 'static-cached singleton; matches one-Arc-per-scan pattern).
+#[must_use]
 pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
     let lc = banner.to_lowercase();
     let mut hits: Vec<FeedEntry> = Vec::new();

@@ -1,7 +1,7 @@
 //! Persisted "desired exit node" intent for the tailscale self-heal loop.
 //!
 //! The `0/1` + `128/1` split-defaults that route all traffic through a
-//! tailscale exit node are a SuperManager artifact — open-source tailscaled
+//! tailscale exit node are a `SuperManager` artifact — open-source tailscaled
 //! does NOT install them. They die when the tailscale utun is torn down on
 //! sleep, and the connectivity watchdog's `panic_reset` removes them on a
 //! blip; nothing re-installs them, so the machine silently falls back to the
@@ -120,8 +120,7 @@ fn write(state: &DesiredExitNode) {
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

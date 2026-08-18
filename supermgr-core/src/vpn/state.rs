@@ -208,7 +208,7 @@ pub struct TunnelStats {
     pub bytes_sent: u64,
     /// Total bytes received through the tunnel since it came up.
     pub bytes_received: u64,
-    /// Timestamp of the most recent WireGuard handshake (absent for IPsec).
+    /// Timestamp of the most recent `WireGuard` handshake (absent for `IPsec`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_handshake: Option<DateTime<Utc>>,
     /// Round-trip time to the peer endpoint in milliseconds, if measured.

@@ -1,6 +1,6 @@
 //! `supermgr-core` — shared types, traits, and interface definitions.
 //!
-//! This crate is the shared vocabulary for the SuperManager workspace:
+//! This crate is the shared vocabulary for the `SuperManager` workspace:
 //!
 //! | Module | Contents |
 //! |--------|----------|

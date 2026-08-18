@@ -31,6 +31,7 @@ pub enum Zone {
 }
 
 impl Zone {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Loopback => "loopback",
@@ -42,6 +43,7 @@ impl Zone {
         }
     }
 
+    #[must_use]
     pub fn is_routable_externally(self) -> bool {
         matches!(self, Self::Public)
     }
@@ -58,6 +60,7 @@ pub struct AssetEnrichment {
 /// Defaults to `Public` for anything that doesn't match a known
 /// reserved range. IPv6 is treated as `Public` for now (we don't
 /// run IPv6-specific scanning paths yet).
+#[must_use]
 pub fn classify(ip: &str) -> Zone {
     let Ok(addr) = ip.parse::<IpAddr>() else {
         return Zone::Public;

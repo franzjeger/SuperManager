@@ -15,8 +15,8 @@
 //!   - `.git/HEAD`         → full source code disclosure
 //!   - `.env`              → DB creds, API keys, secrets
 //!   - `.svn/entries`      → ditto for old SVN repos
-//!   - `wp-admin/`         → WordPress admin login
-//!   - `server-status`     → Apache mod_status, leaks IPs
+//!   - `wp-admin/`         → `WordPress` admin login
+//!   - `server-status`     → Apache `mod_status`, leaks IPs
 //!   - `phpinfo.php`       → PHP config, paths, env
 //!   - `backup.{zip,sql}`  → unencrypted backups
 //!   - `swagger.json`      → API surface enumeration

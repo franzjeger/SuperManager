@@ -1,7 +1,7 @@
-//! SuperManager daemon for macOS.
+//! `SuperManager` daemon for macOS.
 //!
 //! Starts the JSON-RPC engine server on a Unix domain socket.
-//! The SwiftUI app communicates with this daemon to perform SSH operations,
+//! The `SwiftUI` app communicates with this daemon to perform SSH operations,
 //! manage keys/hosts, and (eventually) VPN connections.
 
 use std::sync::Arc;

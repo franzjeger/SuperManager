@@ -4,7 +4,7 @@
 //! with platform-specific implementations:
 //!
 //! - **Linux**: [`LibsecretStore`] backed by the D-Bus Secret Service protocol
-//!   (GNOME Keyring, KWallet).
+//!   (GNOME Keyring, `KWallet`).
 //! - **macOS**: [`KeychainStore`] backed by the macOS Keychain via the
 //!   `security-framework` crate.
 //!
@@ -109,7 +109,7 @@ const ATTR_KEY: &str = "supermgr_label";
 
 /// Production [`SecretStore`] backed by the system Secret Service D-Bus API.
 ///
-/// Works with any compliant service: GNOME Keyring, KWallet (via
+/// Works with any compliant service: GNOME Keyring, `KWallet` (via
 /// `kwallet-secrets`), or any daemon that implements
 /// `org.freedesktop.secrets`.
 #[cfg(target_os = "linux")]

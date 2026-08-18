@@ -41,7 +41,7 @@ pub struct EnableArgs {
     /// The tunnel interface to allow egress through, e.g.
     /// `utun7`. Caller must already know which utun the active
     /// tunnel uses; this RPC doesn't auto-detect because there
-    /// might be several utuns up at once (Tailscale + WireGuard).
+    /// might be several utuns up at once (Tailscale + `WireGuard`).
     pub tunnel_interface: String,
 }
 

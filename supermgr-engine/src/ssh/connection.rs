@@ -356,7 +356,7 @@ impl SshSession {
     /// Run an interactive shell session, sending lines sequentially.
     ///
     /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
-    /// line.  Used for commands that prompt for input (e.g. FortiGate
+    /// line.  Used for commands that prompt for input (e.g. `FortiGate`
     /// `generate-key` which asks for the admin password).
     pub async fn shell_interact(
         &self,

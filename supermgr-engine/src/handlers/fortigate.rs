@@ -1,4 +1,4 @@
-//! FortiGate REST API JSON-RPC handlers.
+//! `FortiGate` REST API JSON-RPC handlers.
 //!
 //! Token generation/test/get, dashboard fetch, and the generic
 //! `fortigate_api` proxy live here. The heavy lifting is in
@@ -9,9 +9,9 @@ use crate::protocol::{self, Response};
 use crate::server::{get_uuid_param, EngineServer};
 
 impl EngineServer {
-    /// Generic FortiGate REST proxy. Looks up the host's stored API
+    /// Generic `FortiGate` REST proxy. Looks up the host's stored API
     /// token and forwards the request. Returns the raw response body
-    /// (JSON for FortiOS APIs) along with the HTTP status code so
+    /// (JSON for `FortiOS` APIs) along with the HTTP status code so
     /// the GUI can branch on 4xx/5xx without a separate error field.
     pub(crate) async fn handle_fortigate_api(&self, id: u64, params: serde_json::Value) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
@@ -60,7 +60,7 @@ impl EngineServer {
         }
     }
 
-    /// Generate a fresh API token via the FortiOS interactive CLI
+    /// Generate a fresh API token via the `FortiOS` interactive CLI
     /// (`config system api-user … execute api-user generate-key`)
     /// and persist it under a host-keyed keychain label. Returns
     /// the cleartext token *once* so the GUI can offer "Copy" — on
@@ -154,7 +154,7 @@ impl EngineServer {
         }
     }
 
-    /// One-shot dashboard fetch — runs four FortiOS REST calls in
+    /// One-shot dashboard fetch — runs four `FortiOS` REST calls in
     /// parallel and returns a coherent snapshot. Each section is
     /// nullable so a partial failure (e.g. VPN endpoint forbidden
     /// due to token scope) still lets the GUI render the rest.

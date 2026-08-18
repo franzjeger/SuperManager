@@ -1,8 +1,8 @@
-//! SuperManager privileged helper daemon.
+//! `SuperManager` privileged helper daemon.
 //!
 //! ## What this is
 //!
-//! A small root-owned LaunchDaemon that brokers between the unprivileged
+//! A small root-owned `LaunchDaemon` that brokers between the unprivileged
 //! SuperManager.app GUI and the system-level VPN machinery (`strongSwan`).
 //! macOS gates `NEVPNManager` behind the paid Personal VPN entitlement
 //! (`com.apple.developer.networking.vpn.api`); going through Configuration
@@ -16,7 +16,7 @@
 //!
 //! The Swift app calls `SMAppService.daemon(plistName:).register()` once.
 //! macOS prompts the user to authorize the daemon, copies the plist into
-//! the system LaunchDaemons store, and starts our binary as root. After
+//! the system `LaunchDaemons` store, and starts our binary as root. After
 //! that the helper sticks around for the life of the install.
 //!
 //! ## Wire protocol
@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async {
         use std::time::{Duration, SystemTime};
         const TICK: Duration = Duration::from_secs(30);
-        const SLEEP_THRESHOLD: Duration = Duration::from_secs(60);
+        const SLEEP_THRESHOLD: Duration = Duration::from_mins(1);
         let mut last = SystemTime::now();
         loop {
             tokio::time::sleep(TICK).await;
@@ -344,7 +344,7 @@ async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
 /// connect but everyone else cannot. We deliberately leave it owned by
 /// root:admin rather than something narrower because every admin user on
 /// the Mac is already trusted to install software (which is what installing
-/// SuperManager is).
+/// `SuperManager` is).
 fn set_socket_permissions(path: &PathBuf) -> anyhow::Result<()> {
     use std::ffi::CString;
 
@@ -892,7 +892,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // so a helper restart keeps the user's preference.
         "tailscale_set_dns_fallbacks" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
             Ok(args) => match dns_health_watchdog::set_fallbacks(args.servers) {
-                Ok(_) => Response::ok(id, serde_json::json!({
+                Ok(()) => Response::ok(id, serde_json::json!({
                     "fallbacks": dns_health_watchdog::current_fallbacks()
                 })),
                 Err(e) => Response::err(id, -32000, format!("set_dns_fallbacks failed: {e:#}")),
@@ -912,7 +912,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // them mid-flight, undoing the user's selection.
         "tailscale_pause_watchdog" => {
             let secs = req.params.get("seconds")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(30);
             connectivity_watchdog::pause_for(secs);
             Response::ok(id, serde_json::json!({"paused_seconds": secs}))
@@ -943,7 +943,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             let args = req.params.get("connect_args").cloned()
                 .unwrap_or(serde_json::Value::Null);
             match auto_reconnect::enable(profile_id.clone(), backend, args).await {
-                Ok(_) => Response::ok(id, serde_json::json!({"enabled": profile_id})),
+                Ok(()) => Response::ok(id, serde_json::json!({"enabled": profile_id})),
                 Err(e) => Response::err(id, -32000, format!("enable failed: {e:#}")),
             }
         }
@@ -954,7 +954,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 None => return Response::err(id, -32602, "missing profile_id"),
             };
             match auto_reconnect::disable(&profile_id).await {
-                Ok(_) => Response::ok(id, serde_json::json!({"disabled": profile_id})),
+                Ok(()) => Response::ok(id, serde_json::json!({"disabled": profile_id})),
                 Err(e) => Response::err(id, -32000, format!("disable failed: {e:#}")),
             }
         }

@@ -48,6 +48,7 @@ pub enum ActivityKind {
 /// Build a unified timeline for `customer_slug`. Returns events
 /// sorted newest-first, capped at `limit` so the UI doesn't have
 /// to handle paging.
+#[must_use]
 pub fn timeline(customer_slug: &str, limit: usize) -> Vec<ActivityEvent> {
     let mut out: Vec<ActivityEvent> = Vec::new();
 
@@ -92,8 +93,8 @@ fn from_engagements(customer_slug: &str) -> Vec<ActivityEvent> {
 }
 
 /// Surface the most-recent disposition change on every finding
-/// in the customer's findings_store. The history was previously
-/// only visible inside the FindingDetailSheet — now operators
+/// in the customer's `findings_store`. The history was previously
+/// only visible inside the `FindingDetailSheet` — now operators
 /// can see "we accepted CVE-X 30 days ago" at the customer level.
 fn from_findings_store(customer_slug: &str) -> Vec<ActivityEvent> {
     let Ok(findings) = crate::findings_store::list_findings(customer_slug) else {

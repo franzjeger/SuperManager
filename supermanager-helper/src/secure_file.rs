@@ -2,7 +2,7 @@
 //!
 //! The helper runs as root and hands credentials to processes it spawns: a
 //! `swanctl` config carrying an EAP password and a group PSK, an `openvpn`
-//! given a static key and password, a WireGuard conf embedding a private key.
+//! given a static key and password, a `WireGuard` conf embedding a private key.
 //! Every one of those was written with `fs::write`, which creates at
 //! `0666 & !umask` — **0644** in practice — and then narrowed with a
 //! `set_permissions` afterwards, leaving the file readable for the length of

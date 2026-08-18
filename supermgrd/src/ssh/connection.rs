@@ -413,7 +413,7 @@ impl SshSession {
             .handle
             .channel_open_direct_tcpip(
                 target_host,
-                target_port as u32,
+                u32::from(target_port),
                 "127.0.0.1",
                 0,
             )
@@ -484,7 +484,7 @@ impl SshSession {
     /// Run an interactive shell session, sending lines sequentially.
     ///
     /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
-    /// line.  Used for commands that prompt for input (e.g. FortiGate
+    /// line.  Used for commands that prompt for input (e.g. `FortiGate`
     /// `generate-key` which asks for the admin password).
     pub async fn shell_interact(
         &self,
@@ -633,7 +633,7 @@ impl SshSession {
         self.handle
             .channel_open_direct_tcpip(
                 remote_host,
-                remote_port as u32,
+                u32::from(remote_port),
                 "127.0.0.1",
                 0u32,
             )

@@ -1,15 +1,15 @@
-//! FortiGate IPsec/IKEv2 backend — drives strongSwan via `swanctl` subprocess.
+//! `FortiGate` IPsec/IKEv2 backend — drives strongSwan via `swanctl` subprocess.
 //!
 //! # Architecture
 //!
 //! 1. Writes a per-connection `swanctl.conf` fragment to
 //!    the system's swanctl `conf.d/` directory (auto-detected).
 //! 2. Runs `swanctl --load-all` to reload strongSwan's connection + secrets tables.
-//! 3. Adds a `/32` host route for the FortiGate endpoint IP via the original
+//! 3. Adds a `/32` host route for the `FortiGate` endpoint IP via the original
 //!    default gateway so IKE/ESP packets reach the peer on the physical NIC.
 //! 4. Initiates the IKE SA via `swanctl --initiate --child <name> --timeout 30`.
 //!    strongSwan/charon installs the XFRM policies and routes (including the
-//!    tunnel default route) in the kernel automatically upon CHILD_SA establishment.
+//!    tunnel default route) in the kernel automatically upon `CHILD_SA` establishment.
 //! 5. Configures `systemd-resolved` per-link DNS via D-Bus.
 //! 6. On disconnect: reverts DNS, terminates SA (charon removes its routes),
 //!    deletes config, removes the endpoint host route.
@@ -26,11 +26,11 @@
 //! `aes128-sha256-ecp384`, `aes256-sha256-ecp384`,
 //! `aes128gcm16-prfsha256-ecp384`, `aes256gcm16-prfsha384-ecp521`,
 //! `chacha20poly1305-prfsha256-ecp384`, and `aes256-sha256-modp2048`
-//! (legacy fallback for FortiGates without ECP DH groups).
+//! (legacy fallback for `FortiGates` without ECP DH groups).
 //!
 //! DH groups: 20 (ECP-384), 21 (ECP-521), and 14 (modp2048).
 //! Authentication: EAP-MSCHAPv2 (local) + PSK (remote).
-//! Virtual IP via IKEv2 config payload (`vips = 0.0.0.0`).
+//! Virtual IP via `IKEv2` config payload (`vips = 0.0.0.0`).
 
 use std::{net::IpAddr, path::PathBuf};
 
@@ -88,7 +88,7 @@ fn swanctl_conf_dir() -> &'static str {
 // Internal state
 // ---------------------------------------------------------------------------
 
-/// Mutable state owned by a running FortiGate connection.
+/// Mutable state owned by a running `FortiGate` connection.
 #[derive(Debug, Default)]
 struct FgState {
     /// swanctl connection / child name (used for terminate and list-sas).
@@ -97,7 +97,7 @@ struct FgState {
     /// Path to the conf fragment we wrote — deleted on disconnect.
     config_path: Option<PathBuf>,
 
-    /// `/32` (or `/128`) host routes added for the FortiGate endpoint.
+    /// `/32` (or `/128`) host routes added for the `FortiGate` endpoint.
     /// Installed on the physical NIC before the IKE SA is initiated so that
     /// IKE/ESP packets continue to reach the peer via the physical interface.
     /// Must be removed explicitly on disconnect (charon does not manage these).
@@ -122,13 +122,13 @@ struct FgState {
 // Backend struct
 // ---------------------------------------------------------------------------
 
-/// FortiGate IPsec/IKEv2 backend.
+/// `FortiGate` IPsec/IKEv2 backend.
 pub struct FortiGateBackend {
     state: Mutex<FgState>,
 }
 
 impl FortiGateBackend {
-    /// Create a new, idle FortiGate backend.
+    /// Create a new, idle `FortiGate` backend.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -154,7 +154,7 @@ impl Default for FortiGateBackend {
 /// stopped, and then fails on every call with this. On a distro that ships
 /// `strongswan.service` disabled by default — Arch, and Debian when installed
 /// without the daemon enabled — that is the state a machine is in until
-/// somebody starts the unit, so it is the first thing a FortiGate connect
+/// somebody starts the unit, so it is the first thing a `FortiGate` connect
 /// hits.
 pub(crate) fn charon_unreachable(stderr: &str) -> bool {
     stderr.contains("charon.vici") || stderr.contains("connecting to 'default' URI failed")
@@ -197,7 +197,7 @@ fn swanctl_failure(command: &str, stderr: &str) -> BackendError {
 /// Convert strongSwan's initiate diagnostics into a stable, user-facing
 /// category. The complete diagnostic stays in the journal; the GUI gets a
 /// sentence that explains the likely remedy without exposing connection IDs
-/// or raw CHILD_SA state-machine text.
+/// or raw `CHILD_SA` state-machine text.
 fn classify_initiate_failure(message: &str) -> BackendError {
     let upper = message.to_ascii_uppercase();
 
@@ -310,15 +310,15 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 // swanctl config generation
 // ---------------------------------------------------------------------------
 
-/// Generate the swanctl config fragment text for a FortiGate
+/// Generate the swanctl config fragment text for a `FortiGate`
 /// connection.
 ///
 /// Uses:
-/// - IKEv2 proposals: aes128/256-sha256-ecp384, aes128/256gcm16, chacha20poly1305
+/// - `IKEv2` proposals: aes128/256-sha256-ecp384, aes128/256gcm16, chacha20poly1305
 /// - DH groups 20 (ecp384), 21 (ecp521), and 14 (modp2048) as a legacy fallback
-///   for FortiGates whose phase1 crypto hasn't been updated to ECP groups —
-///   without a modp group in our proposal list, FortiOS silently drops the
-///   IKE_SA_INIT when it can't parse the KE payload's DH group.
+///   for `FortiGates` whose phase1 crypto hasn't been updated to ECP groups —
+///   without a modp group in our proposal list, `FortiOS` silently drops the
+///   `IKE_SA_INIT` when it can't parse the KE payload's DH group.
 /// - `local { auth = eap-mschapv2; eap_id = <username> }`
 /// - `remote { auth = psk }`
 /// - `vips = 0.0.0.0` for mode-config virtual IP assignment
@@ -338,7 +338,7 @@ fn generate_swanctl_config(
         fg_cfg
             .routes
             .iter()
-            .map(|r| r.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(",")
     };
@@ -572,16 +572,16 @@ async fn capture_default_route_v4() -> Result<Option<String>, BackendError> {
 // DNS helper
 // ---------------------------------------------------------------------------
 
-/// Name of the dedicated dummy netdev that holds the FortiGate session's DNS
+/// Name of the dedicated dummy netdev that holds the `FortiGate` session's DNS
 /// state in systemd-resolved.
 ///
 /// IPsec/XFRM has no kernel netdev, so we used to attach DNS to the *physical*
 /// outbound interface (e.g. `enp14s0`).  But systemd-resolved's `RevertLink`
 /// is per-link and indiscriminate — calling it on the physical link on
-/// disconnect wiped NetworkManager's LAN DNS too, leaving the system unable
+/// disconnect wiped `NetworkManager`'s LAN DNS too, leaving the system unable
 /// to resolve anything until a manual `nmcli connection up`.
 ///
-/// Putting DNS on a dummy interface that we own end-to-end means RevertLink
+/// Putting DNS on a dummy interface that we own end-to-end means `RevertLink`
 /// only clears state we set, never NM's.  The dummy carries no IP and no
 /// route — systemd-resolved only needs a netdev to anchor DNS state to;
 /// query packets still leave the box via the real default route (the VPN).
@@ -648,7 +648,7 @@ pub(crate) async fn remove_dns_dummy() {
 ///
 /// `iface_name` should be the dedicated dummy netdev returned by
 /// [`ensure_dns_dummy`] — never the physical outbound interface, or
-/// `RevertLink` on disconnect will wipe NetworkManager's DNS.
+/// `RevertLink` on disconnect will wipe `NetworkManager`'s DNS.
 /// Returns `Some(ifindex)` on success for later [`RevertLink`] call.
 async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Option<i32> {
     if dns_servers.is_empty() {
@@ -853,19 +853,16 @@ impl VpnBackend for FortiGateBackend {
             let lookup_target = format!("{}:500", fg_cfg.host);
             let result = tokio::net::lookup_host(&lookup_target).await;
             match result {
-                Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
-                    Some(ip) => {
-                        info!("resolved {} → {}", fg_cfg.host, ip);
-                        ip
-                    }
-                    None => {
-                        let _ = tokio::fs::remove_file(&config_path).await;
-                        return Err(BackendError::Interface(format!(
-                            "FortiGate hostname '{}' resolved to zero addresses — \
-                             verify the hostname in the profile configuration",
-                            fg_cfg.host
-                        )));
-                    }
+                Ok(mut addrs) => if let Some(ip) = addrs.next().map(|sa| sa.ip()) {
+                    info!("resolved {} → {}", fg_cfg.host, ip);
+                    ip
+                } else {
+                    let _ = tokio::fs::remove_file(&config_path).await;
+                    return Err(BackendError::Interface(format!(
+                        "FortiGate hostname '{}' resolved to zero addresses — \
+                         verify the hostname in the profile configuration",
+                        fg_cfg.host
+                    )));
                 },
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&config_path).await;
@@ -896,9 +893,9 @@ impl VpnBackend for FortiGateBackend {
         let mut endpoint_host_routes: Vec<String> = Vec::new();
         if let Some((gw, dev)) = &gw_v4 {
             let host_cidr = if host_ip.is_ipv4() {
-                format!("{}/32", host_ip)
+                format!("{host_ip}/32")
             } else {
-                format!("{}/128", host_ip)
+                format!("{host_ip}/128")
             };
             info!(
                 "adding endpoint host route: ip route add {} via {} dev {}",
@@ -1045,10 +1042,7 @@ impl VpnBackend for FortiGateBackend {
         match run_swanctl(&["--list-sas"]).await {
             Ok(list_out) => {
                 let list_stdout = String::from_utf8_lossy(&list_out.stdout);
-                match parse_virtual_ip(&list_stdout) {
-                    Some(vip) => info!("mode-config assigned virtual IP: {}", vip),
-                    None => info!("no virtual IP in --list-sas output (split-tunnel or parse miss)"),
-                }
+                if let Some(vip) = parse_virtual_ip(&list_stdout) { info!("mode-config assigned virtual IP: {}", vip) } else { info!("no virtual IP in --list-sas output (split-tunnel or parse miss)") }
             }
             Err(e) => {
                 warn!("--list-sas failed after successful initiate; tearing down SA: {e}");
@@ -1203,9 +1197,7 @@ impl VpnBackend for FortiGateBackend {
         // (lines like "[IKE] installing DNS server 1.2.3.4 via resolvconf").
         // strongSwan's own resolvconf integration fails on systemd-networkd
         // systems, so we handle DNS ourselves via systemd-resolved D-Bus.
-        let effective_dns: Vec<std::net::IpAddr> = if !fg_cfg.dns_servers.is_empty() {
-            fg_cfg.dns_servers.clone()
-        } else {
+        let effective_dns: Vec<std::net::IpAddr> = if fg_cfg.dns_servers.is_empty() {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut pushed: Vec<std::net::IpAddr> = Vec::new();
             for line in stdout.lines() {
@@ -1226,17 +1218,19 @@ impl VpnBackend for FortiGateBackend {
                 }
             }
             pushed
+        } else {
+            fg_cfg.dns_servers.clone()
         };
 
-        let dns_configured_ifindex = if !effective_dns.is_empty() {
+        let dns_configured_ifindex = if effective_dns.is_empty() {
+            None
+        } else {
             // Attach DNS to a dedicated dummy netdev so RevertLink on disconnect
             // never wipes NetworkManager's DNS on the physical interface.
             match ensure_dns_dummy().await {
                 Some(name) => configure_dns_for_link(name, &effective_dns).await,
                 None => None,
             }
-        } else {
-            None
         };
 
         // ── Step 8: Persist state ────────────────────────────────────────────
@@ -1258,19 +1252,16 @@ impl VpnBackend for FortiGateBackend {
     async fn disconnect(&self) -> Result<(), BackendError> {
         let (conn_name, config_path, endpoint_host_routes, dns_ifindex, tunnel_routes, saved_default_route) = {
             let state = self.state.lock().await;
-            match state.connection_name.clone() {
-                Some(name) => (
-                    name,
-                    state.config_path.clone(),
-                    state.endpoint_host_routes.clone(),
-                    state.dns_configured_ifindex,
-                    state.tunnel_routes.clone(),
-                    state.saved_default_route.clone(),
-                ),
-                None => {
-                    debug!("disconnect called but no SA is active — no-op");
-                    return Ok(());
-                }
+            if let Some(name) = state.connection_name.clone() { (
+                name,
+                state.config_path.clone(),
+                state.endpoint_host_routes.clone(),
+                state.dns_configured_ifindex,
+                state.tunnel_routes.clone(),
+                state.saved_default_route.clone(),
+            ) } else {
+                debug!("disconnect called but no SA is active — no-op");
+                return Ok(());
             }
         };
 
@@ -1369,15 +1360,15 @@ impl VpnBackend for FortiGateBackend {
                 .await
                 .map_err(BackendError::Io)?;
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
+            if out.status.success() {
+                info!("ip route del {} → ok", cidr);
+            } else {
                 warn!(
                     "ip route del {} → exit={} stderr={:?} (may already be gone)",
                     cidr,
                     out.status,
                     stderr.trim()
                 );
-            } else {
-                info!("ip route del {} → ok", cidr);
             }
         }
 

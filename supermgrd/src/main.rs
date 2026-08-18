@@ -7,7 +7,7 @@
 //!    non-root -> XDG user path for development).
 //! 3. Load VPN profiles from the selected directory (TOML files).
 //! 4. Load SSH keys and hosts from the SSH data directories.
-//! 5. Clean up any stale WireGuard interfaces left by a previous crash.
+//! 5. Clean up any stale `WireGuard` interfaces left by a previous crash.
 //! 6. Acquire the D-Bus well-known name `org.supermgr.Daemon` on the **system** bus.
 //! 7. Register the `DaemonService` object at `/org/supermgr/Daemon`.
 //! 8. Spawn the background monitoring task.
@@ -16,7 +16,7 @@
 //! # Privilege requirements
 //!
 //! The daemon must run as root (or a user with `CAP_NET_ADMIN`) to create and
-//! configure WireGuard interfaces via netlink.  The provided systemd unit file
+//! configure `WireGuard` interfaces via netlink.  The provided systemd unit file
 //! (in `contrib/systemd/`) restricts capabilities accordingly.
 //!
 //! When run as root the system bus is used and profiles are stored in
@@ -71,12 +71,10 @@ async fn main() -> anyhow::Result<()> {
     let log_dir = if nix::unistd::getuid().is_root() {
         PathBuf::from("/var/log/supermgrd")
     } else {
-        let base = std::env::var("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_STATE_HOME").map_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                 PathBuf::from(home).join(".local/state")
-            });
+            }, PathBuf::from);
         base.join("supermgrd")
     };
 
@@ -118,24 +116,20 @@ async fn main() -> anyhow::Result<()> {
     // `SUPERMGRD_PROFILE_DIR` always wins; otherwise the directory is chosen
     // based on effective UID so the daemon works for both production (root,
     // system path) and development (non-root, XDG user path).
-    let profile_dir = std::env::var("SUPERMGRD_PROFILE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
+    let profile_dir = std::env::var("SUPERMGRD_PROFILE_DIR").map_or_else(|_| {
             if nix::unistd::getuid().is_root() {
                 PathBuf::from(SYSTEM_PROFILE_DIR)
             } else {
                 // Non-root development mode: use XDG data home so no
                 // privileged filesystem access is required.
-                let base = std::env::var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
+                let base = std::env::var("XDG_DATA_HOME").map_or_else(|_| {
                         let home = std::env::var("HOME")
                             .unwrap_or_else(|_| "/tmp".to_owned());
                         PathBuf::from(home).join(".local/share")
-                    });
+                    }, PathBuf::from);
                 base.join("supermgrd/profiles")
             }
-        });
+        }, PathBuf::from);
 
     info!("profile directory: {}", profile_dir.display());
 
@@ -275,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Scan `/sys/class/net/` for stale WireGuard interfaces left by a previous
+/// Scan `/sys/class/net/` for stale `WireGuard` interfaces left by a previous
 /// crash and remove them.
 ///
 /// Our interfaces follow the pattern `wg[0-9a-f]{8}` — exactly 10 characters,
@@ -285,7 +279,7 @@ async fn main() -> anyhow::Result<()> {
 /// For each matching interface:
 /// 1. `resolvectl revert <iface>` — remove any per-link DNS state from
 ///    systemd-resolved before the interface disappears.
-/// 2. `ip link delete <iface>` — tear down the WireGuard interface; the kernel
+/// 2. `ip link delete <iface>` — tear down the `WireGuard` interface; the kernel
 ///    automatically removes all routes whose `dev` is that interface.
 /// 3. Check whether a default IPv4 route still exists; if not, log a warning
 ///    that manual route restoration may be needed (we cannot know the original
@@ -586,7 +580,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
             line.push_str(&v.extras.join(" "));
         }
 
-        let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = self.buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if buf.len() >= self.cap {
             buf.pop_front();
         }

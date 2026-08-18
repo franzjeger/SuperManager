@@ -1,4 +1,4 @@
-//! `supermgr-engine` — cross-platform daemon engine for SuperManager.
+//! `supermgr-engine` — cross-platform daemon engine for `SuperManager`.
 //!
 //! This crate contains the platform-independent business logic:
 //! SSH operations, state management, secrets, and the JSON-RPC server.

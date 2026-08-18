@@ -1,6 +1,6 @@
 //! Linux compliance baseline run over SSH.
 //!
-//! The existing `compliance.rs` module targets FortiGate via the
+//! The existing `compliance.rs` module targets `FortiGate` via the
 //! REST API. Linux servers (which an MSP fleet has *plenty* of)
 //! got nothing — operators couldn't answer "is this server's
 //! sshd configured per CIS?" from the GUI.
@@ -13,7 +13,7 @@
 //!   - Severity + recommendation if it fails
 //!
 //! We run the scripts over an existing SSH connection (the same
-//! connection_pool the SSH section uses). No agent install
+//! `connection_pool` the SSH section uses). No agent install
 //! required — vanilla coreutils is enough for the starter set.
 //!
 //! # Two invariants this module got wrong once, and now tests
@@ -46,7 +46,7 @@
 //!   - SSH password auth disabled (vs key-only)
 //!   - SSH root login disabled
 //!   - SSH protocol v2 only (rule out v1 fallback)
-//!   - Kernel core_pattern is sane (no pipe to an unrecognised program)
+//!   - Kernel `core_pattern` is sane (no pipe to an unrecognised program)
 //!   - Automatic security updates applying
 //!   - journald running (audit trail exists)
 //!   - Host firewall active
@@ -238,7 +238,7 @@ struct LinuxCheck {
     /// CVSS score, currently unused by both the runner and the
     /// library (the library uses `severity` as the operator-facing
     /// magnitude; CVSS is preserved here for a future risk-score
-    /// integration). Marked allow(dead_code) until consumed.
+    /// integration). Marked `allow(dead_code)` until consumed.
     #[allow(dead_code)]
     cvss: f32,
     detail_on_fail: &'static str,
@@ -444,7 +444,7 @@ const LINUX_CHECKS: &[LinuxCheck] = &[
 ];
 
 /// Run all baseline checks over a single SSH session and assemble
-/// a `ComplianceRun` in the same shape the FortiGate path produces.
+/// a `ComplianceRun` in the same shape the `FortiGate` path produces.
 /// Caller supplies a `run_cmd` closure that executes a command and
 /// returns combined stdout — typically wired to russh.
 ///
@@ -455,7 +455,7 @@ const LINUX_CHECKS: &[LinuxCheck] = &[
 ///
 /// Findings emission was dropped in 1.12a — the GUI of 1.12b renders
 /// failure rows directly off `run.checks` (filtering `Status::Fail`),
-/// which is what the FortiGate path has always done. Pushing to
+/// which is what the `FortiGate` path has always done. Pushing to
 /// `findings_store` from compliance was never wired up; that
 /// integration is a separate concern.
 pub async fn run_baseline<F, Fut>(
@@ -574,8 +574,8 @@ where
 /// `compliance::Severity` (what `CheckResult` expects). The two
 /// enums have identical variants — they exist separately because
 /// `vuln::Severity` predates `compliance`; consolidating them is
-/// out of scope here and would ripple through notify/findings_store/
-/// report/cve_feed/risk. See compliance.rs for that future cleanup.
+/// out of scope here and would ripple through `notify/findings_store`/
+/// `report/cve_feed/risk`. See compliance.rs for that future cleanup.
 fn map_severity(v: Severity) -> compliance::Severity {
     match v {
         Severity::Info => compliance::Severity::Info,
@@ -589,7 +589,7 @@ fn map_severity(v: Severity) -> compliance::Severity {
 /// Derive a human-readable category from the check id prefix so
 /// the GUI's per-check rendering shows "SSH" / "Kernel" / etc.
 /// rather than "Linux baseline" on every row. Aligns with the
-/// FortiGate path's `CheckDefinition.category` (which has values
+/// `FortiGate` path's `CheckDefinition.category` (which has values
 /// like "Authentication", "Logging", etc.).
 ///
 /// **Single source of truth** for Linux check categories. Called
@@ -600,6 +600,7 @@ fn map_severity(v: Severity) -> compliance::Severity {
 /// share this function rather than referencing parallel literals.
 /// The runtime backstop for this invariant lives in
 /// `compliance::tests::linux_library_category_byte_identical_to_runner_category`.
+#[must_use]
 pub fn category_for_id(check_id: &str) -> String {
     let mid = check_id.strip_prefix("linux.").unwrap_or(check_id);
     let segment = mid.split('.').next().unwrap_or("baseline");
@@ -620,7 +621,7 @@ pub fn category_for_id(check_id: &str) -> String {
 /// entry, suitable for merging into `compliance::list_checks()`.
 /// Once merged, the GUI's library browser shows Linux checks,
 /// the in-row Remediation block in `ComplianceHostView` resolves
-/// for Linux check_ids, and `render_markdown_report` produces a
+/// for Linux `check_ids`, and `render_markdown_report` produces a
 /// complete Remediation column for Linux runs — closing two of
 /// the three tracked defects named in 1.12b.
 ///
@@ -632,14 +633,15 @@ pub fn category_for_id(check_id: &str) -> String {
 /// identical by construction because they come from the same
 /// function call, not from parallel literals.
 ///
-/// **Runtime fields (cli_command, cli_grep, channel, expect,
-/// api_path, api_pointer)** are placeholders, not consulted by
+/// **Runtime fields (`cli_command`, `cli_grep`, channel, expect,
+/// `api_path`, `api_pointer`)** are placeholders, not consulted by
 /// the Linux runner — `run_baseline` reads commands directly off
 /// `LINUX_CHECKS` and matches via `LinuxCheck.expect_contains`.
 /// The library row's value for Linux is in `description /
 /// remediation / cisReference / category / severity / title /
 /// framework` — the fields `ChecksLibrarySheet` and `CheckRow`
 /// actually render. See per-field notes below.
+#[must_use]
 pub fn linux_default_checks() -> Vec<compliance::CheckDefinition> {
     LINUX_CHECKS
         .iter()
@@ -709,8 +711,8 @@ pub const LINUX_FRAMEWORK: &str = "CIS Distribution Independent Linux v2.0.0";
 /// filled in by pattern, and most of the baseline turns out to have no
 /// counterpart in the distribution-independent benchmark:
 ///
-/// - `password-auth-disabled` — CIS DIL has **no** PasswordAuthentication
-///   control. 5.2.11 is PermitEmptyPasswords, which is a different setting.
+/// - `password-auth-disabled` — CIS DIL has **no** `PasswordAuthentication`
+///   control. 5.2.11 is `PermitEmptyPasswords`, which is a different setting.
 ///   Key-only SSH is a defensible control; it is not this benchmark's.
 /// - `core-pattern-safe` — 1.5.1 "Ensure core dumps are restricted" is the
 ///   neighbourhood, but it checks `fs.suid_dumpable` and a limits entry, not
@@ -734,7 +736,7 @@ pub const LINUX_FRAMEWORK: &str = "CIS Distribution Independent Linux v2.0.0";
 /// yet" and fills the gap with something plausible.
 ///
 /// Sources: the control ids and titles were read from the `dev-sec/cis-dil-benchmark`
-/// InSpec profile, which encodes the benchmark's own numbering.
+/// `InSpec` profile, which encodes the benchmark's own numbering.
 fn cis_reference(check_id: &str) -> Option<&'static str> {
     match check_id {
         // "Ensure SSH Protocol is set to 2"
@@ -772,6 +774,7 @@ fn linux_description(check_id: &str) -> &'static str {
 /// Static count of checks the baseline currently covers — handy
 /// for the UI's "Linux baseline (7 checks)" subtitle without
 /// needing to call `run_baseline` first.
+#[must_use]
 pub fn check_count() -> usize {
     LINUX_CHECKS.len()
 }
@@ -779,6 +782,7 @@ pub fn check_count() -> usize {
 /// Names of every check, in order. Surfaced to the UI when the
 /// operator wants to see what the baseline actually checks
 /// before running it.
+#[must_use]
 pub fn check_titles() -> Vec<&'static str> {
     LINUX_CHECKS.iter().map(|c| c.title).collect()
 }
@@ -1288,7 +1292,7 @@ mod tests {
     #[test]
     fn every_check_has_unique_id() {
         let mut ids: Vec<&'static str> = LINUX_CHECKS.iter().map(|c| c.id).collect();
-        ids.sort();
+        ids.sort_unstable();
         let original_len = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), original_len, "duplicate check IDs would corrupt findings_store keys");
@@ -1385,8 +1389,7 @@ mod tests {
             assert!(matches!(c.status, Status::Error),
                 "ssh errors must produce Error, not Fail");
             assert!(c.raw_value.as_deref()
-                .map(|s| s.contains("simulated ssh disconnect"))
-                .unwrap_or(false));
+                .is_some_and(|s| s.contains("simulated ssh disconnect")));
         }
         assert_eq!(run.errored, check_count() as u32);
         assert_eq!(run.failed, 0);

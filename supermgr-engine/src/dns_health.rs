@@ -35,7 +35,7 @@ pub struct DnsHealthReport {
     /// intentionally NOT emitted — an absent record and a failed query
     /// must not be reported the same way, or a transient DNS outage is
     /// indistinguishable from "SPF/DNSSEC missing" and gets shipped to
-    /// the customer and PagerDuty as a real gap.
+    /// the customer and `PagerDuty` as a real gap.
     #[serde(default)]
     pub query_failures: Vec<String>,
 }

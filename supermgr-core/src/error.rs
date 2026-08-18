@@ -108,7 +108,7 @@ pub enum ProfileError {
         name: String,
     },
 
-    /// A WireGuard `.conf` or FortiGate `.mobileconfig` file could not be parsed.
+    /// A `WireGuard` `.conf` or `FortiGate` `.mobileconfig` file could not be parsed.
     #[error("import failed for '{path}': {reason}")]
     ImportFailed {
         /// Path or label of the file that failed to import.
@@ -140,7 +140,7 @@ pub enum SecretError {
         label: String,
     },
 
-    /// The secret service (GNOME Keyring / KWallet) is unavailable.
+    /// The secret service (GNOME Keyring / `KWallet`) is unavailable.
     #[error("secret service unavailable: {0}")]
     ServiceUnavailable(String),
 

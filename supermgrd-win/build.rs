@@ -1,4 +1,4 @@
-//! Embed a Windows VS_FIXEDFILEINFO version resource into the daemon
+//! Embed a Windows `VS_FIXEDFILEINFO` version resource into the daemon
 //! `.exe`. The values appear in:
 //!
 //! - File Explorer's *Properties* dialog (Details tab).

@@ -559,8 +559,8 @@ impl EngineServer {
         }
     }
 
-    /// Manually set an API token for a host. Used when the FortiGate
-    /// admin generates a token outside SuperManager and the user
+    /// Manually set an API token for a host. Used when the `FortiGate`
+    /// admin generates a token outside `SuperManager` and the user
     /// pastes it into the GUI. The token is stored in the keychain
     /// under a label keyed by host id; the host record gains a
     /// `SecretRef` pointing at it.
@@ -582,8 +582,7 @@ impl EngineServer {
         let api_port = params
             .get("api_port")
             .and_then(serde_json::Value::as_u64)
-            .map(|v| v as u16)
-            .unwrap_or(443);
+            .map_or(443, |v| v as u16);
 
         let label = format!("ssh/{}/fortigate-api-token", host_id.simple());
         if let Err(e) = self.secrets.store(&label, token.as_bytes()).await {
@@ -698,7 +697,7 @@ impl EngineServer {
             Err(r) => return r,
         };
         let host_ids_json = params.get("host_ids_json").and_then(|v| v.as_str()).unwrap_or("[]");
-        let use_sudo = params.get("use_sudo").and_then(|v| v.as_bool()).unwrap_or(false);
+        let use_sudo = params.get("use_sudo").and_then(serde_json::Value::as_bool).unwrap_or(false);
 
         let host_ids: Vec<uuid::Uuid> = match serde_json::from_str(host_ids_json) {
             Ok(ids) => ids,

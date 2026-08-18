@@ -1,4 +1,4 @@
-//! `supermgr-win` — SuperManager desktop GUI for Windows.
+//! `supermgr-win` — `SuperManager` desktop GUI for Windows.
 //!
 //! Slint frontend that talks to `supermgrd-win` over the named pipe at
 //! `\\.\pipe\supermgrd`. The GUI process runs as the interactive user;

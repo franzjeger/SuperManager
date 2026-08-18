@@ -1,8 +1,8 @@
-//! Microsoft Entra ID OAuth2 device-code flow + runtime detection
+//! Microsoft Entra ID `OAuth2` device-code flow + runtime detection
 //! for Azure VPN.
 //!
 //! The Azure VPN gateway authenticates clients with an Entra ID
-//! access token in the OpenVPN `auth-user-pass` password slot.
+//! access token in the `OpenVPN` `auth-user-pass` password slot.
 //! For a desktop client to obtain that token without an embedded
 //! webview, Microsoft uses the **device code flow** (RFC 8628):
 //!
@@ -12,7 +12,7 @@
 //!   2. The user opens the URI in any browser, signs in, and
 //!      enters the `user_code`. Browser stays out-of-band — the
 //!      app never sees the user's password.
-//!   3. Client polls `/oauth2/v2.0/token` with the device_code.
+//!   3. Client polls `/oauth2/v2.0/token` with the `device_code`.
 //!      Returns `authorization_pending` until the user completes
 //!      the browser flow, then returns an `access_token`.
 //!
@@ -20,7 +20,7 @@
 //! and `vpn_azure_device_code_poll`) so the GUI can drive the
 //! polling loop with its own UI state. The daemon stays
 //! stateless — it doesn't track which device codes are in flight,
-//! the GUI hands the device_code back on every poll.
+//! the GUI hands the `device_code` back on every poll.
 //!
 //! # Client app ID
 //!
@@ -55,7 +55,7 @@ pub struct DeviceCodeStart {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
-    /// How long the device_code stays valid, in seconds. Microsoft
+    /// How long the `device_code` stays valid, in seconds. Microsoft
     /// usually returns 900 (15 min); the GUI uses this to size the
     /// "code expires in…" countdown.
     pub expires_in: i64,
@@ -68,14 +68,14 @@ pub struct DeviceCodeStart {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum DeviceCodePoll {
-    /// Token issued. `access_token` becomes the OpenVPN password;
+    /// Token issued. `access_token` becomes the `OpenVPN` password;
     /// `username` is what we'll send in the `auth-user-pass` user
-    /// slot (preferred_username from the id_token if present, else
+    /// slot (`preferred_username` from the `id_token` if present, else
     /// a placeholder).
     Authorized {
         access_token: String,
         username: String,
-        /// Seconds until the access_token expires. The GUI surfaces
+        /// Seconds until the `access_token` expires. The GUI surfaces
         /// this so the user knows roughly how long the VPN session
         /// is good for before re-authentication.
         expires_in: i64,
@@ -91,7 +91,7 @@ pub enum DeviceCodePoll {
 }
 
 /// Kick off the device-code flow against the given tenant. The
-/// client_id is the gateway's expected audience (from the
+/// `client_id` is the gateway's expected audience (from the
 /// `.azurevpnconfig`); we wrap it as a `.default` scope.
 pub async fn start_device_flow(
     tenant: &str,
@@ -167,7 +167,7 @@ pub async fn poll_token(
             .to_owned();
         let expires_in = json
             .get("expires_in")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(3600);
         // Lift `preferred_username` from the id_token JWT payload
         // for use as the OpenVPN auth-user-pass username. The
@@ -211,9 +211,9 @@ pub async fn poll_token(
     })
 }
 
-/// Lift the `preferred_username` claim from a JWT id_token. We
+/// Lift the `preferred_username` claim from a JWT `id_token`. We
 /// don't validate the signature — this is just for display; the
-/// gateway is what verifies the access_token cryptographically.
+/// gateway is what verifies the `access_token` cryptographically.
 fn decode_id_token_username(jwt: &str) -> Option<String> {
     use base64::Engine as _;
     let payload_b64 = jwt.split('.').nth(1)?;
@@ -223,7 +223,7 @@ fn decode_id_token_username(jwt: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     v.get("preferred_username")
         .and_then(|s| s.as_str())
-        .map(|s| s.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
 }
 
 /// Cheap percent-encoder — just the chars we actually emit (`/`,
@@ -237,7 +237,7 @@ fn urlencoding(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            _ => out.push_str(&format!("%{:02X}", b)),
+            _ => out.push_str(&format!("%{b:02X}")),
         }
     }
     out
@@ -248,11 +248,11 @@ fn urlencoding(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// What's installed on this Mac that can carry an Azure-AAD VPN
-/// session. Azure's Entra ID flow puts an OAuth2 access token in
-/// the OpenVPN `auth-user-pass` password slot — vanilla OpenVPN
+/// session. Azure's Entra ID flow puts an `OAuth2` access token in
+/// the `OpenVPN` `auth-user-pass` password slot — vanilla `OpenVPN`
 /// 2.x doesn't speak this dialect reliably (it doesn't refresh
 /// the token, doesn't handle the SAML push, can fail mid-handshake
-/// on some gateway versions). The fix is OpenVPN 3.x or one of
+/// on some gateway versions). The fix is `OpenVPN` 3.x or one of
 /// the Mac apps that wraps it.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -267,13 +267,13 @@ pub enum AzureRuntime {
     /// via `open -a` and lose direct lifetime control, but the
     /// user gets a working tunnel without any extra setup.
     AzureVpnClientApp { path: String },
-    /// "OpenVPN Connect" (App Store). Also wraps openvpn3, but
+    /// "`OpenVPN` Connect" (App Store). Also wraps openvpn3, but
     /// is generic — the user has to wire up the .ovpn manually
     /// the first time, and we can't drive it programmatically
     /// from the helper. Listed as a discoverable option so the
     /// UI can suggest it.
     OpenvpnConnectApp { path: String },
-    /// **Only OpenVPN 2.x** is installed. We refuse to launch
+    /// **Only `OpenVPN` 2.x** is installed. We refuse to launch
     /// Azure connections on this stack — past the import step
     /// the user gets a guided "install one of the above" message.
     Only2x { path: String },
@@ -286,6 +286,7 @@ impl AzureRuntime {
     /// True iff we can drive the connection from the privileged
     /// helper — i.e. the runtime is a CLI we can spawn, not a
     /// .app we'd need to hand off to.
+    #[must_use]
     pub fn is_helper_driveable(&self) -> bool {
         matches!(self, AzureRuntime::Openvpn3Cli { .. })
     }
@@ -293,6 +294,7 @@ impl AzureRuntime {
     /// True iff *some* macOS app exists that can complete an
     /// Azure-AAD VPN session, even if we can't drive it from the
     /// helper. Drives the GUI's "Open in Azure VPN Client" button.
+    #[must_use]
     pub fn is_app_handoff(&self) -> bool {
         matches!(
             self,
@@ -305,10 +307,11 @@ impl AzureRuntime {
 ///   1. `openvpn3` CLI binary (we own the session lifetime)
 ///   2. Microsoft's Azure VPN Client (handoff, but Azure-specific
 ///      and most reliable for AAD)
-///   3. OpenVPN Connect (handoff, generic)
-///   4. OpenVPN 2.x (refused — token-as-password handshake is too
+///   3. `OpenVPN` Connect (handoff, generic)
+///   4. `OpenVPN` 2.x (refused — token-as-password handshake is too
 ///      flaky to ship as a default)
 ///   5. Nothing
+#[must_use]
 pub fn detect_azure_runtime() -> AzureRuntime {
     // Brew prefixes + a few known custom-port locations. The
     // openvpn3-aircrack port lands the binary at `/usr/local/sbin`

@@ -13,7 +13,7 @@
 //! Either way the user lands on a routing table with no default
 //! and is offline until WiFi-cycles or panic-resets.
 //!
-//! Tailscale.app sidesteps this with NetworkExtension. We can't
+//! Tailscale.app sidesteps this with `NetworkExtension`. We can't
 //! (no Developer Program enrollment yet). Cheapest practical fix:
 //! a watchdog thread.
 //!
@@ -23,7 +23,7 @@
 //!    + interface (e.g. `192.0.2.1` via `en0`).
 //! 2. Every 500 ms, re-read the route table.
 //!    - Default present → update snapshot (network may have changed
-//!      legitimately, e.g. WiFi roam; we want the freshest known-good).
+//!      legitimately, e.g. `WiFi` roam; we want the freshest known-good).
 //!    - Default missing → wait one more poll (debounce against
 //!      transient reconfigs), then restore via
 //!      `route -q add default <gw>`.
@@ -112,7 +112,7 @@ pub fn spawn_guardian() -> Result<()> {
 
     thread::Builder::new()
         .name("route-guardian".into())
-        .spawn(move || guardian_loop())
+        .spawn(guardian_loop)
         .map_err(|e| anyhow!("could not spawn guardian thread: {e}"))?;
 
     tracing::info!("route guardian spawned (v4 + v6)");
@@ -163,8 +163,8 @@ pub fn force_restore_now() -> Result<()> {
 
     let mut any_done = false;
     if let Some(snap) = v4 {
-        if interface_is_up(&snap.interface) {
-            if restore_default(&snap, Af::V4).is_ok() {
+        if interface_is_up(&snap.interface)
+            && restore_default(&snap, Af::V4).is_ok() {
                 tracing::warn!(
                     af = %Af::V4.label(),
                     gw = %snap.gateway,
@@ -173,11 +173,10 @@ pub fn force_restore_now() -> Result<()> {
                 );
                 any_done = true;
             }
-        }
     }
     if let Some(snap) = v6 {
-        if interface_is_up(&snap.interface) {
-            if restore_default(&snap, Af::V6).is_ok() {
+        if interface_is_up(&snap.interface)
+            && restore_default(&snap, Af::V6).is_ok() {
                 tracing::warn!(
                     af = %Af::V6.label(),
                     gw = %snap.gateway,
@@ -186,7 +185,6 @@ pub fn force_restore_now() -> Result<()> {
                 );
                 any_done = true;
             }
-        }
     }
     if any_done {
         Ok(())
@@ -213,68 +211,65 @@ fn tick_one(af: Af, missing: &mut u32) {
     };
     let Some(cell) = cell else { return };
 
-    match observed {
-        Some(snap) => {
-            *missing = 0;
-            if let Ok(mut guard) = cell.lock() {
-                if guard.as_ref() != Some(&snap) {
-                    tracing::info!(
-                        af = %af.label(),
-                        gw = %snap.gateway,
-                        iface = %snap.interface,
-                        "default-route snapshot updated"
-                    );
-                }
-                *guard = Some(snap);
+    if let Some(snap) = observed {
+        *missing = 0;
+        if let Ok(mut guard) = cell.lock() {
+            if guard.as_ref() != Some(&snap) {
+                tracing::info!(
+                    af = %af.label(),
+                    gw = %snap.gateway,
+                    iface = %snap.interface,
+                    "default-route snapshot updated"
+                );
             }
+            *guard = Some(snap);
         }
-        None => {
-            // `read_default_route` filters out utun-bound defaults.
-            // Before treating the route as "missing", check whether a
-            // VPN tunnel has legitimately replaced the default via a
-            // utun interface (strongSwan full tunnel, WireGuard, etc.).
-            // If so, the route is not missing — the VPN owns it.
-            // Restoring the physical-interface default would fight the
-            // tunnel: charon reinstalls 0.0.0.0/0 via utun, the guardian
-            // removes it again, repeat every 500 ms. Symptom: 90-second
-            // connectivity outage in the helper log with ~100 "restored
-            // from snapshot" messages, followed by the VPN silently dying.
-            if read_default_route_raw(af).map_or(false, |s| s.interface.starts_with("utun")) {
-                // VPN tunnel owns the default route. Reset the miss
-                // counter so we don't act on accumulated misses when
-                // the tunnel eventually tears down.
-                *missing = 0;
-                return;
-            }
+    } else {
+        // `read_default_route` filters out utun-bound defaults.
+        // Before treating the route as "missing", check whether a
+        // VPN tunnel has legitimately replaced the default via a
+        // utun interface (strongSwan full tunnel, WireGuard, etc.).
+        // If so, the route is not missing — the VPN owns it.
+        // Restoring the physical-interface default would fight the
+        // tunnel: charon reinstalls 0.0.0.0/0 via utun, the guardian
+        // removes it again, repeat every 500 ms. Symptom: 90-second
+        // connectivity outage in the helper log with ~100 "restored
+        // from snapshot" messages, followed by the VPN silently dying.
+        if read_default_route_raw(af).is_some_and(|s| s.interface.starts_with("utun")) {
+            // VPN tunnel owns the default route. Reset the miss
+            // counter so we don't act on accumulated misses when
+            // the tunnel eventually tears down.
+            *missing = 0;
+            return;
+        }
 
-            *missing += 1;
-            // Debounce: act on second consecutive miss (1 s gap).
-            if *missing < 2 {
-                return;
-            }
-            let snap = cell.lock().ok().and_then(|s| s.clone());
-            let Some(snap) = snap else { return };
-            if !interface_is_up(&snap.interface) {
+        *missing += 1;
+        // Debounce: act on second consecutive miss (1 s gap).
+        if *missing < 2 {
+            return;
+        }
+        let snap = cell.lock().ok().and_then(|s| s.clone());
+        let Some(snap) = snap else { return };
+        if !interface_is_up(&snap.interface) {
+            tracing::warn!(
+                af = %af.label(),
+                iface = %snap.interface,
+                "snapshot interface is down; not restoring"
+            );
+            return;
+        }
+        match restore_default(&snap, af) {
+            Ok(()) => {
                 tracing::warn!(
                     af = %af.label(),
+                    gw = %snap.gateway,
                     iface = %snap.interface,
-                    "snapshot interface is down; not restoring"
+                    "default route was missing — restored from snapshot"
                 );
-                return;
+                *missing = 0;
             }
-            match restore_default(&snap, af) {
-                Ok(()) => {
-                    tracing::warn!(
-                        af = %af.label(),
-                        gw = %snap.gateway,
-                        iface = %snap.interface,
-                        "default route was missing — restored from snapshot"
-                    );
-                    *missing = 0;
-                }
-                Err(e) => {
-                    tracing::warn!(af = %af.label(), "restore failed: {e}");
-                }
+            Err(e) => {
+                tracing::warn!(af = %af.label(), "restore failed: {e}");
             }
         }
     }
@@ -412,6 +407,5 @@ fn interface_is_up(iface: &str) -> bool {
     // First line carries flags=NNNN<UP,...>
     s.lines()
         .next()
-        .map(|l| l.contains("<UP,") || l.contains(",UP,") || l.contains(",UP>"))
-        .unwrap_or(false)
+        .is_some_and(|l| l.contains("<UP,") || l.contains(",UP,") || l.contains(",UP>"))
 }

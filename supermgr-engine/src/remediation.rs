@@ -28,6 +28,7 @@ use crate::vuln::Finding;
 
 /// Returns a remediation script for the given finding, or `None`
 /// if no recipe is registered for this finding id.
+#[must_use]
 pub fn script_for_finding(f: &Finding) -> Option<String> {
     let id = f.id.as_str();
     match id {
@@ -52,6 +53,7 @@ pub fn script_for_finding(f: &Finding) -> Option<String> {
 /// related findings gets one paste-once script. Any unrecognised
 /// finding ids are skipped silently — caller has already checked
 /// `script_for_finding` returns Some for at least one entry.
+#[must_use]
 pub fn batch_script(host: &str, findings: &[Finding]) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -195,13 +197,13 @@ fi
 }
 
 fn script_block_dotenv(f: &Finding) -> String {
-    let body = r#"# Block .env (and any hidden file) at the web server.
+    let body = r"# Block .env (and any hidden file) at the web server.
 if [ -d /etc/nginx ]; then
   grep -q 'location ~ /\\\\\\.' /etc/nginx/nginx.conf 2>/dev/null \
     || sed -i '/server_name/a \\tlocation ~ /\\\\. { deny all; return 404; }' /etc/nginx/nginx.conf
   nginx -t && systemctl reload nginx && echo 'nginx: blocked hidden files'
 fi
-"#;
+";
     let mut out = header(f);
     out.push_str(body);
     out

@@ -14,7 +14,7 @@
 //! not that any specific handler returns correct data. Per-handler
 //! correctness lives in the unit tests of each handler's module.
 //!
-//! Why not also unit-test EngineServer methods directly?
+//! Why not also unit-test `EngineServer` methods directly?
 //! Because the bug class we're guarding against here is in the
 //! *framing* + *dispatch*, not the handler bodies. A unit test
 //! that calls `server.handle_X` skips the very layer we want to

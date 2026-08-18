@@ -4,9 +4,9 @@
 //!
 //! macOS System Configuration has two layers:
 //!
-//!   Setup:/Network/Service/<uuid>/DNS  — persistent, survives reboot.
+//!   <Setup:/Network/Service>/<uuid>/DNS  — persistent, survives reboot.
 //!                                        Written by `networksetup`.
-//!   State:/Network/Service/<uuid>/DNS  — ephemeral, cleared on reboot.
+//!   <State:/Network/Service>/<uuid>/DNS  — ephemeral, cleared on reboot.
 //!                                        Written by scutil / VPN daemons.
 //!
 //! `networksetup -setdnsservers` writes to **Setup** — the user's saved
@@ -30,7 +30,7 @@
 //!
 //! ## Boot-time survival
 //!
-//! The companion LaunchDaemon (`no.sybr.supermanager.vpn-dns-cleanup`)
+//! The companion `LaunchDaemon` (`no.sybr.supermanager.vpn-dns-cleanup`)
 //! runs `clear_vpn_dns` equivalent shell commands at boot, so a
 //! machine that was hard-powered-off mid-VPN session comes up with
 //! clean DNS rather than pointing at a VPN gateway that no longer exists.
@@ -38,7 +38,7 @@
 use std::io::Write as _;
 use std::process::Command;
 
-/// The one State-store key SuperManager ever writes DNS to.
+/// The one State-store key `SuperManager` ever writes DNS to.
 ///
 /// Scoped to our own service name on purpose: the physical interface's
 /// `State:/Network/Service/<uuid>/DNS` is where DHCP puts the router's

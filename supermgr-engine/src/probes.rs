@@ -13,7 +13,7 @@
 //! - **SSH** — banner read on TCP connect
 //! - **SNMP** — read sysDescr.0 with default community strings
 //!   via shell-out to `snmpget` (when installed)
-//! - **SMB** — NetBIOS query over UDP
+//! - **SMB** — `NetBIOS` query over UDP
 //! - **Telnet** — flag if open at all
 //!
 //! Banner data is the foundation of vulnerability detection in
@@ -154,7 +154,7 @@ pub struct PortProbe {
     pub powered_by: Option<String>,
     pub tls: Option<TlsInfo>,
     /// Framework / CMS detected via Wappalyzer-style heuristics.
-    /// Populated for HTTP/HTTPS only. Each entry: "WordPress 6.4",
+    /// Populated for HTTP/HTTPS only. Each entry: "`WordPress` 6.4",
     /// "Drupal 10", "Confluence 8.5.3" — exact strings designed
     /// to pass through `vuln::match_cves` for version matching.
     #[serde(default)]
@@ -406,7 +406,7 @@ pub struct HttpResult {
     pub powered_by: Option<String>,
     pub first_line: Option<String>,
     /// Detected frameworks/CMSes from headers + body. Each entry
-    /// is a banner-shaped string like "WordPress 6.4" so it can
+    /// is a banner-shaped string like "`WordPress` 6.4" so it can
     /// flow through `vuln::match_cves` for version-based CVE
     /// matching.
     pub fingerprints: Vec<String>,
@@ -473,7 +473,7 @@ pub async fn http_probe(host: &str, port: u16, tls: bool) -> Result<HttpResult> 
 }
 
 /// Turn WAF/CDN identifications into informational findings so
-/// they surface in the SwiftUI alongside everything else. These
+/// they surface in the `SwiftUI` alongside everything else. These
 /// are Info severity by design — they're context, not vulnerabilities.
 /// The operator uses them to understand audit scope (e.g.
 /// "this site is behind Cloudflare so my port scans probably
@@ -531,7 +531,7 @@ fn waf_findings(
 /// Looks at:
 ///   - Response headers (`X-Powered-By`, `X-Generator`, etc.)
 ///   - HTML meta tags (`<meta name="generator" content="...">`)
-///   - Distinctive HTML patterns (WordPress link tags, Drupal markers)
+///   - Distinctive HTML patterns (`WordPress` link tags, Drupal markers)
 ///   - Cookie names (`PHPSESSID`, `JSESSIONID`, `wordpress_logged_in_*`)
 ///
 /// Returns banner-shaped strings like `"WordPress 6.4.2"`,
@@ -632,7 +632,7 @@ fn fingerprint_web(
 /// Extract `<meta name="generator" content="<product> <version>">`
 /// for the given product. Returns the version string only.
 fn extract_meta_generator_version(body: &str, product: &str) -> Option<String> {
-    let needle_lc = format!(r#"<meta name="generator" content="{}"#, product).to_lowercase();
+    let needle_lc = format!(r#"<meta name="generator" content="{product}"#).to_lowercase();
     let body_lc = body.to_lowercase();
     let start = body_lc.find(&needle_lc)?;
     let after = &body[start + needle_lc.len()..];
@@ -666,7 +666,7 @@ fn extract_title(body: &str) -> Option<String> {
 ///   - Subject + issuer + SAN + expiry from cert chain
 ///
 /// We don't bring in a Rust TLS dep just for this — `openssl`
-/// (LibreSSL on macOS) is shipped with the OS and gives us
+/// (`LibreSSL` on macOS) is shipped with the OS and gives us
 /// everything in one shot.
 pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
     let target = format!("{host}:{port}");
@@ -745,7 +745,7 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
 /// Step 2 is critical — without it we false-positive in two
 /// situations:
 ///   a. The local openssl was compiled without the requested
-///      cipher family (e.g. modern LibreSSL has no NULL ciphers).
+///      cipher family (e.g. modern `LibreSSL` has no NULL ciphers).
 ///      In that case `-cipher NULL` silently degrades to "no
 ///      constraint" and the server picks a strong cipher.
 ///   b. The handshake falls through to TLS 1.3, where `-cipher`

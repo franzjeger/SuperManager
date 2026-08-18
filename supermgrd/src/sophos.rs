@@ -26,7 +26,7 @@
 //! - No uptime / CPU load / memory metrics — same gap as firmware.
 //! - No HA status query.
 //! - No config-backup download endpoint — backups go through the
-//!   *Backup and Firmware → Import/Export* WebAdmin page only.
+//!   *Backup and Firmware → Import/Export* `WebAdmin` page only.
 //!
 //! Until Sophos ships a real REST API or documents missing entity tags,
 //! a "dashboard card" comparable to FortiGate/OPNsense is not possible
@@ -45,9 +45,9 @@ use tracing::debug;
 /// Sent as `<Login>` on every API call — Sophos does not issue tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
-    /// WebAdmin username (typically `admin` or a service account).
+    /// `WebAdmin` username (typically `admin` or a service account).
     pub username: String,
-    /// WebAdmin password.
+    /// `WebAdmin` password.
     pub password: String,
 }
 
@@ -103,7 +103,7 @@ pub fn wrap_request(creds: &Credentials, inner_xml: &str) -> String {
 /// Build a reqwest client suitable for talking to a Sophos firewall.
 ///
 /// Self-signed certs on Sophos appliances are the norm, so verification is
-/// disabled. 30 s combined connect+read timeout matches the OPNsense client.
+/// disabled. 30 s combined connect+read timeout matches the `OPNsense` client.
 fn http_client() -> &'static reqwest::Client {
     supermgr_core::http::insecure_client()
 }

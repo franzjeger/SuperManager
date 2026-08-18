@@ -1,4 +1,4 @@
-//! OpenVPN3 backend — manages sessions via the `openvpn3` CLI tool.
+//! `OpenVPN3` backend — manages sessions via the `openvpn3` CLI tool.
 //!
 //! # Lifecycle
 //!
@@ -149,13 +149,13 @@ struct Ov3State {
 // Backend
 // ---------------------------------------------------------------------------
 
-/// OpenVPN3 backend — wraps the `openvpn3` CLI.
+/// `OpenVPN3` backend — wraps the `openvpn3` CLI.
 pub struct OpenVpnBackend {
     state: Arc<Mutex<Ov3State>>,
 }
 
 impl OpenVpnBackend {
-    /// Create a new, idle OpenVPN3 backend.
+    /// Create a new, idle `OpenVPN3` backend.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -232,11 +232,11 @@ impl VpnBackend for OpenVpnBackend {
                 Err(e) => {
                     warn!("OpenVPN3: could not retrieve password from keyring: {e}");
                     // Fall through to the no-credentials path for the override.
-                    ("".to_owned(), None)
+                    (String::new(), None)
                 }
             }
         } else {
-            ("".to_owned(), None)
+            (String::new(), None)
         };
 
         // If no temp file was created yet (no credentials or keyring error),
@@ -308,11 +308,11 @@ impl VpnBackend for OpenVpnBackend {
         ])
         .await?;
 
-        if !ok {
+        if ok {
+            info!("OpenVPN3: allow-compression asym set for '{}'", config_name);
+        } else {
             warn!("OpenVPN3: config-manage --allow-compression asym failed: {}", stderr.trim());
             // Non-fatal — proceed; server may not use compression.
-        } else {
-            info!("OpenVPN3: allow-compression asym set for '{}'", config_name);
         }
 
         // Step 3 — start the session.

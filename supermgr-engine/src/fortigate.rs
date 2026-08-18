@@ -1,22 +1,22 @@
-//! FortiGate REST-API + token-management glue.
+//! `FortiGate` REST-API + token-management glue.
 //!
 //! Exposes three primitives that the JSON-RPC server wraps:
 //!
 //! 1. [`api_request`]  — a generic REST proxy. Looks up the host's stored
 //!    API token from the secret store, builds an HTTPS request with the
 //!    `Authorization: Bearer <token>` header, and returns the raw response
-//!    body (JSON for FortiOS).
+//!    body (JSON for `FortiOS`).
 //!
-//! 2. [`generate_token`] — SSH into the device, run the FortiOS interactive
+//! 2. [`generate_token`] — SSH into the device, run the `FortiOS` interactive
 //!    `config system api-user` flow, parse the resulting `New API key:` line,
 //!    and store it via `SecretStore`. Carries forward four bug fixes that
 //!    landed on the Linux daemon's `fortigate_generate_api_token` over
 //!    several iterations:
-//!      - send each CLI line separately (FortiOS doesn't tolerate batched
+//!      - send each CLI line separately (`FortiOS` doesn't tolerate batched
 //!        config commands in a shell session)
-//!      - wait for the FortiOS prompt (`# `) between each line
+//!      - wait for the `FortiOS` prompt (`# `) between each line
 //!      - request a PTY so the device behaves interactively
-//!      - feed the admin password line-by-line when FortiOS prompts for it
+//!      - feed the admin password line-by-line when `FortiOS` prompts for it
 //!
 //! 3. [`get_token`]    — retrieve the stored token in cleartext for the GUI's
 //!    "Copy token" / "Show token" affordance. Goes through the same
@@ -40,9 +40,9 @@ use crate::state::DaemonState;
 
 /// Outcome of a `fortigate_api` call. `status` is the raw HTTP status
 /// code (200, 401, 500, …); `body` is the response body (JSON for
-/// FortiOS APIs, possibly HTML on error). The wrapper RPC only
+/// `FortiOS` APIs, possibly HTML on error). The wrapper RPC only
 /// surfaces an *error* response when the HTTP layer itself failed —
-/// 4xx/5xx still return Ok so the GUI can show FortiOS's own error
+/// 4xx/5xx still return Ok so the GUI can show `FortiOS`'s own error
 /// JSON to the user.
 #[derive(Debug)]
 pub struct ApiResponse {
@@ -50,7 +50,7 @@ pub struct ApiResponse {
     pub body: String,
 }
 
-/// Make a single REST call against a FortiGate host's API.
+/// Make a single REST call against a `FortiGate` host's API.
 ///
 /// Looks up the host's API token from `secrets`, builds an HTTPS
 /// request with `Authorization: Bearer <token>`, and returns the
@@ -142,11 +142,11 @@ pub async fn api_request(
     })
 }
 
-/// Generate a new API token on the FortiGate via SSH, store it in
+/// Generate a new API token on the `FortiGate` via SSH, store it in
 /// `secrets`, and return its label so the caller can update the
 /// host record.
 ///
-/// FortiOS exposes API tokens via the legacy CLI:
+/// `FortiOS` exposes API tokens via the legacy CLI:
 ///
 /// ```text
 /// config system api-user
@@ -161,7 +161,7 @@ pub async fn api_request(
 /// The `generate-key` command prompts for the admin password before
 /// echoing the new key. We therefore drive an interactive shell
 /// (`SshSession::shell_interact`) which is PTY-backed and waits for
-/// the FortiOS prompt before sending each line.
+/// the `FortiOS` prompt before sending each line.
 ///
 /// Returns `(token, secret_label)` so the caller can both display the
 /// token in the GUI (one-time, for "Copy") and persist the label on
@@ -306,9 +306,9 @@ pub async fn get_token(
 
 /// Test the stored API token by making a low-cost authenticated
 /// call to the device. Picks `/api/v2/monitor/system/status` which
-/// every FortiGate exposes regardless of license tier and returns
+/// every `FortiGate` exposes regardless of license tier and returns
 /// quickly. Returns a small structured result so the GUI can
-/// render "Connected to FortiGate-100F (FortiOS 7.4.3)" rather than
+/// render "Connected to FortiGate-100F (`FortiOS` 7.4.3)" rather than
 /// just a green dot.
 pub async fn test_connection(
     state: &Arc<Mutex<DaemonState>>,
@@ -382,7 +382,7 @@ pub struct TestResult {
 // Live dashboard
 // ---------------------------------------------------------------------------
 
-/// One point-in-time snapshot of a FortiGate's vitals. Aggregated
+/// One point-in-time snapshot of a `FortiGate`'s vitals. Aggregated
 /// from four separate REST endpoints so the GUI gets a coherent
 /// view in one round-trip rather than firing parallel calls and
 /// discovering they don't all succeed.
@@ -406,7 +406,7 @@ pub struct DashboardSnapshot {
     /// Per-interface RX/TX bytes counters. Client computes deltas
     /// between snapshots to derive throughput rates.
     pub interfaces: Option<Vec<InterfaceStat>>,
-    /// IPsec tunnel rollup — total + up. Detailed per-tunnel
+    /// `IPsec` tunnel rollup — total + up. Detailed per-tunnel
     /// data lives in the existing `/monitor/vpn/ipsec` payload
     /// which we expose verbatim if the GUI wants it.
     pub vpn: Option<VpnSummary>,
@@ -432,7 +432,7 @@ pub struct DashboardResource {
     pub mem_pct: u8,
     /// Active session count.
     pub sessions: u64,
-    /// Disk usage in percent. FortiGates with no log disk return
+    /// Disk usage in percent. `FortiGates` with no log disk return
     /// 0 here — that's normal, not an error.
     pub disk_pct: u8,
 }
@@ -445,7 +445,7 @@ pub struct InterfaceStat {
     pub rx_bytes: u64,
     /// Cumulative transmit bytes since interface up.
     pub tx_bytes: u64,
-    /// "up" / "down" / "unknown" — matches FortiOS link state.
+    /// "up" / "down" / "unknown" — matches `FortiOS` link state.
     pub status: String,
     /// Negotiated link speed in Mbps. 0 means unknown / down.
     pub speed_mbps: u64,
@@ -462,8 +462,8 @@ pub struct VpnSummary {
 /// concurrently; each fails independently so a transient quirk
 /// in one endpoint doesn't blank the whole dashboard.
 ///
-/// Total time is roughly max(call_a, call_b, call_c, call_d) —
-/// usually under 800 ms on a healthy LAN-attached FortiGate.
+/// Total time is roughly `max(call_a`, `call_b`, `call_c`, `call_d`) —
+/// usually under 800 ms on a healthy LAN-attached `FortiGate`.
 pub async fn get_dashboard(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
@@ -525,7 +525,7 @@ pub async fn get_dashboard(
 }
 
 /// Parse `/api/v2/monitor/system/status` into `DashboardStatus`.
-/// FortiOS shape:
+/// `FortiOS` shape:
 /// ```json
 /// {
 ///   "results": {
@@ -546,11 +546,11 @@ fn parse_status(body: &str) -> Option<DashboardStatus> {
         version: r.get("version")?.as_str().unwrap_or("unknown").to_owned(),
         hostname: r.get("hostname")?.as_str().unwrap_or("unknown").to_owned(),
         serial: r.get("serial")?.as_str().unwrap_or("unknown").to_owned(),
-        uptime_seconds: r.get("uptime").and_then(|u| u.as_u64()).unwrap_or(0),
+        uptime_seconds: r.get("uptime").and_then(serde_json::Value::as_u64).unwrap_or(0),
     })
 }
 
-/// Parse `/api/v2/monitor/system/resource/usage`. FortiOS returns
+/// Parse `/api/v2/monitor/system/resource/usage`. `FortiOS` returns
 /// per-resource time series; we want the most recent value of each.
 /// Shape:
 /// ```json

@@ -13,12 +13,10 @@ fn audit_log_path() -> PathBuf {
     if nix::unistd::getuid().is_root() {
         PathBuf::from("/etc/supermgrd/ssh-audit.log")
     } else {
-        let base = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_DATA_HOME").map_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 PathBuf::from(home).join(".local/share")
-            });
+            }, PathBuf::from);
         base.join("supermgrd/ssh-audit.log")
     }
 }

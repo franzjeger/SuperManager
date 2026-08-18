@@ -14,8 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     println!("cargo:rustc-env=HELPER_BUILD_TIMESTAMP={ts}");
     // NOTE: the IOKit power monitor (power.rs) needs IOKit + CoreFoundation
     // framework links here, but linking system frameworks makes the cargo

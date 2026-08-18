@@ -1,4 +1,4 @@
-//! Template engine for FortiGate / UniFi configuration generation.
+//! Template engine for `FortiGate` / `UniFi` configuration generation.
 //!
 //! # Architecture
 //!
@@ -29,12 +29,12 @@
 //! what would change before anything hits the device. Phase 6
 //! adds a `provisioning_diff_preview` RPC that pulls live config
 //! and renders unified-diff against the rendered template; phase
-//! 6 also adds `provisioning_safe_deploy` which uses FortiOS's
+//! 6 also adds `provisioning_safe_deploy` which uses `FortiOS`'s
 //! `revert-on-no-confirm` to roll back automatically if the
 //! deploy breaks SSH/API connectivity.
 //!
 //! For now the GUI exposes "Render → Copy" so the user can paste
-//! into a FortiGate console session manually. That alone replaces
+//! into a `FortiGate` console session manually. That alone replaces
 //! the bulk of the Linux wizard's value while keeping the trust
 //! model conservative.
 
@@ -63,7 +63,7 @@ pub struct TemplateInfo {
     /// "fortigate" / "unifi" / "switch". The GUI uses this to
     /// filter the picker by device type.
     pub vendor: String,
-    /// "branch_office" / "hq" / "retail" / "datacenter" / "custom".
+    /// "`branch_office`" / "hq" / "retail" / "datacenter" / "custom".
     pub category: String,
     /// True when the template is shipped in the binary; false for
     /// user-supplied templates in the support directory. The GUI
@@ -86,8 +86,8 @@ pub struct RenderRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderResult {
     pub template_id: String,
-    /// The rendered config (FortiOS CLI for FortiGate templates,
-    /// JSON for UniFi controller calls).
+    /// The rendered config (`FortiOS` CLI for `FortiGate` templates,
+    /// JSON for `UniFi` controller calls).
     pub output: String,
     /// Variables Tera reported as accessed during rendering.
     /// Used by the GUI to surface "you referenced extras.foo
@@ -107,7 +107,7 @@ fn templates_dir() -> PathBuf {
     p
 }
 
-/// Built-in templates. Each (id, display_name, description,
+/// Built-in templates. Each (id, `display_name`, description,
 /// vendor, category, body). Body is the Tera source.
 ///
 /// Why hardcoded: a v1 template needs to ship with the binary so
@@ -339,7 +339,7 @@ fn build_context(
 // Section parsing & diff
 // ---------------------------------------------------------------------------
 
-/// FortiOS configs are blocks of the form:
+/// `FortiOS` configs are blocks of the form:
 ///
 /// ```text
 /// config <path with spaces>
@@ -361,11 +361,12 @@ pub struct ConfigSection {
     pub body: String,
 }
 
-/// Parse a FortiOS config dump (or rendered template) into
+/// Parse a `FortiOS` config dump (or rendered template) into
 /// top-level `config X / end` sections. Comments (`#` / `{#`)
 /// and blank lines outside any section are ignored. Lines
 /// inside a section are kept verbatim — order matters for
 /// `edit` blocks.
+#[must_use]
 pub fn parse_sections(text: &str) -> Vec<ConfigSection> {
     let mut out: Vec<ConfigSection> = Vec::new();
     let mut depth: usize = 0; // 0 = outside any section
@@ -433,7 +434,7 @@ pub struct SectionDiff {
     pub template_body: Option<String>,
     pub device_body: Option<String>,
     /// Unified diff (template-as-newer, device-as-older). Empty
-    /// when status is Equal or DeviceOnly.
+    /// when status is Equal or `DeviceOnly`.
     pub unified_diff: String,
 }
 
@@ -441,6 +442,7 @@ pub struct SectionDiff {
 /// the live device config. Both are passed as raw text — the
 /// daemon fetches the device side via SSH `show full-configuration`
 /// before calling this.
+#[must_use]
 pub fn diff_sections(template: &str, device: &str) -> Vec<SectionDiff> {
     let tmpl_sections = parse_sections(template);
     let dev_sections = parse_sections(device);
@@ -500,7 +502,7 @@ pub fn diff_sections(template: &str, device: &str) -> Vec<SectionDiff> {
 
 /// Normalise a section body for comparison: trim trailing
 /// whitespace per line, collapse runs of blank lines, strip
-/// leading indentation. FortiOS config dumps come back with 4-
+/// leading indentation. `FortiOS` config dumps come back with 4-
 /// space indents while template output uses tabs or different
 /// indent — without normalisation every section would diff just
 /// for whitespace.
@@ -630,7 +632,7 @@ pub struct Deployment {
     /// The rendered template that we tried (or are about) to push.
     pub rendered_config: String,
     /// Lines pushed successfully. On error, the abort line is
-    /// the next one in the rendered_config.
+    /// the next one in the `rendered_config`.
     pub lines_pushed: u64,
     /// Last device error message if status == Failed.
     pub error: Option<String>,
@@ -642,7 +644,7 @@ pub enum DeploymentStatus {
     Running,
     Succeeded,
     Failed,
-    /// User clicked rollback — the backup_path was restored.
+    /// User clicked rollback — the `backup_path` was restored.
     RolledBack,
 }
 
@@ -710,7 +712,7 @@ fn backups_dir(host_id: &str) -> PathBuf {
 
 /// Pull `show full-configuration` over SSH, save to disk, return
 /// the path. Used both standalone (manual backup) and as the
-/// pre-deploy snapshot of safe_deploy.
+/// pre-deploy snapshot of `safe_deploy`.
 pub async fn pre_deploy_backup(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
@@ -733,7 +735,7 @@ pub async fn pre_deploy_backup(
 
 /// Convenience: open SSH to the host, return the session +
 /// host record. Splits the session-open from the work so callers
-/// can hold the session across multiple FortiOS commands without
+/// can hold the session across multiple `FortiOS` commands without
 /// repeated handshakes.
 async fn open_session(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
@@ -823,7 +825,7 @@ fn summarise_sections(sections: &[SectionDiff]) -> DiffSummary {
 /// Deploy a rendered template. The flow is:
 ///   1. Snapshot pre-deploy config to disk (recoverable rollback).
 ///   2. Push the rendered config via SSH using `shell_interact`
-///      so we can wait for the FortiOS prompt between blocks
+///      so we can wait for the `FortiOS` prompt between blocks
 ///      and abort on the first error.
 ///   3. Persist a Deployment record either way.
 ///
@@ -923,7 +925,7 @@ pub async fn deploy(
     Ok(record)
 }
 
-/// Pull the first FortiOS error line out of a shell transcript
+/// Pull the first `FortiOS` error line out of a shell transcript
 /// for terse display in the GUI's deploy-result banner.
 fn extract_first_error(transcript: &str) -> String {
     transcript
@@ -937,7 +939,7 @@ fn extract_first_error(transcript: &str) -> String {
 }
 
 /// Restore from a saved backup. Reads the backup .conf and
-/// pushes it via shell_interact — same path as a deploy but
+/// pushes it via `shell_interact` — same path as a deploy but
 /// the source is an old config, not a fresh render. A new
 /// Deployment record with status=RolledBack is created so the
 /// rollback shows up in history.

@@ -25,7 +25,7 @@
 //! findings store in an inconsistent state. Polling at batch
 //! boundaries is enough granularity for the UI.
 //!
-//! # What about tokio-util CancellationToken?
+//! # What about tokio-util `CancellationToken`?
 //!
 //! Considered, but added a dependency just for one bool. The
 //! `AtomicBool` approach has the same semantics for our use case
@@ -71,6 +71,7 @@ pub struct OperationRegistry {
 }
 
 impl OperationRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -114,7 +115,7 @@ impl OperationRegistry {
                 info
             })
             .collect();
-        out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
+        out.sort_by_key(|a| a.started_at);
         out
     }
 
@@ -152,16 +153,19 @@ pub struct OperationGuard {
 }
 
 impl OperationGuard {
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
 
     /// Hand out a clone of the cancel flag to a worker task.
     /// Workers should `load(Ordering::Acquire)` between batches.
+    #[must_use]
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel)
     }

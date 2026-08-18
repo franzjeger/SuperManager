@@ -178,7 +178,7 @@ pub async fn passive_scan(
         let enrichment = crate::asset_enrich::enrich_many(&ips).await;
         let by_ip: HashMap<String, &crate::asset_enrich::AssetEnrichment> =
             enrichment.iter().map(|e| (e.ip.clone(), e)).collect();
-        for host in hosts.iter_mut() {
+        for host in &mut hosts {
             if let Some(en) = by_ip.get(&host.ip) {
                 host.reverse_dns = en.reverse_dns.clone();
                 host.zone = Some(en.zone.label().to_owned());
@@ -602,11 +602,10 @@ fn parse_ifconfig(text: &str) -> Vec<LocalInterface> {
                         }
                     }
                 }
-                "inet6" if parts.len() > 1 => {
-                    if c.ipv6.is_none() && !parts[1].starts_with("fe80") {
+                "inet6" if parts.len() > 1
+                    && c.ipv6.is_none() && !parts[1].starts_with("fe80") => {
                         c.ipv6 = Some(parts[1].split('%').next().unwrap_or("").to_owned());
                     }
-                }
                 _ => {}
             }
         }
@@ -648,7 +647,7 @@ fn u32_to_ipv4(n: u32) -> String {
 // ---------------------------------------------------------------------------
 
 /// Bundled IEEE OUI prefix → vendor table. The curated list
-/// below covers every Ubiquiti / Fortinet / Cisco / MikroTik
+/// below covers every Ubiquiti / Fortinet / Cisco / `MikroTik`
 /// / Aruba / HPE / Meraki / TP-Link / Netgear prefix the
 /// author has personally seen in MSP fleets, plus the major
 /// consumer-PC + virtualisation vendors so misc IPs get a
@@ -886,11 +885,11 @@ fn oui_database() -> HashMap<String, String> {
 ///
 /// File format is one line per OUI:
 ///     08:00:20	Sun	Oracle Corporation
-///     8C:ED:E1	UbiquitiI	Ubiquiti Inc
+///     8C:ED:E1	`UbiquitiI`	Ubiquiti Inc
 /// We just take the first two whitespace-separated fields per
 /// line, lowercase the prefix, and overwrite our curated entry
 /// only when the curated table has no entry (so a curated
-/// "Ubiquiti Networks Inc." beats Wireshark's "UbiquitiI"
+/// "Ubiquiti Networks Inc." beats Wireshark's "`UbiquitiI`"
 /// truncated alias).
 fn apply_wireshark_manuf_overlay(out: &mut HashMap<String, String>) {
     // Wireshark's manuf file installs under `share/wireshark/`
@@ -1012,8 +1011,8 @@ pub struct ActiveScanResult {
     pub findings: Vec<crate::vuln::Finding>,
     pub engagement_id: Option<String>,
     /// Diff produced by `findings_store::reconcile`. None when the
-    /// scan ran without a persistence scope (no customer_slug
-    /// AND no engagement_id).
+    /// scan ran without a persistence scope (no `customer_slug`
+    /// AND no `engagement_id`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<crate::findings_store::ScanDiff>,
     /// The persistence scope used for reconciliation — either the
@@ -1033,7 +1032,7 @@ pub struct ActiveHost {
     pub probes: Vec<crate::probes::PortProbe>,
     pub finding_count: u32,
     /// Controller cross-reference. Populated post-scan by
-    /// matching `mac` against every configured UniFi
+    /// matching `mac` against every configured `UniFi`
     /// controller's device inventory. Non-None means a
     /// controller-API path is available for this host;
     /// the GUI uses it to replace SSH-based actions with
@@ -1170,7 +1169,7 @@ pub async fn active_scan(
             HashMap::new()
         });
     let scanned_ips: HashSet<String> = hosts.iter().map(|h| h.ip.clone()).collect();
-    for h in hosts.iter_mut() {
+    for h in &mut hosts {
         if let Some((mac, vendor)) = arp_map.get(&h.ip) {
             if h.mac.is_none() { h.mac = mac.clone(); }
             if h.vendor.is_none() { h.vendor = vendor.clone(); }
@@ -1216,7 +1215,7 @@ pub async fn active_scan(
         let enrichment = crate::asset_enrich::enrich_many(&ips).await;
         let by_ip: HashMap<String, &crate::asset_enrich::AssetEnrichment> =
             enrichment.iter().map(|e| (e.ip.clone(), e)).collect();
-        for h in hosts.iter_mut() {
+        for h in &mut hosts {
             if h.hostname.is_none() {
                 if let Some(en) = by_ip.get(&h.ip) {
                     h.hostname = en.reverse_dns.clone();
@@ -1237,7 +1236,7 @@ pub async fn active_scan(
     for f in &findings {
         *by_ip.entry(f.host_ip.clone()).or_insert(0) += 1;
     }
-    for h in hosts.iter_mut() {
+    for h in &mut hosts {
         h.finding_count = by_ip.get(&h.ip).copied().unwrap_or(0);
     }
     let finished_at = chrono::Utc::now();
@@ -1312,8 +1311,7 @@ pub async fn active_scan(
     if let Some(eid) = engagement_id {
         let diff_summary = result
             .diff
-            .as_ref()
-            .map(|d| {
+            .as_ref().map_or_else(|| "no diff".into(), |d| {
                 format!(
                     "{}new, {}regressed, {}still-open, {}auto-resolved",
                     d.new_findings.len(),
@@ -1321,8 +1319,7 @@ pub async fn active_scan(
                     d.still_open.len(),
                     d.auto_resolved.len()
                 )
-            })
-            .unwrap_or_else(|| "no diff".into());
+            });
         let _ = crate::engagement::log_event(
             eid,
             crate::engagement::EngagementEvent {
@@ -1452,6 +1449,7 @@ pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
 /// Expand a list of targets (hosts and CIDRs) into a flat list
 /// of IPs. Caps total at 4096 to avoid runaways. Anything
 /// invalid is silently skipped.
+#[must_use]
 pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
     let mut out = Vec::new();
     for t in targets {

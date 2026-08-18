@@ -56,12 +56,13 @@ pub enum WafKind {
 
 /// Inspect a response's headers + cookies for vendor signatures.
 /// Returns one entry per vendor matched (a request can hit
-/// multiple — e.g. AWS ALB in front of CloudFront).
+/// multiple — e.g. AWS ALB in front of `CloudFront`).
 ///
 /// Inputs:
 ///   - `headers`: header pairs from the HTTP response. Keys are
 ///     case-insensitive — the matcher lowercases them.
 ///   - `cookies`: parsed `Set-Cookie` names (not full values).
+#[must_use]
 pub fn detect(headers: &[(String, String)], cookies: &[String]) -> Vec<WafInfo> {
     let mut hits: Vec<WafInfo> = Vec::new();
     let mut seen_vendors: HashSet<String> = HashSet::new();

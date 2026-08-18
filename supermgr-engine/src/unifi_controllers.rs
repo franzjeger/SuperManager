@@ -1,13 +1,13 @@
-//! Standalone UniFi controller registry.
+//! Standalone `UniFi` controller registry.
 //!
 //! Architectural note — controllers are NOT tied to an SSH host.
 //! Earlier iterations of this codebase stored `unifi_controller_url`
 //! + creds inline on each `Host`, conflating "an SSH host that
-//! happens to be a UniFi controller machine" with "any UniFi
+//! happens to be a `UniFi` controller machine" with "any `UniFi`
 //! controller the MSP runs anywhere." The new model treats
 //! controllers as first-class top-level entities. Reasoning:
 //!
-//!   - Most MSP UniFi controllers run on UDM-Pro / cloud-key /
+//!   - Most MSP `UniFi` controllers run on UDM-Pro / cloud-key /
 //!     a hosted VM and we never SSH them directly.
 //!   - One controller manages many devices; many devices are
 //!     reached via one controller. Coupling those two scopes
@@ -28,7 +28,7 @@
 //!   - `UnifiManagedDevice` struct (one row of `/stat/device`)
 //!   - `list_devices` / `devmgr_command` async helpers
 //!   - `cross_reference` — given a list of MACs + the controller
-//!     registry, return a map MAC → ManagedDevice for every
+//!     registry, return a map MAC → `ManagedDevice` for every
 //!     match. Used by `active_scan` to annotate scan rows.
 
 use std::collections::HashMap;
@@ -50,13 +50,13 @@ use uuid::Uuid;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long a pending MFA challenge stays valid before the
-/// operator has to restart the add-controller flow. UniFi's own
+/// operator has to restart the add-controller flow. `UniFi`'s own
 /// email codes time out at 5 minutes, so matching that.
-const MFA_CHALLENGE_TTL: Duration = Duration::from_secs(300);
+const MFA_CHALLENGE_TTL: Duration = Duration::from_mins(5);
 
 /// In-flight MFA challenge state. Holds the partially-
-/// authenticated reqwest::Client (its cookie jar carries the
-/// session ID UniFi opened during the initial password POST)
+/// authenticated `reqwest::Client` (its cookie jar carries the
+/// session ID `UniFi` opened during the initial password POST)
 /// plus a pending `UnifiController` record that gets persisted
 /// once the second factor verifies. Auto-evicted after
 /// `MFA_CHALLENGE_TTL`.
@@ -70,7 +70,7 @@ pub struct InflightMfaChallenge {
 
 /// Process-global registry of in-flight MFA challenges, keyed
 /// by opaque challenge ID. `OnceLock` (std-stable since 1.70)
-/// gives us the lazy global without dragging in the once_cell
+/// gives us the lazy global without dragging in the `once_cell`
 /// crate — same shape, no new dependency.
 static MFA_CHALLENGES: std::sync::OnceLock<
     tokio::sync::Mutex<HashMap<String, InflightMfaChallenge>>,
@@ -215,7 +215,7 @@ pub enum UnifiAuthMethod {
 }
 
 
-/// A configured UniFi controller. The struct is the canonical
+/// A configured `UniFi` controller. The struct is the canonical
 /// on-disk record (one TOML file per controller); the
 /// credential (API key OR password) is stored separately in
 /// the keychain and referenced by `creds_ref`.
@@ -226,10 +226,10 @@ pub struct UnifiController {
     /// (e.g. "Main site", "ACME Corp", "Home lab").
     pub label: String,
     /// Base URL. Should NOT end with a slash. Scheme is
-    /// honoured — https://… stays https. Default UniFi
+    /// honoured — https://… stays https. Default `UniFi`
     /// Network Application port is 8443.
     pub url: String,
-    /// UniFi site identifier within the controller. Most
+    /// `UniFi` site identifier within the controller. Most
     /// single-site deploys use the literal string "default";
     /// multi-site deploys have distinct IDs per site.
     pub site_id: String,
@@ -264,11 +264,12 @@ impl UnifiController {
     /// older standalone Network Applications.
     ///
     /// We can't tell which one applies without an API hit. The
-    /// classic /api path works on every UniFi version since 5.x;
+    /// classic /api path works on every `UniFi` version since 5.x;
     /// the proxy path is a strict superset on UDM/UDM-Pro. We
     /// use classic /api as the default because it has the
     /// widest compatibility, and let callers override by passing
     /// `path` starting with `/proxy/...` if they know better.
+    #[must_use]
     pub fn site_url(&self, path: &str) -> String {
         let base = self.url.trim_end_matches('/');
         let p = path.trim_start_matches('/');
@@ -281,7 +282,7 @@ impl UnifiController {
 }
 
 /// One row of `/api/s/<site>/stat/device`. We only deserialise
-/// the fields we actually surface in the GUI; UniFi adds new
+/// the fields we actually surface in the GUI; `UniFi` adds new
 /// ones every release, so we don't fail on unknown keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -298,7 +299,7 @@ pub struct UnifiManagedDevice {
     pub state: String,
     /// Firmware version string.
     pub version: Option<String>,
-    /// Adoption status. UniFi controller API exposes this as
+    /// Adoption status. `UniFi` controller API exposes this as
     /// `adopted: bool`. Combined with `state == "pending"` we
     /// can render "pending adoption" vs "adopted" vs "orphaned".
     pub adopted: Option<bool>,
@@ -306,7 +307,7 @@ pub struct UnifiManagedDevice {
     pub inform_url: Option<String>,
     /// Uptime in seconds.
     pub uptime: Option<u64>,
-    /// Last-seen Unix timestamp (UniFi reports both `lastSeen`
+    /// Last-seen Unix timestamp (`UniFi` reports both `lastSeen`
     /// and `_last_seen`; serde tolerates either via alias).
     #[serde(alias = "lastSeen", alias = "_last_seen")]
     pub last_seen: Option<i64>,
@@ -319,7 +320,7 @@ pub struct UnifiManagedDevice {
     pub controller_label: Option<String>,
 }
 
-/// Cross-reference annotation attached to an ActiveHost when a
+/// Cross-reference annotation attached to an `ActiveHost` when a
 /// scan match is found. The GUI uses this to show the controller
 /// badge + replace SSH actions with controller-API ones.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,7 +374,7 @@ pub enum PasswordLoginOutcome {
 ///   - `ApiKey`: build a client with `X-API-KEY` as a default
 ///     header. No /api/auth/login round-trip; every request
 ///     carries the token. Skips MFA entirely. This is the
-///     recommended path for any controller running UniFi
+///     recommended path for any controller running `UniFi`
 ///     Network 8.x or later.
 ///   - `Password`: classic cookie-based login. Returns
 ///     `MfaRequired` if the controller answers with 499
@@ -669,15 +670,15 @@ async fn list_devices_classic(
             ip: row.get("ip").and_then(|v| v.as_str()).map(str::to_owned),
             model: row.get("model").and_then(|v| v.as_str()).map(str::to_owned),
             name: row.get("name").and_then(|v| v.as_str()).map(str::to_owned),
-            state: state_label(row.get("state").and_then(|v| v.as_i64()).unwrap_or(0)),
+            state: state_label(row.get("state").and_then(serde_json::Value::as_i64).unwrap_or(0)),
             version: row.get("version").and_then(|v| v.as_str()).map(str::to_owned),
-            adopted: row.get("adopted").and_then(|v| v.as_bool()),
+            adopted: row.get("adopted").and_then(serde_json::Value::as_bool),
             inform_url: row
                 .get("inform_url")
                 .and_then(|v| v.as_str())
                 .map(str::to_owned),
-            uptime: row.get("uptime").and_then(|v| v.as_u64()),
-            last_seen: row.get("last_seen").and_then(|v| v.as_i64()),
+            uptime: row.get("uptime").and_then(serde_json::Value::as_u64),
+            last_seen: row.get("last_seen").and_then(serde_json::Value::as_i64),
             controller_id: Some(controller.id),
             controller_label: Some(controller.label.clone()),
         };
@@ -749,9 +750,7 @@ async fn list_devices_integration(
             let Some(mac) = mac else { continue };
             let state_str = row
                 .get("state")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| "unknown".into());
+                .and_then(|v| v.as_str()).map_or_else(|| "unknown".into(), str::to_owned);
             let device = UnifiManagedDevice {
                 mac,
                 ip: row
@@ -777,9 +776,9 @@ async fn list_devices_integration(
                     .get("adoptionStatus")
                     .and_then(|v| v.as_str())
                     .map(|s| s.eq_ignore_ascii_case("ADOPTED"))
-                    .or_else(|| row.get("adopted").and_then(|v| v.as_bool())),
+                    .or_else(|| row.get("adopted").and_then(serde_json::Value::as_bool)),
                 inform_url: None, // not exposed via integration API
-                uptime: row.get("uptime").and_then(|v| v.as_u64()),
+                uptime: row.get("uptime").and_then(serde_json::Value::as_u64),
                 last_seen: None,
                 controller_id: Some(controller.id),
                 controller_label: Some(controller.label.clone()),
@@ -788,7 +787,7 @@ async fn list_devices_integration(
         }
         let total = parsed
             .get("totalCount")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(out.len() as u64) as usize;
         offset += data.len();
         if offset >= total {
@@ -798,7 +797,7 @@ async fn list_devices_integration(
     Ok(out)
 }
 
-/// Resolve a site_id usable on the Integration API. If the
+/// Resolve a `site_id` usable on the Integration API. If the
 /// stored value already looks like a UUID we trust it. The
 /// literal "default" (or empty) gets resolved by hitting
 /// `/sites` and picking either an entry named "default" or
@@ -882,7 +881,7 @@ fn normalise_integration_state(s: &str) -> String {
     .to_owned()
 }
 
-/// Map UniFi's numeric device state codes to human labels.
+/// Map `UniFi`'s numeric device state codes to human labels.
 /// Codes come from years of reverse-engineering the controller
 /// API: 0/1 are pending or adopting variants, 2 is operating,
 /// the rest are exception states.

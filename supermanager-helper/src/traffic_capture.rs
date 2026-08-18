@@ -2,7 +2,7 @@
 //! pipeline. Shells out to `tcpdump` (already on every macOS box)
 //! with a BPF filter built by the engine. The helper's value-add
 //! here is: it runs as root, so `tcpdump` opens `/dev/bpf*`
-//! without an admin prompt or a ChmodBPF dance.
+//! without an admin prompt or a `ChmodBPF` dance.
 //!
 //! # Security
 //!
@@ -114,7 +114,7 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
     // Wait up to `duration + 10s` for tcpdump to finish. The
     // +10s gives it time to flush the pcap and exit after the
     // rotation marker hits.
-    let wait = Duration::from_secs(duration as u64 + 10);
+    let wait = Duration::from_secs(u64::from(duration) + 10);
     let status = match tokio::time::timeout(wait, child.wait()).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => return Err(anyhow!("tcpdump wait: {e}")),

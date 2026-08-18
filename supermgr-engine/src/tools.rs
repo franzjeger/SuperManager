@@ -234,5 +234,5 @@ fn first_useful_line(s: &str) -> Option<String> {
     s.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .map(|l| l.to_owned())
+        .map(std::borrow::ToOwned::to_owned)
 }

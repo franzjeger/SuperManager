@@ -12,10 +12,10 @@
 //!
 //! * [`default_client`] — plain internet endpoints (webhooks, Azure OAuth,
 //!   the NVD feed, crt.sh, ifconfig.me, the Claude API). Standard TLS.
-//! * [`insecure_client`] — LAN gear (FortiGate, UniFi, OPNsense, Sophos,
+//! * [`insecure_client`] — LAN gear (`FortiGate`, `UniFi`, `OPNsense`, Sophos,
 //!   self-signed admin panels) that needs `danger_accept_invalid_certs`.
 //!
-//! Deliberately NOT shared: per-controller UniFi clients that carry a
+//! Deliberately NOT shared: per-controller `UniFi` clients that carry a
 //! `cookie_store` / `cookie_provider` / `default_headers` with a per-controller
 //! API key. Sharing those would leak cookies and credentials between
 //! controllers, so those keep building their own client.
@@ -23,7 +23,7 @@
 //! Timeouts are intentionally left to the *request* (via
 //! `RequestBuilder::timeout`) rather than baked into the client: different
 //! call sites need different budgets (3 s for ifconfig.me, 60 s for a
-//! FortiGate backup). A client-level timeout would be the minimum for all of
+//! `FortiGate` backup). A client-level timeout would be the minimum for all of
 //! them, which is exactly the coupling we don't want. The value set here is
 //! only a safety net for the rare call site that sets none.
 

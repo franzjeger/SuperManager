@@ -190,7 +190,7 @@ pub struct FindingsStore {
 /// orphans every stored finding, since the key is what the store is indexed by.
 #[must_use]
 pub fn finding_key(f: &Finding) -> String {
-    let port = f.port.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+    let port = f.port.map_or_else(|| "-".into(), |p| p.to_string());
     let service = f.service.clone().unwrap_or_else(|| "-".into());
     format!("{}|{}|{}|{}", f.id, f.host_ip, port, service)
 }
@@ -235,7 +235,7 @@ pub fn load_store(customer_slug: &str) -> std::result::Result<FindingsStore, cra
         })
 }
 
-/// Persist the findings store. Errors split into IO and InvalidScope
+/// Persist the findings store. Errors split into IO and `InvalidScope`
 /// — there's no parse step in the save direction.
 pub fn save_store(
     customer_slug: &str,
@@ -281,17 +281,17 @@ pub fn save_store(
 /// return the diff. Side-effect: persists the updated store.
 ///
 /// Reconciliation semantics:
-///   - New finding (key not in store) → record as Open, first_seen=now.
+///   - New finding (key not in store) → record as Open, `first_seen=now`.
 ///   - Existing finding still detected:
-///       - Open / Fixed (auto) → keeps state, last_seen bumped, scan_count++.
+///       - Open / Fixed (auto) → keeps state, `last_seen` bumped, `scan_count`++.
 ///         A previously Fixed-then-redetected finding flips back to Open
 ///         and is reported as a *regression*.
-///       - AcceptedRisk (untimed or not yet expired) → kept, surfaced
-///         as accepted_risk in the diff.
-///       - AcceptedRisk (expired) → flips back to Open + regression.
-///       - FalsePositive → kept; user explicitly marked it irrelevant.
+///       - `AcceptedRisk` (untimed or not yet expired) → kept, surfaced
+///         as `accepted_risk` in the diff.
+///       - `AcceptedRisk` (expired) → flips back to Open + regression.
+///       - `FalsePositive` → kept; user explicitly marked it irrelevant.
 ///   - Existing finding NOT in fresh scan:
-///       - Open → flipped to Fixed{auto:true}, surfaced as auto_resolved.
+///       - Open → flipped to Fixed{auto:true}, surfaced as `auto_resolved`.
 ///       - Other states → unchanged (we don't auto-update terminal states).
 pub fn reconcile(customer_slug: &str, fresh: &[Finding]) -> Result<ScanDiff> {
     // Acquire the per-customer reconcile lock for the entire
@@ -434,7 +434,7 @@ pub fn set_disposition(
     Ok(updated)
 }
 
-/// Returns all findings sorted by severity descending then first_seen ascending.
+/// Returns all findings sorted by severity descending then `first_seen` ascending.
 pub fn list_findings(customer_slug: &str) -> Result<Vec<PersistedFinding>> {
     let store = load_store(customer_slug)?;
     let mut findings: Vec<PersistedFinding> = store.findings.into_values().collect();
@@ -462,8 +462,8 @@ fn sev_rank(s: &crate::severity::Severity) -> u8 {
 /// without re-running a scan.
 ///
 /// We don't persist diffs separately — instead we re-derive a
-/// summary from the store where we can (last_seen relative to
-/// last_scan_at). For the full diff the caller should look at the
+/// summary from the store where we can (`last_seen` relative to
+/// `last_scan_at`). For the full diff the caller should look at the
 /// `ScanDiff` returned from `reconcile()`.
 pub fn summary(customer_slug: &str) -> Result<StoreSummary> {
     let store = load_store(customer_slug)?;

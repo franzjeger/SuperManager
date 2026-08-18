@@ -1,4 +1,4 @@
-//! Where SuperManager keeps its data, per platform.
+//! Where `SuperManager` keeps its data, per platform.
 //!
 //! Moved here from `supermgr-engine::secrets` because the engine is macOS-only
 //! and this is not: the Linux daemon needs the same answer to write compliance
@@ -29,12 +29,10 @@ pub fn default_data_dir() -> PathBuf {
         if nix::unistd::getuid().is_root() {
             PathBuf::from("/etc/supermgrd")
         } else {
-            let base = std::env::var("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
+            let base = std::env::var("XDG_DATA_HOME").map_or_else(|_| {
                     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                     PathBuf::from(home).join(".local/share")
-                });
+                }, PathBuf::from);
             base.join("supermgrd")
         }
     }

@@ -9,7 +9,7 @@
 //!
 //! where:
 //!   - `base_weight` = Critical 100, High 60, Medium 30, Low 10, Info 0
-//!   - `age_factor` = 1.0 + 0.02 × days_open (capped at 2.0)
+//!   - `age_factor` = 1.0 + 0.02 × `days_open` (capped at 2.0)
 //!     → a 50-day-old finding weighs double a fresh one
 //!   - `exposure_factor` = 1.0 for internal hosts, 1.5 for public
 //!     (when zone is known)
@@ -60,6 +60,7 @@ pub enum RiskBand {
 }
 
 impl RiskBand {
+    #[must_use]
     pub fn from_score(score: u8) -> Self {
         match score {
             0       => Self::Clean,
@@ -69,6 +70,7 @@ impl RiskBand {
             _       => Self::Critical,
         }
     }
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Critical => "Critical",
@@ -83,6 +85,7 @@ impl RiskBand {
 /// Compute risk per host across the whole findings store of a
 /// scope. `host_zones` is optional context from `asset_enrich`:
 /// when provided, public-zone hosts get a 1.5× exposure multiplier.
+#[must_use]
 pub fn score_hosts(
     findings: &[PersistedFinding],
     host_zones: &HashMap<String, String>,
@@ -100,8 +103,7 @@ pub fn score_hosts(
         let mut weight_sum: f32 = 0.0;
         let exposure = host_zones
             .get(&host_ip)
-            .map(|z| if z == "public" { 1.5 } else { 1.0 })
-            .unwrap_or(1.0);
+            .map_or(1.0, |z| if z == "public" { 1.5 } else { 1.0 });
         let mut oldest_days = 0i64;
         for f in &fs {
             match f.finding.severity {
@@ -167,8 +169,8 @@ mod tests {
                 service: None,
                 severity: sev,
                 title: "t".into(),
-                detail: "".into(),
-                recommendation: "".into(),
+                detail: String::new(),
+                recommendation: String::new(),
                 cve: None,
                 cvss: None,
             },

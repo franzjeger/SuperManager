@@ -22,11 +22,13 @@ pub struct FileSecretStore {
 
 impl FileSecretStore {
     /// Create a new file-based store at the given path.
+    #[must_use]
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
     /// Create with the default path for the current platform.
+    #[must_use]
     pub fn default_path() -> Self {
         let dir = super::default_data_dir();
         Self::new(dir.join("secrets.json"))
@@ -49,9 +51,7 @@ impl FileSecretStore {
     async fn write_map(&self, map: &HashMap<String, String>) -> Result<()> {
         let dir = self
             .path
-            .parent()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+            .parent().map_or_else(|| PathBuf::from("."), PathBuf::from);
         tokio::fs::create_dir_all(&dir)
             .await
             .with_context(|| format!("create secrets directory {}", dir.display()))?;

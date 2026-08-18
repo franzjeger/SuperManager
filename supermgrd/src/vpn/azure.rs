@@ -1,5 +1,5 @@
 //! Azure Point-to-Site VPN backend — Entra ID (device-code) authentication
-//! over OpenVPN.
+//! over `OpenVPN`.
 //!
 //! # Connection flow
 //!
@@ -9,13 +9,13 @@
 //!    `auth_challenge` D-Bus signal to the GUI.
 //! 3. Poll `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
 //!    every `interval` seconds until the user authenticates in the browser.
-//! 4. Extract the UPN / preferred_username from the JWT access token payload.
+//! 4. Extract the UPN / `preferred_username` from the JWT access token payload.
 //! 5. Write three temporary files to `/run/supermgrd/azure-<uuid>/`:
-//!    - `tls-auth.key`   — OpenVPN static key converted from `server_secret_hex` (tls-auth dir 1, SHA256).
+//!    - `tls-auth.key`   — `OpenVPN` static key converted from `server_secret_hex` (tls-auth dir 1, SHA256).
 //!    - `ca.pem`         — PEM CA certificate from the profile.
 //!    - `auth.txt`       — Two-line `openvpn --auth-user-pass` credentials file
 //!                         (`<upn>\n<access_token>`).
-//!    - `client.ovpn`    — Assembled OpenVPN configuration.
+//!    - `client.ovpn`    — Assembled `OpenVPN` configuration.
 //! 6. Spawn `openvpn --config client.ovpn` and capture stdout/stderr until
 //!    "Initialization Sequence Completed" appears (or the process exits with
 //!    an error), with a 60-second timeout.
@@ -118,7 +118,7 @@ impl AzureBackend {
 /// to live where deletion can see it.
 use supermgr_core::secret_lifecycle::azure_refresh_token_label as refresh_token_label;
 
-/// Percent-encode a single OAuth2 query-parameter value.
+/// Percent-encode a single `OAuth2` query-parameter value.
 ///
 /// Encodes `/` → `%2F` and space → `+`; leaves everything else as-is (GUIDs,
 /// dots, hyphens and alphanumerics are all safe in query values).
@@ -134,7 +134,7 @@ fn encode_param(s: &str) -> String {
     out
 }
 
-/// Minimal percent-decode for the OAuth2 redirect callback query string.
+/// Minimal percent-decode for the `OAuth2` redirect callback query string.
 fn percent_decode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let b = s.as_bytes();
@@ -160,7 +160,7 @@ fn percent_decode(s: &str) -> String {
     out
 }
 
-/// Perform the OAuth2 PKCE authorization-code flow.
+/// Perform the `OAuth2` PKCE authorization-code flow.
 ///
 /// 1. Generates a PKCE `code_verifier` and `code_challenge` (S256).
 /// 2. Starts a local HTTP server on `http://localhost:2023` to receive the
@@ -223,7 +223,7 @@ async fn pkce_auth_code_flow(
     // browser on behalf of the daemon (which has no display access).
     // Empty user_code signals PKCE flow (no code to enter manually).
     info!("Azure: sending browser auth URL to GUI");
-    let _ = auth_tx.send(("".to_string(), auth_url.clone()));
+    let _ = auth_tx.send((String::new(), auth_url.clone()));
 
     // ── Wait for the redirect callback ────────────────────────────────────────
     let code = tokio::time::timeout(
@@ -281,7 +281,7 @@ async fn pkce_auth_code_flow(
     )))
 }
 
-/// Accept exactly one HTTP connection on `listener`, parse the OAuth2
+/// Accept exactly one HTTP connection on `listener`, parse the `OAuth2`
 /// `code` and `state` query parameters, send a "you may close this window"
 /// HTML response, and return the code.
 async fn accept_auth_code(
@@ -322,7 +322,7 @@ async fn accept_auth_code(
         .nth(1)
         .ok_or_else(|| "malformed HTTP request line".to_string())?;
 
-    let query = path.split_once('?').map(|x| x.1).unwrap_or("");
+    let query = path.split_once('?').map_or("", |x| x.1);
 
     let mut code: Option<String> = None;
     let mut returned_state: Option<String> = None;
@@ -468,7 +468,7 @@ fn jwt_upn(token: &str) -> String {
 // File-generation helpers
 // ---------------------------------------------------------------------------
 
-/// Convert the 512-hex-char `server_secret_hex` to the OpenVPN static key
+/// Convert the 512-hex-char `server_secret_hex` to the `OpenVPN` static key
 /// file format (16 lines × 32 hex chars, wrapped in PEM-like header/footer).
 fn hex_to_openvpn_key(hex: &str) -> String {
     let mut out = String::from("-----BEGIN OpenVPN Static key V1-----\n");
@@ -536,7 +536,7 @@ fn build_ovpn_config(
     // Avoid overwriting the default route for DNS when using split tunnel.
     if !cfg.dns_servers.is_empty() {
         s.push_str("dhcp-option DNS ");
-        s.push_str(&cfg.dns_servers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(" "));
+        s.push_str(&cfg.dns_servers.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(" "));
         s.push('\n');
     }
 
@@ -864,16 +864,13 @@ impl VpnBackend for AzureBackend {
                 nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
                 nix::sys::signal::Signal::SIGTERM,
             );
-            match tokio::time::timeout(
+            if let Ok(_) = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 child.wait(),
-            ).await {
-                Ok(_) => info!("Azure: openvpn exited cleanly"),
-                Err(_) => {
-                    warn!("Azure: openvpn did not exit in 5 s, killing");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
+            ).await { info!("Azure: openvpn exited cleanly") } else {
+                warn!("Azure: openvpn did not exit in 5 s, killing");
+                let _ = child.kill().await;
+                let _ = child.wait().await;
             }
         }
 
@@ -897,21 +894,18 @@ impl VpnBackend for AzureBackend {
         };
 
         // Non-blocking check: did the process exit?
-        match child.try_wait().map_err(BackendError::Io)? {
-            Some(exit) => {
-                warn!("Azure: openvpn exited unexpectedly: {exit}");
-                Ok(BackendStatus::Inactive)
-            }
-            None => {
-                let iface = st.interface.clone().unwrap_or_default();
-                let stats = super::read_iface_stats(&iface);
-                Ok(BackendStatus::Active {
-                    interface: iface,
-                    stats,
-                    virtual_ip: st.virtual_ip.clone(),
-                    active_routes: st.active_routes.clone(),
-                })
-            }
+        if let Some(exit) = child.try_wait().map_err(BackendError::Io)? {
+            warn!("Azure: openvpn exited unexpectedly: {exit}");
+            Ok(BackendStatus::Inactive)
+        } else {
+            let iface = st.interface.clone().unwrap_or_default();
+            let stats = super::read_iface_stats(&iface);
+            Ok(BackendStatus::Active {
+                interface: iface,
+                stats,
+                virtual_ip: st.virtual_ip.clone(),
+                active_routes: st.active_routes.clone(),
+            })
         }
     }
 
@@ -947,8 +941,8 @@ fn extract_tun_iface(line: &str) -> Option<String> {
 
 /// Parse the virtual IP from an openvpn log line.
 ///
-/// OpenVPN 2.6: `/usr/bin/ip addr add dev tun0 10.134.2.3/24 broadcast +`
-/// OpenVPN 2.7: `net_addr_v4_add: 10.134.2.2/24 dev tun0`
+/// `OpenVPN` 2.6: `/usr/bin/ip addr add dev tun0 10.134.2.3/24 broadcast +`
+/// `OpenVPN` 2.7: `net_addr_v4_add: 10.134.2.2/24 dev tun0`
 fn extract_virtual_ip(line: &str) -> Option<String> {
     // OpenVPN 2.7+ format: "net_addr_v4_add: <cidr> dev <iface>"
     if let Some(idx) = line.find("net_addr_v4_add: ") {
@@ -972,8 +966,8 @@ fn extract_virtual_ip(line: &str) -> Option<String> {
 
 /// Parse a pushed route from an openvpn log line.
 ///
-/// OpenVPN 2.6: `/usr/bin/ip route add 10.134.0.0/23 via 10.134.2.1`
-/// OpenVPN 2.7: `net_route_v4_add: 10.134.0.0/23 via 10.134.2.1 dev [NULL] table 0 metric -1`
+/// `OpenVPN` 2.6: `/usr/bin/ip route add 10.134.0.0/23 via 10.134.2.1`
+/// `OpenVPN` 2.7: `net_route_v4_add: 10.134.0.0/23 via 10.134.2.1 dev [NULL] table 0 metric -1`
 fn extract_pushed_route(line: &str) -> Option<String> {
     // OpenVPN 2.7+ format: "net_route_v4_add: <dest> via ..."
     if let Some(idx) = line.find("net_route_v4_add: ") {

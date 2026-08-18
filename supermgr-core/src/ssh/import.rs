@@ -50,6 +50,7 @@ const SKIP_EXTENSIONS: &[&str] = &[".pub", ".txt", ".bak", ".old", ".orig", ".lo
 /// `has_passphrase = true` if a corresponding `.pub` file provides
 /// enough information to populate the public key and fingerprint fields.
 /// Keys that cannot be parsed at all are silently skipped.
+#[must_use]
 pub fn scan_ssh_directory(directory: &Path) -> Vec<ImportCandidate> {
     let entries = match std::fs::read_dir(directory) {
         Ok(rd) => rd,
@@ -208,13 +209,11 @@ fn read_pub_file(private_key_path: &Path) -> Option<String> {
     // Try appending .pub to the full path.
     let pub_path = private_key_path.with_extension(
         private_key_path
-            .extension()
-            .map(|ext| {
+            .extension().map_or_else(|| "pub".into(), |ext| {
                 let mut s = ext.to_os_string();
                 s.push(".pub");
                 s
-            })
-            .unwrap_or_else(|| "pub".into()),
+            }),
     );
 
     // Simpler: just append ".pub" to the full filename.

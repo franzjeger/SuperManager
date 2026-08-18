@@ -8,7 +8,7 @@
 //!    process handle held in this struct.
 //! 2. Generate a swanctl config file under
 //!    `/etc/swanctl/conf.d/supermanager-<profile_id>.conf` that declares one
-//!    `connections.<profile_id>` block with FortiGate-friendly IKEv2 +
+//!    `connections.<profile_id>` block with FortiGate-friendly `IKEv2` +
 //!    EAP-MSCHAPv2 + group PSK proposals.
 //! 3. Generate a secrets file under
 //!    `/etc/swanctl/swanctl.d/supermanager-<profile_id>.secrets` (mode 0600)
@@ -99,7 +99,7 @@ pub struct ConnectArgs {
     pub username: String,
     /// EAP password.
     pub password: String,
-    /// IKEv2 group PSK. Empty means certificate-only.
+    /// `IKEv2` group PSK. Empty means certificate-only.
     pub shared_secret: String,
     /// If true, ask for `0.0.0.0/0,::/0` as `remote_ts` (catch-all
     /// — every packet goes through the tunnel). If false, use the
@@ -115,8 +115,8 @@ pub struct ConnectArgs {
     /// selector in the strongSwan child config.
     #[serde(default)]
     pub routes: Vec<String>,
-    /// Optional IKE identity to send as IDi (`local.id`). Empty means
-    /// omit it so strongSwan defaults IDi to the local IP (today's
+    /// Optional IKE identity to send as `IDi` (`local.id`). Empty means
+    /// omit it so strongSwan defaults `IDi` to the local IP (today's
     /// behaviour). `#[serde(default)]` keeps replayed connect args from
     /// before this field existed deserialising cleanly.
     #[serde(default)]
@@ -172,8 +172,8 @@ pub struct StatusResult {
     /// What the gateway agreed to carry: every child SA's remote traffic
     /// selector.
     ///
-    /// The IKEv2 analogue of OpenVPN's pushed routes, arrived at differently —
-    /// OpenVPN is told its routes in a PUSH_REPLY, IKEv2 negotiates them as
+    /// The `IKEv2` analogue of `OpenVPN`'s pushed routes, arrived at differently —
+    /// `OpenVPN` is told its routes in a `PUSH_REPLY`, `IKEv2` negotiates them as
     /// traffic selectors per child SA. Same question answered ("what goes
     /// through this tunnel"), so it lands in the same field.
     #[serde(default)]
@@ -195,12 +195,12 @@ pub struct StatusResult {
     /// `AES_CBC-128/HMAC_SHA2_256_128/PRF_HMAC_SHA2_256/ECP_384`.
     ///
     /// Answers "is this tunnel actually using decent crypto", which for an
-    /// IKEv2 dial-up is otherwise invisible without reading charon's log.
+    /// `IKEv2` dial-up is otherwise invisible without reading charon's log.
     #[serde(default)]
     pub cipher_suite: String,
     /// Bytes and packets over the child SA, gateway's own counters.
     ///
-    /// The GUI previously believed IKEv2 had no throughput data and hid the
+    /// The GUI previously believed `IKEv2` had no throughput data and hid the
     /// row. It does: swanctl prints it on the child SA's `in`/`out` lines,
     /// inside the block we already extract for the traffic selectors.
     #[serde(default)]
@@ -282,7 +282,7 @@ impl Strongswan {
 
     /// Launch charon as a child process if it's not already running.
     /// We supervise it ourselves rather than relying on a separate
-    /// LaunchDaemon so a SuperManager uninstall doesn't leave charon
+    /// `LaunchDaemon` so a `SuperManager` uninstall doesn't leave charon
     /// hanging around as a system service.
     async fn ensure_charon(&mut self) -> anyhow::Result<()> {
         if let Some(child) = &mut self.charon_child {
@@ -602,7 +602,7 @@ fn routes_installed_verdict(
 /// lines saying what the tunnel actually carries were the ones being thrown
 /// away.
 fn extract_sa_block(list_sas: &str, profile_id: &str) -> String {
-    let marker = format!("{}: ", profile_id);
+    let marker = format!("{profile_id}: ");
     let mut lines = list_sas.lines().skip_while(|l| !l.starts_with(&marker));
     let Some(head) = lines.next() else {
         return String::new();
@@ -912,7 +912,7 @@ async fn run_with_timeout(
     }
 }
 
-/// Build a swanctl config snippet for a FortiGate dial-up IKEv2 + EAP +
+/// Build a swanctl config snippet for a `FortiGate` dial-up `IKEv2` + EAP +
 /// optional group-PSK setup. Strings come from typed `ConnectArgs` fields,
 /// not from the wire — no shell quoting concerns.
 fn build_swanctl_conf(args: &ConnectArgs) -> String {
@@ -986,7 +986,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
     // comment mentioning "retransmit" would both bloat every render and trip
     // the guard test that asserts no retransmit_ token reaches swanctl.
     format!(
-        r#"connections {{
+        r"connections {{
     {id} {{
         version = 2
         remote_addrs = {host}
@@ -1014,7 +1014,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         }}
     }}
 }}
-"#,
+",
         id = id,
         host = args.host,
         username = args.username,
@@ -1032,14 +1032,14 @@ fn sanitize_name(s: &str) -> String {
 }
 
 /// Secrets file format per
-/// https://docs.strongswan.org/docs/latest/swanctl/swanctlConf.html#_secrets
+/// <https://docs.strongswan.org/docs/latest/swanctl/swanctlConf.html>#_secrets
 ///
 /// strongSwan matches `ike` secrets to peers by ID. We pin the local IKE
 /// identity to a stable `supermgr-<profile_id>` FQDN-style value in
 /// `build_swanctl_conf`, then list it here as `id-1`. We also list `%any`
 /// as `id-2` so a server-initiated lookup against any other identity
 /// still finds the secret. The remote ID isn't enumerated because we
-/// configure the connection with `remote.id = %any` — the FortiGate's
+/// configure the connection with `remote.id = %any` — the `FortiGate`'s
 /// IKE identity is not what authenticates us; the EAP exchange does.
 fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     let id = sanitize_name(&args.profile_id);
@@ -1077,7 +1077,7 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
 }
 
 /// Delete the VPN-server host route that charon installs during an
-/// IKEv2 full-tunnel connect.
+/// `IKEv2` full-tunnel connect.
 ///
 /// When charon brings up a full tunnel it adds a host route so that
 /// IKE keep-alives and rekeying reach the peer directly instead of
@@ -1091,7 +1091,7 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
 /// network change — charon can't determine a source address because
 /// the route still points at the old gateway on the old network →
 /// "unable to determine source address, faking NAT situation" →
-/// every IKE_SA_INIT packet fails with EADDRNOTAVAIL.
+/// every `IKE_SA_INIT` packet fails with EADDRNOTAVAIL.
 ///
 /// This function is called from `disconnect()` (before cleaning up
 /// the config file) and from `sweep_stale_configs()` (at startup).
@@ -1116,13 +1116,13 @@ fn delete_server_host_route(host: &str) {
 }
 
 /// Remove the split-default routes that strongSwan installs for full-tunnel
-/// IKEv2 connections. These two routes redirect ALL IPv4 traffic through the
+/// `IKEv2` connections. These two routes redirect ALL IPv4 traffic through the
 /// VPN tunnel — if they linger after a disconnect (e.g., because the SA was
 /// already gone when `swanctl --terminate` ran), the entire machine loses
 /// internet access until a reboot or another VPN connect.
 ///
-/// CRITICAL: `0/1` + `128.0/1` are a SHARED kernel resource. WireGuard
-/// (wg-quick) and OpenVPN (`redirect-gateway def1`) install the exact same
+/// CRITICAL: `0/1` + `128.0/1` are a SHARED kernel resource. `WireGuard`
+/// (wg-quick) and `OpenVPN` (`redirect-gateway def1`) install the exact same
 /// pair for their own full tunnels. `route delete -net 0/1` matches purely on
 /// destination, so a blind delete would strip a live WireGuard/OpenVPN
 /// tunnel's routes and silently leak all traffic in cleartext via en0 while
@@ -1189,20 +1189,19 @@ fn delete_full_tunnel_routes() {
 
 /// True if the IPv4 full-tunnel split-default (`0/1`) is currently installed
 /// on a utun interface — i.e. a full tunnel's routes are actually present, not
-/// merely its SA. auto_reconnect uses this to detect an ESTABLISHED-but-
+/// merely its SA. `auto_reconnect` uses this to detect an ESTABLISHED-but-
 /// routeless tunnel (e.g. the split-defaults were externally flushed) so it
 /// can replay the connect and re-install them instead of reporting "connected"
 /// for a tunnel that is silently leaking.
 pub(crate) fn full_tunnel_routes_present() -> bool {
     route_iface_family("0.0.0.0/1", "-inet")
-        .map(|i| i.starts_with("utun"))
-        .unwrap_or(false)
+        .is_some_and(|i| i.starts_with("utun"))
 }
 
 /// True if `swanctl --list-sas` shows any ESTABLISHED IKE SA — i.e. a live
 /// strongSwan tunnel exists right now. Used to keep route/config cleanup from
-/// stripping a tunnel that auto_reconnect (or always-on) re-established before
-/// a wake sweep ran, and to protect one IKEv2 profile while another disconnects.
+/// stripping a tunnel that `auto_reconnect` (or always-on) re-established before
+/// a wake sweep ran, and to protect one `IKEv2` profile while another disconnects.
 pub(crate) fn has_established_strongswan_sa() -> bool {
     // BOUNDED. A wedged charon can make `swanctl --list-sas` hang FOREVER; this
     // is called from the RPC dispatch / cleanup paths, and an unbounded hang here
@@ -1215,7 +1214,7 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
 }
 
 /// Run `swanctl --list-sas` bounded by a 3s timeout, off the caller's thread (a
-/// worker thread + recv_timeout, since some callers run on a non-tokio std
+/// worker thread + `recv_timeout`, since some callers run on a non-tokio std
 /// thread). `Some(true)` = an SA is ESTABLISHED, `Some(false)` = the probe ran
 /// cleanly with none, `None` = the probe could not complete (missing binary,
 /// spawn error, or a wedged charon that timed out).
@@ -1239,11 +1238,11 @@ fn swanctl_list_sas_established() -> Option<bool> {
 /// FAIL-SAFE liveness probe for the orphan-route reaper. Returns `true` if an IKE
 /// SA is ESTABLISHED, OR if the probe could not be completed (swanctl missing,
 /// spawn error, or a wedged charon making `--list-sas` hang). The reaper must
-/// NEVER rip a LIVE IKEv2 tunnel's split-default on a transient swanctl hiccup —
+/// NEVER rip a LIVE `IKEv2` tunnel's split-default on a transient swanctl hiccup —
 /// that silently leaks all traffic cleartext — so "uncertain" resolves to KEEP.
 /// Returns `false` ONLY when swanctl succeeds and shows no established SA, i.e.
 /// the tunnel is genuinely gone. Bounded with a 3s timeout (a non-tokio std
-/// thread, so we use a worker thread + recv_timeout).
+/// thread, so we use a worker thread + `recv_timeout`).
 pub(crate) fn ikev2_sa_present_or_unknown() -> bool {
     // Fail-SAFE: only a CLEAN "no SA" (Some(false)) lets the reaper reap; a
     // missing binary / error / 3s timeout (None) resolves to KEEP so a transient
@@ -1293,7 +1292,7 @@ fn delete_split_default(
 /// Install IPv6 leak protection for an IPv4-only full tunnel: blackhole the
 /// two IPv6 split-defaults (`::/1` + `8000::/1`) so they take precedence over
 /// the physical `::/0` default and the kernel silently drops all IPv6. Routed
-/// via `::1`/lo0 with `-blackhole` (RTF_BLACKHOLE). Idempotent: we delete any
+/// via `::1`/lo0 with `-blackhole` (`RTF_BLACKHOLE`). Idempotent: we delete any
 /// prior copy first so a reconnect doesn't error on "route already in table".
 fn install_ipv6_leak_block() {
     for net in &["::/1", "8000::/1"] {
@@ -1360,19 +1359,19 @@ pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
 }
 
 /// Set of kernel interfaces currently owned by a live non-strongSwan VPN
-/// tunnel — WireGuard (`wg show interfaces`) and OpenVPN
+/// tunnel — `WireGuard` (`wg show interfaces`) and `OpenVPN`
 /// (`openvpn::live_tunnel_interfaces`). The strongSwan route cleanup must
 /// never delete a split-default route pointing at one of these.
 ///
 /// NOTE: this set deliberately does NOT include the tailscale utun. The
 /// tailscale exit node ALSO installs `0/1`+`128/1` via its own utun, but
-/// `tailscale::remove_exit_routes` (panic_reset / auto-revert) calls this to
+/// `tailscale::remove_exit_routes` (`panic_reset` / auto-revert) calls this to
 /// decide what to skip and MUST be able to delete tailscale's own routes —
 /// that is the fail-open path. The strongSwan post-wake sweep needs the
 /// opposite (keep a live exit node's routes), so it protects the tailscale
 /// utun separately via `tailscale_tunnel_iface()` in `delete_full_tunnel_routes`.
 /// (An earlier version folded the tailscale utun in here and silently broke
-/// panic_reset's fail-open — it KEPT the routes it was meant to drop.)
+/// `panic_reset`'s fail-open — it KEPT the routes it was meant to drop.)
 pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     // WireGuard: `wg show interfaces` prints a space-separated list of the
@@ -1570,7 +1569,7 @@ mod tests {
     }
 
     /// Verbatim `swanctl --list-sas` from strongSwan 6.0.6, captured from a
-    /// live full-tunnel IKEv2 connection to a FortiGate. Not reconstructed: an
+    /// live full-tunnel `IKEv2` connection to a `FortiGate`. Not reconstructed: an
     /// earlier change in this file shipped a swanctl option that looked right
     /// and wasn't, and strongSwan silently discarded the whole config. Parsers
     /// get written against output someone actually saw.
@@ -1603,8 +1602,7 @@ mod tests {
     #[test]
     fn block_stops_at_the_next_connection() {
         let two = format!(
-            "{}other-profile-id: #2, ESTABLISHED, IKEv2, aaaa_i* bbbb_r\n  local  'x' @ 10.0.0.1[4500] [10.9.9.9]\n",
-            REAL_LIST_SAS_FULL_TUNNEL
+            "{REAL_LIST_SAS_FULL_TUNNEL}other-profile-id: #2, ESTABLISHED, IKEv2, aaaa_i* bbbb_r\n  local  'x' @ 10.0.0.1[4500] [10.9.9.9]\n"
         );
         let block = extract_sa_block(&two, PROFILE);
         assert!(!block.contains("other-profile-id"));
@@ -1921,7 +1919,7 @@ mod diagnose_tests {
     }
 
     /// Priority order matters: an auth failure often also mentions
-    /// the CHILD_SA catch-all, and the specific message must win.
+    /// the `CHILD_SA` catch-all, and the specific message must win.
     #[test]
     fn specific_pattern_beats_catch_all() {
         let log = "[IKE] received AUTHENTICATION_FAILED notify\n\

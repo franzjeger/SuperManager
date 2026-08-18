@@ -5,7 +5,7 @@
 //! D-Bus, daemon state, or any vendor specifics. Drop a file in
 //! `/etc/supermgrd/backups/` named `<safe_host>_<YYYYMMDD_HHMMSS>.<ext>` and
 //! the helpers below treat it as a backup belonging to `<safe_host>`. Both
-//! the FortiGate (`*.conf`) and OPNsense (`*.opnsense.xml`) extensions are
+//! the `FortiGate` (`*.conf`) and `OPNsense` (`*.opnsense.xml`) extensions are
 //! handled the same way; callers can add more extensions by extending
 //! [`BackupExt::recognise`].
 //!
@@ -27,9 +27,9 @@ use tracing::{debug, info, warn};
 /// match is unambiguous against fragmentary filenames like `prod.opnsense`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackupExt {
-    /// FortiGate text/XML config (`<host>_<ts>.conf`).
+    /// `FortiGate` text/XML config (`<host>_<ts>.conf`).
     FortigateConf,
-    /// OPNsense XML config (`<host>_<ts>.opnsense.xml`).
+    /// `OPNsense` XML config (`<host>_<ts>.opnsense.xml`).
     OpnsenseXml,
 }
 

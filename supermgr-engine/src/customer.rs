@@ -51,22 +51,22 @@ pub struct Customer {
 
     /// Default template suggested when the user opens a render
     /// dialog without explicitly picking one. Optional — if
-    /// unset the GUI defaults to "branch_office".
+    /// unset the GUI defaults to "`branch_office`".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_template: Option<String>,
 
-    /// Domains that must be allowed past FortiGuard's
+    /// Domains that must be allowed past `FortiGuard`'s
     /// Newly-Observed-Domains (NOD) / Newly-Registered-Domains
     /// (NRD) categories on management VLANs. Typical entries:
     ///
-    ///   - `*.unifi.<customer-domain>`     (their UniFi controller)
+    ///   - `*.unifi.<customer-domain>`     (their `UniFi` controller)
     ///   - `*.ui.com`                      (Ubiquiti's cloud)
     ///   - `*.ubnt.com`
     ///   - `*.synology.<customer-domain>`  (NAS / surveillance)
     ///
     /// The template engine merges these with a hardcoded set of
     /// universally-required infrastructure domains (Ubiquiti
-    /// cloud, FortiGuard, Microsoft updates) when generating
+    /// cloud, `FortiGuard`, Microsoft updates) when generating
     /// the MGMT-VLAN DNS filter profile.
     #[serde(default)]
     pub mgmt_allowlist_domains: Vec<String>,
@@ -93,7 +93,7 @@ pub struct Site {
     #[serde(default)]
     pub address: String,
 
-    /// FortiGate hostnames at this site. The provisioning view
+    /// `FortiGate` hostnames at this site. The provisioning view
     /// uses these to filter the host picker, and compliance can
     /// roll up scores per-site.
     #[serde(default)]
@@ -104,7 +104,7 @@ pub struct Site {
     #[serde(default)]
     pub wan_type: String,
 
-    /// Public WAN IP if static. Empty for DHCP / PPPoE / unknown.
+    /// Public WAN IP if static. Empty for DHCP / `PPPoE` / unknown.
     #[serde(default)]
     pub wan_static_ip: String,
 
@@ -145,6 +145,7 @@ fn customers_dir() -> PathBuf {
 /// Convert a display name to a URL-safe slug. Lowercase, ASCII
 /// alphanumerics + hyphens only, collapsing runs of separators.
 /// Stable across re-runs: same input always produces same slug.
+#[must_use]
 pub fn slugify(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_was_dash = true; // suppress leading dashes
@@ -214,7 +215,7 @@ fn load_path(path: &Path) -> Result<Customer> {
 /// hidden-file prefix (`.`), and empty input.
 ///
 /// Centralized here because every save / load / delete path
-/// (customer, engagement, findings_store, notify) interpolates
+/// (customer, engagement, `findings_store`, notify) interpolates
 /// the slug into a filename. Unvalidated slugs were the
 /// path-traversal vector flagged in the security review.
 /// The rules live in `supermgr-core::findings::validate_slug` now, because the
@@ -285,7 +286,7 @@ pub fn delete(slug: &str) -> Result<()> {
 /// PDF when the customer wants paper.
 ///
 /// Aggregation is read-only: walk customer file, walk each site's
-/// host_ids, look up each host's compliance history + deployment
+/// `host_ids`, look up each host's compliance history + deployment
 /// history. The engine doesn't need a database join — the
 /// per-host JSON stores already partition cleanly.
 pub async fn render_customer_report(
@@ -421,12 +422,9 @@ pub async fn render_customer_report(
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let host = match host_lookup.get(&host_id) {
-                    Some(h) => h,
-                    None => {
-                        writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
-                        continue;
-                    }
+                let host = if let Some(h) = host_lookup.get(&host_id) { h } else {
+                    writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
+                    continue;
                 };
                 writeln!(out, "#### {} ({})", host.label, format_device_type(host.device_type)).unwrap();
                 writeln!(out).unwrap();

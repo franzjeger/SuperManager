@@ -239,7 +239,7 @@ pub trait Daemon {
     /// has been observed yet or no tunnel is active.
     async fn get_stats(&self) -> fdo::Result<String>;
 
-    /// Import a WireGuard `.conf` file.
+    /// Import a `WireGuard` `.conf` file.
     ///
     /// `conf_text` is the raw file contents; `name` is the desired display name.
     /// Returns the new profile's UUID string on success.
@@ -260,7 +260,7 @@ pub trait Daemon {
     /// Set the `auto_connect` flag on a profile.
     ///
     /// When `true` the daemon will automatically connect this profile when
-    /// NetworkManager reports the network is available (e.g. after resume from
+    /// `NetworkManager` reports the network is available (e.g. after resume from
     /// suspend).  Only one profile should have `auto_connect = true` at a time;
     /// if multiple profiles have the flag set, the daemon picks the first one
     /// it finds.
@@ -268,13 +268,13 @@ pub trait Daemon {
     /// The change is persisted to the profile's TOML file immediately.
     async fn set_auto_connect(&self, profile_id: &str, auto_connect: bool) -> fdo::Result<()>;
 
-    /// Update a FortiGate profile's connection settings.
+    /// Update a `FortiGate` profile's connection settings.
     ///
     /// Non-empty `password` / `psk` overwrite the stored secret; empty strings
     /// leave the existing secret unchanged.
     ///
     /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
-    /// addresses that overrides the FortiGate's mode-config-pushed DNS.
+    /// addresses that overrides the `FortiGate`'s mode-config-pushed DNS.
     /// Pass an empty string to clear any previous override and revert to
     /// using mode-config DNS.
     async fn update_fortigate(
@@ -288,7 +288,7 @@ pub trait Daemon {
         dns_servers: &str,
     ) -> fdo::Result<()>;
 
-    /// Update an OpenVPN profile's credentials.
+    /// Update an `OpenVPN` profile's credentials.
     ///
     /// A non-empty `password` overwrites the stored secret; an empty string
     /// leaves the existing secret unchanged.
@@ -327,22 +327,22 @@ pub trait Daemon {
         customer: &str,
     ) -> fdo::Result<()>;
 
-    /// Set the split-tunnel route list for a WireGuard profile.
+    /// Set the split-tunnel route list for a `WireGuard` profile.
     ///
     /// `routes` is a list of CIDR strings (e.g. `["10.0.0.0/8", "192.168.1.0/24"]`).
     /// These replace the catch-all `0.0.0.0/0` when `full_tunnel = false` is active.
     /// Passing an empty list clears split routes (split-tunnel will then fall back
-    /// to whatever explicit prefixes are in the peer's AllowedIPs after stripping
+    /// to whatever explicit prefixes are in the peer's `AllowedIPs` after stripping
     /// catch-alls, which may cause a connect-time error if none remain).
     ///
-    /// Only valid for WireGuard profiles; returns an error for other backends.
+    /// Only valid for `WireGuard` profiles; returns an error for other backends.
     async fn set_split_routes(
         &self,
         profile_id: &str,
         routes: Vec<String>,
     ) -> fdo::Result<()>;
 
-    /// Create a new FortiGate IPsec/IKEv2 profile and persist it to disk.
+    /// Create a new `FortiGate` IPsec/IKEv2 profile and persist it to disk.
     ///
     /// `name` is the display name; `host` is the appliance hostname or IP;
     /// `username` / `password` are the EAP-MSCHAPv2 credentials; `psk` is
@@ -350,7 +350,7 @@ pub trait Daemon {
     ///
     /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
     /// addresses to push to systemd-resolved on connect. Pass an empty
-    /// string to fall back to whatever DNS servers the FortiGate sends
+    /// string to fall back to whatever DNS servers the `FortiGate` sends
     /// during IKE mode-config negotiation.
     ///
     /// Returns the new profile's UUID string on success.
@@ -364,7 +364,7 @@ pub trait Daemon {
         dns_servers: &str,
     ) -> fdo::Result<String>;
 
-    /// Import an OpenVPN `.ovpn` configuration file.
+    /// Import an `OpenVPN` `.ovpn` configuration file.
     ///
     /// `conf_text` is the raw `.ovpn` file contents; `name` is the desired
     /// display name.  `username` and `password` are optional credentials —
@@ -400,7 +400,7 @@ pub trait Daemon {
     /// with `{ "type": "vpn"|"ssh_key"|"ssh_host", "id": "<uuid>" }`.
     async fn import_toml(&self, toml_text: &str) -> fdo::Result<String>;
 
-    /// Rotate the WireGuard private key for the given profile.
+    /// Rotate the `WireGuard` private key for the given profile.
     ///
     /// Generates a new key pair, overwrites the stored private key in the
     /// secret service, and returns the new base64-encoded public key.
@@ -454,7 +454,7 @@ pub trait Daemon {
 
     /// List nodes in the local tailnet via `tailscale status --json`.
     ///
-    /// Returns a JSON array of TailscaleNode objects (defined in the
+    /// Returns a JSON array of `TailscaleNode` objects (defined in the
     /// daemon's `tailscale` module). Errors string-wise when the
     /// tailscale CLI isn't installed or tailscaled isn't running.
     async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
@@ -462,7 +462,7 @@ pub trait Daemon {
     /// Route this machine's traffic through `value`, or clear the selection
     /// when `value` is empty.
     ///
-    /// `value` is a Tailscale IP or MagicDNS name of a peer advertising
+    /// `value` is a Tailscale IP or `MagicDNS` name of a peer advertising
     /// exit-node capability. Runs `tailscale set --exit-node=…`, which on
     /// Linux installs the routing itself.
     ///
@@ -567,11 +567,11 @@ pub trait Daemon {
     /// Store an OpenSSH certificate for the given host (certificate auth).
     async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()>;
 
-    /// Store a FortiGate REST API token and port for the given host.
+    /// Store a `FortiGate` REST API token and port for the given host.
     /// Pass `port = 0` to keep the existing port.
     async fn ssh_set_api_token(&self, host_id: &str, token: &str, port: u16) -> fdo::Result<()>;
 
-    /// Call the FortiGate REST API on a host.
+    /// Call the `FortiGate` REST API on a host.
     ///
     /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
     /// (e.g. `/api/v2/cmdb/system/admin/admin`).  `body` is optional JSON.
@@ -584,11 +584,11 @@ pub trait Daemon {
         body: &str,
     ) -> fdo::Result<String>;
 
-    /// Push an SSH public key to a FortiGate admin user via REST API.
+    /// Push an SSH public key to a `FortiGate` admin user via REST API.
     ///
-    /// `host_id` is the UUID of the FortiGate host with an API token configured.
+    /// `host_id` is the UUID of the `FortiGate` host with an API token configured.
     /// `key_id` is the UUID of the SSH key whose public key will be pushed.
-    /// `admin_user` is the FortiGate admin username (e.g. `"admin"`).
+    /// `admin_user` is the `FortiGate` admin username (e.g. `"admin"`).
     ///
     /// The key is set as `ssh-public-key1` on the admin user via
     /// `PUT /api/v2/cmdb/system/admin/{admin_user}`.
@@ -608,12 +608,12 @@ pub trait Daemon {
     // UniFi methods
     // =======================================================================
 
-    /// Execute `set-inform <url>` on a UniFi device via SSH.
+    /// Execute `set-inform <url>` on a `UniFi` device via SSH.
     ///
     /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
     async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String>;
 
-    /// Call the UniFi Controller REST API on a host.
+    /// Call the `UniFi` Controller REST API on a host.
     ///
     /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
     /// (e.g. `/proxy/network/api/s/default/stat/device`).  `body` is optional JSON.
@@ -626,7 +626,7 @@ pub trait Daemon {
         body: &str,
     ) -> fdo::Result<String>;
 
-    /// Store UniFi Controller URL and credentials for a host.
+    /// Store `UniFi` Controller URL and credentials for a host.
     ///
     /// Validates the credentials by attempting to log in, then stores the URL
     /// and credentials securely.
@@ -642,10 +642,10 @@ pub trait Daemon {
     // OPNsense REST API
     // =======================================================================
 
-    /// Store OPNsense API credentials (key + secret) for an SSH host.
+    /// Store `OPNsense` API credentials (key + secret) for an SSH host.
     ///
     /// `port` is the HTTPS port (defaults to 443 if 0). `api_key` and
-    /// `api_secret` are the values from OPNsense → System → Access → Users
+    /// `api_secret` are the values from `OPNsense` → System → Access → Users
     /// → API keys.
     ///
     /// Validates the credentials by issuing an authenticated probe; on
@@ -660,7 +660,7 @@ pub trait Daemon {
         api_secret: &str,
     ) -> fdo::Result<()>;
 
-    /// Issue a Basic-Auth REST API call to an OPNsense host and return the
+    /// Issue a Basic-Auth REST API call to an `OPNsense` host and return the
     /// raw response body as text.
     ///
     /// `method` is one of `GET`, `POST`, `PUT`, `DELETE`. `path` is the
@@ -674,14 +674,14 @@ pub trait Daemon {
         body: &str,
     ) -> fdo::Result<String>;
 
-    /// Composite "is this OPNsense alive" status snapshot for the dashboard.
+    /// Composite "is this `OPNsense` alive" status snapshot for the dashboard.
     ///
     /// Returns the `OpnSenseStatus` struct (defined in the daemon's
     /// `opnsense` module) serialised as JSON. Each field is optional; an
     /// individual endpoint failure does not fail the whole call.
     async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
 
-    /// Download the OPNsense running config and save it under
+    /// Download the `OPNsense` running config and save it under
     /// `/etc/supermgrd/backups/<safe_host>_<ts>.opnsense.xml`.
     /// Returns the filename written.
     async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String>;
@@ -690,13 +690,13 @@ pub trait Daemon {
     // Sophos XML Configuration API
     // =======================================================================
 
-    /// Store Sophos WebAdmin credentials for an SSH host and validate them.
+    /// Store Sophos `WebAdmin` credentials for an SSH host and validate them.
     ///
     /// Sophos has no token endpoint; the username and password are stored as
     /// a JSON blob in the system secret service and resent on every API call
     /// inside the `<Login>` block of the XML envelope.
     ///
-    /// `port` defaults to 4444 (the conventional WebAdmin HTTPS port) if 0.
+    /// `port` defaults to 4444 (the conventional `WebAdmin` HTTPS port) if 0.
     async fn sophos_set_credentials(
         &self,
         host_id: &str,
@@ -753,7 +753,7 @@ pub trait Daemon {
     /// to the user (e.g. `"ssh -i /path/to/key user@host -p 22"`).
     async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String>;
 
-    /// Test SSH and (optionally) FortiGate API connectivity for a host.
+    /// Test SSH and (optionally) `FortiGate` API connectivity for a host.
     ///
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.
@@ -860,14 +860,14 @@ pub trait Daemon {
     // FortiGate config backup
     // =======================================================================
 
-    /// Download the FortiGate running config and save it to disk.
+    /// Download the `FortiGate` running config and save it to disk.
     ///
     /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and writes
     /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
     /// Returns the filename on success.
     async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
 
-    /// Run CIS benchmark compliance checks against a FortiGate device via SSH.
+    /// Run CIS benchmark compliance checks against a `FortiGate` device via SSH.
     ///
     /// Returns a JSON object with individual check results and a summary score:
     /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
@@ -953,7 +953,7 @@ pub trait Daemon {
         note: &str,
     ) -> fdo::Result<String>;
 
-    /// Generate a new FortiGate REST API token via SSH.
+    /// Generate a new `FortiGate` REST API token via SSH.
     ///
     /// Creates the API user if needed, generates a key, stores it in the
     /// secret store, and returns the token string.
@@ -964,7 +964,7 @@ pub trait Daemon {
         api_port: u16,
     ) -> fdo::Result<String>;
 
-    /// Retrieve the stored FortiGate API token (for clipboard copy / docs).
+    /// Retrieve the stored `FortiGate` API token (for clipboard copy / docs).
     async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String>;
 
     // =======================================================================

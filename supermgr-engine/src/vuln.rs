@@ -7,16 +7,16 @@
 //!
 //! 1. **Banner-version → CVE** — when a service banner contains
 //!    a known-vulnerable version string ("OpenSSH 7.4p1",
-//!    "Apache 2.4.49", "FortiGate v6.2.3"), we surface the
+//!    "Apache 2.4.49", "`FortiGate` v6.2.3"), we surface the
 //!    matching CVE(s) from the bundled database.
 //!
 //! 2. **Configuration findings** — situations that don't need
-//!    version-matching: telnet open at all, SMBv1 detected,
+//!    version-matching: telnet open at all, `SMBv1` detected,
 //!    self-signed cert on a public service, expired cert,
 //!    SNMP "public" community readable, weak TLS protocol.
 //!
 //! The bundled CVE database is intentionally small (~30
-//! high-impact CVEs covering common gear: FortiGate, Cisco,
+//! high-impact CVEs covering common gear: `FortiGate`, Cisco,
 //! Apache, OpenSSH, Microsoft Exchange). For comprehensive
 //! coverage Phase C+ would integrate Nuclei (~10k templates)
 //! or pull from NVD weekly. This v1 catches the most
@@ -42,6 +42,7 @@ pub use supermgr_core::severity::Severity;
 
 /// Run all detection rules against a single host's probe results.
 /// Returns a flat list of findings — host-level + sub-probe extras.
+#[must_use]
 pub fn analyse_host(host_ip: &str, probes: &[PortProbe]) -> Vec<Finding> {
     let mut findings: Vec<Finding> = Vec::new();
     for p in probes {
@@ -503,7 +504,7 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
 /// attenuated by IP zone. SSLv2/SSLv3 stay Critical regardless
 /// (POODLE-class attacks work on a LAN). TLS 1.0/1.1 drop to
 /// Medium internally — they're a compliance issue (PCI DSS / HIPAA
-/// / FedRAMP all require TLS 1.2+) but the active-exploit risk
+/// / `FedRAMP` all require TLS 1.2+) but the active-exploit risk
 /// against an internal host is much smaller than against a
 /// public-facing one.
 fn deprecated_tls_severity(proto: &str, host_ip: &str) -> (Severity, f32) {

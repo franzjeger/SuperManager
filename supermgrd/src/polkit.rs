@@ -13,8 +13,8 @@
 //! Polkit is the mechanism Linux provides for exactly this shape of
 //! problem — a privileged service deciding whether an unprivileged caller
 //! may perform a named action, with the desktop's authentication agent
-//! prompting when a decision needs a human. It is what NetworkManager,
-//! systemd and PackageKit use for the same reason.
+//! prompting when a decision needs a human. It is what `NetworkManager`,
+//! systemd and `PackageKit` use for the same reason.
 //!
 //! # Failure posture
 //!

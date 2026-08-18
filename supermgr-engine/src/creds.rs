@@ -38,6 +38,7 @@ pub struct CredentialPair {
 
 /// Curated default-credentials database. Keep small + relevant.
 /// Each (service, vendor-context) → list of (user, pass) tuples.
+#[must_use]
 pub fn default_creds_for_service(service: &str) -> Vec<CredentialPair> {
     match service {
         "ssh" => vec![
@@ -258,7 +259,7 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
             // Heuristic — only flag if without auth we got 401
             // (avoiding open services that just always return 200).
             // Cheap probe: do an unauth GET to compare.
-            let baseline = client.get(&url).send().await.ok().map(|r| r.status().as_u16()).unwrap_or(200);
+            let baseline = client.get(&url).send().await.ok().map_or(200, |r| r.status().as_u16());
             if baseline == 401 || baseline == 403 {
                 findings.push(Finding {
                     id: "creds.http-default".into(),

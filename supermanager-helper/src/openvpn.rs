@@ -1,9 +1,9 @@
-//! OpenVPN tunnel control for SuperManager's privileged helper.
+//! `OpenVPN` tunnel control for `SuperManager`'s privileged helper.
 //!
 //! ## Architecture
 //!
-//! `brew install openvpn` puts the canonical OpenVPN 2.x CLI at
-//! `<brew>/sbin/openvpn`. We launch one OpenVPN process per active
+//! `brew install openvpn` puts the canonical `OpenVPN` 2.x CLI at
+//! `<brew>/sbin/openvpn`. We launch one `OpenVPN` process per active
 //! profile, supervised by this helper. The child writes its PID to
 //! `/var/run/supermgr-ovpn-<sanitized-id>.pid` (via the `--writepid`
 //! flag), so disconnect / status look up the PID from there.
@@ -26,12 +26,12 @@
 //! The privileged helper reads / tails it for the GUI. We don't
 //! currently rotate these — TODO once we ship to non-developer users.
 //!
-//! ## Why not openvpn3 / Tunnelblick / OpenVPN Connect?
+//! ## Why not openvpn3 / Tunnelblick / `OpenVPN` Connect?
 //!
 //! `openvpn3` brews cleanly but its session model is much heavier
 //! and the project is moving towards a Cloud-Connect-only future.
-//! Tunnelblick / OpenVPN Connect are full GUIs we'd have to drive
-//! over AppleScript / mobileconfig — clunky and brittle. The plain
+//! Tunnelblick / `OpenVPN` Connect are full GUIs we'd have to drive
+//! over `AppleScript` / mobileconfig — clunky and brittle. The plain
 //! `openvpn` 2.x CLI is rock-solid, scriptable, and what every
 //! integration tutorial assumes. Less work, fewer moving parts.
 
@@ -47,7 +47,7 @@ const PID_DIR: &str = "/var/run";
 /// Where we keep per-profile log files. `/tmp` instead of
 /// `/var/log` so that the GUI process (running as the user, not
 /// root) can read what openvpn actually said. The log file is
-/// the only way to diagnose mid-handshake failures (AUTH_FAILED,
+/// the only way to diagnose mid-handshake failures (`AUTH_FAILED`,
 /// "Cannot resolve host", TLS errors) — without world-readable
 /// logs, "openvpn started but the tunnel never reached
 /// connected" is a complete black box for the user.
@@ -462,12 +462,11 @@ impl OpenVpn {
             // waits 60s for "Initialization Sequence Completed"
             // and only treats AUTH_FAILED as fatal — same idea.
             tracing::info!("ovpn_connect: waiting 5s for daemon child to settle…");
-            tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
             let log_body = std::fs::read_to_string(&log_path).unwrap_or_default();
             let pid_alive = read_pid_file(&pid_path)
-                .map(|p| unsafe { libc::kill(p as i32, 0) } == 0)
-                .unwrap_or(false);
+                .is_some_and(|p| unsafe { libc::kill(p as i32, 0) } == 0);
             tracing::info!(
                 "ovpn_connect: post-spawn check pid_alive={} log_size={}",
                 pid_alive,
@@ -493,9 +492,7 @@ impl OpenVpn {
             let fatal_hit = FATAL.iter().find(|m| log_body.contains(*m));
 
             if !pid_alive || fatal_hit.is_some() {
-                let reason = fatal_hit
-                    .map(|m| format!("openvpn died after fork — {m}"))
-                    .unwrap_or_else(|| "openvpn died after fork (no PID, no fatal marker — see log)".to_owned());
+                let reason = fatal_hit.map_or_else(|| "openvpn died after fork (no PID, no fatal marker — see log)".to_owned(), |m| format!("openvpn died after fork — {m}"));
                 let log_tail = {
                     let lines: Vec<&str> = log_body.lines()
                         .filter(|l| !l.trim().is_empty())
@@ -528,7 +525,7 @@ impl OpenVpn {
         })
     }
 
-    /// SIGTERM the running OpenVPN child(ren). First-pass uses the
+    /// SIGTERM the running `OpenVPN` child(ren). First-pass uses the
     /// PID file; second-pass scans `ps` and kills anything else
     /// matching this profile's daemon-name fingerprint. The
     /// second pass catches tunnels whose PID file got out of sync
@@ -879,14 +876,13 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
         .lines()
         .find_map(|l| l.split("/sbin/ifconfig ").nth(1))
         .map(|s| s.split_whitespace().collect::<Vec<_>>())
-        .map(|toks| {
+        .map_or((None, None), |toks| {
             // `<iface> <vip> <vgw> netmask ...`
             (
-                toks.get(1).map(|s| s.to_string()),
-                toks.get(2).map(|s| s.to_string()),
+                toks.get(1).map(std::string::ToString::to_string),
+                toks.get(2).map(std::string::ToString::to_string),
             )
-        })
-        .unwrap_or((None, None));
+        });
     (iface, vip, vgw)
 }
 
@@ -932,10 +928,10 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
         .map(|s| s.parse::<u8>().ok())
         .collect::<Option<Vec<_>>>()?;
     if octets.len() != 4 { return None; }
-    let bits = ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32);
+    let bits = (u32::from(octets[0]) << 24)
+        | (u32::from(octets[1]) << 16)
+        | (u32::from(octets[2]) << 8)
+        | u32::from(octets[3]);
     let leading = bits.leading_ones();
     let trailing = bits.trailing_zeros();
     if leading + trailing != 32 { return None; }
@@ -946,17 +942,17 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Locate the OpenVPN binary.
+/// Locate the `OpenVPN` binary.
 ///
-/// **Order**: prefer OpenVPN 3 (`/opt/homebrew/bin/openvpn3`)
-/// first. Microsoft's Azure VPN gateway *does* speak OpenVPN
+/// **Order**: prefer `OpenVPN` 3 (`/opt/homebrew/bin/openvpn3`)
+/// first. Microsoft's Azure VPN gateway *does* speak `OpenVPN`
 /// protocol, but the gateway's TLS channel layer rejects 2.x
 /// clients in the AAD/Entra ID flow — TLS handshake completes,
 /// then the gateway RSTs immediately after our auth payload
-/// without sending AUTH_FAILED. The same configuration on a 3.x
+/// without sending `AUTH_FAILED`. The same configuration on a 3.x
 /// client connects cleanly. MSP-Toolkit-V2 (the production
 /// reference) and Microsoft's own Azure VPN Client both use
-/// OpenVPN 3 for this reason.
+/// `OpenVPN` 3 for this reason.
 ///
 /// `openvpn3` is not in Homebrew's core formulae — install with
 /// `contrib/build-openvpn3-mac.sh`, which clones upstream and
@@ -964,7 +960,7 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// picks it up automatically.
 ///
 /// 2.x fallback paths exist for non-Azure profiles (regular
-/// OpenVPN servers don't care about 2.x vs 3.x) but should not
+/// `OpenVPN` servers don't care about 2.x vs 3.x) but should not
 /// be relied on for Azure VPN.
 fn locate_openvpn() -> anyhow::Result<PathBuf> {
     // OpenVPN 3 first. Required for Azure VPN with Entra ID.
@@ -1009,7 +1005,7 @@ fn locate_openvpn() -> anyhow::Result<PathBuf> {
     ))
 }
 
-/// True when the located binary is OpenVPN 3.x. Used to switch
+/// True when the located binary is `OpenVPN` 3.x. Used to switch
 /// to 3.x's session-start sub-command syntax when it's the only
 /// thing installed; 2.x is the default and validated path.
 fn is_openvpn3(bin: &Path) -> bool {
@@ -1029,7 +1025,7 @@ fn pid_path_for(safe: &str) -> PathBuf {
     Path::new(PID_DIR).join(format!("supermgr-ovpn-{safe}.pid"))
 }
 
-/// SIGTERM every live OpenVPN tunnel the helper manages and clean up its
+/// SIGTERM every live `OpenVPN` tunnel the helper manages and clean up its
 /// pidfiles. Used by the system-sleep teardown — a global, profile-agnostic
 /// "kill all our tunnels" that doesn't need the per-profile id.
 ///
@@ -1073,15 +1069,15 @@ pub async fn terminate_all() -> usize {
     killed
 }
 
-/// Kernel interfaces (`utunN`) of every OpenVPN tunnel that is currently
+/// Kernel interfaces (`utunN`) of every `OpenVPN` tunnel that is currently
 /// alive. Cheap, no `&mut self`: scans the helper's pidfiles in `/var/run`,
 /// checks liveness with `kill(pid, 0)`, and parses the bound interface from
 /// each session's log.
 ///
 /// Used by the strongSwan teardown path so it never deletes the shared
 /// full-tunnel split-default routes (`0/1` + `128.0/1`) out from under a
-/// live OpenVPN session — those routes belong to whatever backend installed
-/// them, and OpenVPN's `redirect-gateway def1` uses the exact same pair.
+/// live `OpenVPN` session — those routes belong to whatever backend installed
+/// them, and `OpenVPN`'s `redirect-gateway def1` uses the exact same pair.
 pub fn live_tunnel_interfaces() -> Vec<String> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(PID_DIR) else { return out };
@@ -1108,7 +1104,7 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
     out
 }
 
-/// True if ANY supermgr OpenVPN tunnel process is alive, REGARDLESS of whether
+/// True if ANY supermgr `OpenVPN` tunnel process is alive, REGARDLESS of whether
 /// it has reached `EVENT: CONNECTED` yet. `live_tunnel_interfaces()` only
 /// reports a tunnel once its log shows CONNECTED (so it can name the utun); but
 /// the exit-node ownership gate needs to recognize an Azure/OpenVPN full tunnel

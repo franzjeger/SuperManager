@@ -33,6 +33,7 @@ pub fn append_audit(entry: &AuditEntry) {
 /// Read the last `max_lines` entries from the audit log.
 ///
 /// Returns an empty vector if the log file does not exist or cannot be read.
+#[must_use]
 pub fn read_audit(max_lines: usize) -> Vec<String> {
     let path = audit_log_path();
     let text = match std::fs::read_to_string(&path) {

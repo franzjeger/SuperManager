@@ -6,15 +6,15 @@
 //! professional MSP toolchain and a script-kiddie's collection
 //! of binaries. The model carries:
 //!
-//!   - **scope_cidrs**: which subnets are allowed targets
-//!   - **scope_hosts**: specific hostnames in scope
+//!   - **`scope_cidrs`**: which subnets are allowed targets
+//!   - **`scope_hosts`**: specific hostnames in scope
 //!   - **exclusions**: explicitly-out-of-scope addresses (e.g.
 //!     production payment gateways)
-//!   - **allowed_techniques**: what kinds of action are allowed
-//!     (Recon, Discovery, VulnScan, CredTest, WebExploit, …)
-//!   - **expires_at**: contract-end date; scans against expired
+//!   - **`allowed_techniques`**: what kinds of action are allowed
+//!     (Recon, Discovery, `VulnScan`, `CredTest`, `WebExploit`, …)
+//!   - **`expires_at`**: contract-end date; scans against expired
 //!     engagements are flagged in the GUI
-//!   - **authorization_doc_path**: optional reference to a
+//!   - **`authorization_doc_path`**: optional reference to a
 //!     signed authorization PDF (proof for later legal
 //!     questions)
 //!   - **log**: append-only audit trail of every scan run
@@ -58,7 +58,7 @@ pub struct Engagement {
     pub exclusions: Vec<String>,
 
     /// Allowed techniques for this engagement. Restricts which
-    /// SuperManager actions can run within scope. See
+    /// `SuperManager` actions can run within scope. See
     /// [`Technique`] for the enum.
     #[serde(default)]
     pub allowed_techniques: Vec<Technique>,
@@ -128,6 +128,7 @@ pub enum Cadence {
 }
 
 impl Cadence {
+    #[must_use]
     pub fn advance(self, from: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
         match self {
             Self::Hourly => from + chrono::Duration::hours(1),
@@ -137,6 +138,7 @@ impl Cadence {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Hourly => "Hourly",
@@ -168,7 +170,7 @@ pub enum Technique {
     SnmpRead,
     /// Wireless attacks. NOT implemented; reserved for future.
     Wireless,
-    /// DoS testing. Explicitly NOT implemented.
+    /// `DoS` testing. Explicitly NOT implemented.
     DosTest,
 }
 
@@ -191,7 +193,7 @@ impl Technique {
 
     /// Default starter set — appropriate for most professional
     /// MSP engagements. Includes everything except wireless and
-    /// DoS, which are out-of-scope for typical pen-tests.
+    /// `DoS`, which are out-of-scope for typical pen-tests.
     #[must_use]
     pub fn default_set() -> Vec<Technique> {
         vec![
@@ -237,6 +239,7 @@ pub struct EngagementEvent {
 /// mode. Strict mode without any scope CIDRs would lock the
 /// operator out of their own scans — there's no meaningful
 /// interpretation of "must be in scope" when there's no scope.
+#[must_use]
 pub fn targets_outside_scope(
     targets: &[String],
     scope_cidrs: &[String],

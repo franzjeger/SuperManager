@@ -16,7 +16,7 @@
 //!    from `~/Library/Application Support/SuperManager/checks/`.
 //!
 //! 2. **Runner** — given a host, executes all applicable checks,
-//!    using the FortiGate REST API where possible (faster, lower
+//!    using the `FortiGate` REST API where possible (faster, lower
 //!    overhead than SSH) and falling back to SSH CLI when an
 //!    API endpoint isn't suitable. Produces a `ComplianceRun`.
 //!
@@ -24,9 +24,9 @@
 //!    support directory keyed by host id. The GUI fetches recent
 //!    runs to render trend graphs and drift indicators.
 //!
-//! ## Why JSON not SQLite
+//! ## Why JSON not `SQLite`
 //!
-//! SQLite would add a runtime dependency, a migration story, and
+//! `SQLite` would add a runtime dependency, a migration story, and
 //! complicate the export-everything-and-restore-on-new-machine
 //! flow we'll need later. The data shape is small (a few hundred
 //! KB per host per year of daily runs), append-only, and rarely
@@ -79,7 +79,7 @@ impl Severity {
 
 /// What channel a check uses. API checks are preferred (faster,
 /// less invasive than opening an SSH session). CLI checks parse
-/// the FortiOS `show` output and are necessary for settings the
+/// the `FortiOS` `show` output and are necessary for settings the
 /// API doesn't expose under `/monitor`. `Both` lets a check try
 /// API first and fall back to CLI if the API call returned an
 /// unparseable result.
@@ -162,7 +162,7 @@ pub struct CheckDefinition {
     pub cis_reference: Option<String>,
     /// How the value is read: REST or shell.
     pub channel: Channel,
-    /// FortiGate REST path (when `channel` includes API). Returns
+    /// `FortiGate` REST path (when `channel` includes API). Returns
     /// the JSON object whose `pointer` we evaluate.
     pub api_path: Option<String>,
     /// JSON pointer (RFC6901) into the response, e.g. `/results/admin-sport`.
@@ -176,7 +176,7 @@ pub struct CheckDefinition {
     pub cli_grep: Option<String>,
     /// How the raw value becomes pass or fail.
     pub expect: Expectation,
-    /// CLI snippet that, when applied to the FortiGate, makes
+    /// CLI snippet that, when applied to the `FortiGate`, makes
     /// this check pass. Shown in the "Fix" affordance under each
     /// failed check. Multiline. Variable substitution is the
     /// user's responsibility (e.g. interface name).
@@ -251,18 +251,18 @@ pub enum TriggerKind {
 
 /// Which baseline this run was executed against. Carried on every
 /// `ComplianceRun` and `RunSummary` so downstream code (and the
-/// GUI, once 1.12b lands) can distinguish FortiGate REST-API runs
+/// GUI, once 1.12b lands) can distinguish `FortiGate` REST-API runs
 /// from Linux SSH-shell runs without sniffing check ids.
 ///
 /// **Back-compat:** runs persisted before this field existed will
 /// decode with `#[serde(default)]` → `BaselineKind::Fortigate`
-/// (every legacy row was a FortiGate run — Linux runs had no
+/// (every legacy row was a `FortiGate` run — Linux runs had no
 /// persistence at all before 1.12a, so there are no Linux rows
 /// on disk to mis-tag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaselineKind {
-    /// FortiGate controls, read over the REST API and CLI.
+    /// `FortiGate` controls, read over the REST API and CLI.
     Fortigate,
     /// The Linux host baseline, run as shell commands over SSH.
     Linux,
@@ -303,7 +303,7 @@ pub struct ComplianceRun {
     /// What caused this run.
     pub triggered_by: TriggerKind,
     /// Which baseline this run executed. `#[serde(default)]` so
-    /// runs persisted before 1.12a (all FortiGate) still decode.
+    /// runs persisted before 1.12a (all `FortiGate`) still decode.
     #[serde(default)]
     pub baseline_kind: BaselineKind,
     /// 0–100. See `score()` below.
@@ -360,9 +360,10 @@ pub struct RunSummary {
 /// Apply a definition's [`Expectation`] to a raw value read off the device.
 ///
 /// Returns the status, the operator-facing detail, and the raw value kept for
-/// "what we saw". Public because the FortiGate runner lives in the engine and
+/// "what we saw". Public because the `FortiGate` runner lives in the engine and
 /// evaluates through this — the comparison logic stays in one place so the two
 /// baselines cannot grade the same value differently.
+#[must_use]
 pub fn evaluate(def: &CheckDefinition, value: &str) -> (Status, String, Option<String>) {
     let raw = Some(value.to_owned());
     let pass_detail = || (Status::Pass, format_pass_detail(def, value), raw.clone());
@@ -427,10 +428,11 @@ fn format_pass_detail(def: &CheckDefinition, value: &str) -> String {
 }
 
 /// Count pass/fail/error/skip transitions over a check vector.
-/// Returns `(passed, failed, errored, skipped)` so the FortiGate
+/// Returns `(passed, failed, errored, skipped)` so the `FortiGate`
 /// runner and the Linux runner share a single counting path —
 /// avoids the "two implementations drift" risk and gives the
 /// aggregation a direct test target.
+#[must_use]
 pub fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -451,6 +453,7 @@ pub fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
 /// failed check, ignore skips. Errors count as 1.5× their severity
 /// penalty (an unknown is worse than a known-good but better than
 /// a known-bad — they need investigation). Clamped to [0, 100].
+#[must_use]
 pub fn score(results: &[CheckResult]) -> u8 {
     let mut s: f64 = 100.0;
     for r in results {
@@ -467,20 +470,21 @@ pub fn score(results: &[CheckResult]) -> u8 {
 // Default checks (CIS-FortiOS-7.4 L1)
 // ---------------------------------------------------------------------------
 
-/// Hardcoded FortiGate baseline. Each check carries:
+/// Hardcoded `FortiGate` baseline. Each check carries:
 ///   - a stable id so history can correlate across runs
 ///   - severity that drives score impact
 ///   - remediation snippet for the GUI's "Fix" button
 ///
-/// All checks use the FortiGate API where possible. CLI fallbacks
+/// All checks use the `FortiGate` API where possible. CLI fallbacks
 /// only where the API doesn't expose the data cheaply (none in
 /// the v1 set — all are pure-API).
 ///
 /// Linux baseline rows live in `ssh_compliance::linux_default_checks()`
 /// and are merged into `list_checks()` alongside this set since 1.12c.
+#[must_use]
 pub fn fortigate_default_checks() -> Vec<CheckDefinition> {
-    use Channel::*;
-    use Severity::*;
+    use Channel::Api;
+    use Severity::{Medium, Critical, High, Low, Info};
 
     vec![
         CheckDefinition {
@@ -1040,7 +1044,7 @@ pub fn fortigate_default_checks() -> Vec<CheckDefinition> {
             api_pointer: Some("/results/location".into()),
             cli_command: None,
             cli_grep: None,
-            expect: Expectation::NotEqual { value: "".into() },
+            expect: Expectation::NotEqual { value: String::new() },
             remediation: Some("config system snmp sysinfo\n  set location \"<DC name / Office address>\"\n  set contact-info \"<NOC email>\"\nend".into()),
         },
         CheckDefinition {
@@ -1322,7 +1326,7 @@ pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
     }
     let mut entries: Vec<RunSummary> = std::fs::read_dir(&dir)
         .with_context(|| format!("read {dir:?}"))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
         .filter_map(|e| match std::fs::read(e.path()) {
             Ok(bytes) => serde_json::from_slice::<ComplianceRun>(&bytes).ok(),
@@ -1357,25 +1361,26 @@ pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
 }
 
 /// List the full set of available checks across every baseline
-/// kind (FortiGate + Linux as of 1.12c) plus any user TOML
+/// kind (`FortiGate` + Linux as of 1.12c) plus any user TOML
 /// overlays. The GUI uses this for the "Checks reference"
 /// browser and for the per-check Remediation lookup in the host
-/// detail view + the report renderer's lib_lookup. Re-loads
+/// detail view + the report renderer's `lib_lookup`. Re-loads
 /// from disk on every call so user edits show up without a
 /// daemon restart — the disk read is bounded (small number of
-/// TOML files, kilobytes each), much cheaper than a FortiGate
+/// TOML files, kilobytes each), much cheaper than a `FortiGate`
 /// API round-trip.
 ///
 /// **Mixed-baseline shape, 1.12c:** the returned vector contains
 /// rows from both `fortigate_default_checks()` and
 /// `ssh_compliance::linux_default_checks()`. Every consumer
 /// (`ChecksLibrarySheet`, `CheckRow`, `render_markdown_report`'s
-/// lib_lookup) is keyed by `check_id` or grouped by per-row
+/// `lib_lookup`) is keyed by `check_id` or grouped by per-row
 /// `category` — none branch on framework or assume a homogeneous
 /// library. Drift between Linux library rows and Linux run-result
 /// rows is impossible by construction: both use
 /// `ssh_compliance::{category_for, map_severity}` as the single
 /// source of truth.
+#[must_use]
 pub fn list_checks() -> Vec<CheckDefinition> {
     let mut checks = fortigate_default_checks();
     checks.extend(crate::ssh_compliance::linux_default_checks());
@@ -1574,6 +1579,7 @@ pub struct DriftReport {
 /// RPC for the common case of "compare to immediately previous
 /// run", so the GUI doesn't have to fetch and process two full
 /// runs just to render the drift summary.
+#[must_use]
 pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> DriftReport {
     let mut newly_failing: Vec<DriftEntry> = Vec::new();
     let mut newly_passing: Vec<DriftEntry> = Vec::new();
@@ -1639,8 +1645,7 @@ pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> Dri
 
     let previous_score = previous.map(|p| p.score);
     let score_delta = previous_score
-        .map(|p| i32::from(current.score) - i32::from(p))
-        .unwrap_or(0);
+        .map_or(0, |p| i32::from(current.score) - i32::from(p));
 
     DriftReport {
         current_run_id: current.id.clone(),
@@ -1701,9 +1706,10 @@ pub fn drift_against_previous(host_id: &str, current_run_id: &str) -> Result<Dri
 ///
 /// Why Markdown not PDF directly: PDF generation requires either
 /// a heavy native dep (printpdf, etc.) or a system pandoc. The
-/// GUI side can print-to-PDF on macOS (NSPrintOperation handles
+/// GUI side can print-to-PDF on macOS (`NSPrintOperation` handles
 /// HTML/Markdown rendering with the user's chosen page style)
 /// without the daemon shipping its own PDF stack.
+#[must_use]
 pub fn render_markdown_report(
     run: &ComplianceRun,
     drift: Option<&DriftReport>,
@@ -1846,7 +1852,7 @@ pub fn render_markdown_report(
         writeln!(s, "**Result:** {}", c.detail).unwrap();
         if let Some(raw) = &c.raw_value {
             if !raw.is_empty() {
-                writeln!(s, "**Observed value:** `{}`", raw).unwrap();
+                writeln!(s, "**Observed value:** `{raw}`").unwrap();
             }
         }
         if c.status == Status::Fail {
@@ -1931,7 +1937,7 @@ const EVIDENCE_LIMIT: usize = 160;
 ///
 /// `library` is passed in rather than looked up, because the caller knows which
 /// baseline ran: [`crate::ssh_compliance::linux_default_checks`] for the Linux
-/// controls, [`list_checks`] for FortiGate. Definitions missing from it cost
+/// controls, [`list_checks`] for `FortiGate`. Definitions missing from it cost
 /// only the remediation text.
 #[must_use]
 pub fn failures_as_findings(run: &ComplianceRun, library: &[CheckDefinition]) -> Vec<Finding> {
@@ -2277,7 +2283,7 @@ mod tests {
             Expectation::GreaterEqual { threshold: 14 });
         let (status, detail, _) = evaluate(&d, "8");
         assert_eq!(status, Status::Fail);
-        assert!(detail.contains("8") && detail.contains("14"));
+        assert!(detail.contains('8') && detail.contains("14"));
     }
 
     #[test]
@@ -2775,7 +2781,7 @@ mod tests {
         assert!(md.contains("**Remediation:**"),
             "Linux runs must produce a Remediation block in the report — \
              1.12b tracked defect; if this regresses, the report is \
-             wrong-by-omission again. Rendered:\n{}", md);
+             wrong-by-omission again. Rendered:\n{md}");
         // And the actual remediation text from LINUX_CHECKS:
         assert!(md.contains("PasswordAuthentication no"),
             "remediation text from ssh_compliance must appear in the rendered report");

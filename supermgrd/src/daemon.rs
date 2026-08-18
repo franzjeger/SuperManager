@@ -83,7 +83,7 @@ pub struct DaemonState {
     pub profile_dir: PathBuf,
 
     /// The kill-switch mode that was installed when the current VPN connected
-    /// with kill_switch=true.  Stored so the monitor task can reinstall a
+    /// with `kill_switch=true`.  Stored so the monitor task can reinstall a
     /// stricter variant (without `ct state established,related accept`) when
     /// the VPN drops unexpectedly, ensuring existing connections are also cut.
     pub active_kill_switch_mode: Option<KillSwitchMode>,
@@ -626,7 +626,7 @@ pub struct DaemonService {
 }
 
 impl DaemonService {
-    /// Look up an OPNsense host's stored credentials and connection details.
+    /// Look up an `OPNsense` host's stored credentials and connection details.
     ///
     /// Returns `(hostname, port, credentials)`. Errors map to `fdo::Error`s
     /// suitable for returning straight from a D-Bus method.
@@ -950,7 +950,7 @@ impl DaemonService {
     /// All fields are zero when no tunnel is active.
     ///
     /// Stats are gathered by summing `peer.stats.tx_bytes` / `rx_bytes` across
-    /// all WireGuard peers and taking the most recent `last_handshake_time`.
+    /// all `WireGuard` peers and taking the most recent `last_handshake_time`.
     async fn get_stats(&self) -> fdo::Result<String> {
         let backend = {
             let state = self.state.lock().await;
@@ -964,8 +964,7 @@ impl DaemonService {
                     Ok(BackendStatus::Active { stats, .. }) => {
                         let lhs = stats
                             .last_handshake
-                            .map(|dt| dt.timestamp().max(0) as u64)
-                            .unwrap_or(0);
+                            .map_or(0, |dt| dt.timestamp().max(0) as u64);
                         (stats.bytes_sent, stats.bytes_received, lhs)
                     }
                     _ => (0, 0, 0),
@@ -979,7 +978,7 @@ impl DaemonService {
         ))
     }
 
-    /// Import a WireGuard `.conf` file.
+    /// Import a `WireGuard` `.conf` file.
     ///
     /// `conf_text` is the raw `.conf` file contents; `name` is the desired
     /// display name.  Returns the new profile's UUID string on success.
@@ -1135,7 +1134,7 @@ impl DaemonService {
         Ok(id_str)
     }
 
-    /// Create and persist a FortiGate IPsec/IKEv2 profile.
+    /// Create and persist a `FortiGate` IPsec/IKEv2 profile.
     ///
     /// Returns the new profile's UUID string.
     async fn import_fortigate(
@@ -1235,7 +1234,7 @@ impl DaemonService {
         Ok(id_str)
     }
 
-    /// Import an OpenVPN `.ovpn` configuration file.
+    /// Import an `OpenVPN` `.ovpn` configuration file.
     ///
     /// `conf_text` is the raw `.ovpn` file contents; `name` is the desired
     /// display name.  Returns the new profile's UUID string on success.
@@ -1282,7 +1281,7 @@ impl DaemonService {
             fdo::Error::Failed(format!("create ovpn directory: {e}"))
         })?;
 
-        let config_path = ovpn_dir.join(format!("{}.ovpn", profile_id));
+        let config_path = ovpn_dir.join(format!("{profile_id}.ovpn"));
         let config_path_str = config_path.to_string_lossy().into_owned();
 
         tokio::fs::write(&config_path, conf_text).await.map_err(|e| {
@@ -1555,7 +1554,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the auto_connect flag on a profile and persist it.
+    /// Set the `auto_connect` flag on a profile and persist it.
     async fn set_auto_connect(
         &self,
         profile_id: &str,
@@ -1582,7 +1581,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the kill_switch flag on a profile and persist it.
+    /// Set the `kill_switch` flag on a profile and persist it.
     async fn set_kill_switch(
         &self,
         profile_id: &str,
@@ -1639,7 +1638,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Update a FortiGate profile's connection details and credentials.
+    /// Update a `FortiGate` profile's connection details and credentials.
     async fn update_fortigate(
         &self,
         profile_id: &str,
@@ -1702,7 +1701,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Update an OpenVPN profile's username and optionally its password.
+    /// Update an `OpenVPN` profile's username and optionally its password.
     async fn update_openvpn_credentials(
         &self,
         profile_id: &str,
@@ -1749,7 +1748,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the full_tunnel flag on a profile and persist it.
+    /// Set the `full_tunnel` flag on a profile and persist it.
     async fn set_full_tunnel(
         &self,
         profile_id: &str,
@@ -1776,7 +1775,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the split_routes list for a WireGuard profile and persist it.
+    /// Set the `split_routes` list for a `WireGuard` profile and persist it.
     async fn set_split_routes(
         &self,
         profile_id: &str,
@@ -1805,7 +1804,7 @@ impl DaemonService {
             _ => return Err(fdo::Error::InvalidArgs(
                 "set_split_routes is only supported for WireGuard and FortiGate profiles".into(),
             )),
-        };
+        }
         profile.updated_at = chrono::Utc::now();
 
         let profile_clone = profile.clone();
@@ -1851,7 +1850,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Rotate the WireGuard private key for the given profile.
+    /// Rotate the `WireGuard` private key for the given profile.
     ///
     /// Generates a new key pair, overwrites the stored private key in the
     /// secret service, updates the profile's `updated_at` timestamp, saves
@@ -2103,7 +2102,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Export the public key in OpenSSH authorized_keys format.
+    /// Export the public key in OpenSSH `authorized_keys` format.
     async fn ssh_export_public_key(&self, key_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let state = self.state.lock().await;
@@ -2218,7 +2217,7 @@ impl DaemonService {
         // Apply only the fields present in the update.
         if let Some(v) = updates.get("label").and_then(|v| v.as_str()) { host.label = v.to_owned(); }
         if let Some(v) = updates.get("hostname").and_then(|v| v.as_str()) { host.hostname = v.to_owned(); }
-        if let Some(v) = updates.get("port").and_then(|v| v.as_u64()) {
+        if let Some(v) = updates.get("port").and_then(serde_json::Value::as_u64) {
             if !(1..=65535).contains(&v) {
                 return Err(fdo::Error::InvalidArgs(format!("port {v} out of range 1-65535")));
             }
@@ -2261,7 +2260,7 @@ impl DaemonService {
         if let Some(v) = updates.get("proxy_jump") {
             host.proxy_jump = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         }
-        if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
+        if let Some(v) = updates.get("api_port").and_then(serde_json::Value::as_u64) {
             if v > 0 && !(1..=65535).contains(&v) {
                 return Err(fdo::Error::InvalidArgs(format!("api_port {v} out of range 1-65535")));
             }
@@ -2269,7 +2268,7 @@ impl DaemonService {
             // Some(0), which would defeat the `unwrap_or(443)`/`unwrap_or(4444)`
             // defaults downstream. (A JSON `null` is skipped by `as_u64`,
             // preserving the existing value, matching the prior behaviour.)
-            host.api_port = (v > 0).then(|| v as u16);
+            host.api_port = (v > 0).then_some(v as u16);
         }
         // RDP/VNC ports: 0 or null means "not configured".
         if let Some(v) = updates.get("rdp_port") {
@@ -2288,7 +2287,7 @@ impl DaemonService {
                 other => host.vnc_port = other.map(|p| p as u16),
             }
         }
-        if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
+        if let Some(v) = updates.get("pinned").and_then(serde_json::Value::as_bool) {
             host.pinned = v;
         }
         if let Some(v) = updates.get("port_forwards") {
@@ -2793,7 +2792,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Store a FortiGate REST API token and optional port for the given host.
+    /// Store a `FortiGate` REST API token and optional port for the given host.
     async fn ssh_set_api_token(&self, host_id: &str, token: &str, port: u16) -> fdo::Result<()> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -2816,7 +2815,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Generate a new FortiGate REST API token via SSH.
+    /// Generate a new `FortiGate` REST API token via SSH.
     ///
     /// SSHs into the device, creates the API user if needed, generates a key,
     /// stores it, and returns the token string.
@@ -2865,7 +2864,7 @@ impl DaemonService {
             "end".into(),
             format!("execute api-user generate-key {api_user_owned}"),
         ];
-        let mut lines: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
+        let mut lines: Vec<&str> = cmd_lines.iter().map(std::string::String::as_str).collect();
 
         // Add password if we have it (FortiGate will prompt for it).
         let pw_string;
@@ -2901,7 +2900,7 @@ impl DaemonService {
                 // Some FW versions just output the token on its own line.
                 stdout.lines()
                     .map(str::trim)
-                    .find(|l| l.len() > 20 && l.chars().all(|c| c.is_alphanumeric()))
+                    .find(|l| l.len() > 20 && l.chars().all(char::is_alphanumeric))
                     .map(String::from)
             })
             .ok_or_else(|| fdo::Error::Failed(format!(
@@ -2932,7 +2931,7 @@ impl DaemonService {
         Ok(token)
     }
 
-    /// Retrieve the stored FortiGate API token for a host (for copying to clipboard).
+    /// Retrieve the stored `FortiGate` API token for a host (for copying to clipboard).
     async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -2953,7 +2952,7 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("invalid token encoding: {e}")))
     }
 
-    /// Call the FortiGate REST API on a host.
+    /// Call the `FortiGate` REST API on a host.
     async fn fortigate_api(
         &self,
         host_id: &str,
@@ -3049,7 +3048,7 @@ impl DaemonService {
         Ok(resp_body)
     }
 
-    /// Push an SSH public key to a FortiGate admin user via REST API.
+    /// Push an SSH public key to a `FortiGate` admin user via REST API.
     ///
     /// Calls `PUT /api/v2/cmdb/system/admin/{admin_user}` with the public key
     /// assigned to `ssh-public-key1`.  Returns a JSON result with status.
@@ -3300,14 +3299,14 @@ impl DaemonService {
             password_file.as_deref(),
             key_file.as_deref(),
         )
-        .map_err(|e| fdo::Error::InvalidArgs(e))?;
+        .map_err(fdo::Error::InvalidArgs)?;
 
         // Remove the credential files a minute later. `ssh` and `sshpass` both
         // read theirs at startup, so the session outlives the file. The window
         // only ever exposes them to the one account they were written for.
         for path in tmp_files_to_clean {
             tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(Duration::from_mins(1)).await;
                 if path.exists() {
                     let _ = std::fs::remove_file(&path);
                     debug!("cleaned up credential file: {}", path.display());
@@ -3427,7 +3426,7 @@ impl DaemonService {
                 std::env::var("XDG_CONFIG_HOME")
                     .map(|d| std::path::PathBuf::from(d).join("supermgr/settings.json"))
                     .ok(),
-                Some(std::path::PathBuf::from(format!("{}/.config/supermgr/settings.json", home))),
+                Some(std::path::PathBuf::from(format!("{home}/.config/supermgr/settings.json"))),
             ];
             let mut settings_json = serde_json::Value::Null;
             for p in paths.iter().flatten() {
@@ -3660,9 +3659,9 @@ impl DaemonService {
     // UniFi methods
     // =======================================================================
 
-    /// Execute `set-inform <url>` on a UniFi device via SSH.
+    /// Execute `set-inform <url>` on a `UniFi` device via SSH.
     ///
-    /// The host must be a UniFi device type.  Connects via SSH and runs the
+    /// The host must be a `UniFi` device type.  Connects via SSH and runs the
     /// `set-inform` command, returning the command output.
     async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
@@ -3699,7 +3698,7 @@ impl DaemonService {
         Ok(result.to_string())
     }
 
-    /// Call the UniFi Controller REST API.
+    /// Call the `UniFi` Controller REST API.
     ///
     /// Authenticates with the stored credentials, then makes the API call.
     /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
@@ -3804,7 +3803,7 @@ impl DaemonService {
         Ok(resp_body)
     }
 
-    /// Store UniFi Controller URL and credentials for a host.
+    /// Store `UniFi` Controller URL and credentials for a host.
     ///
     /// Authenticates to verify the credentials are valid, then stores
     /// the URL on the host and the credentials in the secret service.
@@ -3869,7 +3868,7 @@ impl DaemonService {
     // OPNsense REST API
     // =======================================================================
 
-    /// Store OPNsense API credentials (key + secret) for an SSH host and
+    /// Store `OPNsense` API credentials (key + secret) for an SSH host and
     /// validate them against the box. The credentials are persisted as a
     /// JSON blob in the system secret service under
     /// `supermgr/opnsense/<uuid>/credentials`; the host's `api_token_ref`
@@ -3953,7 +3952,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Issue a Basic-Auth API call to an OPNsense host and return the body as text.
+    /// Issue a Basic-Auth API call to an `OPNsense` host and return the body as text.
     ///
     /// Mirrors `fortigate_api`: it's a thin authenticated HTTP proxy so the GUI
     /// can hit any endpoint without re-implementing credential handling.
@@ -3997,7 +3996,7 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("serialise status: {e}")))
     }
 
-    /// Download the running OPNsense config and save it to the shared backup
+    /// Download the running `OPNsense` config and save it to the shared backup
     /// directory.
     ///
     /// Mirrors `fortigate_backup_config`: uses the same `/etc/supermgrd/backups/`
@@ -4058,17 +4057,17 @@ impl DaemonService {
     // Sophos XML Configuration API
     // =======================================================================
 
-    /// Store Sophos WebAdmin credentials (username + password) for an SSH host
+    /// Store Sophos `WebAdmin` credentials (username + password) for an SSH host
     /// and validate them against the box.
     ///
-    /// Sophos has no token endpoint and reuses the WebAdmin credentials on
+    /// Sophos has no token endpoint and reuses the `WebAdmin` credentials on
     /// every API call, so they are stored as a JSON `{username, password}`
     /// blob in the system secret service under
     /// `supermgr/sophos/<uuid>/credentials`. The host's `api_token_ref` is
     /// set to point at it and `api_port` is updated.
     ///
-    /// `port` is the WebAdmin HTTPS port (typically 4444; 443 if the appliance
-    /// publishes WebAdmin on the standard port). Defaults to 4444 if 0.
+    /// `port` is the `WebAdmin` HTTPS port (typically 4444; 443 if the appliance
+    /// publishes `WebAdmin` on the standard port). Defaults to 4444 if 0.
     async fn sophos_set_credentials(
         &self,
         host_id: &str,
@@ -4175,11 +4174,11 @@ impl DaemonService {
     // SSH test connection
     // =======================================================================
 
-    /// Test SSH and (optionally) FortiGate API connectivity for a host.
+    /// Test SSH and (optionally) `FortiGate` API connectivity for a host.
     ///
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.  The `api` field is only
-    /// present when the host has a FortiGate API token configured.
+    /// present when the host has a `FortiGate` API token configured.
     async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -4405,7 +4404,7 @@ impl DaemonService {
     // FortiGate config backup
     // =======================================================================
 
-    /// Download the FortiGate running config and save it to disk.
+    /// Download the `FortiGate` running config and save it to disk.
     ///
     /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and
     /// saves to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
@@ -4453,7 +4452,7 @@ impl DaemonService {
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Length", "0")
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_mins(1))
             .send()
             .await
             .map_err(|e| {
@@ -4524,10 +4523,10 @@ impl DaemonService {
     // FortiGate CIS compliance check
     // =======================================================================
 
-    /// Run CIS benchmark checks against a FortiGate device via SSH.
+    /// Run CIS benchmark checks against a `FortiGate` device via SSH.
     ///
-    /// SSHes into the device and runs a series of `show` commands, checking the
-    /// output against CIS FortiGate hardening recommendations.
+    /// `SSHes` into the device and runs a series of `show` commands, checking the
+    /// output against CIS `FortiGate` hardening recommendations.
     ///
     /// Returns a JSON object with individual check results and a summary score.
     /// Run the CIS Linux baseline over SSH and persist the result.
@@ -4808,7 +4807,7 @@ impl DaemonService {
             .unwrap_or("443");
         checks.push(serde_json::json!({
             "name": "Admin HTTPS non-default port",
-            "status": if port_val.trim() != "443" { "pass" } else { "fail" },
+            "status": if port_val.trim() == "443" { "fail" } else { "pass" },
             "detail": format!("Port {}", port_val.trim()),
         }));
 
@@ -4885,7 +4884,7 @@ impl DaemonService {
         let wan_has_https = out.to_lowercase().contains("https");
         checks.push(serde_json::json!({
             "name": "WAN1 no HTTPS management",
-            "status": if !wan_has_https { "pass" } else { "fail" },
+            "status": if wan_has_https { "fail" } else { "pass" },
             "detail": if wan_has_https { "https found in WAN1 allowaccess" } else { "https not in WAN1 allowaccess" },
         }));
 
@@ -4893,7 +4892,7 @@ impl DaemonService {
         let wan_has_ssh = out.to_lowercase().contains("ssh");
         checks.push(serde_json::json!({
             "name": "WAN1 no SSH management",
-            "status": if !wan_has_ssh { "pass" } else { "fail" },
+            "status": if wan_has_ssh { "fail" } else { "pass" },
             "detail": if wan_has_ssh { "ssh found in WAN1 allowaccess" } else { "ssh not in WAN1 allowaccess" },
         }));
 
@@ -5297,7 +5296,7 @@ async fn connect_direct(
     }
 }
 
-/// Build a ProxyJump chain string for the `-J` flag of the `ssh` CLI.
+/// Build a `ProxyJump` chain string for the `-J` flag of the `ssh` CLI.
 ///
 /// Walks the chain of jump hosts and returns something like
 /// `"user1@host1:22,user2@host2:22"`, or `None` if no jump host is set.
@@ -5425,17 +5424,17 @@ async fn connect_via_jump(
 /// How the kill switch should allow VPN traffic through.
 #[derive(Clone)]
 pub(crate) enum KillSwitchMode {
-    /// Traffic goes through a named virtual NIC (WireGuard, OpenVPN tun).
+    /// Traffic goes through a named virtual NIC (`WireGuard`, `OpenVPN` tun).
     ///
     /// `allowed_ips` contains additional server/endpoint IPs whose traffic
-    /// must be allowed through the *physical* NIC (e.g. WireGuard's encrypted
+    /// must be allowed through the *physical* NIC (e.g. `WireGuard`'s encrypted
     /// UDP packets to peer endpoints, which are sent on the physical NIC, not
     /// through the tunnel interface).
     Interface {
         iface: String,
         allowed_ips: Vec<String>,
     },
-    /// Kernel IPsec via xfrm — no separate virtual interface.
+    /// Kernel `IPsec` via xfrm — no separate virtual interface.
     ///
     /// Allows IKE packets to the VPN server, all IPsec-destined traffic
     /// (`rt ipsec exists`), and any extra IPs (e.g. DNS servers on the local
@@ -5449,10 +5448,10 @@ pub(crate) enum KillSwitchMode {
 }
 
 /// Return the IP addresses of the DNS servers currently configured on the
-/// system (via `resolvectl dns`).  Used to populate the FortiGate kill-switch
+/// system (via `resolvectl dns`).  Used to populate the `FortiGate` kill-switch
 /// allow-list so that DNS continues to work when the profile has no
 /// `dns_servers` configured and the system DNS is on the local network (not
-/// routed through IPsec).
+/// routed through `IPsec`).
 async fn current_system_dns_ips() -> Vec<String> {
     let out = match tokio::process::Command::new("resolvectl")
         .args(["dns", "--no-pager"])
@@ -5482,9 +5481,9 @@ async fn current_system_dns_ips() -> Vec<String> {
     ips
 }
 
-/// Parse `remote <host> <port>` directives from an OpenVPN config file and
+/// Parse `remote <host> <port>` directives from an `OpenVPN` config file and
 /// resolve each host to an IP address string.  Used to populate the kill-switch
-/// allow-list so that the OpenVPN client can reach the server even when the
+/// allow-list so that the `OpenVPN` client can reach the server even when the
 /// kill switch is active (e.g. during reconnection after an unexpected drop).
 async fn openvpn_server_ips(config_file: &str) -> Vec<String> {
     let content = match tokio::fs::read_to_string(config_file).await {
@@ -5537,7 +5536,7 @@ fn parse_dns_server_list(raw: &str) -> Vec<std::net::IpAddr> {
         .collect()
 }
 
-/// Normalize the host string supplied for a FortiGate profile.
+/// Normalize the host string supplied for a `FortiGate` profile.
 ///
 /// Users frequently paste hostnames with a stray scheme (`https://`), trailing
 /// slash, or a `:port` / bare trailing `:` from a copy/paste boundary. The
@@ -5625,7 +5624,7 @@ async fn install_kill_switch(mode: &KillSwitchMode) {
     // Append a single `daddr <ip> accept` rule, picking the right
     // address-family keyword. Returns false (and logs) when the value is
     // not a valid IP/CIDR, so a malformed entry can't inject nft rules.
-    let mut add_daddr = |script: &mut String, ip: &str| -> bool {
+    let add_daddr = |script: &mut String, ip: &str| -> bool {
         if !is_nft_address(ip) {
             warn!("kill-switch: skipping invalid allow address {ip:?}");
             return false;
@@ -5869,9 +5868,7 @@ pub async fn connect_profile(
                     let server_ip = tokio::net::lookup_host(format!("{}:500", fg.host))
                         .await
                         .ok()
-                        .and_then(|mut it| it.next())
-                        .map(|sa| sa.ip().to_string())
-                        .unwrap_or_else(|| fg.host.clone());
+                        .and_then(|mut it| it.next()).map_or_else(|| fg.host.clone(), |sa| sa.ip().to_string());
                     let mode = if profile.kill_switch {
                         // Both branches used to call `current_system_dns_ips`,
                         // so a profile that named its own resolvers had them
@@ -5995,7 +5992,7 @@ pub async fn connect_profile(
 // Auto-reconnect task
 // ---------------------------------------------------------------------------
 
-/// Spawn a background task that watches NetworkManager for network-up events
+/// Spawn a background task that watches `NetworkManager` for network-up events
 /// and reconnects profiles with `auto_connect = true`.
 ///
 /// Uses the D-Bus system bus to subscribe to `org.freedesktop.NetworkManager`
@@ -6004,7 +6001,7 @@ pub async fn connect_profile(
 /// currently `Disconnected`, this task connects the first `auto_connect` profile
 /// it finds.
 ///
-/// Non-fatal: if NetworkManager is unavailable the task simply exits.
+/// Non-fatal: if `NetworkManager` is unavailable the task simply exits.
 pub fn spawn_autoconnect_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Connection) {
     tokio::spawn(async move {
         if let Err(e) = run_autoconnect_loop(state, conn).await {
@@ -6112,7 +6109,7 @@ async fn try_autoconnect(state: &Arc<Mutex<DaemonState>>, conn: &zbus::Connectio
 // Config-format validators
 // ---------------------------------------------------------------------------
 
-/// Validate that `text` looks like an OpenVPN client configuration.
+/// Validate that `text` looks like an `OpenVPN` client configuration.
 ///
 /// Checks for the minimum set of directives required by openvpn3:
 /// - `client` or `tls-client` (identifies this as a client-mode config)
@@ -6122,8 +6119,8 @@ async fn try_autoconnect(state: &Arc<Mutex<DaemonState>>, conn: &zbus::Connectio
 ///
 /// Returns `Ok(())` when all checks pass, or `Err(human-readable message)`.
 ///
-/// This catches the most common mistakes — importing a WireGuard `.conf`,
-/// an SSH key, a plain-text file, or an OpenVPN _server_ config — before
+/// This catches the most common mistakes — importing a `WireGuard` `.conf`,
+/// an SSH key, a plain-text file, or an `OpenVPN` _server_ config — before
 /// any file is written to disk.
 fn validate_ovpn_config(text: &str) -> Result<(), String> {
     // Strip comment lines (starting with `#` or `;`) for all checks.
@@ -6356,7 +6353,7 @@ async fn send_webhook(url: &str, message: &str) {
 // ---------------------------------------------------------------------------
 
 /// Health-check polling interval.
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_mins(1);
 
 /// TCP connect timeout per host.
 const HEALTH_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
@@ -6394,8 +6391,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
                         tokio::net::TcpStream::connect(&addr),
                     )
                     .await
-                    .map(|r| r.is_ok())
-                    .unwrap_or(false);
+                    .is_ok_and(|r| r.is_ok());
                     (id, reachable)
                 });
             }
@@ -6432,9 +6428,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
                     if !reachable && wh_on_host_down && !wh_url.is_empty() {
                         let host_label = state_guard
                             .hosts
-                            .get(id)
-                            .map(|h| format!("{} ({}:{})", h.label, h.hostname, h.port))
-                            .unwrap_or_else(|| id.to_string());
+                            .get(id).map_or_else(|| id.to_string(), |h| format!("{} ({}:{})", h.label, h.hostname, h.port));
                         let msg = format!(
                             "\u{26a0}\u{fe0f} SuperManager: SSH host **{host_label}** is unreachable"
                         );
@@ -6531,9 +6525,7 @@ pub fn spawn_monitor_task(
                                 } = &current_state
                                 {
                                     s.profiles
-                                        .get(profile_id)
-                                        .map(|p| p.name.clone())
-                                        .unwrap_or_else(|| profile_id.to_string())
+                                        .get(profile_id).map_or_else(|| profile_id.to_string(), |p| p.name.clone())
                                 } else {
                                     "unknown".to_string()
                                 };
@@ -6595,7 +6587,9 @@ pub fn spawn_monitor_task(
                         // Auto-reconnect: if the profile has auto_connect and
                         // the kill switch is NOT active, attempt to reconnect
                         // after a short delay.
-                        let auto_reconnect_profile = if !profile_kill_switch {
+                        let auto_reconnect_profile = if profile_kill_switch {
+                            None
+                        } else {
                             let s = state.lock().await;
                             if let VpnState::Connected { profile_id, .. } = &current_state {
                                 s.profiles.get(profile_id)
@@ -6604,8 +6598,6 @@ pub fn spawn_monitor_task(
                             } else {
                                 None
                             }
-                        } else {
-                            None
                         };
 
                         {
@@ -6658,7 +6650,7 @@ pub fn spawn_monitor_task(
 // ---------------------------------------------------------------------------
 
 /// Default backup interval: 24 hours.
-const BACKUP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const BACKUP_INTERVAL: Duration = Duration::from_hours(24);
 
 /// Per-host retention cap. The scheduler's housekeeping pass after each
 /// daily backup unlinks anything beyond this most-recent count for a given
@@ -6674,13 +6666,13 @@ const BACKUP_COMPRESS_AFTER_DAYS: i64 = 7;
 /// Spawn a background task that periodically backs up all hosts with API
 /// credentials configured.
 ///
-/// Currently covers FortiGate (REST API + bearer token) and OPNsense
+/// Currently covers `FortiGate` (REST API + bearer token) and `OPNsense`
 /// (REST API + key/secret). Runs every `BACKUP_INTERVAL` (24 h by default).
 /// Failures for individual hosts are logged but do not stop the loop.
 pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connection) {
     tokio::spawn(async move {
         // Wait a bit after daemon start before the first backup run.
-        tokio::time::sleep(Duration::from_secs(120)).await;
+        tokio::time::sleep(Duration::from_mins(2)).await;
         let mut ticker = tokio::time::interval(BACKUP_INTERVAL);
         loop {
             ticker.tick().await;
@@ -6783,7 +6775,12 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                     let s = state.lock().await;
                     s.webhook_url.clone()
                 };
-                if !webhook_url.is_empty() {
+                if webhook_url.is_empty() {
+                    debug!(
+                        "backup diff webhook: {} host(s) drifted but no webhook URL configured",
+                        report.diffed_hosts.len()
+                    );
+                } else {
                     for host in &report.diffed_hosts {
                         let msg = format!(
                             "SuperManager: backup diff detected for `{host}` — \
@@ -6793,11 +6790,6 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                         let url = webhook_url.clone();
                         tokio::spawn(async move { send_webhook(&url, &msg).await });
                     }
-                } else {
-                    debug!(
-                        "backup diff webhook: {} host(s) drifted but no webhook URL configured",
-                        report.diffed_hosts.len()
-                    );
                 }
             }
         }

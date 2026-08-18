@@ -3,13 +3,13 @@
 //! For each registered profile, polls the backend's status every
 //! 30 seconds. If the tunnel is down, replays the last successful
 //! connect args to bring it back up. Works even when the GUI is
-//! closed because the helper is a system-level LaunchDaemon.
+//! closed because the helper is a system-level `LaunchDaemon`.
 //!
 //! ## State persistence
 //!
 //! The watch list is persisted at
 //! `/var/lib/supermanager/auto_reconnect.json` so a helper
-//! restart (deploy_self, system reboot, crash) preserves the
+//! restart (`deploy_self`, system reboot, crash) preserves the
 //! user's always-on selections. The connect args are stored
 //! alongside — they're the same bytes the GUI passed to
 //! `wg_connect` / `ovpn_connect` / `vpn_connect` last time the
@@ -18,7 +18,7 @@
 //! ## Backends
 //!
 //! Three: `wireguard`, `openvpn`, `ikev2`. Tailscale isn't here
-//! because tailscaled is itself a LaunchDaemon and handles its
+//! because tailscaled is itself a `LaunchDaemon` and handles its
 //! own reconnect lifecycle (the daemon pref `WantRunning=true`
 //! plus tailscaled's own reconnect-on-network-change).
 
@@ -69,7 +69,7 @@ pub struct WatchedProfile {
 impl WatchedProfile {
     /// Can a replay actually run, or is this entry enrolled but toothless?
     ///
-    /// The GUI enrols an IKEv2 profile with empty args, because the rich
+    /// The GUI enrols an `IKEv2` profile with empty args, because the rich
     /// connect args are only captured by `refresh_args` after a successful
     /// manual connect. Until that happens `replay_sw`'s decode fails every
     /// tick while the Always-on toggle sits there showing ON — the toggle
@@ -242,7 +242,7 @@ pub async fn guard_routes(
     Ok(())
 }
 
-/// Drop a RouteGuard registration on manual disconnect. Leaves an Always-on
+/// Drop a `RouteGuard` registration on manual disconnect. Leaves an Always-on
 /// entry intact — that's the user's standing intent, not something a single
 /// disconnect revokes (matching the pre-existing Always-on contract).
 pub async fn unguard_routes(profile_id: &str) -> Result<()> {
@@ -359,7 +359,7 @@ async fn check_and_reconnect(
         _ => unreachable!(),
     };
     match result {
-        Ok(_) => tracing::info!(
+        Ok(()) => tracing::info!(
             profile_id = %p.profile_id,
             backend = %p.backend,
             "auto-reconnect succeeded"
@@ -433,8 +433,7 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
     let full_tunnel = serde_json::from_value::<crate::strongswan::ConnectArgs>(
         p.last_connect_args.clone(),
     )
-    .map(|a| a.full_tunnel)
-    .unwrap_or(false);
+    .is_ok_and(|a| a.full_tunnel);
     if full_tunnel && !crate::strongswan::full_tunnel_routes_present() {
         tracing::warn!(
             profile = %p.profile_id,
@@ -445,8 +444,8 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
     true
 }
 
-/// True if THIS profile's IKEv2 SA is ESTABLISHED, regardless of whether its
-/// full-tunnel routes are present. The RouteGuard branch uses this to tell the
+/// True if THIS profile's `IKEv2` SA is ESTABLISHED, regardless of whether its
+/// full-tunnel routes are present. The `RouteGuard` branch uses this to tell the
 /// route-less case (SA up + routes gone → heal) apart from a genuinely dead SA
 /// (leave a manually-connected profile down). It is deliberately the
 /// route-UNaware half of `sw_connected`.

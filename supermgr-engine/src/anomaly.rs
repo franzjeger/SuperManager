@@ -73,6 +73,7 @@ fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
     p
 }
 
+#[must_use]
 pub fn load(customer_slug: &str, host_ip: &str) -> HostBaseline {
     let path = baseline_path(customer_slug, host_ip);
     if !path.exists() { return HostBaseline::default(); }
@@ -316,7 +317,7 @@ mod tests {
         assert_eq!(sanitize_filename("10.0.0.1"), "10.0.0.1");
         assert_eq!(sanitize_filename("2001:db8::1"), "2001_db8__1");
         assert_eq!(sanitize_filename("fe80::1%eth0"), "fe80__1_eth0");
-        assert!(!sanitize_filename("a/b\\c").contains(|c| c == '/' || c == '\\'));
+        assert!(!sanitize_filename("a/b\\c").contains(['/', '\\']));
         assert_eq!(sanitize_filename(""), "host");
     }
 }

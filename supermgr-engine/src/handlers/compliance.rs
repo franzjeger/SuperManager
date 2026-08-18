@@ -1,6 +1,6 @@
 //! Compliance JSON-RPC handlers.
 //!
-//! Wraps `crate::compliance` (run/history/drift/render/scan_all) and
+//! Wraps `crate::compliance` (`run/history/drift/render/scan_all`) and
 //! exposes them as `EngineServer` methods routed from the dispatch
 //! match in `server.rs`.
 
@@ -76,8 +76,7 @@ impl EngineServer {
         let limit = params
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .map(|n| n as usize)
-            .unwrap_or(50);
+            .map_or(50, |n| n as usize);
         match crate::compliance::load_history(&host_id.simple().to_string(), limit) {
             Ok(history) => match serde_json::to_value(&history) {
                 Ok(v) => Response::ok(id, v),
@@ -142,7 +141,7 @@ impl EngineServer {
         }
     }
 
-    /// Run compliance against every FortiGate host with an API
+    /// Run compliance against every `FortiGate` host with an API
     /// token configured. `min_age_hours` (optional) skips hosts
     /// whose last run is more recent than the threshold —
     /// the GUI's "Run all" button passes None for unconditional
@@ -183,20 +182,20 @@ impl EngineServer {
     }
 
     /// Run the CIS-Linux baseline against a Linux SSH host. Distinct
-    /// from `compliance_run` (FortiGate) because the check execution
+    /// from `compliance_run` (`FortiGate`) because the check execution
     /// model is different — we shell out over SSH rather than calling
     /// a REST API.
     ///
     /// **1.12a:** returns a full `ComplianceRun` (same shape the
-    /// FortiGate path produces) and persists it via `persist_run`
+    /// `FortiGate` path produces) and persists it via `persist_run`
     /// before responding, so subsequent `compliance_history` /
     /// `compliance_get_run` / `compliance_drift` calls see Linux
-    /// rows alongside FortiGate rows.
+    /// rows alongside `FortiGate` rows.
     ///
     /// **Closed in 1.12c:** `compliance_render_report` resolves CIS
     /// reference / description / remediation against the library
     /// returned by `compliance_list_checks`, which used to hold
-    /// FortiGate checks only — so Linux runs rendered with their
+    /// `FortiGate` checks only — so Linux runs rendered with their
     /// per-check `detail` intact but no remediation block, the most
     /// valuable column for the operator. `list_checks()` now merges
     /// in `ssh_compliance::linux_default_checks()` (the preferred

@@ -1,6 +1,6 @@
 //! VPN profile JSON-RPC handlers.
 //!
-//! Profile CRUD, importers (WireGuard, OpenVPN), routing/kill-switch
+//! Profile CRUD, importers (`WireGuard`, `OpenVPN`), routing/kill-switch
 //! toggles, rename/duplicate. Lives on `EngineServer` so the dispatch
 //! table in `server.rs` reaches it via the same `self.handle_*` calls.
 
@@ -53,11 +53,11 @@ impl EngineServer {
         }
     }
 
-    /// Create a new IKEv2 profile (modeled via the existing FortiGateConfig —
+    /// Create a new `IKEv2` profile (modeled via the existing `FortiGateConfig` —
     /// same shape: host, username, EAP password, group PSK, routes, DNS).
     ///
     /// Secrets (password, PSK) are owned by the app via the OS Keychain on Mac;
-    /// the profile only carries SecretRef labels so cross-platform serialization
+    /// the profile only carries `SecretRef` labels so cross-platform serialization
     /// stays consistent.
     pub(crate) async fn handle_vpn_add_ikev2_profile(&self, id: u64, params: serde_json::Value) -> Response {
         let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
@@ -69,8 +69,8 @@ impl EngineServer {
         let Some(username) = params.get("username").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing username".to_owned());
         };
-        let full_tunnel = params.get("full_tunnel").and_then(|v| v.as_bool()).unwrap_or(true);
-        let kill_switch = params.get("kill_switch").and_then(|v| v.as_bool()).unwrap_or(false);
+        let full_tunnel = params.get("full_tunnel").and_then(serde_json::Value::as_bool).unwrap_or(true);
+        let kill_switch = params.get("kill_switch").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let dns_servers = parse_ip_list(params.get("dns_servers"));
         let routes = parse_ipnet_list(params.get("routes"));
         // Optional IKE identity (IDi). Trim only — strongSwan auto-detects
@@ -154,11 +154,11 @@ impl EngineServer {
         }
         let full_tunnel = params
             .get("full_tunnel")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(existing.full_tunnel);
         let kill_switch = params
             .get("kill_switch")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(existing.kill_switch);
 
         let updated = Profile {
@@ -222,7 +222,7 @@ impl EngineServer {
         Response::ok(id, serde_json::json!({ "deleted": true }))
     }
 
-    /// Import a WireGuard `.conf` file. Parses the INI body via
+    /// Import a `WireGuard` `.conf` file. Parses the INI body via
     /// `import_wireguard_conf`, stores the private key + any peer PSKs
     /// in the secrets store, and persists a new `Profile` with
     /// `ProfileConfig::WireGuard`. Idempotent only by `name`: re-importing
@@ -298,7 +298,7 @@ impl EngineServer {
         }
     }
 
-    /// Import an OpenVPN `.ovpn` file. We don't try to parse every
+    /// Import an `OpenVPN` `.ovpn` file. We don't try to parse every
     /// directive — they're a moving target. Instead we:
     ///   1. Save the raw `.ovpn` body to `<data_dir>/ovpn/<id>.ovpn`.
     ///   2. Sniff `remote <host> <port>` for display-only metadata.
@@ -494,8 +494,8 @@ impl EngineServer {
     // See the follow-up issue.
     #[allow(dead_code)]
     /// Start the Entra ID device-code flow for an Azure VPN
-    /// profile. Returns the user_code + verification_uri so the
-    /// GUI can show them and open the browser, plus the device_code
+    /// profile. Returns the `user_code` + `verification_uri` so the
+    /// GUI can show them and open the browser, plus the `device_code`
     /// that the GUI hands back on every subsequent poll. We don't
     /// keep server-side state — the GUI is the source of truth for
     /// "which auth flow am I in."
@@ -693,7 +693,7 @@ impl EngineServer {
         }))
     }
 
-    /// Render a complete WireGuard `.conf` body for a stored profile,
+    /// Render a complete `WireGuard` `.conf` body for a stored profile,
     /// splicing the private key (and any peer pre-shared keys) from
     /// the secret store into the `[Interface]` / `[Peer]` blocks.
     /// The GUI hands the result to the privileged helper at connect
@@ -863,15 +863,15 @@ impl EngineServer {
     ///
     /// Backend-specific behaviour:
     ///
-    /// - **WireGuard**: rewrites `WireGuardConfig.split_routes`. When
+    /// - **`WireGuard`**: rewrites `WireGuardConfig.split_routes`. When
     ///   `full_tunnel=true`, the list is cleared and connect time
     ///   templates the catch-all `0.0.0.0/0, ::/0` into each peer's
-    ///   AllowedIPs. When `false`, the supplied routes (which must
+    ///   `AllowedIPs`. When `false`, the supplied routes (which must
     ///   be non-empty for the tunnel to actually carry traffic)
     ///   replace the catch-all.
-    /// - **FortiGate / IKEv2**: rewrites `FortiGateConfig.routes`,
+    /// - **`FortiGate` / `IKEv2`**: rewrites `FortiGateConfig.routes`,
     ///   which in turn drives strongSwan's `remote_ts` selector.
-    /// - **OpenVPN / Azure / Generic**: returns INVALID_PARAMS for
+    /// - **`OpenVPN` / Azure / Generic**: returns `INVALID_PARAMS` for
     ///   now — full-tunnel-vs-split for those backends is set
     ///   inside the imported config file itself, not by us.
     ///
@@ -890,7 +890,7 @@ impl EngineServer {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let full_tunnel = match params.get("full_tunnel").and_then(|v| v.as_bool()) {
+        let full_tunnel = match params.get("full_tunnel").and_then(serde_json::Value::as_bool) {
             Some(b) => b,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing full_tunnel".to_owned()),
         };
@@ -991,7 +991,7 @@ impl EngineServer {
     /// The duplicate gets a fresh UUID, a derived display name
     /// ("X (copy)"), and freshly-allocated secret-store entries
     /// containing the same secret values as the source. For
-    /// OpenVPN, the .ovpn config file in the daemon data dir is
+    /// `OpenVPN`, the .ovpn config file in the daemon data dir is
     /// also copied so the duplicate doesn't depend on the
     /// original profile's lifetime.
     ///
@@ -1198,7 +1198,7 @@ impl EngineServer {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let enabled = match params.get("enabled").and_then(|v| v.as_bool()) {
+        let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
             Some(b) => b,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned()),
         };
@@ -1306,7 +1306,7 @@ mod allowed_ips_tests {
     }
 
     /// The regression that took Tailscale down: profile flipped to
-    /// split tunnel, but AllowedIPs still catch-all, so wg-quick built
+    /// split tunnel, but `AllowedIPs` still catch-all, so wg-quick built
     /// a full tunnel and blackholed IPv6 into a ULA-only tunnel.
     #[test]
     fn split_tunnel_replaces_catch_all_with_split_routes() {
@@ -1328,7 +1328,7 @@ mod allowed_ips_tests {
     }
 
     /// Specific prefixes already on the peer were never what made the
-    /// tunnel global, so they survive alongside split_routes.
+    /// tunnel global, so they survive alongside `split_routes`.
     #[test]
     fn split_tunnel_keeps_specific_peer_prefixes() {
         let peer = vec![net("0.0.0.0/0"), net("192.168.4.0/24")];
@@ -1338,7 +1338,7 @@ mod allowed_ips_tests {
         assert!(!got.contains(&net("0.0.0.0/0")));
     }
 
-    /// Split tunnel with only specific prefixes and no split_routes is
+    /// Split tunnel with only specific prefixes and no `split_routes` is
     /// already well-formed — don't reject it.
     #[test]
     fn split_tunnel_with_only_specific_prefixes_is_fine() {

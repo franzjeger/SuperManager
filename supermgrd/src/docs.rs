@@ -4,7 +4,7 @@
 //! their `customer` tags) into a single Markdown document suitable for
 //! pasting into a customer-handover note, an audit binder, or a wiki page.
 //!
-//! Live API queries against FortiGate / OPNsense / UniFi appliances are
+//! Live API queries against `FortiGate` / `OPNsense` / `UniFi` appliances are
 //! intentionally NOT performed here — this module produces a pure-data
 //! report from on-disk state, which is what makes it scriptable, fast,
 //! and offline-safe. If you want a richer report that also fetches live
@@ -58,7 +58,7 @@ pub fn render_customer_doc(
         .iter()
         .filter(|p| p.customer.trim().eq_ignore_ascii_case(&needle))
         .collect();
-    matched_profiles.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    matched_profiles.sort_by_key(|a| a.name.to_lowercase());
 
     let _ = writeln!(out, "## VPN profiles ({})", matched_profiles.len());
     let _ = writeln!(out);
@@ -86,9 +86,7 @@ pub fn render_customer_doc(
                 _ => String::new(),
             };
             let last = p
-                .last_connected_at
-                .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_else(|| "never".to_owned());
+                .last_connected_at.map_or_else(|| "never".to_owned(), |t| t.format("%Y-%m-%d %H:%M UTC").to_string());
             let _ = writeln!(
                 out,
                 "| {name} | {backend} | {host} | {user} | {ft} | {ac} | {ks} | {last} |",
@@ -110,7 +108,7 @@ pub fn render_customer_doc(
         .iter()
         .filter(|h| h.customer.trim().eq_ignore_ascii_case(&needle))
         .collect();
-    matched_hosts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    matched_hosts.sort_by_key(|a| a.label.to_lowercase());
 
     let _ = writeln!(out, "## SSH hosts ({})", matched_hosts.len());
     let _ = writeln!(out);
@@ -313,7 +311,7 @@ mod tests {
     fn render_match_is_case_insensitive_and_trims() {
         let profiles = vec![sample_fortigate_profile("p", "Sybr")];
         let md = render_customer_doc("  sYbR  ", &profiles, &[]);
-        assert!(md.contains("p"));
+        assert!(md.contains('p'));
     }
 
     #[test]
@@ -331,7 +329,7 @@ mod tests {
         ];
         let md = render_customer_doc("", &profiles, &[]);
         assert!(md.contains("# Ungrouped"));
-        assert!(md.contains("a"));
+        assert!(md.contains('a'));
         assert!(!md.contains("| b "));
     }
 

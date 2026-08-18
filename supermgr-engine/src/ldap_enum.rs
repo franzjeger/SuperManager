@@ -9,14 +9,14 @@
 //!   - Schema version
 //!   - Naming contexts (every OU/container the directory exposes)
 //!
-//! We send a raw LDAPv3 BindRequest (anonymous) followed by a
-//! SearchRequest against the rootDSE. Hand-rolled BER encoding —
+//! We send a raw `LDAPv3` `BindRequest` (anonymous) followed by a
+//! `SearchRequest` against the rootDSE. Hand-rolled BER encoding —
 //! no need to pull in a full LDAP crate for this surface.
 //!
 //! # Findings produced
 //!
 //! - `ldap.anonymous-bind` — Critical. Anonymous bind succeeded.
-//! - `ldap.rootdse-readable` — High. RootDSE is readable
+//! - `ldap.rootdse-readable` — High. `RootDSE` is readable
 //!   without auth. (Anonymous-bind implies this; we only emit
 //!   the second finding when bind required no creds AND the
 //!   search returned attributes.)
@@ -43,7 +43,7 @@ pub struct LdapInfo {
     pub naming_contexts: Vec<String>,
     /// Default naming context (the AD domain DN).
     pub default_naming_context: Option<String>,
-    /// Domain DNS name parsed from default_naming_context.
+    /// Domain DNS name parsed from `default_naming_context`.
     /// "DC=corp,DC=example,DC=com" → "corp.example.com".
     pub domain_dns: Option<String>,
     /// Domain functional level (AD-specific).
@@ -55,7 +55,7 @@ pub struct LdapInfo {
 }
 
 /// Probe LDAP on (host, port). Returns None if the bind failed
-/// (auth required) or the server didn't speak LDAPv3.
+/// (auth required) or the server didn't speak `LDAPv3`.
 pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)> {
     let target = format!("{host}:{port}");
     let mut stream = match timeout(Duration::from_secs(4), TcpStream::connect(&target)).await {
@@ -164,11 +164,11 @@ pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)
     Some((info, findings))
 }
 
-/// Look at the BindResponse's resultCode byte. The LDAPv3 message
+/// Look at the `BindResponse`'s resultCode byte. The `LDAPv3` message
 /// shape after our anonymous bind looks like:
 ///   30 LL                 ; outer Sequence
 ///     02 01 01            ; messageID
-///     61 LL               ; BindResponse [APPLICATION 1]
+///     61 LL               ; `BindResponse` [APPLICATION 1]
 ///       0a 01 RC          ; resultCode (ENUMERATED 0..)
 ///   ...
 /// resultCode 0 = success.
@@ -188,8 +188,8 @@ fn parse_bind_success(bytes: &[u8]) -> bool {
     false
 }
 
-/// Build a SearchRequest for rootDSE attributes.
-/// BER-encoded LDAPv3 search filter targeting baseObject "" with
+/// Build a `SearchRequest` for rootDSE attributes.
+/// BER-encoded `LDAPv3` search filter targeting baseObject "" with
 /// scope=baseObject, filter=(objectClass=*), and an explicit
 /// attribute list.
 fn build_rootdse_search() -> Vec<u8> {
@@ -315,7 +315,7 @@ fn dn_to_dns(dn: &str) -> String {
         .filter_map(|component| {
             let trimmed = component.trim();
             let lower = trimmed.to_lowercase();
-            lower.strip_prefix("dc=").map(|rest| rest.to_owned())
+            lower.strip_prefix("dc=").map(std::borrow::ToOwned::to_owned)
         })
         .collect::<Vec<_>>()
         .join(".")

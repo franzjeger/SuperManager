@@ -2,12 +2,12 @@
 //!
 //! Tries:
 //!   1. `smbclient -L //host -N -t 3` — null-session share listing
-//!   2. `nmblookup -A host` — NetBIOS name + workgroup + roles
+//!   2. `nmblookup -A host` — `NetBIOS` name + workgroup + roles
 //!
 //! Both are read-only network probes. Findings are produced when:
 //!   - Null session succeeds (any share visible without auth)
 //!   - Specific high-value shares are exposed (`ADMIN$`, `C$`, `IPC$`)
-//!   - SMBv1 negotiation succeeds (separate probe in future iteration)
+//!   - `SMBv1` negotiation succeeds (separate probe in future iteration)
 //!
 //! We intentionally do NOT shell out to `nmap --script smb-vuln-*`
 //! — that's slow + heavy. The lightweight checks here cover the
@@ -146,7 +146,7 @@ async fn smbclient_list(host: &str) -> Option<Vec<SmbShare>> {
     Some(shares)
 }
 
-/// Parse `nmblookup -A host` output for NetBIOS name + workgroup.
+/// Parse `nmblookup -A host` output for `NetBIOS` name + workgroup.
 async fn nmblookup(host: &str) -> (Option<String>, Option<String>, Option<String>) {
     let res = tokio::time::timeout(
         Duration::from_secs(4),

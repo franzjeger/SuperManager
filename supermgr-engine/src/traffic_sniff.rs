@@ -33,7 +33,7 @@
 //! `tcpdump -r <pcap> -A -nn -tttt -X` and grep the ASCII
 //! payload representation for cleartext-protocol signatures.
 //! Each matched packet becomes evidence; packets sharing
-//! (src_ip, protocol) are clustered into a single Finding so an
+//! (`src_ip`, protocol) are clustered into a single Finding so an
 //! ftp session of 30 commands produces ONE finding ("Cleartext
 //! FTP credentials from 192.168.1.50") rather than 30.
 //!
@@ -56,7 +56,7 @@ use crate::vuln::{Finding, Severity};
 /// What gets returned to the caller of `analyse_pcap()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrafficAuditResult {
-    /// One finding per (src_ip, protocol) cluster of cleartext
+    /// One finding per (`src_ip`, protocol) cluster of cleartext
     /// events seen in the capture.
     pub findings: Vec<Finding>,
     /// Paths to per-finding evidence excerpts (redacted) that
@@ -120,7 +120,7 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
     // The 60s timeout is generous; even a multi-gigabyte pcap
     // parses to text in well under that on a modern Mac.
     let output = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         tokio::process::Command::new("tcpdump")
             .args([
                 "-r", &pcap_path.to_string_lossy(),
@@ -771,8 +771,7 @@ fn find_line_prefix(payload: &str, prefix: &str) -> Option<usize> {
 fn extract_line_from(payload: &str, start: usize) -> String {
     let end = payload[start..]
         .find('\n')
-        .map(|i| start + i)
-        .unwrap_or(payload.len());
+        .map_or(payload.len(), |i| start + i);
     payload[start..end].trim_end_matches('\r').to_owned()
 }
 
@@ -845,7 +844,7 @@ fn short_hash(s: &str) -> String {
 /// We try each in turn. Returns the community string itself
 /// (without surrounding quotes / whitespace). Returns `None` if
 /// the payload isn't an SNMP packet or tcpdump didn't decode it
-/// (which happens for SNMPv3 — those packets carry an encrypted
+/// (which happens for `SNMPv3` — those packets carry an encrypted
 /// PDU and don't have a cleartext community to print).
 fn extract_snmp_community(payload: &str) -> Option<String> {
     // Pattern 1: `C="..."`
@@ -932,8 +931,7 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
     let key_len = key.len();
     let value_end = body[idx + key_len..]
         .find('&')
-        .map(|i| idx + key_len + i)
-        .unwrap_or(body.len());
+        .map_or(body.len(), |i| idx + key_len + i);
     let password = &body[idx + key_len..value_end];
     // Build a redacted version of the body that swaps the
     // password value for its hash but keeps the other keys
@@ -952,8 +950,9 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
 }
 
 /// Helper to produce the engagement evidence directory path.
-/// Given an engagement_id, returns
+/// Given an `engagement_id`, returns
 /// `<data-dir>/findings_store/<engagement_id>/captures/`.
+#[must_use]
 pub fn engagement_evidence_dir(engagement_id: &str) -> PathBuf {
     let mut p = crate::secrets::default_data_dir();
     p.push("findings_store");
@@ -965,6 +964,10 @@ pub fn engagement_evidence_dir(engagement_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tcpdump_available() -> bool {
+        std::process::Command::new("tcpdump").arg("--version").output().is_ok()
+    }
 
     #[test]
     fn parses_packet_header() {
@@ -1375,6 +1378,10 @@ NTLMSSP....type-1 negotiate message bytes
 
     #[tokio::test]
     async fn pcap_with_only_global_header_is_ok() {
+        if !tcpdump_available() {
+            eprintln!("skipping: tcpdump not installed");
+            return;
+        }
         // tcpdump -r succeeds on this; we should return Ok with
         // zero findings. This is the "capture just started, no
         // packets yet" case in the polling pattern.
@@ -1390,6 +1397,10 @@ NTLMSSP....type-1 negotiate message bytes
 
     #[tokio::test]
     async fn pcap_with_truncated_packet_tail_is_ok() {
+        if !tcpdump_available() {
+            eprintln!("skipping: tcpdump not installed");
+            return;
+        }
         // Header + a partial per-packet record header (8 of 16
         // bytes). tcpdump warns "Invalid header" and proceeds —
         // we should NOT bubble that up as an error. This is the

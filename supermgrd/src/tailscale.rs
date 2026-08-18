@@ -95,12 +95,12 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
                     .collect()
             })
             .unwrap_or_default(),
-        online: v.get("Online").and_then(|x| x.as_bool()).unwrap_or(false),
+        online: v.get("Online").and_then(serde_json::Value::as_bool).unwrap_or(false),
         is_self,
-        exit_node: v.get("ExitNode").and_then(|x| x.as_bool()).unwrap_or(false),
+        exit_node: v.get("ExitNode").and_then(serde_json::Value::as_bool).unwrap_or(false),
         exit_node_option: v
             .get("ExitNodeOption")
-            .and_then(|x| x.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         last_seen: v
             .get("LastSeen")
@@ -110,14 +110,14 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
             .filter(|s| !s.starts_with("0001-01-01"))
             .unwrap_or("")
             .to_owned(),
-        rx_bytes: v.get("RxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_bytes: v.get("TxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        rx_bytes: v.get("RxBytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
+        tx_bytes: v.get("TxBytes").and_then(serde_json::Value::as_u64).unwrap_or(0),
     }
 }
 
 /// Select an exit node, or clear the selection with an empty `value`.
 ///
-/// `value` is a Tailscale IP, a MagicDNS name, or `""` to route normally
+/// `value` is a Tailscale IP, a `MagicDNS` name, or `""` to route normally
 /// again. Handed to `tailscale set --exit-node=<value>`, which is the
 /// documented interface and — unlike macOS, where open-source tailscaled
 /// leaves the split-default routes to the caller — installs the routing
@@ -173,7 +173,7 @@ pub async fn set_exit_node(value: &str) -> Result<(), String> {
     Err(message)
 }
 
-/// Whether `value` looks like a Tailscale IP or a MagicDNS name.
+/// Whether `value` looks like a Tailscale IP or a `MagicDNS` name.
 ///
 /// Deliberately a shape check, not a resolution: whether the peer exists is
 /// tailscaled's business and it answers with a better error than we could.

@@ -79,12 +79,9 @@ impl EngineServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let server = Arc::clone(&self);
-                    let permit = match Arc::clone(&conn_sema).try_acquire_owned() {
-                        Ok(p) => p,
-                        Err(_) => {
-                            warn!("connection refused: 256 concurrent clients reached");
-                            continue;
-                        }
+                    let permit = if let Ok(p) = Arc::clone(&conn_sema).try_acquire_owned() { p } else {
+                        warn!("connection refused: 256 concurrent clients reached");
+                        continue;
                     };
                     tokio::spawn(async move {
                         let _permit = permit; // released on task end
@@ -688,7 +685,7 @@ pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) -> Resul
     if let Some(s) = incoming.get("hostname").and_then(|v| v.as_str()) {
         host.hostname = s.to_owned();
     }
-    if let Some(n) = incoming.get("port").and_then(|v| v.as_u64()) {
+    if let Some(n) = incoming.get("port").and_then(serde_json::Value::as_u64) {
         if !(1..=65535).contains(&n) {
             return Err(format!("port {n} out of range 1-65535"));
         }

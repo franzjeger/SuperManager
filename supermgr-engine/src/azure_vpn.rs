@@ -5,14 +5,14 @@
 //! → Download VPN client`. The file holds everything we need to
 //! drive an OpenVPN-with-Entra-ID tunnel:
 //!   - `<gatewayfqdn>` — the VPN concentrator
-//!   - `<tenant>` / `<audience>` — Entra OAuth2 endpoints
-//!   - `<serversecret>` — the OpenVPN `tls-crypt` key as hex
+//!   - `<tenant>` / `<audience>` — Entra `OAuth2` endpoints
+//!   - `<serversecret>` — the `OpenVPN` `tls-crypt` key as hex
 //!   - `<servervalidation><cert>` — base64 CA cert
 //!
 //! Microsoft's own Mac client (App Store: "Azure VPN Client") parses
 //! this same file. We don't ship that client — we just parse the
 //! same input so the operator's existing flow ("download config,
-//! drag into app") works in SuperManager.
+//! drag into app") works in `SuperManager`.
 //!
 //! # Why not a real XML crate?
 //!
@@ -44,9 +44,9 @@ const DEFAULT_AZURE_VPN_AUDIENCE: &str = "c632b3df-fb67-4d84-bdcf-b95ad541b5c8";
 /// Every Microsoft-issued Azure VPN gateway certificate chains up
 /// to this root — it's what the `<servervalidation><Cert><hash>`
 /// in a thumbprint-only `.azurevpnconfig` pins to. The PEM is
-/// public (DigiCert publishes it openly) and is already shipped
+/// public (`DigiCert` publishes it openly) and is already shipped
 /// in every macOS/Linux/Windows trust store, so embedding it
-/// doesn't change the trust posture; it just lets OpenVPN 2.x
+/// doesn't change the trust posture; it just lets `OpenVPN` 2.x
 /// find a CA when the .azurevpnconfig didn't ship one inline.
 ///
 /// **This blob was extracted directly from the macOS system
@@ -271,7 +271,7 @@ fn extract_ca_cert_pem(xml: &str) -> String {
 /// Cheap base64 sniff — only chars that legitimately appear in a
 /// base64 body. Doesn't validate length / padding rigorously; the
 /// goal is just to avoid wrapping a thumbprint or other XML in
-/// PEM headers and shipping nonsense to OpenVPN.
+/// PEM headers and shipping nonsense to `OpenVPN`.
 fn is_base64_like(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| {
         c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
@@ -294,7 +294,7 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
         // <tagless>. The next char after the needle must be `>`,
         // a space, or `/` (self-closing).
         let next = lower.as_bytes().get(abs + needle.len()).copied();
-        if !matches!(next, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'/')) {
+        if !matches!(next, Some(b'>' | b' ' | b'\t' | b'/')) {
             // Also accept namespace separator e.g. <ns:tag becoming
             // <ns:tagless> — those aren't a real match either; bump
             // and continue.
@@ -302,9 +302,9 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
             continue;
         }
         // Find the closing `>` of the open tag.
-        let after_open = match xml[abs..].find('>') {
-            Some(p) => abs + p + 1,
-            None => return None,
+        let after_open = {
+            let p = xml[abs..].find('>')?;
+            abs + p + 1
         };
         // Locate the matching `</tag>` (any namespace prefix).
         let close_lower = format!("</{}>", tag.to_lowercase());
@@ -326,7 +326,7 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
 }
 
 /// Wrap a single-line base64 blob into a PEM-formatted certificate
-/// ready for OpenVPN's `<ca>` block. Inserts a newline every 64
+/// ready for `OpenVPN`'s `<ca>` block. Inserts a newline every 64
 /// chars (the openssl convention) so cert parsers that split on
 /// line boundaries don't choke.
 fn wrap_base64_as_pem(b64: &str) -> String {
@@ -420,7 +420,7 @@ fn extract_all_simple_tags(xml: &str, tag: &str) -> Vec<String> {
         // Reject substring matches like <destinationaddress> when
         // we're looking for <destination>.
         let next = lower.as_bytes().get(abs).copied();
-        if !matches!(next, Some(b'>') | Some(b' ') | Some(b'\t') | Some(b'/')) {
+        if !matches!(next, Some(b'>' | b' ' | b'\t' | b'/')) {
             start = abs;
             continue;
         }
@@ -452,10 +452,10 @@ fn netmask_to_prefix(mask: &str) -> Option<u8> {
     if parts.next().is_some() {
         return None;
     }
-    let bits = ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32);
+    let bits = (u32::from(octets[0]) << 24)
+        | (u32::from(octets[1]) << 16)
+        | (u32::from(octets[2]) << 8)
+        | u32::from(octets[3]);
     let leading = bits.leading_ones();
     let trailing = bits.trailing_zeros();
     if leading + trailing != 32 {
@@ -490,11 +490,11 @@ fn extract_all_dns(xml: &str) -> Vec<IpAddr> {
     out
 }
 
-/// Render an Azure VPN profile as an OpenVPN 3.x `.ovpn` body.
+/// Render an Azure VPN profile as an `OpenVPN` 3.x `.ovpn` body.
 ///
 /// **Format ported verbatim from MSP-Toolkit-V2's working
 /// production implementation.** Critical differences from a
-/// generic OpenVPN config:
+/// generic `OpenVPN` config:
 ///
 ///   - `tls-auth` (NOT `tls-crypt`) with direction `1` —
 ///     Azure's `<serversecret>` blob is consumed as a tls-auth
@@ -603,11 +603,11 @@ pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
     //      root, the TLS handshake will fail clearly and we'll
     //      need to widen this lookup table.
     out.push_str("<ca>\n");
-    if !cfg.ca_cert_pem.trim().is_empty() {
+    if cfg.ca_cert_pem.trim().is_empty() {
+        out.push_str(DIGICERT_GLOBAL_ROOT_CA_PEM);
+    } else {
         out.push_str(cfg.ca_cert_pem.trim_end());
         out.push('\n');
-    } else {
-        out.push_str(DIGICERT_GLOBAL_ROOT_CA_PEM);
     }
     out.push_str("</ca>\n\n");
 
@@ -863,14 +863,14 @@ mod tests {
 
     /// Modern thumbprint-only `<servervalidation><Cert><hash>…`
     /// configs (what Microsoft's Azure portal exports today)
-    /// must still produce a working .ovpn. We embed the DigiCert
-    /// Global Root CA PEM so OpenVPN has something to chain
+    /// must still produce a working .ovpn. We embed the `DigiCert`
+    /// Global Root CA PEM so `OpenVPN` has something to chain
     /// against.
     /// Guardrail: any future hand-edit to the embedded
-    /// DigiCert PEM gets caught here. We base64-decode the body
+    /// `DigiCert` PEM gets caught here. We base64-decode the body
     /// and verify the SHA-1 matches what every Azure VPN
     /// `<hash>` field carries — `A8:98:5D:3A:…`. A single
-    /// substituted character corrupts the cert and OpenVPN
+    /// substituted character corrupts the cert and `OpenVPN`
     /// refuses to load it; this test fails immediately.
     #[test]
     fn embedded_digicert_pem_decodes_and_matches_thumbprint() {

@@ -1,4 +1,4 @@
-//! `supermgrd-win` — SuperManager privileged daemon for Windows.
+//! `supermgrd-win` — `SuperManager` privileged daemon for Windows.
 //!
 //! Runs as a Windows Service (Local System by default), exposes the same
 //! RPC contract as the Linux `supermgrd` D-Bus interface, but transports it

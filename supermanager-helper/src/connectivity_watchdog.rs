@@ -7,7 +7,7 @@
 //! - **2 misses (4s)**: trigger `route_guardian::force_restore()`
 //!   in case tailscaled out-raced our 500ms poll.
 //! - **3 misses (6s)**: fail-open `tailscale::panic_reset`
-//!   (clear_pref=false) — removes the exit-node split routes so
+//!   (`clear_pref=false`) — removes the exit-node split routes so
 //!   egress drops to the local uplink, DHCP-renews, but KEEPS the
 //!   exit-node pref + persisted intent so the reconciler can
 //!   re-establish it. Always recoverable; only acts on tailscale
@@ -29,8 +29,8 @@
 //! ## False-positive concerns
 //!
 //! What if the user's ISP is genuinely out, or they're roaming
-//! between WiFi APs, or DHCP is mid-renewal? When NO exit node is
-//! active the watchdog still fires panic_reset, which is
+//! between `WiFi` APs, or DHCP is mid-renewal? When NO exit node is
+//! active the watchdog still fires `panic_reset`, which is
 //! acceptable because:
 //!
 //! 1. `panic_reset` (fail-open) only touches tailscale state —
@@ -64,14 +64,14 @@ static SPAWNED: Mutex<bool> = Mutex::new(false);
 
 /// Suspend-until timestamp. While `Instant::now() < *PAUSE_UNTIL`,
 /// the watchdog keeps probing for visibility but does NOT
-/// escalate to force_restore or panic_reset. Used by AppState
+/// escalate to `force_restore` or `panic_reset`. Used by `AppState`
 /// to grant exit-node-set / clear transitions a quiet window
 /// to settle without our defense kicking in mid-reconfig.
 static PAUSE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Pause watchdog escalation for `secs` seconds. Probes still
 /// run + log so the user can see what's happening, but no
-/// force_restore or panic_reset fires until pause expires.
+/// `force_restore` or `panic_reset` fires until pause expires.
 pub fn pause_for(secs: u64) {
     let new_until = Instant::now() + Duration::from_secs(secs);
     let mut g = PAUSE_UNTIL.lock().unwrap();
@@ -118,7 +118,7 @@ pub fn spawn_watchdog() -> Result<()> {
 /// consecutive probe misses before we conclude the exit PEER is dead and fail
 /// open. The probe budget is ~8s when an exit node is desired, plus a 2s sleep,
 /// so each miss is ~10s of real outage — 6 misses ≈ 60s. Long enough to ride
-/// out an upstream hotspot blip (WiFi association stays up, internet drops for a
+/// out an upstream hotspot blip (`WiFi` association stays up, internet drops for a
 /// few seconds) without flapping the exit node; short enough that a genuinely
 /// dead peer recovers to the local uplink promptly. A DOWN uplink is never torn
 /// down regardless of this count.
@@ -127,10 +127,10 @@ const EXIT_DEAD_PEER_MISSES: u32 = 6;
 /// Enforce the no-brick invariant: the shared full-tunnel split-defaults
 /// (`0/1`, `128/1`, and the IPv6 `::/1`+`8000::/1` pair) must NEVER linger on a
 /// utun that no live VPN backend owns. When a full-tunnel VPN — Azure/OpenVPN,
-/// WireGuard, strongSwan IKEv2, or the tailscale exit node — dies WITHOUT
+/// `WireGuard`, strongSwan `IKEv2`, or the tailscale exit node — dies WITHOUT
 /// cleaning up (auth failure, crash, unclean disconnect, sleep/wake), its routes
 /// orphan on a dead utun and black-hole ALL IPv4 + DNS, freezing the whole
-/// machine; disconnecting the VPN or WiFi doesn't help because nothing removes
+/// machine; disconnecting the VPN or `WiFi` doesn't help because nothing removes
 /// the orphan and only a reboot clears it. This runs every 2s watchdog cycle and
 /// reaps any such orphaned route within ~2s, failing egress open to the local
 /// uplink. Ownership-gated via `tailscale::utun_has_live_owner` — it never
@@ -321,7 +321,7 @@ fn watchdog_loop() {
 /// the probe routes THROUGH the exit peer, and a DERP-relayed peer adds 3-6s
 /// of latency — a 1s budget false-negatives and the watchdog would tear down a
 /// perfectly healthy node (the user's reported flap). Use a generous 8s budget
-/// then (matching test_exit_reachability), and the snappy 1s otherwise. A
+/// then (matching `test_exit_reachability`), and the snappy 1s otherwise. A
 /// genuinely dead peer still fails at 8s and escalates, so this never hides a
 /// real outage.
 fn probe_internet() -> bool {

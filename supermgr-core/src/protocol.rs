@@ -35,7 +35,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 
 /// Maximum single-frame size accepted by the daemon, in bytes. Anything
 /// larger is treated as a protocol violation. 16 MiB is enough to round-trip
-/// large config blobs (FortiGate exports, OpenVPN configs with embedded
+/// large config blobs (`FortiGate` exports, `OpenVPN` configs with embedded
 /// certificates, full SSH key inventories) without artificial chunking.
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 

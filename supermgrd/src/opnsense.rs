@@ -1,6 +1,6 @@
-//! OPNsense REST API client.
+//! `OPNsense` REST API client.
 //!
-//! OPNsense exposes a per-user REST API at `https://<host>/api/...` authenticated
+//! `OPNsense` exposes a per-user REST API at `https://<host>/api/...` authenticated
 //! with HTTP Basic over a key/secret pair created in the Webadmin under
 //! *System → Access → Users → API keys*. Each key/secret pair is tied to one
 //! user account and inherits that user's privileges.
@@ -8,7 +8,7 @@
 //! # Storage
 //!
 //! Credentials are stored as a single JSON blob in the system secret service
-//! under the label `supermgr/opnsense/<uuid>/credentials`, mirroring how UniFi
+//! under the label `supermgr/opnsense/<uuid>/credentials`, mirroring how `UniFi`
 //! controller credentials are stored:
 //!
 //! ```json
@@ -28,13 +28,13 @@
 //!   failures (returns `None` for the missing fields rather than failing the
 //!   whole call).
 //!
-//! Endpoints used here were verified against OPNsense 26.1.6_2 (FreeBSD 14.3)
+//! Endpoints used here were verified against `OPNsense` `26.1.6_2` (FreeBSD 14.3)
 //! on 2026-04-28. The official docs are at <https://docs.opnsense.org/development/api.html>.
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-/// Stored credential blob for one OPNsense host.
+/// Stored credential blob for one `OPNsense` host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
     /// API key — used as the Basic Auth username.
@@ -53,7 +53,7 @@ pub struct Response {
     pub body: String,
 }
 
-/// Composite "is this OPNsense alive and what version" snapshot for the dashboard.
+/// Composite "is this `OPNsense` alive and what version" snapshot for the dashboard.
 ///
 /// Every field is `Option` because each underlying endpoint is allowed to fail
 /// independently — a transient permission error on one shouldn't black-hole the
@@ -62,7 +62,7 @@ pub struct Response {
 pub struct OpnSenseStatus {
     /// Hostname (`name` field of `/api/diagnostics/system/system_information`).
     pub hostname: Option<String>,
-    /// OPNsense version string (e.g. `OPNsense 26.1.6_2-amd64`).
+    /// `OPNsense` version string (e.g. `OPNsense 26.1.6_2-amd64`).
     pub opnsense_version: Option<String>,
     /// FreeBSD version string.
     pub freebsd_version: Option<String>,
@@ -74,9 +74,9 @@ pub struct OpnSenseStatus {
     pub memory_total_bytes: Option<u64>,
     /// Used system memory in bytes.
     pub memory_used_bytes: Option<u64>,
-    /// Map of interface device → label as configured in OPNsense.
+    /// Map of interface device → label as configured in `OPNsense`.
     pub interfaces: Vec<InterfaceSummary>,
-    /// Whether WireGuard is enabled (does not imply any peer is up).
+    /// Whether `WireGuard` is enabled (does not imply any peer is up).
     pub wireguard_enabled: Option<bool>,
 }
 
@@ -85,11 +85,11 @@ pub struct OpnSenseStatus {
 pub struct InterfaceSummary {
     /// Kernel device name (e.g. `igc0`, `vlan02`).
     pub device: String,
-    /// Friendly name configured in OPNsense (e.g. `LAN`, `IoT`).
+    /// Friendly name configured in `OPNsense` (e.g. `LAN`, `IoT`).
     pub label: String,
 }
 
-/// Build a reqwest client suitable for talking to OPNsense.
+/// Build a reqwest client suitable for talking to `OPNsense`.
 ///
 /// Self-signed certs are common on home appliances, so verification is
 /// disabled by default. A 30 s connect+read timeout keeps the daemon from
@@ -98,7 +98,7 @@ fn http_client() -> &'static reqwest::Client {
     supermgr_core::http::insecure_client()
 }
 
-/// Issue a Basic-Auth request to an OPNsense API endpoint and return the raw
+/// Issue a Basic-Auth request to an `OPNsense` API endpoint and return the raw
 /// body. Errors map to a human-readable string suitable for surfacing to the
 /// GUI.
 pub async fn request(
@@ -207,7 +207,7 @@ pub async fn get_status(
                     .and_then(|s| s.parse().ok());
                 s.memory_used_bytes = v
                     .pointer("/memory/used")
-                    .and_then(|x| x.as_u64());
+                    .and_then(serde_json::Value::as_u64);
             }
         }
     }
@@ -267,11 +267,11 @@ mod tests {
         assert_eq!(parsed.secret, "s");
     }
 
-    /// Live smoke test against a real OPNsense box. Ignored by default —
+    /// Live smoke test against a real `OPNsense` box. Ignored by default —
     /// run with `cargo test -p supermgrd opnsense::tests::live_status -- \
     ///   --ignored --nocapture` and the env vars below to exercise the full
     /// `get_status` path end-to-end. Useful when adapting to a new
-    /// OPNsense major release whose endpoint shapes might have shifted.
+    /// `OPNsense` major release whose endpoint shapes might have shifted.
     ///
     /// Env vars:
     /// - `OPNSENSE_HOST`   e.g. `opnsense.tailb0b06a.ts.net`

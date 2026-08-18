@@ -13,17 +13,17 @@ pub enum DeviceType {
     /// Standard Linux/Unix server (default).
     #[default]
     Linux,
-    /// Ubiquiti UniFi device.
+    /// Ubiquiti `UniFi` device.
     UniFi,
     /// pfSense firewall.
     PfSense,
-    /// OPNsense firewall (FreeBSD-based fork of pfSense, distinct REST API).
+    /// `OPNsense` firewall (FreeBSD-based fork of pfSense, distinct REST API).
     OpnSense,
     /// Sophos XG / SFOS firewall.
     Sophos,
-    /// OpenWrt router.
+    /// `OpenWrt` router.
     OpenWrt,
-    /// Fortinet FortiGate appliance.
+    /// Fortinet `FortiGate` appliance.
     Fortigate,
     /// Microsoft Windows (OpenSSH server).
     Windows,
@@ -34,17 +34,17 @@ pub enum DeviceType {
 /// Which compliance baseline applies to a device, if any.
 ///
 /// Two destinations and an explicit "neither", rather than an `Option`: the
-/// difference between "run the FortiGate controls" and "run the Linux
+/// difference between "run the `FortiGate` controls" and "run the Linux
 /// controls" is not a presence check, and collapsing the third case into
 /// `None` loses the ability to say *why* a host has no scan button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComplianceDispatch {
-    /// FortiGate controls, read over the REST API and CLI.
+    /// `FortiGate` controls, read over the REST API and CLI.
     FortigateBaseline,
     /// The CIS Linux host baseline, run as shell commands over SSH.
     LinuxBaseline,
     /// No baseline exists for this device type. Not a gap to fill by
-    /// guessing — a UniFi AP is not a Linux server for CIS purposes even
+    /// guessing — a `UniFi` AP is not a Linux server for CIS purposes even
     /// though it runs Linux.
     NotApplicable,
 }
@@ -78,6 +78,7 @@ impl DeviceType {
 
     /// Returns a warning message for device types that require manual key
     /// deployment steps, or `None` if automated deployment is supported.
+    #[must_use]
     pub fn warning_message(&self) -> Option<&'static str> {
         match self {
             Self::UniFi => Some("Keys must be added via UniFi Controller GUI"),
