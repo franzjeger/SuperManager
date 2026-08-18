@@ -1005,6 +1005,22 @@ mod tests {
         assert!(validate_openssh_certificate(&padded).is_ok());
     }
 
+    /// The property the connect path relies on: `from_openssh` only trims
+    /// the END, so LEADING whitespace makes it fail. validate accepts such
+    /// a cert (it trims first) and the value is stored as-is, so connect
+    /// must trim before parsing or cert auth silently downgrades to plain
+    /// pubkey. If a future ssh-key release starts tolerating leading
+    /// whitespace this test flags that the connect-side trim is redundant.
+    #[test]
+    fn from_openssh_requires_leading_whitespace_trimmed() {
+        let leading = format!("  {CERT}");
+        assert!(
+            ssh_key::Certificate::from_openssh(&leading).is_err(),
+            "from_openssh tolerated leading whitespace — the connect-side trim may be unnecessary"
+        );
+        assert!(ssh_key::Certificate::from_openssh(leading.trim()).is_ok());
+    }
+
     #[test]
     fn rejects_the_plain_public_key() {
         // The mistake worth catching: handing over id_ed25519.pub
