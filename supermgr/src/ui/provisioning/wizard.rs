@@ -1,4 +1,4 @@
-//! Multi-step provisioning wizard for FortiGate and UniFi devices.
+//! Multi-step provisioning wizard for `FortiGate` and `UniFi` devices.
 //!
 //! Collects customer info, network design, services, security policies,
 //! then generates device configuration via Claude and pushes it over
@@ -260,7 +260,7 @@ pub fn build_provisioning_page(
             let state = Rc::clone(&state);
             move || {
                 let step = *current_step.borrow();
-                step_label.set_label(&format!("Step {} of {}", step, TOTAL_STEPS));
+                step_label.set_label(&format!("Step {step} of {TOTAL_STEPS}"));
                 back_btn.set_sensitive(step > 1);
 
                 // Skip security step for UniFi
@@ -422,7 +422,7 @@ fn build_step1_customer_info(
             }
             host_ids.borrow_mut().clear();
 
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let filter = match device_filter {
                 "FortiGate" => "Fortigate",
                 "UniFi" => "UniFi",
@@ -477,7 +477,7 @@ fn build_step1_customer_info(
             let h = hasher.finish();
             let octet2 = ((h >> 8) & 0xFF) as u8;
             let octet3 = (h & 0xFF) as u8;
-            let subnet = format!("10.{}.{}.0/24", octet2, octet3);
+            let subnet = format!("10.{octet2}.{octet3}.0/24");
             let mut s = state.borrow_mut();
             s.customer_name = text;
             s.lan_subnet = subnet;
@@ -1263,8 +1263,8 @@ fn build_step3_services(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
                 if staff.text().is_empty() && !cust.is_empty() {
                     drop(s);
                     let cust = state.borrow().customer_name.clone();
-                    staff.set_text(&format!("{}-Staff", cust));
-                    guest.set_text(&format!("{}-Guest", cust));
+                    staff.set_text(&format!("{cust}-Staff"));
+                    guest.set_text(&format!("{cust}-Guest"));
                 }
             }
         });
@@ -1810,7 +1810,7 @@ fn build_step5_review(
                         Err(e) => format!("# Error generating config: {e}\n"),
                     };
 
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config_text);
+                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config_text);
                 });
             }
 
@@ -1826,7 +1826,7 @@ fn build_step5_review(
             let ws = Rc::clone(&state);
             let rt_poll = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let maybe = result_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                 if let Some(config_text) = maybe {
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
@@ -1891,13 +1891,13 @@ fn build_step5_review(
                     };
 
                     let _ = tx.send(AppMsg::ShowToast(msg));
-                    *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                    *flag.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
                 });
             }
 
             let btn = btn.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                if *done_flag.lock().unwrap_or_else(|e| e.into_inner()) {
+                if *done_flag.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
                     btn.set_sensitive(true);
                     btn.set_label("Push Config");
                     return glib::ControlFlow::Break;
@@ -1933,7 +1933,7 @@ fn build_step5_review(
                 let device_type = s.device_type.clone();
                 rt.spawn(async move {
                     let res = fetch_device_config(&host_id, &device_type).await;
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(
+                    *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
                         res.map_err(|e| format!("{e}"))
                     );
                 });
@@ -1943,7 +1943,7 @@ fn build_step5_review(
             let generated = s.generated_config.clone();
             let device_label = s.target_host_label.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let maybe = result_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                 if let Some(result) = maybe {
                     btn.set_sensitive(true);
                     btn.set_label("Diff with Device");
@@ -1956,7 +1956,7 @@ fn build_step5_review(
                                 window.as_ref(),
                                 &device_config,
                                 &generated,
-                                &format!("Current ({})", device_label),
+                                &format!("Current ({device_label})"),
                                 "Generated Config",
                             );
                         }
@@ -2293,15 +2293,15 @@ fn build_step5_review(
                 let customer = customer.clone();
                 rt.spawn(async move {
                     match list_config_versions_dbus(&customer).await {
-                        Ok(json) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(json),
-                        Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("ERROR:{e}")),
+                        Ok(json) => *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(json),
+                        Err(e) => *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!("ERROR:{e}")),
                     }
                 });
             }
             let config_buffer = config_buffer.clone();
             let rt2 = rt.clone();
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                let maybe = result_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                 if let Some(json) = maybe {
                     btn.set_sensitive(true);
                     if json.starts_with("ERROR:") {
@@ -2486,8 +2486,8 @@ fn generate_network_svg(state: &WizardState) -> String {
     // LAN subnet label
     if !lan_subnet_label.is_empty() {
         svg.push_str(&format!(
-            r##"<text x="{cx}" y="{lan_label_y}" text-anchor="middle" class="label">{lan}</text>
-"##,
+            r#"<text x="{cx}" y="{lan_label_y}" text-anchor="middle" class="label">{lan}</text>
+"#,
             lan = html_escape(&lan_subnet_label)
         ));
     }
@@ -2605,9 +2605,7 @@ fn generate_network_svg(state: &WizardState) -> String {
 fn generate_html_report(state: &WizardState, config: &str) -> String {
     let now = glib::DateTime::now_local().unwrap();
     let date_str = now
-        .format("%Y-%m-%d %H:%M")
-        .map(|s| s.to_string())
-        .unwrap_or_else(|_| "Unknown date".into());
+        .format("%Y-%m-%d %H:%M").map_or_else(|_| "Unknown date".into(), |s| s.to_string());
 
     let yn = |b: bool| if b { "Enabled" } else { "Disabled" };
     let check = |b: bool| if b { "&#x2705;" } else { "&#x274C;" };
@@ -3162,8 +3160,7 @@ async fn send_provisioning_subscription(prompt: &str) -> anyhow::Result<String> 
     use tokio::process::Command;
 
     let full_prompt = format!(
-        "{}\n\n---\n\nUser request:\n{}",
-        PROVISIONING_SYSTEM_PROMPT, prompt
+        "{PROVISIONING_SYSTEM_PROMPT}\n\n---\n\nUser request:\n{prompt}"
     );
 
     let output = Command::new("claude")
@@ -3377,13 +3374,13 @@ fn show_history_dialog(
                     let slot = Arc::clone(&result_slot);
                     rt.spawn(async move {
                         match get_config_version_dbus(&filename).await {
-                            Ok(config) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config),
-                            Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}")),
+                            Ok(config) => *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(config),
+                            Err(e) => *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!("# Error: {e}")),
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    let maybe = result_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                     if let Some(config) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&config);
@@ -3411,16 +3408,16 @@ fn show_history_dialog(
                         match get_config_version_dbus(&filename).await {
                             Ok(old_config) => {
                                 let diff = compute_unified_diff(&old_config, &current_text);
-                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(diff);
+                                *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(diff);
                             }
                             Err(e) => {
-                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}"));
+                                *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(format!("# Error: {e}"));
                             }
                         }
                     });
                 }
                 glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                    let maybe = result_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
                     if let Some(diff_text) = maybe {
                         btn2.set_sensitive(true);
                         show_config_viewer_dialog(&diff_text);
@@ -3567,7 +3564,7 @@ struct BatchEntry {
 }
 
 /// Parse CSV text into batch entries.
-/// Expected columns: customer_name, location, device_type, wan_type, wan_ip, lan_subnet
+/// Expected columns: `customer_name`, location, `device_type`, `wan_type`, `wan_ip`, `lan_subnet`
 fn parse_batch_csv(text: &str) -> Result<Vec<BatchEntry>, String> {
     let mut entries = Vec::new();
     let mut lines = text.lines();
@@ -3605,7 +3602,7 @@ fn parse_batch_csv(text: &str) -> Result<Vec<BatchEntry>, String> {
 }
 
 fn parse_csv_line(line: &str) -> Result<Option<BatchEntry>, String> {
-    let fields: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
+    let fields: Vec<&str> = line.split(',').map(str::trim).collect();
     if fields.len() < 6 {
         return Err(format!(
             "Expected 6 columns (customer_name, location, device_type, wan_type, \
@@ -3623,7 +3620,7 @@ fn parse_csv_line(line: &str) -> Result<Option<BatchEntry>, String> {
     }))
 }
 
-/// Build a WizardState from a BatchEntry with sensible defaults.
+/// Build a `WizardState` from a `BatchEntry` with sensible defaults.
 fn batch_entry_to_state(entry: &BatchEntry) -> WizardState {
     WizardState {
         customer_name: entry.customer_name.clone(),
@@ -4101,7 +4098,7 @@ fn build_zip_eocd(num_entries: u16, cd_size: u32, cd_offset: u32) -> Vec<u8> {
 fn crc32_simple(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
-        crc ^= byte as u32;
+        crc ^= u32::from(byte);
         for _ in 0..8 {
             if crc & 1 != 0 {
                 crc = (crc >> 1) ^ 0xEDB8_8320;

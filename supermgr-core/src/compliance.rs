@@ -463,7 +463,7 @@ pub fn score(results: &[CheckResult]) -> u8 {
             Status::Error => s -= r.severity.penalty() * 1.5,
         }
     }
-    s.clamp(0.0, 100.0).round() as u8
+    u8::try_from(s.clamp(0.0, 100.0).round() as u8).unwrap_or(100)
 }
 
 // ---------------------------------------------------------------------------

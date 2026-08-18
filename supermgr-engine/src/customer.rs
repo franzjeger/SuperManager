@@ -27,6 +27,7 @@
 //!   integration; we hand that map straight to Tera's context.
 //! - First-class export/import without translation layers.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -205,8 +206,8 @@ pub fn load(slug: &str) -> Result<Customer> {
 }
 
 fn load_path(path: &Path) -> Result<Customer> {
-    let bytes = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-    toml::from_str(&bytes).with_context(|| format!("parse {path:?}"))
+    let bytes = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Validate that a customer / engagement slug is filesystem-safe.
@@ -244,6 +245,10 @@ fn customer_lock(slug: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
 
 /// Persist a customer. Creates the directory if needed. Slug is
 /// the only thing that pins the file path — renames are safe.
+///
+/// # Panics
+///
+/// Panics if the per-customer save mutex is poisoned.
 pub fn save(customer: &Customer) -> Result<()> {
     validate_slug(&customer.slug).context("invalid customer slug")?;
     let lock = customer_lock(&customer.slug);
@@ -255,8 +260,8 @@ pub fn save(customer: &Customer) -> Result<()> {
     path.push(format!("{}.toml", customer.slug));
     let tmp = path.with_extension("toml.tmp");
     let serialized = toml::to_string_pretty(customer).context("serialize customer")?;
-    std::fs::write(&tmp, serialized).with_context(|| format!("write {tmp:?}"))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename {path:?}"))?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 
@@ -265,7 +270,7 @@ pub fn delete(slug: &str) -> Result<()> {
     let mut path = customers_dir();
     path.push(format!("{slug}.toml"));
     if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("delete {path:?}"))?;
+        std::fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
     }
     Ok(())
 }
@@ -304,7 +309,6 @@ pub async fn render_customer_report(
     };
 
     let mut out = String::with_capacity(8192);
-    use std::fmt::Write;
 
     // ============= Cover =============
     writeln!(out, "# {} — Network Operations Report", customer.display_name).unwrap();
@@ -369,13 +373,8 @@ pub async fn render_customer_report(
     writeln!(out, "| Devices | {total_hosts} |").unwrap();
     writeln!(out, "| Devices currently CIS-L1 compliant (score ≥ 90) | {total_compliant} of {total_hosts} |").unwrap();
     writeln!(out, "| Total compliance scans recorded | {total_runs} |").unwrap();
-    if score_count > 0 {
-        writeln!(
-            out,
-            "| Average compliance score | {} / 100 |",
-            score_sum / score_count
-        )
-        .unwrap();
+    if let Some(average) = score_sum.checked_div(score_count) {
+        writeln!(out, "| Average compliance score | {average} / 100 |").unwrap();
     }
     writeln!(out, "| Total deployments performed | {total_deployments} |").unwrap();
     writeln!(out).unwrap();
@@ -418,11 +417,10 @@ pub async fn render_customer_report(
             writeln!(out, "### Devices").unwrap();
             writeln!(out).unwrap();
             for host_id_str in &site.host_ids {
-                let host_id = match uuid::Uuid::parse_str(host_id_str) {
-                    Ok(id) => id,
-                    Err(_) => continue,
+                let Ok(host_id) = uuid::Uuid::parse_str(host_id_str) else {
+                    continue;
                 };
-                let host = if let Some(h) = host_lookup.get(&host_id) { h } else {
+                let Some(host) = host_lookup.get(&host_id) else {
                     writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
                     continue;
                 };

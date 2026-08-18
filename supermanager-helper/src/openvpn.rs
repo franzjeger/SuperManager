@@ -167,6 +167,18 @@ impl OpenVpn {
     /// its own and writes its PID to the file we pass via
     /// `--writepid`.
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
+        const FATAL: &[&str] = &[
+            "AUTH_FAILED",
+            "auth-failure",
+            "Cannot resolve host",
+            "Fatal TLS error",
+            "Options error",
+            "Cannot load CA certificate",
+            "Cannot load private key",
+            "Cannot load inline certificate",
+            "process exiting",
+            "SIGTERM[soft,init_instance]",
+        ];
         let openvpn = locate_openvpn()?;
         tracing::info!(
             "ovpn_connect: profile={} config={} openvpn={}",
@@ -349,7 +361,7 @@ impl OpenVpn {
                 stderr: Vec::new(),
             }
         } else {
-            let mut argv: Vec<String> = vec![
+            let mut cmd_args: Vec<String> = vec![
                 "--config".into(), args.config_file.clone(),
                 "--daemon".into(), format!("supermgr-ovpn-{safe}"),
                 "--writepid".into(), pid_path.display().to_string(),
@@ -357,12 +369,12 @@ impl OpenVpn {
                 "--verb".into(), "3".into(),
             ];
             if let Some(ref auth) = auth_path {
-                argv.push("--auth-user-pass".into());
-                argv.push(auth.display().to_string());
+                cmd_args.push("--auth-user-pass".into());
+                cmd_args.push(auth.display().to_string());
             }
-            tracing::info!("ovpn_connect: argv = {} {}", openvpn.display(), argv.join(" "));
+            tracing::info!("ovpn_connect: argv = {} {}", openvpn.display(), cmd_args.join(" "));
             let mut cmd = Command::new(&openvpn);
-            cmd.args(&argv);
+            cmd.args(&cmd_args);
             cmd.output().await.with_context(|| {
                 format!("run {} --config {}", openvpn.display(), args.config_file)
             })?
@@ -477,18 +489,6 @@ impl OpenVpn {
             // *unrecoverably*. Recoverable signals (Connection
             // reset, soft restart) intentionally don't appear here
             // — the daemon retries those by design.
-            const FATAL: &[&str] = &[
-                "AUTH_FAILED",
-                "auth-failure",
-                "Cannot resolve host",
-                "Fatal TLS error",
-                "Options error",
-                "Cannot load CA certificate",
-                "Cannot load private key",
-                "Cannot load inline certificate",
-                "process exiting",
-                "SIGTERM[soft,init_instance]",
-            ];
             let fatal_hit = FATAL.iter().find(|m| log_body.contains(*m));
 
             if !pid_alive || fatal_hit.is_some() {
@@ -969,11 +969,6 @@ fn locate_openvpn() -> anyhow::Result<PathBuf> {
         "/usr/local/bin/openvpn3",
         "/opt/local/bin/openvpn3",
     ];
-    for path in OVPN3_PATHS {
-        if Path::new(path).exists() {
-            return Ok(PathBuf::from(path));
-        }
-    }
     // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
     // Useful for non-Azure profiles where 2.x works fine — kept
     // for backwards compatibility but won't help with Azure VPN.
@@ -981,6 +976,11 @@ fn locate_openvpn() -> anyhow::Result<PathBuf> {
         "/opt/homebrew/bin/openvpn-patched",
         "/usr/local/bin/openvpn-patched",
     ];
+    for path in OVPN3_PATHS {
+        if Path::new(path).exists() {
+            return Ok(PathBuf::from(path));
+        }
+    }
     for path in PATCHED_PATHS {
         if Path::new(path).exists() {
             return Ok(PathBuf::from(path));

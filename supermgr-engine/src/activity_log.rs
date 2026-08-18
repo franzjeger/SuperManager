@@ -56,7 +56,7 @@ pub fn timeline(customer_slug: &str, limit: usize) -> Vec<ActivityEvent> {
     out.extend(from_findings_store(customer_slug));
 
     // Sort newest first.
-    out.sort_by(|a, b| b.at.cmp(&a.at));
+    out.sort_by_key(|a| std::cmp::Reverse(a.at));
     out.truncate(limit);
     out
 }

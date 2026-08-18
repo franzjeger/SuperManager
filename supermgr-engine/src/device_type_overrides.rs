@@ -28,9 +28,9 @@ use tokio::sync::RwLock;
 ///
 ///   - `mac` — exact MAC address match. Wins over prefix.
 ///   - `oui` — three-octet OUI prefix match. Lets the
-///             operator classify every `UniFi` device on a
-///             newly-encountered Ubiquiti OUI in one stroke
-///             instead of repeating per host.
+///     operator classify every `UniFi` device on a
+///     newly-encountered Ubiquiti OUI in one stroke
+///     instead of repeating per host.
 ///
 /// Cheap to clone (Arc-shared). One global instance lives
 /// on `DaemonState`.
@@ -204,13 +204,13 @@ impl DeviceTypeOverrides {
             .context("serialize device-type overrides")?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {parent:?}"))?;
+                .with_context(|| format!("mkdir {}", parent.display()))?;
         }
         let tmp = self.path.with_extension("toml.tmp");
         std::fs::write(&tmp, text.as_bytes())
-            .with_context(|| format!("write {tmp:?}"))?;
+            .with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("rename {tmp:?} -> {:?}", self.path))?;
+            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
         Ok(())
     }
 }

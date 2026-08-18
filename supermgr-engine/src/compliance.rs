@@ -193,7 +193,7 @@ async fn extract_api(
         .api_path
         .as_deref()
         .ok_or_else(|| anyhow!("api check {} missing api_path", def.id))?;
-    let pointer = def
+    let json_pointer = def
         .api_pointer
         .as_deref()
         .ok_or_else(|| anyhow!("api check {} missing api_pointer", def.id))?;
@@ -208,8 +208,8 @@ async fn extract_api(
     let v: serde_json::Value =
         serde_json::from_str(&resp.body).context("response is not JSON")?;
     let pointed = v
-        .pointer(pointer)
-        .ok_or_else(|| anyhow!("pointer {pointer} not found in response"))?;
+        .pointer(json_pointer)
+        .ok_or_else(|| anyhow!("pointer {json_pointer} not found in response"))?;
     Ok(match pointed {
         serde_json::Value::String(s) => s.trim().to_owned(),
         serde_json::Value::Number(n) => n.to_string(),

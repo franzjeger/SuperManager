@@ -7,8 +7,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Wire-protocol API version. Bumped on:
-///   - Major: breaking changes (renamed/removed RPC, changed required fields).
-///   - Minor: additive changes (new RPC, new optional field).
+///
+/// - Major: breaking changes (renamed/removed RPC, changed required fields).
+/// - Minor: additive changes (new RPC, new optional field).
+///
 /// Mac app reads this on connect via `api_version` RPC and warns
 /// the user if the major version doesn't match the bundled
 /// expectation (`HelperClient.expectedMajor`).

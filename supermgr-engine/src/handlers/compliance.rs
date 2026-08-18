@@ -64,7 +64,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_compliance_history(
+    pub(crate) fn handle_compliance_history(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -86,7 +86,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_compliance_get_run(
+    pub(crate) fn handle_compliance_get_run(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -108,7 +108,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_compliance_list_checks(&self, id: u64) -> Response {
+    pub(crate) fn handle_compliance_list_checks(&self, id: u64) -> Response {
         let checks = crate::compliance::list_checks();
         match serde_json::to_value(&checks) {
             Ok(v) => Response::ok(id, v),
@@ -120,7 +120,7 @@ impl EngineServer {
     /// immediately preceding it on the same host. The first run
     /// for a host has no baseline; the report renders all current
     /// failures as "newly failing" in that case.
-    pub(crate) async fn handle_compliance_drift(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_compliance_drift(&self, id: u64, params: serde_json::Value) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -294,7 +294,7 @@ impl EngineServer {
     /// List the static set of Linux baseline checks (titles + count)
     /// without running them — handy for the UI's "About this baseline"
     /// disclosure before the user kicks off a scan.
-    pub(crate) async fn handle_compliance_list_linux_checks(&self, id: u64) -> Response {
+    pub(crate) fn handle_compliance_list_linux_checks(&self, id: u64) -> Response {
         let titles = crate::ssh_compliance::check_titles();
         Response::ok(
             id,
@@ -309,7 +309,7 @@ impl EngineServer {
     /// this when the user clicks "Export report"; we keep
     /// rendering server-side so the same logic runs whether the
     /// trigger is GUI, scheduled watchdog, or future CLI tool.
-    pub(crate) async fn handle_compliance_render_report(
+    pub(crate) fn handle_compliance_render_report(
         &self,
         id: u64,
         params: serde_json::Value,

@@ -1,4 +1,4 @@
-//! Claude API client with tool use for SuperManager operations.
+//! Claude API client with tool use for `SuperManager` operations.
 
 use std::sync::mpsc;
 
@@ -48,7 +48,7 @@ static SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None
 
 /// Reset the Claude CLI session (e.g. on "Clear conversation").
 pub fn reset_session() {
-    *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *SESSION_ID.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// Send a message using Claude Code CLI (subscription-based, no API tokens).
@@ -91,7 +91,7 @@ pub async fn send_message_subscription(
         "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
     );
 
-    let session_id = SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let session_id = SESSION_ID.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
 
     let mut cmd = tokio::process::Command::new("claude");
     cmd.args([
@@ -170,14 +170,12 @@ pub async fn send_message_subscription(
                 }
                 Some("result") => {
                     // Final result — extract text if we haven't streamed yet.
-                    if !sent_text {
-                        if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
-                            let _ = tx_stream.send(AppMsg::ConsoleResponse(
-                                format!("\nClaude: {result}\n"),
-                            ));
-                        }
-                    } else {
+                    if sent_text {
                         let _ = tx_stream.send(AppMsg::ConsoleResponse("\n".into()));
+                    } else if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
+                        let _ = tx_stream.send(AppMsg::ConsoleResponse(
+                            format!("\nClaude: {result}\n"),
+                        ));
                     }
                     // Capture session_id from result.
                     if let Some(sid) = parsed.get("session_id").and_then(|s| s.as_str()) {
@@ -192,7 +190,7 @@ pub async fn send_message_subscription(
 
     // Wait with timeout.
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
+        std::time::Duration::from_mins(5),
         child.wait(),
     ).await;
 
@@ -214,7 +212,7 @@ pub async fn send_message_subscription(
     // Save session ID for next message.
     if let Ok(Some(sid)) = reader_handle.await {
         info!("Claude CLI session: {sid}");
-        *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid);
+        *SESSION_ID.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid);
     }
 
     Ok(())
@@ -402,17 +400,14 @@ pub async fn send_message(
 ) -> Result<Vec<Value>> {
     // Try D-Bus connection; if it fails (daemon restarted), notify the user
     // and retry once after a short delay.
-    let conn = match supermgr_core::client::system_connection().await {
-        Ok(c) => c,
-        Err(_) => {
-            let _ = tx.send(AppMsg::ConsoleResponse(
-                "\nDaemon connection lost — reconnecting...\n".into(),
-            ));
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            supermgr_core::client::system_connection()
-                .await
-                .context("D-Bus reconnect failed — is the daemon running?")?
-        }
+    let conn = if let Ok(c) = supermgr_core::client::system_connection().await { c } else {
+        let _ = tx.send(AppMsg::ConsoleResponse(
+            "\nDaemon connection lost — reconnecting...\n".into(),
+        ));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        supermgr_core::client::system_connection()
+            .await
+            .context("D-Bus reconnect failed — is the daemon running?")?
     };
     let proxy = DaemonProxy::new(conn).await.context("DaemonProxy")?;
 
@@ -640,7 +635,7 @@ fn dispatch_sse_event(
                 *tool_input_json = String::new();
                 *in_tool_block = true;
                 let _ = tx.send(AppMsg::ConsoleResponse(
-                    format!("\n[tool: {}]\n", tool_name),
+                    format!("\n[tool: {tool_name}]\n"),
                 ));
             }
         }
@@ -680,7 +675,7 @@ fn dispatch_sse_event(
     }
 }
 
-/// Finalize a tool_use content block and record it for execution.
+/// Finalize a `tool_use` content block and record it for execution.
 fn finalize_tool_block(
     content_blocks: &mut Vec<Value>,
     tool_id: &mut String,

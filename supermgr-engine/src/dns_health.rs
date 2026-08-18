@@ -103,10 +103,12 @@ pub async fn audit(domain: &str) -> DnsHealthReport {
         &mta_sts,
         &dnssec,
         &dkim,
-        spf_err.is_some(),
-        dmarc_err.is_some(),
-        mta_err.is_some(),
-        dnssec_err.is_some(),
+        DnsCheckFailures {
+            spf: spf_err.is_some(),
+            dmarc: dmarc_err.is_some(),
+            mta_sts: mta_err.is_some(),
+            dnssec: dnssec_err.is_some(),
+        },
         &mut findings,
     );
 
@@ -223,7 +225,7 @@ async fn check_dnssec(domain: &str) -> (DnssecState, Option<DigError>) {
         Ok(r) => r,
         Err(e) => return (DnssecState::Disabled, Some(e)),
     };
-    let count = res.iter().filter(|line| !line.is_empty()).count() as u32;
+    let count = u32::try_from(res.iter().filter(|line| !line.is_empty()).count()).unwrap_or(u32::MAX);
     let state = if count == 0 {
         DnssecState::Disabled
     } else {
@@ -290,6 +292,14 @@ async fn find_dkim_selectors(domain: &str) -> DkimProbe {
 // Findings derivation — turn states into customer-facing recommendations
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, Default)]
+struct DnsCheckFailures {
+    spf: bool,
+    dmarc: bool,
+    mta_sts: bool,
+    dnssec: bool,
+}
+
 fn derive_findings(
     domain: &str,
     spf: &SpfState,
@@ -297,10 +307,7 @@ fn derive_findings(
     mta_sts: &MtaStsState,
     dnssec: &DnssecState,
     dkim: &DkimProbe,
-    spf_failed: bool,
-    dmarc_failed: bool,
-    mta_failed: bool,
-    dnssec_failed: bool,
+    failures: DnsCheckFailures,
     out: &mut Vec<Finding>,
 ) {
     let mk = |id: &str, sev: Severity, cvss: f32, title: String, detail: String, rec: String| Finding {
@@ -317,7 +324,7 @@ fn derive_findings(
     };
 
     // --- SPF --- (suppressed if the lookup itself failed)
-    if !spf_failed {
+    if !failures.spf {
         match spf {
         SpfState::Missing => out.push(mk(
             "dns.spf-missing",
@@ -356,7 +363,7 @@ fn derive_findings(
     }
 
     // --- DMARC --- (suppressed if the lookup itself failed)
-    if !dmarc_failed {
+    if !failures.dmarc {
         match dmarc {
         DmarcState::Missing => out.push(mk(
             "dns.dmarc-missing",
@@ -391,7 +398,7 @@ fn derive_findings(
     }
 
     // --- MTA-STS --- (suppressed if the lookup itself failed)
-    if !mta_failed && matches!(mta_sts, MtaStsState::Missing) {
+    if !failures.mta_sts && matches!(mta_sts, MtaStsState::Missing) {
         out.push(mk(
             "dns.mta-sts-missing",
             Severity::Low,
@@ -403,7 +410,7 @@ fn derive_findings(
     }
 
     // --- DNSSEC --- (suppressed if the lookup itself failed)
-    if !dnssec_failed && matches!(dnssec, DnssecState::Disabled) {
+    if !failures.dnssec && matches!(dnssec, DnssecState::Disabled) {
         out.push(mk(
             "dns.dnssec-disabled",
             Severity::Low,
@@ -593,7 +600,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(vec!["selector1".into()], true),
-            false, false, false, false,
+            DnsCheckFailures::default(),
             &mut out,
         );
         assert!(out.iter().any(|f| f.id == "dns.spf-missing"));
@@ -611,7 +618,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(vec!["selector1".into()], true),
-            false, false, false, false,
+            DnsCheckFailures::default(),
             &mut out,
         );
         let spf = out.iter().find(|f| f.id == "dns.spf-permissive").unwrap();
@@ -628,7 +635,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(vec!["selector1".into()], true),
-            false, false, false, false,
+            DnsCheckFailures::default(),
             &mut out,
         );
         assert!(out.is_empty(), "fully-locked-down DNS should produce no findings");
@@ -644,7 +651,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(Vec::new(), true),  // probes succeeded, none found
-            false, false, false, false,
+            DnsCheckFailures::default(),
             &mut out,
         );
         assert!(out.iter().any(|f| f.id == "dns.dkim-missing"));
@@ -661,7 +668,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(vec!["selector1".into()], true),
-            true, false, false, false,  // spf_failed
+            DnsCheckFailures { spf: true, ..Default::default() },
             &mut out,
         );
         assert!(!out.iter().any(|f| f.id == "dns.spf-missing"));
@@ -678,7 +685,7 @@ mod tests {
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &dkim(Vec::new(), false),  // no probe succeeded
-            false, false, false, false,
+            DnsCheckFailures::default(),
             &mut out,
         );
         assert!(!out.iter().any(|f| f.id == "dns.dkim-missing"));

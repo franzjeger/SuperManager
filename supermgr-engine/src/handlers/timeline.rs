@@ -16,7 +16,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_activity_timeline(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_activity_timeline(&self, id: u64, params: serde_json::Value) -> Response {
         let slug = match params.get("customer_slug").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing customer_slug".to_owned()),

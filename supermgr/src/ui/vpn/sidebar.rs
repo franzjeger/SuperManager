@@ -171,7 +171,7 @@ pub fn build_vpn_sidebar(
 
     // Paint the initial state.
     {
-        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         populate_vpn_sidebar(
             &profile_list,
             &s.profiles,
@@ -257,7 +257,7 @@ pub fn populate_vpn_sidebar(
 
     // Display alphabetically so the list is stable.
     let mut sorted: Vec<&ProfileSummary> = filtered;
-    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    sorted.sort_by_key(|a| a.name.to_lowercase());
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -395,7 +395,7 @@ pub fn populate_vpn_sidebar(
                 let action = gio::SimpleAction::new("delete", None);
                 action.connect_activate(move |_, _| {
                     let dialog = adw::AlertDialog::new(
-                        Some(&format!("Delete \"{}\"?", profile_name)),
+                        Some(&format!("Delete \"{profile_name}\"?")),
                         Some("This cannot be undone."),
                     );
                     dialog.add_response("cancel", "Cancel");

@@ -430,12 +430,12 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         test_btn,
         push_key_btn,
         push_key_api_btn,
-        rdp_btn,
-        vnc_btn,
-        set_inform_btn,
         edit_btn,
         delete_btn,
         pin_btn,
+        rdp_btn,
+        vnc_btn,
+        set_inform_btn,
         fg_dashboard_group,
         fg_firmware_row,
         fg_update_badge,
@@ -489,9 +489,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
     // Show jump host name if configured.
     if let Some(jump_id) = host.proxy_jump {
         let jump_name = all_hosts.iter()
-            .find(|h| h.id == jump_id)
-            .map(|h| format!("{} ({})", h.label, h.hostname))
-            .unwrap_or_else(|| jump_id.to_string());
+            .find(|h| h.id == jump_id).map_or_else(|| jump_id.to_string(), |h| format!("{} ({})", h.label, h.hostname));
         detail.jump_host_row.set_subtitle(&jump_name);
         detail.jump_host_row.set_visible(true);
     } else {
@@ -542,7 +540,7 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
 
 /// Populate the port forwards listbox with saved entries.
 ///
-/// `active_ids` is a set of forward_ids currently active (from daemon), keyed
+/// `active_ids` is a set of `forward_ids` currently active (from daemon), keyed
 /// by `"local_port:remote_host:remote_port"` → `forward_id`.
 pub fn populate_port_forwards_list(
     listbox: &gtk4::ListBox,
@@ -864,31 +862,28 @@ pub fn refresh_host_key_row(
 /// `None` means the daemon has never connected to this host, so there is
 /// nothing to forget and the button stays insensitive.
 pub fn apply_host_key(detail: &SshHostDetail, fingerprint: Option<&str>) {
-    match fingerprint {
-        Some(fp) => {
-            // The full SHA-256 hex is 64 characters and would wrap the row.
-            // First and last 8 are plenty to eyeball against a mismatch
-            // message, and the tooltip carries the whole thing for anyone
-            // comparing it properly. Sliced by char, not by byte: the string
-            // arrives over D-Bus from a file on disk, and a hand-edited
-            // known_hosts.json should not be able to panic the GUI.
-            let chars: Vec<char> = fp.chars().collect();
-            let short = if chars.len() > 20 {
-                let head: String = chars[..8].iter().collect();
-                let tail: String = chars[chars.len() - 8..].iter().collect();
-                format!("{head}…{tail}")
-            } else {
-                fp.to_owned()
-            };
-            detail.host_key_row.set_subtitle(&format!("SHA256 {short}"));
-            detail.host_key_row.set_tooltip_text(Some(fp));
-            detail.forget_host_key_btn.set_sensitive(true);
-        }
-        None => {
-            detail.host_key_row.set_subtitle("Not yet recorded");
-            detail.host_key_row.set_tooltip_text(None);
-            detail.forget_host_key_btn.set_sensitive(false);
-        }
+    if let Some(fp) = fingerprint {
+        // The full SHA-256 hex is 64 characters and would wrap the row.
+        // First and last 8 are plenty to eyeball against a mismatch
+        // message, and the tooltip carries the whole thing for anyone
+        // comparing it properly. Sliced by char, not by byte: the string
+        // arrives over D-Bus from a file on disk, and a hand-edited
+        // known_hosts.json should not be able to panic the GUI.
+        let chars: Vec<char> = fp.chars().collect();
+        let short = if chars.len() > 20 {
+            let head: String = chars[..8].iter().collect();
+            let tail: String = chars[chars.len() - 8..].iter().collect();
+            format!("{head}…{tail}")
+        } else {
+            fp.to_owned()
+        };
+        detail.host_key_row.set_subtitle(&format!("SHA256 {short}"));
+        detail.host_key_row.set_tooltip_text(Some(fp));
+        detail.forget_host_key_btn.set_sensitive(true);
+    } else {
+        detail.host_key_row.set_subtitle("Not yet recorded");
+        detail.host_key_row.set_tooltip_text(None);
+        detail.forget_host_key_btn.set_sensitive(false);
     }
 }
 
@@ -896,7 +891,7 @@ pub fn apply_host_key(detail: &SshHostDetail, fingerprint: Option<&str>) {
 // FortiGate dashboard
 // ---------------------------------------------------------------------------
 
-/// Kick off an async fetch of the FortiGate system status and send the result
+/// Kick off an async fetch of the `FortiGate` system status and send the result
 /// back to the GTK main thread via `AppMsg::FortigateStatus`.
 pub fn refresh_fortigate_dashboard(
     host_id: String,
@@ -983,8 +978,7 @@ pub fn refresh_fortigate_dashboard(
                     let has_update = results
                         .get("available")
                         .and_then(|a| a.as_array())
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false);
+                        .is_some_and(|a| !a.is_empty());
                     if has_update {
                         data["firmware_update_available"] = Value::Bool(true);
                         // Include the latest available version for display.
@@ -1022,7 +1016,7 @@ pub fn refresh_fortigate_dashboard(
     });
 }
 
-/// Apply FortiGate status data to the dashboard rows.
+/// Apply `FortiGate` status data to the dashboard rows.
 pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
     // Handle error case — show "Unreachable" in all fields.
     if data.get("error").is_some() {
@@ -1050,7 +1044,7 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
     };
 
     let version = get_str("version");
-    let build = data.get("build").and_then(|v| v.as_u64()).unwrap_or(0);
+    let build = data.get("build").and_then(serde_json::Value::as_u64).unwrap_or(0);
     let firmware = if build > 0 {
         format!("{version} (build {build})")
     } else {
@@ -1061,7 +1055,7 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
     // Show "Update available" badge if firmware update info is present.
     let has_fw_update = data
         .get("firmware_update_available")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     detail.fg_update_badge.set_visible(has_fw_update);
     if has_fw_update {
@@ -1084,22 +1078,18 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
     let resource = data.get("resource");
     let cpu = resource
         .and_then(|r| r.get("cpu"))
-        .and_then(|v| v.as_u64())
-        .or_else(|| results.get("cpu").and_then(|v| v.as_u64()))
-        .or_else(|| data.get("cpu").and_then(|v| v.as_u64()))
-        .map(|v| format!("{v}%"))
-        .unwrap_or_else(|| "--".to_owned());
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| results.get("cpu").and_then(serde_json::Value::as_u64))
+        .or_else(|| data.get("cpu").and_then(serde_json::Value::as_u64)).map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
     detail.fg_cpu_row.set_subtitle(&cpu);
 
     // Memory — also check "ram" key used by some firmware versions.
     let mem = resource
         .and_then(|r| r.get("mem").or_else(|| r.get("ram")))
-        .and_then(|v| v.as_u64())
-        .or_else(|| results.get("mem").and_then(|v| v.as_u64()))
-        .or_else(|| results.get("ram").and_then(|v| v.as_u64()))
-        .or_else(|| data.get("mem").and_then(|v| v.as_u64()))
-        .map(|v| format!("{v}%"))
-        .unwrap_or_else(|| "--".to_owned());
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| results.get("mem").and_then(serde_json::Value::as_u64))
+        .or_else(|| results.get("ram").and_then(serde_json::Value::as_u64))
+        .or_else(|| data.get("mem").and_then(serde_json::Value::as_u64)).map_or_else(|| "--".to_owned(), |v| format!("{v}%"));
     detail.fg_memory_row.set_subtitle(&mem);
 }
 
@@ -1246,10 +1236,10 @@ pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&s
         }
     }
 
-    if preferred != "auto" {
-        Err(format!("RDP client '{preferred}' not found — install it or switch to Auto in Settings"))
-    } else {
+    if preferred == "auto" {
         Err("No RDP client found — install freerdp or remmina".into())
+    } else {
+        Err(format!("RDP client '{preferred}' not found — install it or switch to Auto in Settings"))
     }
 }
 
@@ -1286,11 +1276,10 @@ pub fn launch_vnc(hostname: &str, port: u16) -> Result<String, String> {
 /// Check whether an executable is on PATH.
 fn which_exists(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
+        .is_some_and(|paths| {
             std::env::split_paths(&paths)
                 .any(|dir| dir.join(name).is_file())
         })
-        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -1351,9 +1340,9 @@ pub fn show_compliance_dialog(parent: &adw::ApplicationWindow, data: &Value) {
     }
 
     let score = data.get("score").and_then(|v| v.as_str()).unwrap_or("--");
-    let passed = data.get("passed").and_then(|v| v.as_u64()).unwrap_or(0);
-    let failed = data.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
-    let total = data.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    let passed = data.get("passed").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let failed = data.get("failed").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let total = data.get("total").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
     let mut body = format!("Score: {score}  ({passed} passed, {failed} failed, {total} total)\n\n");
 

@@ -5,7 +5,9 @@
 //! + creds inline on each `Host`, conflating "an SSH host that
 //! happens to be a `UniFi` controller machine" with "any `UniFi`
 //! controller the MSP runs anywhere." The new model treats
-//! controllers as first-class top-level entities. Reasoning:
+//! controllers as first-class top-level entities.
+//!
+//! Reasoning:
 //!
 //!   - Most MSP `UniFi` controllers run on UDM-Pro / cloud-key /
 //!     a hosted VM and we never SSH them directly.
@@ -785,10 +787,11 @@ async fn list_devices_integration(
             };
             out.push(device);
         }
-        let total = parsed
+        let total = usize::try_from(parsed
             .get("totalCount")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(out.len() as u64) as usize;
+            .unwrap_or(u64::try_from(out.len()).unwrap_or(u64::MAX)))
+            .unwrap_or(usize::MAX);
         offset += data.len();
         if offset >= total {
             break;
@@ -962,13 +965,13 @@ pub async fn devmgr_command(
 /// sysinfo. Dispatches based on auth method:
 ///
 ///   - `ApiKey`  → Integration API at
-///                 `/proxy/network/integration/v1/info`. The
-///                 classic /api/.../stat/sysinfo path requires
-///                 a cookie session and 404s for API-key
-///                 callers, so we MUST take the Integration
-///                 API path here.
+///     `/proxy/network/integration/v1/info`. The
+///     classic /api/.../stat/sysinfo path requires
+///     a cookie session and 404s for API-key
+///     callers, so we MUST take the Integration
+///     API path here.
 ///   - `Password`→ classic /api/s/<site>/stat/sysinfo via the
-///                 logged-in cookie session.
+///     logged-in cookie session.
 pub async fn test_connection(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,

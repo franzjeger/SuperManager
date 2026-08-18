@@ -8,7 +8,7 @@ use crate::protocol::{self, Response};
 use crate::server::{get_uuid_param, EngineServer};
 
 impl EngineServer {
-    pub(crate) async fn handle_provisioning_list_templates(&self, id: u64) -> Response {
+    pub(crate) fn handle_provisioning_list_templates(&self, id: u64) -> Response {
         match crate::provisioning::list_templates() {
             Ok(list) => match serde_json::to_value(&list) {
                 Ok(v) => Response::ok(id, v),
@@ -18,7 +18,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_provisioning_render(
+    pub(crate) fn handle_provisioning_render(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -125,7 +125,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_provisioning_list_deployments(
+    pub(crate) fn handle_provisioning_list_deployments(
         &self,
         id: u64,
         params: serde_json::Value,

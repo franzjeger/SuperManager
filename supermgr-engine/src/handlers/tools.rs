@@ -45,7 +45,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_cve_feed_status(&self, id: u64) -> Response {
+    pub(crate) fn handle_cve_feed_status(&self, id: u64) -> Response {
         let cache = crate::cve_feed::load();
         let payload = serde_json::json!({
             "total": cache.entries.len(),

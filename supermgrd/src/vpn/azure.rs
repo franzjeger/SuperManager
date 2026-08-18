@@ -14,7 +14,7 @@
 //!    - `tls-auth.key`   — `OpenVPN` static key converted from `server_secret_hex` (tls-auth dir 1, SHA256).
 //!    - `ca.pem`         — PEM CA certificate from the profile.
 //!    - `auth.txt`       — Two-line `openvpn --auth-user-pass` credentials file
-//!                         (`<upn>\n<access_token>`).
+//!     (`<upn>\n<access_token>`).
 //!    - `client.ovpn`    — Assembled `OpenVPN` configuration.
 //! 6. Spawn `openvpn --config client.ovpn` and capture stdout/stderr until
 //!    "Initialization Sequence Completed" appears (or the process exits with
@@ -26,6 +26,7 @@
 //! Kill the openvpn child, delete the temp directory, revert DNS.
 
 use std::{
+    fmt::Write as _,
     net::IpAddr,
     path::PathBuf,
     sync::Arc,
@@ -34,6 +35,7 @@ use std::{
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -515,8 +517,8 @@ fn build_ovpn_config(
     }
     s.push_str("</ca>\n");
 
-    s.push_str(&format!("auth-user-pass {auth_path}\n"));
-    s.push_str(&format!("tls-auth {key_path} 1\n"));
+    let _ = writeln!(s, "auth-user-pass {auth_path}");
+    let _ = writeln!(s, "tls-auth {key_path} 1");
 
     if full_tunnel || cfg.routes.is_empty() {
         s.push_str("redirect-gateway def1\n");
@@ -524,10 +526,10 @@ fn build_ovpn_config(
         for route in &cfg.routes {
             match route {
                 ipnet::IpNet::V4(n) => {
-                    s.push_str(&format!("route {} {}\n", n.network(), n.netmask()));
+                    let _ = writeln!(s, "route {} {}", n.network(), n.netmask());
                 }
                 ipnet::IpNet::V6(n) => {
-                    s.push_str(&format!("route-ipv6 {}/{}\n", n.network(), n.prefix_len()));
+                    let _ = writeln!(s, "route-ipv6 {}/{}", n.network(), n.prefix_len());
                 }
             }
         }
@@ -553,7 +555,10 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
     }
 
     let ifindex: i32 = match nix::net::if_::if_nametoindex(iface_name) {
-        Ok(idx) => idx as i32,
+        Ok(idx) => if let Ok(v) = i32::try_from(idx) { v } else {
+            error!("Azure DNS: if_nametoindex({iface_name}) index too large");
+            return None;
+        },
         Err(e) => {
             error!("Azure DNS: if_nametoindex({iface_name}): {e}");
             return None;
@@ -630,9 +635,8 @@ async fn revert_link_dns(ifindex: i32) {
 #[async_trait]
 impl VpnBackend for AzureBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
-        let cfg = match &profile.config {
-            ProfileConfig::AzureVpn(c) => c,
-            _ => return Err(BackendError::Interface("wrong profile type for AzureBackend".into())),
+        let ProfileConfig::AzureVpn(cfg) = &profile.config else {
+            return Err(BackendError::Interface("wrong profile type for AzureBackend".into()));
         };
 
         info!("Azure: connecting profile '{}'", profile.name);
@@ -737,7 +741,6 @@ impl VpnBackend for AzureBackend {
         })?;
 
         // Merge stdout + stderr into a single line stream.
-        use tokio::io::{AsyncBufReadExt, BufReader};
         let mut out_lines = BufReader::new(stdout).lines();
         let mut err_lines = BufReader::new(stderr).lines();
 
@@ -861,13 +864,13 @@ impl VpnBackend for AzureBackend {
             info!("Azure: stopping openvpn child");
             // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
             let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
+                nix::unistd::Pid::from_raw(i32::try_from(child.id().unwrap_or(0)).unwrap_or(0)),
                 nix::sys::signal::Signal::SIGTERM,
             );
-            if let Ok(_) = tokio::time::timeout(
+            if tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 child.wait(),
-            ).await { info!("Azure: openvpn exited cleanly") } else {
+            ).await.is_ok() { info!("Azure: openvpn exited cleanly") } else {
                 warn!("Azure: openvpn did not exit in 5 s, killing");
                 let _ = child.kill().await;
                 let _ = child.wait().await;

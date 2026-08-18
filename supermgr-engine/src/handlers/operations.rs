@@ -9,7 +9,7 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_operation_list(&self, id: u64) -> Response {
+    pub(crate) fn handle_operation_list(&self, id: u64) -> Response {
         let list = self.operations.list();
         match serde_json::to_value(&list) {
             Ok(v) => Response::ok(id, v),
@@ -17,7 +17,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_operation_cancel(
+    pub(crate) fn handle_operation_cancel(
         &self,
         id: u64,
         params: serde_json::Value,

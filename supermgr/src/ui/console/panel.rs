@@ -209,13 +209,12 @@ pub fn build_console_page(
             let text = text.clone();
             let app_state = Arc::clone(&app_state);
             let (messages, context) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let vpn = match &s.vpn_state {
                     VpnState::Connected { profile_id, .. } => {
                         let name = s.profiles.iter()
                             .find(|p| p.id == *profile_id)
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("unknown");
+                            .map_or("unknown", |p| p.name.as_str());
                         format!("VPN: connected to '{name}'")
                     }
                     VpnState::Disconnected => "VPN: disconnected".into(),
@@ -250,8 +249,7 @@ pub fn build_console_page(
                     .map(|(id, ok)| {
                         let label = s.hosts.iter()
                             .find(|h| h.id.to_string() == *id)
-                            .map(|h| h.label.as_str())
-                            .unwrap_or(id);
+                            .map_or(id, |h| &h.label);
                         format!("- {}: {}", label, if *ok { "reachable" } else { "UNREACHABLE" })
                     })
                     .collect();
@@ -306,7 +304,7 @@ pub fn build_console_page(
 
                     match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
                         Ok(updated_messages) => {
-                            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages = updated_messages;
+                            app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).console_messages = updated_messages;
                         }
                         Err(e) => {
                             let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
@@ -344,7 +342,7 @@ pub fn build_console_page(
         let app_state = Arc::clone(app_state);
         clear_btn.connect_clicked(move |_| {
             chat_buffer.set_text("");
-            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages.clear();
+            app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).console_messages.clear();
             super::claude::reset_session();
             append_system_msg(&chat_buffer, "Conversation cleared.\n");
         });

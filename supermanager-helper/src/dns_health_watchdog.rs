@@ -182,7 +182,7 @@ fn watchdog_loop() {
                 fallbacks = ?fallbacks,
                 "DNS unhealthy 30s — forcing State to fallback list"
             );
-            match crate::tailscale::force_dns_state(crate::tailscale::SetDnsArgs {
+            match crate::tailscale::force_dns_state(&crate::tailscale::SetDnsArgs {
                 servers: fallbacks,
             }) {
                 Ok(_) => {

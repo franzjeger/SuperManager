@@ -116,10 +116,10 @@ pub fn score_hosts(
             let base = base_weight(f.finding.severity);
             let days = (now - f.first_seen).num_days().max(0);
             oldest_days = oldest_days.max(days);
-            let age_factor = (1.0 + 0.02 * days as f32).min(2.0);
+            let age_factor = (1.0 + 0.02 * (days as f32)).min(2.0);
             weight_sum += base * age_factor * exposure;
         }
-        let score = weight_sum.min(100.0).round() as u8;
+        let score = (weight_sum.min(100.0).round() as u8).min(100);
         let band = RiskBand::from_score(score);
         let hint = format!(
             "{}{} open · oldest {}d",
@@ -131,7 +131,7 @@ pub fn score_hosts(
             host_ip,
             score,
             band,
-            open_findings: fs.len() as u32,
+            open_findings: u32::try_from(fs.len()).unwrap_or(u32::MAX),
             hint,
             critical: crit,
             high,
@@ -139,7 +139,7 @@ pub fn score_hosts(
             low: low_,
         });
     }
-    out.sort_by(|a, b| b.score.cmp(&a.score));
+    out.sort_by_key(|h| std::cmp::Reverse(h.score));
     out
 }
 

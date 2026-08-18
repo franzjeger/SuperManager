@@ -499,10 +499,7 @@ fn parse_sa_bytes(output: &str) -> (u64, u64) {
             None => continue,
         };
         // after_spi = "<N> bytes, ..."
-        let bytes_token = match after_spi.split_whitespace().next() {
-            Some(t) => t,
-            None => continue,
-        };
+        let Some(bytes_token) = after_spi.split_whitespace().next() else { continue };
         if let Ok(n) = bytes_token.parse::<u64>() {
             match dir {
                 "in" => bytes_in += n,
@@ -656,7 +653,10 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
     }
 
     let ifindex: i32 = match nix::net::if_::if_nametoindex(iface_name) {
-        Ok(idx) => idx as i32,
+        Ok(idx) => if let Ok(v) = i32::try_from(idx) { v } else {
+            error!("if_nametoindex({iface_name}) index too large");
+            return None;
+        },
         Err(e) => {
             error!("if_nametoindex({iface_name}): {e}");
             return None;

@@ -185,13 +185,11 @@ impl EngineServer {
 
     pub(crate) async fn handle_ssh_import_key(&self, id: u64, params: serde_json::Value) -> Response {
         let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Imported");
-        let public_key = match params.get("public_key").and_then(|v| v.as_str()) {
-            Some(pk) => pk,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing public_key"),
+        let Some(public_key) = params.get("public_key").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing public_key");
         };
-        let private_key_pem = match params.get("private_key_pem").and_then(|v| v.as_str()) {
-            Some(pk) => pk,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing private_key_pem"),
+        let Some(private_key_pem) = params.get("private_key_pem").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing private_key_pem");
         };
         let key_type_str = params.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519");
 
@@ -237,11 +235,11 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
 
-    pub(crate) async fn handle_ssh_import_keys_scan(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_ssh_import_keys_scan(id: u64, params: &serde_json::Value) -> Response {
         let directory = params.get("directory").and_then(|v| v.as_str()).unwrap_or("~/.ssh");
-        let expanded = if directory.starts_with("~/") {
+        let expanded = if let Some(rest) = directory.strip_prefix("~/") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-            format!("{}/{}", home, &directory[2..])
+            format!("{home}/{rest}")
         } else {
             directory.to_owned()
         };
@@ -253,27 +251,24 @@ impl EngineServer {
     }
 
     pub(crate) async fn handle_ssh_add_host(&self, id: u64, params: serde_json::Value) -> Response {
-        let host_json = match params.get("host_json").and_then(|v| v.as_str()) {
-            Some(j) => j,
-            None => {
-                // Try parsing params directly as a host.
-                match serde_json::from_value::<Host>(params.clone()) {
-                    Ok(mut host) => {
-                        host.id = uuid::Uuid::new_v4();
-                        host.created_at = chrono::Utc::now();
-                        host.updated_at = chrono::Utc::now();
-                        let mut state = self.state.lock().await;
-                        if let Err(e) = state.save_ssh_host(&host) {
-                            return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
-                        }
-                        let host_id = host.id;
-                        state.ssh_hosts.insert(host.id, host);
-                        return Response::ok(id, serde_json::json!(host_id.to_string()));
+        let Some(host_json) = params.get("host_json").and_then(|v| v.as_str()) else {
+            // Try parsing params directly as a host.
+            match serde_json::from_value::<Host>(params.clone()) {
+                Ok(mut host) => {
+                    host.id = uuid::Uuid::new_v4();
+                    host.created_at = chrono::Utc::now();
+                    host.updated_at = chrono::Utc::now();
+                    let mut state = self.state.lock().await;
+                    if let Err(e) = state.save_ssh_host(&host) {
+                        return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
                     }
-                    Err(_) => return Response::err(id, protocol::INVALID_PARAMS, "missing host_json"),
+                    let host_id = host.id;
+                    state.ssh_hosts.insert(host.id, host);
+                    return Response::ok(id, serde_json::json!(host_id.to_string()));
                 }
+                Err(_) => return Response::err(id, protocol::INVALID_PARAMS, "missing host_json"),
             }
-        };
+    };
 
         let mut host: Host = match serde_json::from_str(host_json) {
             Ok(h) => h,
@@ -350,9 +345,8 @@ impl EngineServer {
         };
 
         let mut state = self.state.lock().await;
-        let mut host = match state.ssh_hosts.get(&p.host_id).cloned() {
-            Some(h) => h,
-            None => return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {}", p.host_id)),
+        let Some(mut host) = state.ssh_hosts.get(&p.host_id).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {}", p.host_id));
         };
 
         if let Err(e) = merge_host_update(&mut host, &incoming) {
@@ -445,9 +439,8 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let password = match params.get("password").and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing password"),
+        let Some(password) = params.get("password").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing password");
         };
 
         let secret_label = format!("supermgr/ssh/host/{host_id}/password");
@@ -486,9 +479,8 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let certificate = match params.get("certificate").and_then(|v| v.as_str()) {
-            Some(c) => c,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing certificate"),
+        let Some(certificate) = params.get("certificate").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing certificate");
         };
         if let Err(msg) = validate_openssh_certificate(certificate) {
             return Response::err(id, protocol::INVALID_PARAMS, msg);
@@ -582,7 +574,7 @@ impl EngineServer {
         let api_port = params
             .get("api_port")
             .and_then(serde_json::Value::as_u64)
-            .map_or(443, |v| v as u16);
+            .map_or(443, |v| u16::try_from(v).unwrap_or(443));
 
         let label = format!("ssh/{}/fortigate-api-token", host_id.simple());
         if let Err(e) = self.secrets.store(&label, token.as_bytes()).await {
@@ -625,13 +617,12 @@ impl EngineServer {
 
         let label = {
             let state = self.state.lock().await;
-            let host = match state.ssh_hosts.get(&host_id) {
-                Some(h) => h,
-                None => return Response::err(
+            let Some(host) = state.ssh_hosts.get(&host_id) else {
+                return Response::err(
                     id,
                     protocol::INVALID_PARAMS,
                     "host not found".to_owned(),
-                ),
+                );
             };
             host.api_token_ref.as_ref().map(|r| r.0.clone())
         };
@@ -644,9 +635,8 @@ impl EngineServer {
         }
 
         let mut state = self.state.lock().await;
-        let host = match state.ssh_hosts.get_mut(&host_id) {
-            Some(h) => h,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned()),
+        let Some(host) = state.ssh_hosts.get_mut(&host_id) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned());
         };
         host.api_token_ref = None;
         host.updated_at = chrono::Utc::now();

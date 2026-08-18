@@ -87,6 +87,8 @@ russh-sftp  = "2.0"
 russh-keys  = "0.46"
 # Random number generation
 rand        = "0.9"
+# Signed/unsigned integer casts (clippy pedantic cast_sign_loss / cast_possible_truncation)
+num-traits  = { version = "0.2", default-features = false, features = ["std"] }
 # Template engine for FortiGate / UniFi configuration generation.
 # Tera is Jinja-like, supports loops + conditionals + filters,
 # and is embedded so users can ship custom templates as plain

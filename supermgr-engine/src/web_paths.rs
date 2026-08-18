@@ -433,14 +433,13 @@ const PATH_RULES: &[PathRule] = &[
 pub async fn enumerate(host: &str, port: u16, tls: bool) -> (Vec<PathProbe>, Vec<Finding>) {
     let scheme = if tls { "https" } else { "http" };
     let base = format!("{scheme}://{host}:{port}");
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(4))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (Vec::new(), Vec::new()),
+    else {
+        return (Vec::new(), Vec::new());
     };
 
     let sema = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
@@ -460,7 +459,7 @@ pub async fn enumerate(host: &str, port: u16, tls: bool) -> (Vec<PathProbe>, Vec
         if let Ok(Some((probe, maybe_finding))) = f.await {
             probes.push(probe);
             if let Some(mut finding) = maybe_finding {
-                finding.host_ip = host.to_owned();
+                host.clone_into(&mut finding.host_ip);
                 finding.port = Some(port);
                 finding.service = Some(if tls { "https".into() } else { "http".into() });
                 findings.push(finding);

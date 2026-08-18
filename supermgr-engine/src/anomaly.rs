@@ -89,17 +89,19 @@ pub fn save(customer_slug: &str, host_ip: &str, baseline: &HostBaseline) -> Resu
     let path = baseline_path(customer_slug, host_ip);
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(baseline).context("serialize baseline")?;
-    std::fs::write(&tmp, bytes).with_context(|| format!("write {tmp:?}"))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename {path:?}"))?;
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 
 /// Compare `observed_ports` from the latest scan against the
 /// baseline for `host_ip`. Returns:
-///   - findings for ports newly observed (not in stable, not in pending);
-///   - findings for ports that existed before but are now missing
-///     (stable port disappeared — could be a host going down OR
-///     a service being stopped intentionally).
+///
+/// - findings for ports newly observed (not in stable, not in pending);
+/// - findings for ports that existed before but are now missing
+///   (stable port disappeared — could be a host going down OR
+///   a service being stopped intentionally).
+///
 /// Side effect: persists the updated baseline.
 pub fn reconcile_host(
     customer_slug: &str,

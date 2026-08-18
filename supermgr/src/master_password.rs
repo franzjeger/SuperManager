@@ -211,7 +211,7 @@ pub fn migrate_from_legacy_field(legacy_hash: &str) {
 mod tests {
     use super::*;
 
-    /// Run a closure with a temporary $XDG_CONFIG_HOME so each test gets
+    /// Run a closure with a temporary $`XDG_CONFIG_HOME` so each test gets
     /// its own hash file and they don't stomp on each other.
     ///
     /// `XDG_CONFIG_HOME` is process-global env state; cargo runs tests
@@ -225,7 +225,7 @@ mod tests {
         let _guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("XDG_CONFIG_HOME");

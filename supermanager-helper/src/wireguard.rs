@@ -38,6 +38,7 @@
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -222,7 +223,7 @@ impl WireGuard {
             });
         }
 
-        let interface = detect_interface(&wg_quick, &name).await.ok();
+        let interface = detect_interface(&wg_quick, &name).ok();
 
         Ok(WgConnectResult {
             success: true,
@@ -356,19 +357,16 @@ impl WireGuard {
     pub async fn status(&mut self, args: &WgStatusArgs) -> anyhow::Result<WgStatusResult> {
         let name = interface_name(&args.profile_id);
 
-        let utun_name = match read_name_mapping(&name) {
-            Some(u) => u,
-            None => {
-                // No mapping file → tunnel was never up, or it was
-                // brought down (wg-quick removes the file on `down`).
-                return Ok(WgStatusResult {
-                    state: WgState::Disconnected,
-                    rx_bytes: None,
-                    tx_bytes: None,
-                    last_handshake_unix: None,
-                    peer_endpoint: None,
-                });
-            }
+        let Some(utun_name) = read_name_mapping(&name) else {
+            // No mapping file → tunnel was never up, or it was
+            // brought down (wg-quick removes the file on `down`).
+            return Ok(WgStatusResult {
+                state: WgState::Disconnected,
+                rx_bytes: None,
+                tx_bytes: None,
+                last_handshake_unix: None,
+                peer_endpoint: None,
+            });
         };
 
         let wg_quick = locate_wg_quick()?;
@@ -513,11 +511,10 @@ fn interface_name(profile_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
     let digest = hasher.finalize();
-    let hex: String = digest
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let mut hex = String::new();
+    for b in digest.iter().take(4) {
+        let _ = write!(hex, "{b:02x}");
+    }
     format!("smwg{hex}")
 }
 
@@ -560,7 +557,7 @@ fn interface_exists(name: &str) -> bool {
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from
 /// the mapping file rather than re-deriving it via `wg show`.
-async fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
+fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
     read_name_mapping(name).ok_or_else(|| {
         anyhow!(
             "no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"

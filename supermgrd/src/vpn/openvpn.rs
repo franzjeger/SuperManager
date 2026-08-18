@@ -4,15 +4,15 @@
 //!
 //! 1. `connect`:
 //!    a. If credentials are configured, write a temporary `.ovpn` with an
-//!       `<auth-user-pass>` inline block appended.
+//!   `<auth-user-pass>` inline block appended.
 //!    b. Run `openvpn3 config-import --config <tmp> --name <uuid>` to load
-//!       the configuration into the openvpn3 config manager.  The temp file
-//!       is deleted immediately after import.
+//!   the configuration into the openvpn3 config manager.  The temp file
+//!   is deleted immediately after import.
 //!    c. Run `openvpn3 config-manage --config <uuid> --allow-compression asym`
-//!       so the client accepts server-pushed compression (VORACLE-safe: only
-//!       receives compressed, never sends).
+//!   so the client accepts server-pushed compression (VORACLE-safe: only
+//!   receives compressed, never sends).
 //!    d. Run `openvpn3 session-start --config <uuid> --background`.
-//!       Parse the session path from stdout.
+//!   Parse the session path from stdout.
 //! 2. `disconnect`:
 //!    a. `openvpn3 session-manage --session-path <path> --disconnect`
 //!    b. `openvpn3 config-remove --config <uuid> --force`
@@ -167,9 +167,8 @@ impl OpenVpnBackend {
 #[async_trait]
 impl VpnBackend for OpenVpnBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
-        let cfg = match &profile.config {
-            ProfileConfig::OpenVpn(c) => c,
-            _ => return Err(BackendError::Interface("wrong profile type".into())),
+        let ProfileConfig::OpenVpn(cfg) = &profile.config else {
+            return Err(BackendError::Interface("wrong profile type".into()));
         };
 
         info!("OpenVPN3: starting session for '{}'", profile.name);
@@ -389,10 +388,7 @@ impl VpnBackend for OpenVpnBackend {
             'poll: for _ in 0..MAX_POLLS {
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
 
-                let (list_out, _, _) = match run_openvpn3(&["sessions-list"]).await {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
+                let Ok((list_out, _, _)) = run_openvpn3(&["sessions-list"]).await else { continue };
 
                 // Find the block for our session.
                 if !list_out.contains(session_path.as_str()) {
@@ -412,7 +408,7 @@ impl VpnBackend for OpenVpnBackend {
                     if in_block {
                         let trimmed = line.trim();
                         if let Some(s) = trimmed.strip_prefix("Status:") {
-                            status_line = s.trim().to_owned();
+                            s.trim().clone_into(&mut status_line);
                         }
                         // openvpn3 sessions-list shows the device in two formats:
                         //   "Tunnel Device: tun0"   (standalone line, older builds)
@@ -423,7 +419,7 @@ impl VpnBackend for OpenVpnBackend {
                                 let after = trimmed[pos + "Device:".len()..].trim();
                                 if !after.is_empty() && !after.starts_with("(not") {
                                     if let Some(name) = after.split_whitespace().next() {
-                                        found_iface = name.to_owned();
+                                        name.clone_into(&mut found_iface);
                                     }
                                 }
                             }
@@ -435,7 +431,7 @@ impl VpnBackend for OpenVpnBackend {
                     }
                 }
 
-                last_status = status_line.clone();
+                status_line.clone_into(&mut last_status);
 
                 // Log every status change so the daemon log shows progression.
                 debug!("OpenVPN3: session status = '{status_line}', device = '{found_iface}'");

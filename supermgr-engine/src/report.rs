@@ -21,6 +21,8 @@
 //!   6. Audit log
 //!   7. Generated-at footer
 
+use std::fmt::Write as _;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 
@@ -76,12 +78,8 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     //   2. `xelatex`/`lualatex` — Unicode-friendly LaTeX (MacTeX)
     //   3. `pdflatex`   — classic, ASCII-only (BasicTeX)
     //   4. `wkhtmltopdf`/`weasyprint` — HTML→PDF, no LaTeX needed
-    let engine = match pick_pdf_engine() {
-        Some(e) => e,
-        // anyhow::Error::new() wraps the EngineError so the handler
-        // can `downcast_ref::<EngineError>()` to recognise this
-        // specific case structurally — not by error-message regex.
-        None => return Err(anyhow::Error::new(crate::error::EngineError::PdfEngineMissing)),
+    let Some(engine) = pick_pdf_engine() else {
+        return Err(anyhow::Error::new(crate::error::EngineError::PdfEngineMissing));
     };
 
     // Markdown input — written + closed before invoking pandoc.
@@ -138,7 +136,7 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     }
 
     let bytes = std::fs::read(&out_path)
-        .with_context(|| format!("read pdf output {out_path:?}"))?;
+        .with_context(|| format!("read pdf output {}", out_path.display()))?;
     let _ = std::fs::remove_file(&out_path);
     // `in_file` (still held) drops here and unlinks the markdown.
     Ok(bytes)
@@ -264,36 +262,27 @@ hr{border:0;border-top:1px solid #d2d2d7;margin:2em 0}
 
 fn title_block(out: &mut String, input: &ReportInput<'_>) {
     let e = input.engagement;
-    out.push_str(&format!("# {}\n\n", e.title));
+    let _ = write!(out, "# {}\n\n", e.title);
     out.push_str("| | |\n|---|---|\n");
     if let Some(slug) = input.customer_slug {
         if !slug.is_empty() {
-            out.push_str(&format!("| Customer | `{slug}` |\n"));
+            let _ = writeln!(out, "| Customer | `{slug}` |");
         }
     }
-    out.push_str(&format!(
-        "| Engagement ID | `{}` |\n",
-        e.id
-    ));
-    out.push_str(&format!(
-        "| Started | {} |\n",
-        e.started_at.format("%Y-%m-%d")
-    ));
-    out.push_str(&format!(
-        "| Expires | {} |\n",
-        e.expires_at.format("%Y-%m-%d")
-    ));
+    let _ = writeln!(out, "| Engagement ID | `{}` |", e.id);
+    let _ = writeln!(out, "| Started | {} |", e.started_at.format("%Y-%m-%d"));
+    let _ = writeln!(out, "| Expires | {} |", e.expires_at.format("%Y-%m-%d"));
     if !e.authorized_by.is_empty() {
-        out.push_str(&format!("| Authorized by | {} |\n", e.authorized_by));
+        let _ = writeln!(out, "| Authorized by | {} |", e.authorized_by);
     }
     if !e.scope_cidrs.is_empty() {
-        out.push_str(&format!("| Scope CIDRs | {} |\n", e.scope_cidrs.join(", ")));
+        let _ = writeln!(out, "| Scope CIDRs | {} |", e.scope_cidrs.join(", "));
     }
     if !e.scope_hosts.is_empty() {
-        out.push_str(&format!("| Scope hosts | {} |\n", e.scope_hosts.join(", ")));
+        let _ = writeln!(out, "| Scope hosts | {} |", e.scope_hosts.join(", "));
     }
     if !e.exclusions.is_empty() {
-        out.push_str(&format!("| Exclusions | {} |\n", e.exclusions.join(", ")));
+        let _ = writeln!(out, "| Exclusions | {} |", e.exclusions.join(", "));
     }
     out.push('\n');
 }
@@ -325,11 +314,11 @@ fn executive_summary(out: &mut String, input: &ReportInput<'_>) {
     }
 
     out.push_str("## Executive summary\n\n");
-    out.push_str(&format!(
+    let _ = write!(out,
         "{open} open finding(s): **{critical} Critical**, **{high} High**, \
          {medium} Medium, {low} Low. \
          {accepted} accepted-risk, {fixed} resolved.\n\n"
-    ));
+    );
 
     let posture = if critical > 0 {
         "**Critical**. Remediate Critical findings within 7 days."
@@ -342,7 +331,7 @@ fn executive_summary(out: &mut String, input: &ReportInput<'_>) {
     } else {
         "**Clean**. No outstanding findings."
     };
-    out.push_str(&format!("Posture: {posture}\n\n"));
+    let _ = write!(out, "Posture: {posture}\n\n");
 }
 
 fn scope_methodology(out: &mut String, input: &ReportInput<'_>) {
@@ -359,13 +348,13 @@ fn scope_methodology(out: &mut String, input: &ReportInput<'_>) {
         out.push_str("- _(none specified)_\n");
     } else {
         for t in &e.allowed_techniques {
-            out.push_str(&format!("- {}\n", technique_label(t)));
+            let _ = writeln!(out, "- {}", technique_label(*t));
         }
     }
     out.push('\n');
 }
 
-fn technique_label(t: &crate::engagement::Technique) -> &'static str {
+fn technique_label(t: crate::engagement::Technique) -> &'static str {
     use crate::engagement::Technique::{Recon, Discovery, VulnScan, TlsAudit, CredTest, WebExploit, SmbEnum, SnmpRead, Wireless, DosTest};
     match t {
         Recon => "Reconnaissance (passive discovery, ARP, mDNS)",
@@ -392,12 +381,12 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
         out.push_str("_No open findings._\n\n");
         return;
     }
-    let mut by_sev: std::collections::BTreeMap<u8, Vec<&PersistedFinding>> = Default::default();
+    let mut by_sev: std::collections::BTreeMap<u8, Vec<&PersistedFinding>> = std::collections::BTreeMap::default();
     for f in &open {
-        by_sev.entry(sev_rank(&f.finding.severity)).or_default().push(f);
+        by_sev.entry(sev_rank(f.finding.severity)).or_default().push(f);
     }
     for (rank, group) in by_sev {
-        out.push_str(&format!("### {}\n\n", sev_heading(rank)));
+        let _ = write!(out, "### {}\n\n", sev_heading(rank));
         for f in group {
             render_finding(out, f);
         }
@@ -417,15 +406,12 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
         );
         for f in accepted {
             if let Disposition::AcceptedRisk { reason, until } = &f.disposition {
-                out.push_str(&format!(
-                    "- **{}** on `{}`",
-                    f.finding.title, f.finding.host_ip
-                ));
+                let _ = write!(out, "- **{}** on `{}`", f.finding.title, f.finding.host_ip);
                 if let Some(u) = until {
-                    out.push_str(&format!(" — until {}", u.format("%Y-%m-%d")));
+                    let _ = write!(out, " — until {}", u.format("%Y-%m-%d"));
                 }
                 if !reason.is_empty() {
-                    out.push_str(&format!(" — _{reason}_"));
+                    let _ = write!(out, " — _{reason}_");
                 }
                 out.push('\n');
             }
@@ -446,39 +432,28 @@ fn render_finding(out: &mut String, f: &PersistedFinding) {
         .cvss
         .map(|c| format!(" (CVSS {c:.1})"))
         .unwrap_or_default();
-    out.push_str(&format!(
-        "#### {}{}{}\n\n",
-        f.finding.title, cve, cvss
-    ));
-    out.push_str(&format!(
-        "- Host: `{}`{}\n",
+    let _ = write!(out, "#### {}{}{}\n\n", f.finding.title, cve, cvss);
+    let _ = writeln!(out, "- Host: `{}`{}",
         f.finding.host_ip,
         f.finding
             .port
             .map(|p| format!(" — port {p}"))
             .unwrap_or_default(),
-    ));
-    out.push_str(&format!(
-        "- First seen: {}\n",
-        f.first_seen.format("%Y-%m-%d")
-    ));
-    out.push_str(&format!(
-        "- Last seen: {} (across {} scan(s))\n",
+    );
+    let _ = writeln!(out, "- First seen: {}", f.first_seen.format("%Y-%m-%d"));
+    let _ = writeln!(out, "- Last seen: {} (across {} scan(s))",
         f.last_seen.format("%Y-%m-%d"),
         f.scan_count
-    ));
+    );
     let age_days = (Utc::now() - f.first_seen).num_days();
     if age_days > 0 {
-        out.push_str(&format!("- Open for: {age_days} days\n"));
+        let _ = writeln!(out, "- Open for: {age_days} days");
     }
     out.push('\n');
-    out.push_str(&format!("**Detail.** {}\n\n", f.finding.detail));
-    out.push_str(&format!(
-        "**Recommendation.** {}\n\n",
-        f.finding.recommendation
-    ));
+    let _ = write!(out, "**Detail.** {}\n\n", f.finding.detail);
+    let _ = write!(out, "**Recommendation.** {}\n\n", f.finding.recommendation);
     if !f.note.is_empty() {
-        out.push_str(&format!("**Note.** {}\n\n", f.note));
+        let _ = write!(out, "**Note.** {}\n\n", f.note);
     }
 }
 
@@ -492,20 +467,16 @@ fn resolved_section(out: &mut String, input: &ReportInput<'_>) {
         return;
     }
     out.push_str("## Resolved\n\n");
-    out.push_str(&format!(
-        "{} finding(s) resolved during the engagement window.\n\n",
-        resolved.len()
-    ));
+    let _ = write!(out, "{} finding(s) resolved during the engagement window.\n\n", resolved.len());
     out.push_str("| Severity | Title | Host | Resolved |\n");
     out.push_str("|---|---|---|---|\n");
     for f in resolved {
-        out.push_str(&format!(
-            "| {} | {} | `{}` | {} |\n",
-            sev_label(&f.finding.severity),
+        let _ = writeln!(out, "| {} | {} | `{}` | {} |",
+            sev_label(f.finding.severity),
             f.finding.title,
             f.finding.host_ip,
             f.last_seen.format("%Y-%m-%d"),
-        ));
+        );
     }
     out.push('\n');
 }
@@ -519,26 +490,25 @@ fn audit_log(out: &mut String, input: &ReportInput<'_>) {
     out.push_str("| When | Technique | Action | Findings | Notes |\n");
     out.push_str("|---|---|---|---|---|\n");
     for ev in log.iter().rev().take(50) {
-        out.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+        let _ = writeln!(out, "| {} | {} | {} | {} | {} |",
             ev.at.format("%Y-%m-%d %H:%M"),
-            technique_label(&ev.technique),
+            technique_label(ev.technique),
             ev.action,
             ev.findings,
             ev.notes,
-        ));
+        );
     }
     out.push('\n');
 }
 
 fn footer(out: &mut String) {
-    out.push_str(&format!(
+    let _ = write!(out,
         "---\n\nGenerated {} by SuperManager.\n",
         Utc::now().format("%Y-%m-%d %H:%M UTC")
-    ));
+    );
 }
 
-fn sev_rank(s: &Severity) -> u8 {
+fn sev_rank(s: Severity) -> u8 {
     match s {
         Severity::Critical => 0,
         Severity::High => 1,
@@ -548,7 +518,7 @@ fn sev_rank(s: &Severity) -> u8 {
     }
 }
 
-fn sev_label(s: &Severity) -> &'static str {
+fn sev_label(s: Severity) -> &'static str {
     match s {
         Severity::Critical => "Critical",
         Severity::High => "High",

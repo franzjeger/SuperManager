@@ -1,4 +1,4 @@
-//! System tray implementation via `ksni` (StatusNotifierItem).
+//! System tray implementation via `ksni` (`StatusNotifierItem`).
 #![allow(missing_docs)]
 
 use std::sync::mpsc;

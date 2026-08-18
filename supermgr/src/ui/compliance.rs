@@ -3,10 +3,10 @@
 //! # Scope, and why it is narrower than the macOS app's
 //!
 //! Linux hosts only. The daemon exposes the Linux baseline (seven checks over
-//! SSH) and not the FortiGate one, because FortiGate compliance wants a REST
-//! client `supermgrd` does not have. So a FortiGate host appears in the picker
+//! SSH) and not the `FortiGate` one, because `FortiGate` compliance wants a REST
+//! client `supermgrd` does not have. So a `FortiGate` host appears in the picker
 //! with its reason rather than being hidden — "no scan button because this
-//! platform cannot audit FortiGate yet" is a different message from "this
+//! platform cannot audit `FortiGate` yet" is a different message from "this
 //! device has no baseline", and both are better than a silently missing row.
 //!
 //! Which baseline applies to which device type comes from

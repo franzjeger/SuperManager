@@ -479,7 +479,7 @@ impl EngineServer {
     /// asking the user to sign in if we can't bring up the tunnel
     /// afterwards. Returns the detected variant verbatim; the GUI
     /// switches off the discriminator to drive its UI.
-    pub(crate) async fn handle_vpn_check_azure_runtime(&self, id: u64) -> Response {
+    pub(crate) fn handle_vpn_check_azure_runtime(&self, id: u64) -> Response {
         let runtime = crate::azure_oauth::detect_azure_runtime();
         match serde_json::to_value(&runtime) {
             Ok(v) => Response::ok(id, v),

@@ -21,6 +21,7 @@
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -1050,7 +1051,8 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
         // The server presents its IDr as the host IP, so we list it as id-1.
         // We also include `%any` as id-2 so the lookup succeeds regardless
         // of how charon formats the local IDi (IP, FQDN, etc.).
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "    ike-{id} {{\n\
              \x20       id-1 = {host}\n\
              \x20       id-2 = %any\n\
@@ -1059,10 +1061,11 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
             id = id,
             host = args.host,
             secret = escape_swanctl(&args.shared_secret),
-        ));
+        );
     }
     if !args.password.is_empty() {
-        s.push_str(&format!(
+        let _ = write!(
+            s,
             "    eap-{id} {{\n\
              \x20       id = {username}\n\
              \x20       secret = \"{secret}\"\n\
@@ -1070,7 +1073,7 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
             id = id,
             username = args.username,
             secret = escape_swanctl(&args.password),
-        ));
+        );
     }
     s.push_str("}\n");
     s
@@ -1492,12 +1495,15 @@ pub async fn terminate_and_sweep() {
             continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
-            let fname = match entry.file_name().into_string() {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(fname) = entry.file_name().into_string() else {
+                continue;
             };
             // Only touch our namespace; leave other strongSwan configs alone.
-            if !fname.starts_with("supermanager-") || !fname.ends_with(".conf") {
+            if !fname.starts_with("supermanager-")
+                || !std::path::Path::new(&fname)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("conf"))
+            {
                 continue;
             }
             // Secrets files (supermanager-<id>-secrets.conf) — remove but

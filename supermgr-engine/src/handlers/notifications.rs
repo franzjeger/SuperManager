@@ -4,7 +4,7 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_notify_get_config(&self, id: u64) -> Response {
+    pub(crate) fn handle_notify_get_config(&self, id: u64) -> Response {
         let cfg = crate::notify::load_config();
         match serde_json::to_value(&cfg) {
             Ok(v) => Response::ok(id, v),
@@ -12,7 +12,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_notify_set_webhook(
+    pub(crate) fn handle_notify_set_webhook(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -42,7 +42,7 @@ impl EngineServer {
 
     /// Set/clear `PagerDuty` Events API v2 routing key for a customer
     /// scope. Empty `key` removes the entry (no escalation).
-    pub(crate) async fn handle_notify_set_pagerduty(
+    pub(crate) fn handle_notify_set_pagerduty(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -65,7 +65,7 @@ impl EngineServer {
     }
 
     /// Set/clear `OpsGenie` Genie API key for a customer scope.
-    pub(crate) async fn handle_notify_set_opsgenie(
+    pub(crate) fn handle_notify_set_opsgenie(
         &self,
         id: u64,
         params: serde_json::Value,

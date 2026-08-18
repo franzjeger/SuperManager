@@ -7,7 +7,7 @@
 //! switches, each of which had a left-aligned label and a right-aligned
 //! switch with the entire width of the window in between. On a 1900px display
 //! that put roughly 1500px of nothing between "Connect automatically" and the
-//! control that did it, and rendered "Rename…", "Rotate WireGuard Key…",
+//! control that did it, and rendered "Rename…", "Rotate `WireGuard` Key…",
 //! "Export Profile…" and "Duplicate Profile" as four lines of centred text
 //! that did not look like anything you could click.
 //!

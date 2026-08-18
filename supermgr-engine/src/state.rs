@@ -74,6 +74,11 @@ impl DaemonState {
     ///
     /// On Linux: `/etc/supermgrd/` (root) or `$XDG_DATA_HOME/supermgrd/`.
     /// On macOS: `~/Library/Application Support/SuperManager/`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the known-hosts fallback store cannot be opened under
+    /// `/tmp` (i.e. `/tmp` is not writable).
     #[must_use]
     pub fn new(data_dir: PathBuf) -> Self {
         // KnownHostsStore::open returns a Result for I/O errors. If it
@@ -290,7 +295,7 @@ fn save_toml<T: serde::Serialize>(dir: &PathBuf, name: &str, value: &T) -> anyho
     Ok(())
 }
 
-fn delete_toml(dir: &PathBuf, name: &str) -> anyhow::Result<()> {
+fn delete_toml(dir: &std::path::Path, name: &str) -> anyhow::Result<()> {
     let path = dir.join(format!("{name}.toml"));
     if path.exists() {
         std::fs::remove_file(path)?;

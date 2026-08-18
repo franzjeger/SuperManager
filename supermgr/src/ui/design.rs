@@ -268,8 +268,8 @@ pub fn status_pill(status: Status, label: &str) -> gtk4::Box {
 
 /// A small tinted badge, for a backend name or a role.
 ///
-/// Deliberately not colour-coded per backend. The brief gives WireGuard its
-/// own teal and OpenVPN its own red, which works in a mock where every
+/// Deliberately not colour-coded per backend. The brief gives `WireGuard` its
+/// own teal and `OpenVPN` its own red, which works in a mock where every
 /// colour is chosen at once; in a themed application it means six more
 /// hardcoded colours competing with the status colours that carry actual
 /// meaning. The badge stays neutral so the status pill is the only coloured
@@ -431,7 +431,7 @@ pub fn toggle_row(switch: &gtk4::Switch, title: &str, subtitle: &str) -> adw::Ac
 /// exists.
 ///
 /// The old panes rendered these as centred flat buttons — "Rename…",
-/// "Rotate WireGuard Key…", "Export Profile…" — which read as labels rather
+/// "Rotate `WireGuard` Key…", "Export Profile…" — which read as labels rather
 /// than as things that do something.  This keeps the button, because the
 /// button is what the rest of the application connected its handler to, and
 /// gives it a row to live in.

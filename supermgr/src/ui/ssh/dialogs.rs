@@ -564,9 +564,7 @@ pub fn show_import_keys_dialog(
                 for path in &selected_paths {
                     // Derive key name from file path (e.g. "id_ed25519" from "/home/user/.ssh/id_ed25519").
                     let name = std::path::Path::new(path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.clone());
+                        .file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().to_string());
                     // Read public and private key files.
                     let pub_path = format!("{path}.pub");
                     let public_key = tokio::fs::read_to_string(&pub_path).await.unwrap_or_default();
@@ -1004,8 +1002,7 @@ pub fn show_edit_host_dialog(
     let vpn_model = gtk4::StringList::new(&vpn_names);
     let vpn_idx = host.vpn_profile_id
         .and_then(|vid| vpn_profiles.iter().position(|p| p.id == vid))
-        .map(|i| (i + 1) as u32) // +1 because index 0 is "None"
-        .unwrap_or(0);
+        .map_or(0, |i| (i + 1) as u32);
     let vpn_row = adw::ComboRow::builder()
         .title("VPN Profile")
         .subtitle("Auto-connect VPN before SSH")
@@ -1019,12 +1016,11 @@ pub fn show_edit_host_dialog(
         .collect();
     let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
     jump_names.extend(other_hosts.iter().map(|h| format!("{} ({})", h.label, h.hostname)));
-    let jump_name_refs: Vec<&str> = jump_names.iter().map(|s| s.as_str()).collect();
+    let jump_name_refs: Vec<&str> = jump_names.iter().map(std::string::String::as_str).collect();
     let jump_model = gtk4::StringList::new(&jump_name_refs);
     let jump_idx = host.proxy_jump
         .and_then(|jid| other_hosts.iter().position(|h| h.id == jid))
-        .map(|i| (i + 1) as u32)
-        .unwrap_or(0);
+        .map_or(0, |i| (i + 1) as u32);
     let jump_row = adw::ComboRow::builder()
         .title("Jump Host")
         .subtitle("Connect via bastion/jump host (ProxyJump)")

@@ -51,7 +51,7 @@ pub async fn walk(host: &str) -> Option<SnmpDetail> {
             if detail.sys_uptime.is_some() { detail.raw_count += 1; }
             detail.interfaces = snmpwalk_iface(host, community).await;
             if !detail.interfaces.is_empty() {
-                detail.raw_count += detail.interfaces.len() as u32;
+                detail.raw_count = detail.raw_count.saturating_add(u32::try_from(detail.interfaces.len()).unwrap_or(u32::MAX));
             }
             return Some(detail);
         }

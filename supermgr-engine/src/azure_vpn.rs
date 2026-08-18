@@ -25,6 +25,7 @@
 //!
 //! Format reference: <https://learn.microsoft.com/en-us/azure/vpn-gateway/point-to-site-entra-vpn-client-mac>
 
+use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::str::FromStr;
 
@@ -461,7 +462,7 @@ fn netmask_to_prefix(mask: &str) -> Option<u8> {
     if leading + trailing != 32 {
         return None;
     }
-    Some(leading as u8)
+    Some(u8::try_from(leading).unwrap_or(32))
 }
 
 /// Pick out every `<dnsserver>` (or `<server>`) inner-text that
@@ -522,7 +523,7 @@ pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
     out.push_str("client\n");
     out.push_str("dev tun\n");
     out.push_str("proto tcp\n");
-    out.push_str(&format!("remote {} 443\n", cfg.gateway_fqdn));
+    let _ = writeln!(out, "remote {} 443", cfg.gateway_fqdn);
     out.push_str("resolv-retry infinite\n");
     out.push_str("nobind\n");
     out.push_str("persist-tun\n");
@@ -569,17 +570,17 @@ pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
         for net in &cfg.routes {
             match net {
                 ipnet::IpNet::V4(v4) => {
-                    out.push_str(&format!("route {} {}\n", v4.network(), v4.netmask()));
+                    let _ = writeln!(out, "route {} {}", v4.network(), v4.netmask());
                 }
                 ipnet::IpNet::V6(v6) => {
-                    out.push_str(&format!("route-ipv6 {}/{}\n", v6.network(), v6.prefix_len()));
+                    let _ = writeln!(out, "route-ipv6 {}/{}", v6.network(), v6.prefix_len());
                 }
             }
         }
     }
 
     for ip in &cfg.dns_servers {
-        out.push_str(&format!("dhcp-option DNS {ip}\n"));
+        let _ = writeln!(out, "dhcp-option DNS {ip}");
     }
 
     out.push('\n');
@@ -912,37 +913,42 @@ mod tests {
         }
         buf.extend_from_slice(&bit_len.to_be_bytes());
 
-        let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+        let mut state: [u32; 5] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476, 0xc3d2_e1f0];
         for chunk in buf.chunks(64) {
-            let mut w = [0u32; 80];
-            for (i, word) in chunk.chunks(4).enumerate() {
-                w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+            let mut words = [0u32; 80];
+            for (idx, word) in chunk.chunks(4).enumerate() {
+                words[idx] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
             }
-            for i in 16..80 {
-                w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1);
+            for idx in 16..80 {
+                words[idx] = (words[idx-3] ^ words[idx-8] ^ words[idx-14] ^ words[idx-16]).rotate_left(1);
             }
-            let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-            for i in 0..80 {
-                let (f, k) = match i {
-                    0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
-                    20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                    _ => (b ^ c ^ d, 0xca62c1d6),
+            let (mut reg_a, mut reg_b, mut reg_c, mut reg_d, mut reg_e) =
+                (state[0], state[1], state[2], state[3], state[4]);
+            for (idx, word_val) in words.iter().enumerate() {
+                let (func, round_const) = match idx {
+                    0..=19 => ((reg_b & reg_c) | ((!reg_b) & reg_d), 0x5a82_7999),
+                    20..=39 => (reg_b ^ reg_c ^ reg_d, 0x6ed9_eba1),
+                    40..=59 => ((reg_b & reg_c) | (reg_b & reg_d) | (reg_c & reg_d), 0x8f1b_bcdc),
+                    _ => (reg_b ^ reg_c ^ reg_d, 0xca62_c1d6),
                 };
-                let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
-                e = d;
-                d = c;
-                c = b.rotate_left(30);
-                b = a;
-                a = temp;
+                let temp = reg_a.rotate_left(5)
+                    .wrapping_add(func)
+                    .wrapping_add(reg_e)
+                    .wrapping_add(round_const)
+                    .wrapping_add(*word_val);
+                reg_e = reg_d;
+                reg_d = reg_c;
+                reg_c = reg_b.rotate_left(30);
+                reg_b = reg_a;
+                reg_a = temp;
             }
-            h[0] = h[0].wrapping_add(a);
-            h[1] = h[1].wrapping_add(b);
-            h[2] = h[2].wrapping_add(c);
-            h[3] = h[3].wrapping_add(d);
-            h[4] = h[4].wrapping_add(e);
+            state[0] = state[0].wrapping_add(reg_a);
+            state[1] = state[1].wrapping_add(reg_b);
+            state[2] = state[2].wrapping_add(reg_c);
+            state[3] = state[3].wrapping_add(reg_d);
+            state[4] = state[4].wrapping_add(reg_e);
         }
-        format!("{:08x}{:08x}{:08x}{:08x}{:08x}", h[0], h[1], h[2], h[3], h[4])
+        format!("{:08x}{:08x}{:08x}{:08x}{:08x}", state[0], state[1], state[2], state[3], state[4])
     }
 
     #[test]

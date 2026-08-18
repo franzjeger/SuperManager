@@ -74,7 +74,7 @@ async fn list_nameservers(domain: &str) -> Vec<String> {
 ///   - `None` — the NS refused (typical), timed out, or
 ///     unreachable.
 async fn attempt_axfr(domain: &str, ns: &str) -> Option<AxfrTransfer> {
-    let output = match tokio::time::timeout(
+    let Ok(Ok(output)) = tokio::time::timeout(
         Duration::from_secs(8),
         tokio::process::Command::new("dig")
             .args([
@@ -97,9 +97,8 @@ async fn attempt_axfr(domain: &str, ns: &str) -> Option<AxfrTransfer> {
             .output(),
     )
     .await
-    {
-        Ok(Ok(o)) => o,
-        _ => return None,  // timeout or spawn error
+    else {
+        return None;  // timeout or spawn error
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);

@@ -103,24 +103,23 @@ async fn tick() -> anyhow::Result<()> {
         // changed scope, or cleared the schedule) during that window, writing
         // back the stale `e` would clobber their changes. Reload, and apply
         // only the schedule advancement to the current on-disk state.
-        match engagement::load(&engagement_id) {
-            Ok(mut fresh) => {
-                // If the user cleared the schedule mid-scan, respect it and
-                // do not re-arm it.
-                if let Some(current) = fresh.schedule.as_ref() {
-                    let new_next = current.cadence.advance(now);
-                    fresh.schedule = Some(engagement::Schedule {
-                        cadence: current.cadence,
-                        next_scan_at: new_next,
-                        last_scan_at: Some(now),
-                    });
-                }
-                if let Err(err) = engagement::save(&fresh) {
-                    warn!("scheduler: persist {} failed: {err:#}", engagement_id);
-                }
+        if let Ok(mut fresh) = engagement::load(&engagement_id) {
+            // If the user cleared the schedule mid-scan, respect it and
+            // do not re-arm it.
+            if let Some(current) = fresh.schedule.as_ref() {
+                let new_next = current.cadence.advance(now);
+                fresh.schedule = Some(engagement::Schedule {
+                    cadence: current.cadence,
+                    next_scan_at: new_next,
+                    last_scan_at: Some(now),
+                });
             }
+            if let Err(err) = engagement::save(&fresh) {
+                warn!("scheduler: persist {} failed: {err:#}", engagement_id);
+            }
+        } else {
             // Engagement deleted mid-scan — nothing to persist.
-            Err(_) => info!("scheduler: {} no longer exists, skipping persist", engagement_id),
+            info!("scheduler: {engagement_id} no longer exists, skipping persist");
         }
     }
     Ok(())

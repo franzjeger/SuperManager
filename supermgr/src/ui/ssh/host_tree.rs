@@ -72,10 +72,10 @@ pub fn host_row_view(host: &HostSummary, health: Option<bool>) -> HostRowView {
 ///
 /// The right-click menu used to be a fixed five-item list (Connect, Test,
 /// Edit, Pin, Delete) for every host regardless of type — RDP got offered
-/// on FortiGate firewalls, "Open WebAdmin" was nowhere even though every
+/// on `FortiGate` firewalls, "Open `WebAdmin`" was nowhere even though every
 /// appliance has one. This helper returns a curated list based on the
 /// host's `device_type` plus what's actually configured (RDP/VNC ports,
-/// API token, UniFi controller URL).
+/// API token, `UniFi` controller URL).
 ///
 /// Returned tuples are `(label, action_id)`; `host-ctx.` is prepended to
 /// each id when the menu is wired up.
@@ -125,11 +125,11 @@ fn host_menu_items(host: &HostSummary) -> Vec<(&'static str, &'static str)> {
     items
 }
 
-/// Resolve the WebAdmin / Controller URL for `host`, if one can be derived.
+/// Resolve the `WebAdmin` / Controller URL for `host`, if one can be derived.
 ///
-/// FortiGate / pfSense / OpenWrt use `https://<hostname>:<api_port>/`
-/// (defaulting `api_port` to 443). UniFi uses `unifi_controller_url`
-/// directly. OpnSense and Sophos URL handling will be added in the
+/// `FortiGate` / pfSense / `OpenWrt` use `https://<hostname>:<api_port>/`
+/// (defaulting `api_port` to 443). `UniFi` uses `unifi_controller_url`
+/// directly. `OpnSense` and Sophos URL handling will be added in the
 /// follow-up PR that ties this menu to those device-type variants.
 fn web_admin_url(host: &HostSummary) -> Option<String> {
     match host.device_type {
@@ -315,7 +315,7 @@ pub fn populate_ssh_host_list(
             let tx_c = tx.clone();
             delete_btn.connect_clicked(move |_| {
                 let dialog = adw::AlertDialog::new(
-                    Some(&format!("Delete host \"{}\"?", host_label)),
+                    Some(&format!("Delete host \"{host_label}\"?")),
                     Some("This cannot be undone."),
                 );
                 dialog.add_response("cancel", "Cancel");
@@ -580,7 +580,7 @@ pub fn populate_ssh_host_list(
                     let action = gio::SimpleAction::new("delete", None);
                     action.connect_activate(move |_, _| {
                         let dialog = adw::AlertDialog::new(
-                            Some(&format!("Delete host \"{}\"?", host_label)),
+                            Some(&format!("Delete host \"{host_label}\"?")),
                             Some("This cannot be undone."),
                         );
                         dialog.add_response("cancel", "Cancel");

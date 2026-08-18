@@ -36,9 +36,8 @@ pub fn append_audit(entry: &AuditEntry) {
 #[must_use]
 pub fn read_audit(max_lines: usize) -> Vec<String> {
     let path = audit_log_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
     };
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(max_lines);

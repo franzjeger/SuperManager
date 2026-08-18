@@ -22,6 +22,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -122,7 +123,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 /// `LaunchDaemon`. Idempotent — calling on an already-installed
 /// daemon re-copies the binary (in case the version bundled with
 /// `SuperManager` has changed) and re-bootstraps.
-pub fn install(args: InstallArgs) -> Result<InstallResult> {
+pub fn install(args: &InstallArgs) -> Result<InstallResult> {
     let src = Path::new(&args.bundled_daemon_path);
     if !src.exists() {
         bail!("bundled daemon not found at {}", args.bundled_daemon_path);
@@ -200,7 +201,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 /// the launchd registration. Leaves the state directory intact —
 /// the user's node key + tailnet identity is in there, and a future
 /// reinstall (whether ours or Tailscale.app's) will pick it up.
-pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
+pub fn uninstall(_: &UninstallArgs) -> InstallResult {
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .status();
@@ -210,10 +211,10 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     if Path::new(DAEMON_INSTALL_PATH).exists() {
         let _ = fs::remove_file(DAEMON_INSTALL_PATH);
     }
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: "tailscaled uninstalled. State directory preserved.".to_string(),
-    })
+    }
 }
 
 /// Find PID of the running tailscaled. Used by exit-node setup to
@@ -306,13 +307,11 @@ fn is_routeable_public_ipv4(ip: &str) -> bool {
     let nums: Option<Vec<u8>> = parts.iter().map(|s| s.parse::<u8>().ok()).collect();
     let n = match nums { Some(v) if v.len() == 4 => v, _ => return false };
     match n[0] {
-        0 | 127 => false,                  // unspecified, loopback
-        10 => false,                       // RFC1918
+        0 | 10 | 127 | 224..=239 => false, // unspecified, RFC1918, loopback, multicast
         100 if (64..=127).contains(&n[1]) => false, // CGNAT / tailnet
         169 if n[1] == 254 => false,       // link-local
         172 if (16..=31).contains(&n[1]) => false, // RFC1918
         192 if n[1] == 168 => false,       // RFC1918
-        224..=239 => false,                // multicast
         _ => true,
     }
 }
@@ -552,7 +551,7 @@ fn rollback_exemptions(ips: &[String]) {
 /// We discover the service UUID dynamically from the State
 /// store, so this works regardless of the user's specific
 /// service ID.
-pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn force_dns_state(args: &SetDnsArgs) -> Result<InstallResult> {
     if args.servers.is_empty() {
         bail!("force_dns_state requires at least one server");
     }
@@ -572,7 +571,7 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
         script.push_str(s);
     }
     script.push('\n');
-    script.push_str(&format!("set State:/Network/Service/{uuid}/DNS\n"));
+    let _ = writeln!(script, "set State:/Network/Service/{uuid}/DNS");
     script.push_str("set State:/Network/Global/DNS\n");
     script.push_str("quit\n");
 
@@ -619,7 +618,7 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// from DHCP. Pass `["empty"]` to clear and let DHCP own DNS
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
-pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn set_dns_servers(args: &SetDnsArgs) -> Result<InstallResult> {
     let service = detect_active_network_service()
         .unwrap_or_else(|| "Wi-Fi".to_string());
 
@@ -807,7 +806,7 @@ fn delete_split_default_if_unowned(
 /// Remove the split-default exit-node routes. Always succeeds —
 /// missing routes are a no-op. Called when the user clears the
 /// exit node, when auto-revert kicks in, and from `panic_reset`.
-pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
+pub fn remove_exit_routes(_: &ExitRoutesArgs) -> InstallResult {
     // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
     //
     // This runs from panic_reset (fired by the connectivity watchdog on a
@@ -837,13 +836,13 @@ pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     }
     let _ = fs::remove_file(EXEMPTION_STATE_FILE);
 
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: format!(
             "Removed split-default + {} underlay exemptions (best-effort)",
             exempt.len()
         ),
-    })
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -907,7 +906,7 @@ fn detect_tailscale_utun() -> Option<String> {
 /// When the daemon goes back to BackendState=Stopped (user
 /// disconnected), call with `install: false` so we leave a clean
 /// system. The file is owned by root:wheel, mode 0644.
-pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
+pub fn install_magicdns_resolver(args: &MagicdnsResolverArgs) -> Result<InstallResult> {
     let domain = args.tailnet_suffix.trim_matches('.');
     if domain.is_empty() || !domain.contains('.') {
         bail!("invalid tailnet_suffix '{}'", args.tailnet_suffix);
@@ -982,7 +981,7 @@ pub struct MagicdnsResolverArgs {
 /// drop the user's authenticated session. Just clearing the
 /// exit-node pref is enough on the daemon side; the route fix is
 /// `ipconfig set en0 DHCP` which is fast (< 1 s) and idempotent.
-pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
+pub fn panic_reset(args: &PanicResetArgs) -> Result<InstallResult> {
     // 0. Wipe the split-default exit-node routes FIRST. If the
     // user got here by selecting an exit-node that broke
     // routing, those /1 routes are why their internet is dead.
@@ -990,7 +989,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // again immediately — ipconfig DHCP renew below is belt-
     // and-braces. Removing routes is always FAIL OPEN (egress
     // falls back to the local uplink); it can never black-hole.
-    let _ = remove_exit_routes(ExitRoutesArgs::default());
+    let _ = remove_exit_routes(&ExitRoutesArgs::default());
 
     // 1. Optionally tell the daemon to drop exit-node + accept-routes.
     //

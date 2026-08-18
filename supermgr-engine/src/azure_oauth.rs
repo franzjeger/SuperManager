@@ -237,7 +237,9 @@ fn urlencoding(s: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => {
+                let _ = std::fmt::Write::write_fmt(&mut out, format_args!("%{b:02X}"));
+            }
         }
     }
     out
@@ -313,9 +315,6 @@ impl AzureRuntime {
 ///   5. Nothing
 #[must_use]
 pub fn detect_azure_runtime() -> AzureRuntime {
-    // Brew prefixes + a few known custom-port locations. The
-    // openvpn3-aircrack port lands the binary at `/usr/local/sbin`
-    // by default; macports puts it under `/opt/local/bin`.
     const OVPN3_CLI_PATHS: &[&str] = &[
         "/opt/homebrew/bin/openvpn3",
         "/opt/homebrew/sbin/openvpn3",
@@ -323,6 +322,15 @@ pub fn detect_azure_runtime() -> AzureRuntime {
         "/usr/local/sbin/openvpn3",
         "/opt/local/bin/openvpn3",
     ];
+    const OVPN2_PATHS: &[&str] = &[
+        "/opt/homebrew/sbin/openvpn",
+        "/opt/homebrew/bin/openvpn",
+        "/usr/local/sbin/openvpn",
+        "/usr/local/bin/openvpn",
+    ];
+    // Brew prefixes + a few known custom-port locations. The
+    // openvpn3-aircrack port lands the binary at `/usr/local/sbin`
+    // by default; macports puts it under `/opt/local/bin`.
     for p in OVPN3_CLI_PATHS {
         if std::path::Path::new(p).exists() {
             return AzureRuntime::Openvpn3Cli { path: (*p).to_owned() };
@@ -343,12 +351,6 @@ pub fn detect_azure_runtime() -> AzureRuntime {
     // to go" — the GUI surfaces it as `unsupported` so the user
     // gets actionable install instructions instead of a confusing
     // mid-handshake failure later.
-    const OVPN2_PATHS: &[&str] = &[
-        "/opt/homebrew/sbin/openvpn",
-        "/opt/homebrew/bin/openvpn",
-        "/usr/local/sbin/openvpn",
-        "/usr/local/bin/openvpn",
-    ];
     for p in OVPN2_PATHS {
         if std::path::Path::new(p).exists() {
             return AzureRuntime::Only2x { path: (*p).to_owned() };
@@ -372,11 +374,11 @@ mod tests {
 
     #[test]
     fn decode_id_token_username_pulls_preferred_username() {
+        use base64::Engine as _;
         // Hand-rolled JWT: header.payload.sig where payload has
         // `preferred_username = alice@example.com`. Header and sig
         // are placeholders — we don't validate them.
         let payload = r#"{"preferred_username":"alice@example.com","name":"Alice"}"#;
-        use base64::Engine as _;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
         let jwt = format!("aaa.{payload_b64}.bbb");
         let upn = decode_id_token_username(&jwt);

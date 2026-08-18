@@ -278,7 +278,7 @@ impl TailscaleView {
     }
 
     /// One device. Title is the name, subtitle carries the address and the
-    /// MagicDNS name — the two things that get copied into an ssh command.
+    /// `MagicDNS` name — the two things that get copied into an ssh command.
     fn node_row(node: &TailscaleNode) -> adw::ActionRow {
         let row = adw::ActionRow::new();
         row.set_title(node.display_name());

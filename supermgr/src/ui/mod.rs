@@ -44,8 +44,6 @@ use libadwaita::prelude::*;
 use tracing::{error, info};
 
 use supermgr_core::vpn::{profile::ProfileSummary, state::VpnState};
-use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::host::HostSummary;
 
 use crate::app::{AppMsg, AppState};
 use crate::dbus_client::{
@@ -108,7 +106,7 @@ fn push_tray_update(
     new_profiles: Vec<ProfileSummary>,
     rt: &tokio::runtime::Handle,
 ) {
-    let handle = match tray_handle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    let handle = match tray_handle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
         Some(h) => h.clone(),
         None => return,
     };
@@ -144,7 +142,7 @@ pub fn build_ui(
     // following nothing at all — libadwaita has no idea the desktop is dark.
     // With a desktop palette in hand it can mean what it says.
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let scheme = match (&s.color_scheme, desktop.as_ref()) {
             (crate::settings::ColorScheme::Default, Some(p)) if p.is_dark() => {
                 adw::ColorScheme::ForceDark
@@ -164,7 +162,7 @@ pub fn build_ui(
 
     // Apply persisted opacity.
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         window.set_opacity(s.opacity);
     }
 
@@ -177,7 +175,7 @@ pub fn build_ui(
     let tray_handle: Arc<Mutex<Option<ksni::Handle<VpnTray>>>> = Arc::new(Mutex::new(None));
     {
         let (initial_state, initial_profiles) = {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (s.vpn_state.clone(), s.profiles.clone())
         };
         let vpn_tray = VpnTray {
@@ -190,7 +188,7 @@ pub fn build_ui(
         rt.spawn(async move {
             match vpn_tray.spawn().await {
                 Ok(handle) => {
-                    *tray_handle_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+                    *tray_handle_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(handle);
                     info!("system tray registered");
                 }
                 Err(e) => {
@@ -393,7 +391,7 @@ pub fn build_ui(
         let app_state = Arc::clone(&app_state);
         notif_clear_btn.connect_clicked(move |_| {
             {
-                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.clear_notifications();
             }
             render_notifications(&app_state, &notif_list, &notif_btn);
@@ -428,7 +426,7 @@ pub fn build_ui(
     let banner = adw::Banner::new("Daemon not running");
     banner.set_button_label(Some("Retry"));
     {
-        let available = app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available;
+        let available = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).daemon_available;
         banner.set_revealed(!available);
     }
 
@@ -447,7 +445,7 @@ pub fn build_ui(
         let tx = tx.clone();
         vpn_search_entry.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             populate_vpn_sidebar(
                 &vpn_profile_list,
                 &s.profiles,
@@ -459,7 +457,7 @@ pub fn build_ui(
                 &text,
             );
             drop(s);
-            app_state.lock().unwrap_or_else(|e| e.into_inner()).vpn_filter = text;
+            app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).vpn_filter = text;
         });
     }
     let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
@@ -536,7 +534,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_search.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let health = s.host_health.clone();
             populate_ssh_host_list(
                 &ssh_host_list,
@@ -549,7 +547,7 @@ pub fn build_ui(
                 &health,
             );
             drop(s);
-            app_state.lock().unwrap_or_else(|e| e.into_inner()).ssh_filter = text;
+            app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).ssh_filter = text;
         });
     }
 
@@ -580,7 +578,7 @@ pub fn build_ui(
         let window = window.clone();
         let rt = rt.clone();
         ssh_batch_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ssh::dialogs::show_batch_command_dialog(&window, &s.hosts, &rt);
         });
     }
@@ -668,7 +666,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_key_search.connect_search_changed(move |entry| {
             let text = entry.text().to_string();
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             populate_ssh_key_list(
                 &ssh_key_list,
                 &s.ssh_keys,
@@ -730,7 +728,7 @@ pub fn build_ui(
 
     // Populate SSH lists with initial state.
     {
-        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         populate_ssh_key_list(
             &ssh_key_list,
             &s.ssh_keys,
@@ -944,7 +942,7 @@ pub fn build_ui(
                     // up here without a refresh button to press.
                     let hosts = nav_app_state
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .hosts
                         .clone();
                     nav_compliance_view.set_hosts(&hosts);
@@ -962,7 +960,7 @@ pub fn build_ui(
                     // and loading all of them to render a list would be waste.
                     let hosts = nav_app_state
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .hosts
                         .clone();
                     nav_security_view.set_hosts(&hosts);
@@ -1107,7 +1105,7 @@ pub fn build_ui(
             if outer_stack.visible_child_name().as_deref() == Some("app") {
                 let cur = ctr.get() + 1;
                 ctr.set(cur);
-                let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 if crate::master_password::is_set() && s.auto_lock_minutes > 0 {
                     let limit = s.auto_lock_minutes * 60;
                     if cur >= limit {
@@ -1123,7 +1121,7 @@ pub fn build_ui(
 
     // Paint initial VPN state.
     {
-        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if s.selected_profile.is_some() {
             vpn_detail.detail_stack.set_visible_child_name("detail");
         }
@@ -1288,7 +1286,7 @@ pub fn build_ui(
         let window = window.clone();
         ssh_add_host_btn.connect_clicked(move |_| {
             popover.popdown();
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ssh::dialogs::show_add_host_dialog(&window, &s.ssh_keys, &rt, &tx);
         });
     }
@@ -1318,7 +1316,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_export_all_btn.connect_clicked(move |_| {
             popover.popdown();
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ssh::key_list::export_all_keys_to_ssh_dir(&s.ssh_keys, &rt, &tx);
         });
     }
@@ -1344,7 +1342,7 @@ pub fn build_ui(
         vpn_profile_list.connect_row_activated(move |list, row| {
             let row_id = row.widget_name().to_string();
             let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg, azure) = {
-                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let entry = s.profiles.iter().find(|p| p.id.to_string() == row_id);
                 let name = entry.map(|p| p.name.clone());
                 let exists = entry.is_some();
@@ -1398,7 +1396,7 @@ pub fn build_ui(
 
             list.select_row(Some(row));
 
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             rename_btn.set_sensitive(s.selected_profile.is_some());
             apply_vpn_state(&vpn_status, &s);
         });
@@ -1423,7 +1421,7 @@ pub fn build_ui(
             // Clone the key out of the lock so we can drop the immutable
             // borrow before mutating `selected_ssh_key` / `selected_ssh_host`.
             let key = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.ssh_keys.iter().find(|k| k.id.to_string() == row_id).cloned()
             };
             let Some(key) = key else { return };
@@ -1456,7 +1454,7 @@ pub fn build_ui(
             key_detail_stack.set_visible_child_name("detail");
             keys_content_stack.set_visible_child_name("key-detail");
             {
-                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_key = Some(key.id.to_string());
                 s.selected_ssh_host = None;
             }
@@ -1502,7 +1500,7 @@ pub fn build_ui(
             // Clone the host + full host list out of the lock so we can drop
             // the immutable borrow before mutating `selected_ssh_host`.
             let (host, all_hosts) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 match s.hosts.iter().find(|h| h.id.to_string() == row_id) {
                     Some(h) => (h.clone(), s.hosts.clone()),
                     None => return,
@@ -1511,7 +1509,7 @@ pub fn build_ui(
             ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, &host, &all_hosts);
             hosts_content_stack.set_visible_child_name("host-detail");
             {
-                let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
             }
@@ -1556,7 +1554,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.forget_host_key_btn.connect_clicked(move |_| {
             let Some((host_id, hostname, port, label)) = ({
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.as_ref().and_then(|id| {
                     s.hosts
                         .iter()
@@ -1626,7 +1624,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::host_detail::refresh_fortigate_dashboard(
@@ -1647,7 +1645,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_backup_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(host_id) = &s.selected_ssh_host {
                 let host_id = host_id.clone();
                 let tx = tx.clone();
@@ -1682,7 +1680,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_compliance_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(host_id) = &s.selected_ssh_host {
                 ssh::host_detail::run_fortigate_compliance(
                     host_id.clone(),
@@ -1701,7 +1699,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.fg_gen_token_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1736,7 +1734,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.fg_copy_token_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1776,7 +1774,7 @@ pub fn build_ui(
                 return;
             }
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -1816,7 +1814,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.pf_add_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     let host = host.clone();
@@ -1840,7 +1838,7 @@ pub fn build_ui(
             if key.is_empty() {
                 return;
             }
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let host_id = match &s.selected_ssh_host {
                 Some(id) => id.clone(),
                 None => return,
@@ -1930,7 +1928,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.connect_btn.connect_clicked(move |_| {
             let (should_disconnect, selected) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 (!s.vpn_state.is_idle(), s.selected_profile.clone())
             };
             let tx = tx.clone();
@@ -1968,7 +1966,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.rename_btn.connect_clicked(move |_| {
             let profile_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else { return };
             vpn::dialogs::show_rename_dialog(&window, profile_id, &rt, &tx);
@@ -1983,7 +1981,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.edit_creds_btn.connect_clicked(move |_| {
             let (profile_id, backend, name, host, username, dns_servers) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let pid = s.selected_profile.clone();
                 let idx = pid.as_deref().and_then(|id| {
                     s.profiles.iter().position(|p| p.id.to_string() == id)
@@ -1999,7 +1997,7 @@ pub fn build_ui(
                             p.username.clone().unwrap_or_default(),
                             p.dns_servers
                                 .iter()
-                                .map(|ip| ip.to_string())
+                                .map(std::string::ToString::to_string)
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         )
@@ -2024,7 +2022,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.auto_connect_switch.connect_state_set(move |_sw, new_state| {
             let profile_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else {
                 return glib::Propagation::Proceed;
@@ -2053,7 +2051,7 @@ pub fn build_ui(
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_detail.full_tunnel_switch.connect_state_set(move |_sw, new_state| {
             let (profile_id, supports_split, split_routes) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let pid = s.selected_profile.clone();
                 let idx = s.profiles.iter().position(|p| Some(p.id.to_string()) == pid);
                 let supports = idx.is_some_and(|i| {
@@ -2097,7 +2095,7 @@ pub fn build_ui(
         let rt = rt.clone();
         vpn_detail.kill_switch_switch.connect_state_set(move |_sw, new_state| {
             let profile_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else {
                 return glib::Propagation::Proceed;
@@ -2125,7 +2123,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.rotate_key_btn.connect_clicked(move |_| {
             let profile_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_profile.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_profile.clone()
             };
             let Some(profile_id) = profile_id else { return };
             vpn::dialogs::rotate_wireguard_key(&window, profile_id, &rt, &tx);
@@ -2140,12 +2138,10 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.export_btn.connect_clicked(move |_| {
             let (profile_id, profile_name) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let pid = s.selected_profile.clone();
                 let name = pid.as_deref()
-                    .and_then(|id| s.profiles.iter().find(|p| p.id.to_string() == id))
-                    .map(|p| p.name.clone())
-                    .unwrap_or_else(|| "profile".to_owned());
+                    .and_then(|id| s.profiles.iter().find(|p| p.id.to_string() == id)).map_or_else(|| "profile".to_owned(), |p| p.name.clone());
                 (pid, name)
             };
             let Some(profile_id) = profile_id else { return };
@@ -2203,7 +2199,7 @@ pub fn build_ui(
         let tx = tx.clone();
         vpn_detail.duplicate_btn.connect_clicked(move |_| {
             let profile_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_profile.clone()
             };
             let Some(profile_id) = profile_id else { return };
@@ -2245,7 +2241,7 @@ pub fn build_ui(
         let window = window.clone();
         vpn_detail.split_routes_edit_btn.connect_clicked(move |_| {
             let (profile_id, current_routes) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let pid = s.selected_profile.clone().unwrap_or_default();
                 let idx = s.profiles.iter().position(|p| p.id.to_string() == pid);
                 let routes = idx
@@ -2325,7 +2321,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.connect_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -2360,7 +2356,7 @@ pub fn build_ui(
         let rt = rt.clone();
         ssh_host_detail.rdp_btn.connect_clicked(move |_| {
             let (host_id, hostname, port, username, has_password) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sel = s.selected_ssh_host.as_deref();
                 sel.and_then(|id| s.hosts.iter().find(|h| h.id.to_string() == id))
                     .map(|h| (h.id.to_string(), h.hostname.clone(), h.rdp_port.unwrap_or(3389), h.username.clone(), h.has_password))
@@ -2398,7 +2394,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.vnc_btn.connect_clicked(move |_| {
             let (hostname, port) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let sel = s.selected_ssh_host.as_deref();
                 sel.and_then(|id| s.hosts.iter().find(|h| h.id.to_string() == id))
                     .map(|h| (h.hostname.clone(), h.vnc_port.unwrap_or(5900)))
@@ -2421,7 +2417,7 @@ pub fn build_ui(
         let tx = tx.clone();
         ssh_host_detail.test_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 s.selected_ssh_host.clone()
             };
             if let Some(host_id) = host_id {
@@ -2468,7 +2464,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.edit_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(host_id) = &s.selected_ssh_host {
                 if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *host_id) {
                     ssh::dialogs::show_edit_host_dialog(
@@ -2486,7 +2482,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         ssh_key_detail.push_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
@@ -2507,7 +2503,7 @@ pub fn build_ui(
         let keys_content_stack = keys_content_stack.clone();
         ssh_key_detail.delete_btn.connect_clicked(move |_| {
             let key_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_ssh_key.clone()
             };
             let Some(key_id) = key_id else { return };
             let dialog = adw::AlertDialog::new(
@@ -2549,7 +2545,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         ssh_host_detail.push_key_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             ssh::dialogs::show_push_key_dialog(
                 &window,
                 &s.ssh_keys,
@@ -2569,7 +2565,7 @@ pub fn build_ui(
         let window = window.clone();
         let toast_overlay = toast_overlay.clone();
         ssh_host_detail.push_key_api_btn.connect_clicked(move |_| {
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let host_id = match s.selected_ssh_host.clone() {
                 Some(id) => id,
                 None => return,
@@ -2679,7 +2675,7 @@ pub fn build_ui(
         let toast_overlay = toast_overlay.clone();
         ssh_host_detail.set_inform_btn.connect_clicked(move |_| {
             let host_id = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 match s.selected_ssh_host.clone() {
                     Some(id) => id,
                     None => return,
@@ -2764,7 +2760,7 @@ pub fn build_ui(
         let hosts_content_stack = hosts_content_stack.clone();
         ssh_host_detail.delete_btn.connect_clicked(move |_| {
             let host_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_ssh_host.clone()
             };
             let Some(host_id) = host_id else { return };
             let dialog = adw::AlertDialog::new(
@@ -2805,7 +2801,7 @@ pub fn build_ui(
         let rt = rt.clone();
         ssh_host_detail.pin_btn.connect_clicked(move |_btn| {
             let host_id = {
-                app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host.clone()
+                app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_ssh_host.clone()
             };
             let Some(host_id) = host_id else { return };
             let tx = tx.clone();
@@ -2831,7 +2827,7 @@ pub fn build_ui(
                 let msg = match fetch_initial_state(&app_state).await {
                     Ok(()) => {
                         let _ = fetch_initial_ssh_state(&app_state).await;
-                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         AppMsg::DaemonConnected {
                             profiles: s.profiles.clone(),
                             state: s.vpn_state.clone(),
@@ -2895,7 +2891,7 @@ pub fn build_ui(
     let rx_notif_btn = notif_btn.clone();
 
     let prev_state_init: VpnState = {
-        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.vpn_state.clone()
     };
     let mut rx_prev_state = prev_state_init;
@@ -2906,13 +2902,13 @@ pub fn build_ui(
                 // === VPN messages =========================================
                 AppMsg::DaemonConnected { profiles, state } => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.profiles = profiles;
                         s.vpn_state = state;
                         s.daemon_available = true;
                     }
                     rx_banner.set_revealed(false);
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -2933,10 +2929,10 @@ pub fn build_ui(
                 }
                 AppMsg::ImportSucceeded { profiles, toast } => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.profiles = profiles;
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -2959,7 +2955,7 @@ pub fn build_ui(
                 }
                 AppMsg::StateUpdated(state) => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.vpn_state = state;
                         s.daemon_available = true;
                     }
@@ -2967,7 +2963,7 @@ pub fn build_ui(
                     // Snapshot everything we need, then drop the lock.
                     // push_notification() needs to re-lock, so we must not hold it.
                     let (vpn_state_snap, profiles_snap, selected_snap, vpn_filter_snap) = {
-                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         (s.vpn_state.clone(), s.profiles.clone(),
                          s.selected_profile.clone(), s.vpn_filter.clone())
                     };
@@ -2978,8 +2974,7 @@ pub fn build_ui(
                                 let body = profiles_snap
                                     .iter()
                                     .find(|p| p.id == *profile_id)
-                                    .map(|p| p.name.as_str())
-                                    .unwrap_or("Unknown profile");
+                                    .map_or("Unknown profile", |p| p.name.as_str());
                                 let notif = gio::Notification::new("VPN Connected");
                                 notif.set_body(Some(body));
                                 rx_app.send_notification(Some("vpn-state"), &notif);
@@ -3005,8 +3000,7 @@ pub fn build_ui(
                                 let body = profiles_snap
                                     .iter()
                                     .find(|p| p.id == *profile_id)
-                                    .map(|p| p.name.as_str())
-                                    .unwrap_or("Unknown profile");
+                                    .map_or("Unknown profile", |p| p.name.as_str());
                                 let notif = gio::Notification::new("VPN Disconnected");
                                 notif.set_body(Some(body));
                                 rx_app.send_notification(Some("vpn-state"), &notif);
@@ -3028,8 +3022,7 @@ pub fn build_ui(
                     let display_name = selected_snap
                         .as_deref()
                         .and_then(|sid| profiles_snap.iter().find(|p| p.id.to_string() == sid))
-                        .map(|p| p.name.as_str())
-                        .unwrap_or("");
+                        .map_or("", |p| p.name.as_str());
                     rx_profile_name_label.set_label(display_name);
                     populate_vpn_sidebar(
                         &rx_profile_list,
@@ -3043,7 +3036,7 @@ pub fn build_ui(
                     );
                     // Re-lock briefly for apply_vpn_state (reads multiple fields).
                     {
-                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         apply_vpn_state(&rx_vpn_status, &s);
                     }
                     push_tray_update(
@@ -3110,13 +3103,13 @@ pub fn build_ui(
                 }
                 AppMsg::ProfileDeleted(deleted_id) => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.profiles.retain(|p| p.id.to_string() != deleted_id);
                         if s.selected_profile.as_deref() == Some(deleted_id.as_str()) {
                             s.selected_profile = None;
                         }
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     populate_vpn_sidebar(
                         &rx_profile_list,
                         &s.profiles,
@@ -3141,7 +3134,7 @@ pub fn build_ui(
                     );
                 }
                 AppMsg::DaemonUnavailable => {
-                    rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available = false;
+                    rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).daemon_available = false;
                     rx_banner.set_revealed(true);
                 }
                 AppMsg::ComplianceRunFinished { host_id, result } => {
@@ -3320,10 +3313,10 @@ pub fn build_ui(
                 }
                 AppMsg::SshKeysRefreshed(keys) => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.ssh_keys = keys;
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let filter = s.ssh_filter.clone();
                     populate_ssh_key_list(
                         &rx_ssh_key_list,
@@ -3338,7 +3331,7 @@ pub fn build_ui(
                     if let Some(sel) = &s.selected_ssh_key {
                         if !s.ssh_keys.iter().any(|k| k.id.to_string() == *sel) {
                             drop(s);
-                            rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key = None;
+                            rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_ssh_key = None;
                             rx_keys_content_stack.set_visible_child_name("empty");
                         }
                     }
@@ -3346,10 +3339,10 @@ pub fn build_ui(
                 }
                 AppMsg::SshHostsRefreshed(hosts) => {
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.hosts = hosts;
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let filter = s.ssh_filter.clone();
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
@@ -3368,7 +3361,7 @@ pub fn build_ui(
                             ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.hosts);
                         } else {
                             drop(s);
-                            rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
+                            rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).selected_ssh_host = None;
                             rx_hosts_content_stack.set_visible_child_name("empty");
                         }
                     }
@@ -3377,38 +3370,36 @@ pub fn build_ui(
                     let was_known_before;
                     let old_reachable;
                     {
-                        let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         old_reachable = s.host_health.get(&host_id).copied();
                         was_known_before = old_reachable.is_some();
                         s.host_health.insert(host_id.clone(), reachable);
                     }
                     // Desktop notification on state *change* (not initial discovery).
                     if was_known_before && old_reachable != Some(reachable) {
-                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         let host_label = s.hosts.iter()
-                            .find(|h| h.id.to_string() == host_id)
-                            .map(|h| h.label.clone())
-                            .unwrap_or_else(|| host_id.clone());
+                            .find(|h| h.id.to_string() == host_id).map_or_else(|| host_id.clone(), |h| h.label.clone());
                         drop(s);
                         let (title, body) = if reachable {
                             (
-                                format!("\u{2b24} {} is now reachable", host_label),
+                                format!("\u{2b24} {host_label} is now reachable"),
                                 "Host came back online.".to_owned(),
                             )
                         } else {
                             (
-                                format!("\u{2b24} {} is unreachable", host_label),
+                                format!("\u{2b24} {host_label} is unreachable"),
                                 "Host went offline.".to_owned(),
                             )
                         };
                         if let Some(app) = rx_window.application() {
                             let notif = gio::Notification::new(&title);
                             notif.set_body(Some(&body));
-                            let notif_id = format!("host-health-{}", host_id);
+                            let notif_id = format!("host-health-{host_id}");
                             app.send_notification(Some(&notif_id), &notif);
                         }
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let filter = s.ssh_filter.clone();
                     let health = s.host_health.clone();
                     populate_ssh_host_list(
@@ -3426,7 +3417,7 @@ pub fn build_ui(
                     // Only paint it if that host is still the selected one —
                     // the fetch is async and the user may have moved on.
                     let still_selected = {
-                        let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         s.selected_ssh_host.as_deref() == Some(host_id.as_str())
                     };
                     if still_selected {
@@ -3445,7 +3436,7 @@ pub fn build_ui(
                         .add_toast(adw::Toast::new(&format!("{host_label}: {message}")));
                 }
                 AppMsg::EditSshHost(host_id) => {
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == host_id) {
                         ssh::dialogs::show_edit_host_dialog(
                             &rx_window, host, &s.ssh_keys, &s.hosts, &s.profiles, &rx_rt, &rx_tx,
@@ -3453,7 +3444,7 @@ pub fn build_ui(
                     }
                 }
                 AppMsg::EditVpnProfile(profile_id) => {
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(p) = s.profiles.iter().find(|p| p.id.to_string() == profile_id) {
                         let backend = p.backend.clone();
                         let name = p.name.clone();
@@ -3462,7 +3453,7 @@ pub fn build_ui(
                         let dns_servers = p
                             .dns_servers
                             .iter()
-                            .map(|ip| ip.to_string())
+                            .map(std::string::ToString::to_string)
                             .collect::<Vec<_>>()
                             .join(", ");
                         drop(s);
@@ -3479,7 +3470,7 @@ pub fn build_ui(
                     }
                 }
                 AppMsg::PushSshKey(key_id) => {
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     ssh::dialogs::show_push_key_dialog(
                         &rx_window,
                         &s.ssh_keys,
@@ -3502,7 +3493,7 @@ pub fn build_ui(
                             active_map.insert(format!("{lp}:{rh}:{rp}"), fid);
                         }
                     }
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if let Some(sel) = &s.selected_ssh_host {
                         if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *sel) {
                             ssh::host_detail::populate_port_forwards_list(
@@ -3518,7 +3509,7 @@ pub fn build_ui(
                 }
                 AppMsg::FortigateStatus { host_id, data } => {
                     // Only apply if this host is still the selected one.
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if s.selected_ssh_host.as_deref() == Some(&host_id) {
                         ssh::host_detail::apply_fortigate_status(
                             &rx_ssh_host_detail,
@@ -3527,7 +3518,7 @@ pub fn build_ui(
                     }
                 }
                 AppMsg::FortigateApiTokenFetched { host_id, token } => {
-                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = rx_app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     if s.selected_ssh_host.as_deref() == Some(&host_id) {
                         rx_ssh_host_detail.fg_api_token_row.set_subtitle(&token);
                         rx_ssh_host_detail.fg_show_token_btn.set_icon_name("view-conceal-symbolic");
@@ -3882,11 +3873,8 @@ pub fn build_ui(
         let ssh_search_entry = ssh_search_entry.clone();
         focus_search_action.connect_activate(move |_, _| {
             let page = view_stack.visible_child_name();
-            match page.as_deref() {
-                Some("hosts") | Some("keys") => {
-                    ssh_search_entry.grab_focus();
-                }
-                _ => {}
+            if let Some("hosts" | "keys") = page.as_deref() {
+                ssh_search_entry.grab_focus();
             }
         });
         window.add_action(&focus_search_action);
@@ -3921,7 +3909,7 @@ pub fn build_ui(
             }
             // Otherwise, clear search in the active section.
             let page = view_stack.visible_child_name();
-            if matches!(page.as_deref(), Some("hosts") | Some("keys")) {
+            if matches!(page.as_deref(), Some("hosts" | "keys")) {
                 let text = ssh_search_entry.text();
                 if !text.is_empty() {
                     ssh_search_entry.set_text("");
@@ -3945,7 +3933,7 @@ pub fn build_ui(
                 // Re-fetch VPN state.
                 match fetch_initial_state(&app_state).await {
                     Ok(()) => {
-                        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         tx.send(AppMsg::DaemonConnected {
                             profiles: s.profiles.clone(),
                             state: s.vpn_state.clone(),
@@ -3957,7 +3945,7 @@ pub fn build_ui(
                 }
                 // Re-fetch SSH state.
                 if let Ok(()) = fetch_initial_ssh_state(&app_state).await {
-                    let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                     tx.send(AppMsg::SshKeysRefreshed(s.ssh_keys.clone())).ok();
                     tx.send(AppMsg::SshHostsRefreshed(s.hosts.clone())).ok();
                 }
@@ -4044,7 +4032,7 @@ fn render_notifications(
     }
 
     let notifications = {
-        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.notifications.clone()
     };
 
@@ -4088,7 +4076,7 @@ fn push_notification(
     // Capture the new notification so we can build its row after releasing
     // the lock (we must not hold the lock while touching GTK widgets).
     let notification = {
-        let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = app_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         s.push_notification(icon, message);
         s.notifications.first().cloned()
     };

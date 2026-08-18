@@ -84,12 +84,12 @@ pub fn set_desired(id: &str, ip: &str) {
 /// when the routes went up. They are recorded for debuggability only; the
 /// reconciler re-asserts `auto:any` rather than either of them. See
 /// [`DesiredExitNode::auto`].
-pub fn set_desired_auto(observed_id: &str, observed_ip: &str) {
+pub fn set_desired_auto(id: &str, ip: &str) {
     write(&DesiredExitNode {
         desired: true,
         auto: true,
-        exit_node_id: observed_id.to_string(),
-        exit_node_ip: observed_ip.to_string(),
+        exit_node_id: id.to_string(),
+        exit_node_ip: ip.to_string(),
         updated_unix: now_unix(),
     });
 }

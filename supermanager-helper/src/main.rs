@@ -746,7 +746,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // + write small files; the Tokio runtime is overkill and the
         // calls finish in <100 ms.
         "tailscaled_install" => match serde_json::from_value::<tailscale::InstallArgs>(req.params) {
-            Ok(args) => match tailscale::install(args) {
+            Ok(args) => match tailscale::install(&args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("tailscaled_install failed: {e:#}")),
             },
@@ -754,10 +754,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         "tailscaled_uninstall" => match serde_json::from_value::<tailscale::UninstallArgs>(req.params) {
-            Ok(args) => match tailscale::uninstall(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("tailscaled_uninstall failed: {e:#}")),
-            },
+            Ok(args) => {
+                let s = tailscale::uninstall(&args);
+                Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+            }
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
         },
 
@@ -775,7 +775,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // the internet to even open a browser. Always available;
         // doesn't depend on tailscaled being responsive.
         "tailscale_panic_reset" => match serde_json::from_value::<tailscale::PanicResetArgs>(req.params) {
-            Ok(args) => match tailscale::panic_reset(args) {
+            Ok(args) => match tailscale::panic_reset(&args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("tailscale_panic_reset failed: {e:#}")),
             },
@@ -789,7 +789,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // resolve through the system resolver. See helper
         // `install_magicdns_resolver` for full reasoning.
         "tailscale_install_magicdns_resolver" => match serde_json::from_value::<tailscale::MagicdnsResolverArgs>(req.params) {
-            Ok(args) => match tailscale::install_magicdns_resolver(args) {
+            Ok(args) => match tailscale::install_magicdns_resolver(&args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}")),
             },
@@ -815,11 +815,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     // `auto:any` it is only an observation, so it gets recorded
                     // as such and the reconciler re-asserts `auto:any` rather
                     // than pinning this particular peer.
-                    let (node_id, node_ip) = tailscale::current_exit_node();
+                    let (peer_id, peer_addr) = tailscale::current_exit_node();
                     if auto {
-                        tailscale_state::set_desired_auto(&node_id, &node_ip);
+                        tailscale_state::set_desired_auto(&peer_id, &peer_addr);
                     } else {
-                        tailscale_state::set_desired(&node_id, &node_ip);
+                        tailscale_state::set_desired(&peer_id, &peer_addr);
                     }
                     Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                 }
@@ -830,18 +830,16 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         "tailscale_remove_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-            Ok(args) => match tailscale::remove_exit_routes(args) {
-                Ok(s) => {
-                    // This RPC is the INTENTIONAL clear (user cleared the exit
-                    // node) — stop self-heal. The watchdog's blip recovery goes
-                    // through panic_reset (clear_pref=false), which does NOT
-                    // touch the desired-state, so a transient drop never wipes
-                    // intent.
-                    tailscale_state::clear_desired();
-                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
-                }
-                Err(e) => Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}")),
-            },
+            Ok(args) => {
+                let s = tailscale::remove_exit_routes(&args);
+                // This RPC is the INTENTIONAL clear (user cleared the exit
+                // node) — stop self-heal. The watchdog's blip recovery goes
+                // through panic_reset (clear_pref=false), which does NOT
+                // touch the desired-state, so a transient drop never wipes
+                // intent.
+                tailscale_state::clear_desired();
+                Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+            }
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
         },
 
@@ -867,7 +865,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // unreachable nameserver. Always available — DNS rescue
         // is a baseline capability.
         "tailscale_set_dns_servers" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-            Ok(args) => match tailscale::set_dns_servers(args) {
+            Ok(args) => match tailscale::set_dns_servers(&args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("set_dns_servers failed: {e:#}")),
             },
@@ -880,7 +878,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // propagate to State (e.g., a stale IPv6 RA RDNSS
         // nameserver shadowing the manual config).
         "tailscale_force_dns_state" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-            Ok(args) => match tailscale::force_dns_state(args) {
+            Ok(args) => match tailscale::force_dns_state(&args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("force_dns_state failed: {e:#}")),
             },

@@ -9,8 +9,9 @@
 //! 2. **Zone classification.** Tags each host as `internal` /
 //!    `dmz` / `wan` / `loopback` based on RFC 1918 + RFC 6598
 //!    + 169.254 link-local rules. Drives the per-finding
-//!    "exposure" judgement: a Critical CVE on an `internal` host
-//!    is bad, on `wan` it's incident-response material.
+//!      "exposure" judgement: a Critical CVE on an `internal` host
+//!      is bad, on `wan` it's incident-response material.
+//!
 //!
 //! All in pure Rust — no shell-out, no external services.
 

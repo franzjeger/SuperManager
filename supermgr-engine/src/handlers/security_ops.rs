@@ -4,7 +4,7 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_remediation_script(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_remediation_script(&self, id: u64, params: serde_json::Value) -> Response {
         // Two modes: single finding key, or batch by host_ip.
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),

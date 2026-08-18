@@ -98,6 +98,7 @@ struct State {
 }
 
 static STATE: tokio::sync::OnceCell<Arc<Mutex<State>>> = tokio::sync::OnceCell::const_new();
+static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Spawn the watchdog. Idempotent. Pass in the helper's existing
 /// Arc<Mutex<>> backend handles so we don't fight the main RPC
@@ -120,7 +121,6 @@ pub async fn spawn_watchdog(
         .clone();
 
     // Avoid double-spawn — guard via a separate Once flag.
-    static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SPAWNED.get().is_some() {
         return Ok(());
     }

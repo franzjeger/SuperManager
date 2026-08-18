@@ -89,7 +89,7 @@ pub fn save(cache: &FeedCache) -> Result<()> {
     let path = cache_path();
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(cache).context("serialize cve cache")?;
-    std::fs::write(&tmp, bytes).with_context(|| format!("write {tmp:?}"))?;
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &path).context("rename cve cache")?;
     Ok(())
 }

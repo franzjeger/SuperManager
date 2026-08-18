@@ -55,11 +55,12 @@ pub fn script_for_finding(f: &Finding) -> Option<String> {
 /// `script_for_finding` returns Some for at least one entry.
 #[must_use]
 pub fn batch_script(host: &str, findings: &[Finding]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::new();
-    out.push_str(&format!(
+    let _ = write!(out,
         "#!/usr/bin/env bash\n# SuperManager remediation script for {host}\n# Generated {}\n\n",
         chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
-    ));
+    );
     out.push_str("set -euo pipefail\n");
     out.push_str("BACKUP_DIR=/var/backups/supermgr-$(date +%Y%m%d-%H%M%S)\n");
     out.push_str("mkdir -p \"$BACKUP_DIR\"\n");
@@ -68,10 +69,7 @@ pub fn batch_script(host: &str, findings: &[Finding]) -> String {
     let mut applied = 0;
     for f in findings {
         if let Some(s) = script_for_finding(f) {
-            out.push_str(&format!(
-                "# ----- {} (severity {:?}) -----\n",
-                f.title, f.severity
-            ));
+            let _ = writeln!(out, "# ----- {} (severity {:?}) -----", f.title, f.severity);
             out.push_str(&s);
             out.push_str("\n\n");
             applied += 1;
@@ -80,9 +78,7 @@ pub fn batch_script(host: &str, findings: &[Finding]) -> String {
     if applied == 0 {
         out.push_str("echo \"No automated remediation available for the supplied findings.\"\n");
     } else {
-        out.push_str(&format!(
-            "echo \"\\u2713 {applied} remediation step(s) applied.\"\n"
-        ));
+        let _ = writeln!(out, "echo \"\\u2713 {applied} remediation step(s) applied.\"");
     }
     out
 }

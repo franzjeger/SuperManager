@@ -254,7 +254,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_discovery_findings(
+    pub(crate) fn handle_discovery_findings(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -344,7 +344,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_discovery_inventory(
+    pub(crate) fn handle_discovery_inventory(
         &self,
         id: u64,
         params: serde_json::Value,

@@ -79,7 +79,7 @@ impl EngineServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let server = Arc::clone(&self);
-                    let permit = if let Ok(p) = Arc::clone(&conn_sema).try_acquire_owned() { p } else {
+                    let Ok(permit) = Arc::clone(&conn_sema).try_acquire_owned() else {
                         warn!("connection refused: 256 concurrent clients reached");
                         continue;
                     };
@@ -134,7 +134,7 @@ impl EngineServer {
 
             // Write response with length prefix.
             let resp_bytes = serde_json::to_vec(&response)?;
-            let len = (resp_bytes.len() as u32).to_be_bytes();
+            let len = u32::try_from(resp_bytes.len()).unwrap_or(u32::MAX).to_be_bytes();
             stream.write_all(&len).await?;
             stream.write_all(&resp_bytes).await?;
         }
@@ -155,7 +155,7 @@ impl EngineServer {
             "vpn_import_azure" => self.handle_vpn_import_azure(id, req.params).await,
             "vpn_render_wireguard_conf" => self.handle_vpn_render_wireguard_conf(id, req.params).await,
             "vpn_render_azure_ovpn" => self.handle_vpn_render_azure_ovpn(id, req.params).await,
-            "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id).await,
+            "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id),
             "vpn_set_routing" => self.handle_vpn_set_routing(id, req.params).await,
             "vpn_set_kill_switch" => self.handle_vpn_set_kill_switch(id, req.params).await,
             "vpn_set_push_dns" => self.handle_vpn_set_push_dns(id, req.params).await,
@@ -169,7 +169,7 @@ impl EngineServer {
             "ssh_delete_key" => self.handle_ssh_delete_key(id, req.params).await,
             "ssh_export_public_key" => self.handle_ssh_export_public_key(id, req.params).await,
             "ssh_import_key" => self.handle_ssh_import_key(id, req.params).await,
-            "ssh_import_keys_scan" => self.handle_ssh_import_keys_scan(id, req.params).await,
+            "ssh_import_keys_scan" => EngineServer::handle_ssh_import_keys_scan(id, &req.params),
 
             // -- SSH host methods --
             "ssh_add_host" => self.handle_ssh_add_host(id, req.params).await,
@@ -208,27 +208,27 @@ impl EngineServer {
 
             // -- Compliance methods --
             "compliance_run" => self.handle_compliance_run(id, req.params).await,
-            "compliance_history" => self.handle_compliance_history(id, req.params).await,
-            "compliance_get_run" => self.handle_compliance_get_run(id, req.params).await,
-            "compliance_list_checks" => self.handle_compliance_list_checks(id).await,
-            "compliance_drift" => self.handle_compliance_drift(id, req.params).await,
+            "compliance_history" => self.handle_compliance_history(id, req.params),
+            "compliance_get_run" => self.handle_compliance_get_run(id, req.params),
+            "compliance_list_checks" => self.handle_compliance_list_checks(id),
+            "compliance_drift" => self.handle_compliance_drift(id, req.params),
             "compliance_render_report" => {
-                self.handle_compliance_render_report(id, req.params).await
+                self.handle_compliance_render_report(id, req.params)
             }
             "compliance_scan_all" => self.handle_compliance_scan_all(id, req.params).await,
             "compliance_run_linux" => self.handle_compliance_run_linux(id, req.params).await,
-            "compliance_list_linux_checks" => self.handle_compliance_list_linux_checks(id).await,
+            "compliance_list_linux_checks" => self.handle_compliance_list_linux_checks(id),
 
             // -- Customer / Provisioning methods --
-            "customer_list" => self.handle_customer_list(id).await,
-            "customer_save" => self.handle_customer_save(id, req.params).await,
-            "customer_delete" => self.handle_customer_delete(id, req.params).await,
+            "customer_list" => self.handle_customer_list(id),
+            "customer_save" => self.handle_customer_save(id, req.params),
+            "customer_delete" => self.handle_customer_delete(id, req.params),
             "customer_report" => self.handle_customer_report(id, req.params).await,
             "provisioning_list_templates" => {
-                self.handle_provisioning_list_templates(id).await
+                self.handle_provisioning_list_templates(id)
             }
             "provisioning_render" => {
-                self.handle_provisioning_render(id, req.params).await
+                self.handle_provisioning_render(id, req.params)
             }
             "provisioning_diff_preview" => {
                 self.handle_provisioning_diff_preview(id, req.params).await
@@ -240,7 +240,7 @@ impl EngineServer {
                 self.handle_provisioning_deploy(id, req.params).await
             }
             "provisioning_list_deployments" => {
-                self.handle_provisioning_list_deployments(id, req.params).await
+                self.handle_provisioning_list_deployments(id, req.params)
             }
             "provisioning_rollback" => {
                 self.handle_provisioning_rollback(id, req.params).await
@@ -290,20 +290,20 @@ impl EngineServer {
             }
 
             // -- Engagement / Security methods --
-            "engagement_list" => self.handle_engagement_list(id).await,
-            "engagement_save" => self.handle_engagement_save(id, req.params).await,
-            "engagement_delete" => self.handle_engagement_delete(id, req.params).await,
+            "engagement_list" => self.handle_engagement_list(id),
+            "engagement_save" => self.handle_engagement_save(id, req.params),
+            "engagement_delete" => self.handle_engagement_delete(id, req.params),
             "discovery_passive_scan" => {
                 self.handle_discovery_passive_scan(id, req.params).await
             }
             "discovery_inventory" => {
-                self.handle_discovery_inventory(id, req.params).await
+                self.handle_discovery_inventory(id, req.params)
             }
             "discovery_active_scan" => {
                 self.handle_discovery_active_scan(id, req.params).await
             }
             "discovery_findings" => {
-                self.handle_discovery_findings(id, req.params).await
+                self.handle_discovery_findings(id, req.params)
             }
             "discovery_dns_axfr" => {
                 self.handle_discovery_dns_axfr(id, req.params).await
@@ -316,19 +316,19 @@ impl EngineServer {
             }
 
             // -- Track A: findings management --
-            "findings_list" => self.handle_findings_list(id, req.params).await,
-            "findings_summary" => self.handle_findings_summary(id, req.params).await,
-            "findings_risk_hosts" => self.handle_findings_risk_hosts(id, req.params).await,
+            "findings_list" => self.handle_findings_list(id, req.params),
+            "findings_summary" => self.handle_findings_summary(id, req.params),
+            "findings_risk_hosts" => self.handle_findings_risk_hosts(id, req.params),
             "findings_set_disposition" => {
-                self.handle_findings_set_disposition(id, req.params).await
+                self.handle_findings_set_disposition(id, req.params)
             }
-            "engagement_report" => self.handle_engagement_report(id, req.params).await,
-            "notify_get_config" => self.handle_notify_get_config(id).await,
-            "notify_set_webhook" => self.handle_notify_set_webhook(id, req.params).await,
-            "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, req.params).await,
-            "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, req.params).await,
+            "engagement_report" => self.handle_engagement_report(id, req.params),
+            "notify_get_config" => self.handle_notify_get_config(id),
+            "notify_set_webhook" => self.handle_notify_set_webhook(id, req.params),
+            "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, req.params),
+            "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, req.params),
             "engagement_set_schedule" => {
-                self.handle_engagement_set_schedule(id, req.params).await
+                self.handle_engagement_set_schedule(id, req.params)
             }
             "api_version" => Response::ok(
                 id,
@@ -341,15 +341,15 @@ impl EngineServer {
             "tools_status" => self.handle_tools_status(id).await,
             "dns_health_audit" => self.handle_dns_health_audit(id, req.params).await,
             "cve_feed_refresh" => self.handle_cve_feed_refresh(id).await,
-            "cve_feed_status" => self.handle_cve_feed_status(id).await,
+            "cve_feed_status" => self.handle_cve_feed_status(id),
             "subdomain_enum" => self.handle_subdomain_enum(id, req.params).await,
             "asset_enrich" => self.handle_asset_enrich(id, req.params).await,
             "engagement_report_pdf" => self.handle_engagement_report_pdf(id, req.params).await,
             "engagement_report_html" => self.handle_engagement_report_html(id, req.params).await,
-            "operation_list" => self.handle_operation_list(id).await,
-            "operation_cancel" => self.handle_operation_cancel(id, req.params).await,
-            "activity_timeline" => self.handle_activity_timeline(id, req.params).await,
-            "remediation_script" => self.handle_remediation_script(id, req.params).await,
+            "operation_list" => self.handle_operation_list(id),
+            "operation_cancel" => self.handle_operation_cancel(id, req.params),
+            "activity_timeline" => self.handle_activity_timeline(id, req.params),
+            "remediation_script" => self.handle_remediation_script(id, req.params),
 
             _ => Response::err(id, protocol::METHOD_NOT_FOUND, format!("unknown method: {}", req.method)),
         }
@@ -680,22 +680,22 @@ pub(crate) fn parse_ipnet_list(v: Option<&serde_json::Value>) -> Vec<ipnet::IpNe
 /// editable fields explicitly.
 pub fn merge_host_update(host: &mut Host, incoming: &serde_json::Value) -> Result<(), String> {
     if let Some(s) = incoming.get("label").and_then(|v| v.as_str()) {
-        host.label = s.to_owned();
+        s.clone_into(&mut host.label);
     }
     if let Some(s) = incoming.get("hostname").and_then(|v| v.as_str()) {
-        host.hostname = s.to_owned();
+        s.clone_into(&mut host.hostname);
     }
     if let Some(n) = incoming.get("port").and_then(serde_json::Value::as_u64) {
         if !(1..=65535).contains(&n) {
             return Err(format!("port {n} out of range 1-65535"));
         }
-        host.port = n as u16;
+        host.port = u16::try_from(n).unwrap_or(u16::MAX);
     }
     if let Some(s) = incoming.get("username").and_then(|v| v.as_str()) {
-        host.username = s.to_owned();
+        s.clone_into(&mut host.username);
     }
     if let Some(s) = incoming.get("group").and_then(|v| v.as_str()) {
-        host.group = s.to_owned();
+        s.clone_into(&mut host.group);
     }
     if let Some(v) = incoming.get("device_type") {
         if let Ok(dt) = serde_json::from_value(v.clone()) {

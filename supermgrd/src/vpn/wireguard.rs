@@ -50,7 +50,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt as _;
-use netlink_packet_route::route::{RouteAttribute, RouteMessage};
+use netlink_packet_route::link::LinkAttribute;
+use netlink_packet_route::route::{RouteAttribute, RouteHeader, RouteMessage, RouteType};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 use wireguard_control::{Backend, DeviceUpdate, InterfaceName, Key, PeerConfigBuilder};
@@ -67,6 +68,8 @@ use crate::secrets;
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
+
+type RouteCapture = (Option<RouteMessage>, Option<RouteMessage>, Vec<String>);
 
 /// Tracks whether a `WireGuard` interface is currently owned by this backend,
 /// and saves state that must be restored at disconnect time.
@@ -169,7 +172,6 @@ async fn ifindex_to_name(idx: u32) -> Option<String> {
     tokio::spawn(conn);
     let mut links = handle.link().get().match_index(idx).execute();
     let link = links.try_next().await.ok()??;
-    use netlink_packet_route::link::LinkAttribute;
     link.attributes.iter().find_map(|a| {
         if let LinkAttribute::IfName(name) = a { Some(name.clone()) } else { None }
     })
@@ -198,7 +200,6 @@ async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, Backe
             continue;
         }
         // Only consider unicast routes in the main table.
-        use netlink_packet_route::route::{RouteType, RouteHeader};
         if route.header.kind != RouteType::Unicast {
             continue;
         }
@@ -654,8 +655,7 @@ impl WireGuardBackend {
             for allowed_ip in &peer.allowed_ips {
                 peer_builder = peer_builder.add_allowed_ip(
                     allowed_ip.addr(),
-                    u8::try_from(allowed_ip.prefix_len())
-                        .expect("prefix length fits in u8"),
+                    allowed_ip.prefix_len(),
                 );
             }
 
@@ -802,7 +802,7 @@ impl WireGuardBackend {
         &self,
         iface_name: &str,
         wg_cfg: &WireGuardConfig,
-    ) -> Result<(Option<RouteMessage>, Option<RouteMessage>, Vec<String>), BackendError> {
+    ) -> Result<RouteCapture, BackendError> {
         let mut saved_v4: Option<RouteMessage> = None;
         let mut saved_v6: Option<RouteMessage> = None;
         let mut endpoint_host_routes: Vec<String> = Vec::new();
@@ -885,9 +885,9 @@ impl WireGuardBackend {
             {
                 let mut st = self.state.lock().await;
                 st.interface = Some(iface_name.to_owned());
-                st.saved_default_v4 = saved_v4.clone();
-                st.saved_default_v6 = saved_v6.clone();
-                st.endpoint_host_routes = endpoint_host_routes.clone();
+                saved_v4.clone_into(&mut st.saved_default_v4);
+                saved_v6.clone_into(&mut st.saved_default_v6);
+                endpoint_host_routes.clone_into(&mut st.endpoint_host_routes);
             }
 
             // ----------------------------------------------------------------
@@ -960,7 +960,10 @@ impl WireGuardBackend {
         // Interface index (i32 — D-Bus `i` type).
         // ----------------------------------------------------------------
         let ifindex: i32 = match nix::net::if_::if_nametoindex(iface_name) {
-            Ok(idx) => idx as i32,
+            Ok(idx) => if let Ok(v) = i32::try_from(idx) { v } else {
+                error!("if_nametoindex({iface_name}) index too large");
+                return None;
+            },
             Err(e) => {
                 error!("if_nametoindex({iface_name}): {e}");
                 return None;
@@ -1079,60 +1082,68 @@ impl WireGuardBackend {
         // domain routing.
         // ----------------------------------------------------------------
         if !domains.is_empty() {
-            // Build the argument list: routing-only domains get "~" prefix.
-            let domain_args: Vec<String> = domains
-                .iter()
-                .map(|(d, routing_only)| {
-                    if *routing_only {
-                        format!("~{d}")
-                    } else {
-                        d.clone()
-                    }
-                })
-                .collect();
-
-            info!(
-                "running: resolvectl domain {} {}",
-                iface_name,
-                domain_args.join(" ")
-            );
-
-            let mut cmd = tokio::process::Command::new("resolvectl");
-            cmd.arg("domain").arg(iface_name);
-            for arg in &domain_args {
-                cmd.arg(arg);
-            }
-
-            match cmd.output().await {
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if out.status.success() {
-                        info!(
-                            "resolvectl domain {iface_name} [{}] — ok",
-                            domain_args.join(", ")
-                        );
-                    } else {
-                        // Don't return None — SetLinkDNS succeeded.
-                        error!(
-                            "resolvectl domain {iface_name} failed: exit={} stderr={:?} \
-                             (DNS servers active; domain routing not configured)",
-                            out.status,
-                            stderr.trim()
-                        );
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "resolvectl domain {iface_name}: could not spawn process: {e} \
-                         (DNS servers active; domain routing not configured)"
-                    );
-                }
-            }
+            apply_dns_domains(iface_name, &domains).await;
         }
 
         Some(ifindex)
     }
 
+}
+
+/// Set per-link DNS search/routing domains via `resolvectl domain`.
+///
+/// Routing-only domains are passed with a leading `~` (which `resolvectl`
+/// strips before calling `SetLinkDomains`); search domains are passed as plain
+/// names.  Non-fatal — a failure leaves DNS servers active but without
+/// domain routing.
+async fn apply_dns_domains(iface_name: &str, domains: &[(String, bool)]) {
+    let domain_args: Vec<String> = domains
+        .iter()
+        .map(|(d, routing_only)| {
+            if *routing_only {
+                format!("~{d}")
+            } else {
+                d.clone()
+            }
+        })
+        .collect();
+
+    info!(
+        "running: resolvectl domain {} {}",
+        iface_name,
+        domain_args.join(" ")
+    );
+
+    let mut cmd = tokio::process::Command::new("resolvectl");
+    cmd.arg("domain").arg(iface_name);
+    for arg in &domain_args {
+        cmd.arg(arg);
+    }
+
+    match cmd.output().await {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if out.status.success() {
+                info!(
+                    "resolvectl domain {iface_name} [{}] — ok",
+                    domain_args.join(", ")
+                );
+            } else {
+                error!(
+                    "resolvectl domain {iface_name} failed: exit={} stderr={:?} \
+                     (DNS servers active; domain routing not configured)",
+                    out.status,
+                    stderr.trim()
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "resolvectl domain {iface_name}: could not spawn process: {e} \
+                 (DNS servers active; domain routing not configured)"
+            );
+        }
+    }
 }
 
 /// Remove a `WireGuard` kernel interface via rtnetlink.
@@ -1268,7 +1279,7 @@ impl VpnBackend for WireGuardBackend {
             } else {
                 // Replace every peer's AllowedIPs with the configured split routes.
                 for peer in &mut cfg.peers {
-                    peer.allowed_ips = wg_cfg.split_routes.clone();
+                    wg_cfg.split_routes.clone_into(&mut peer.allowed_ips);
                 }
                 std::borrow::Cow::Owned(cfg)
             }
@@ -1299,7 +1310,7 @@ impl VpnBackend for WireGuardBackend {
             state.saved_default_v6 = saved_v6;
             state.endpoint_host_routes = endpoint_host_routes;
             state.dns_configured_ifindex = dns_ifindex;
-            state.addresses = wg_cfg.addresses.clone();
+            wg_cfg.addresses.clone_into(&mut state.addresses);
             state.connected_at = Some(std::time::Instant::now());
         }
 
@@ -1425,7 +1436,7 @@ impl VpnBackend for WireGuardBackend {
                     .unwrap_or_default()
                     .as_secs();
                 // chrono 0.4.27+: from_timestamp returns Option<DateTime<Utc>>.
-                if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
+                if let Some(dt) = chrono::DateTime::from_timestamp(i64::try_from(secs).unwrap_or(i64::MAX), 0) {
                     last_handshake =
                         Some(last_handshake.map_or(dt, |prev: chrono::DateTime<chrono::Utc>| {
                             prev.max(dt)
@@ -1450,22 +1461,20 @@ impl VpnBackend for WireGuardBackend {
         // and no handshake has been seen in the last 180 s (WireGuard's
         // REJECT_AFTER_TIME), treat the peer as gone and report Inactive so
         // the monitor task can trigger kill-switch strict mode / reconnect.
-        const HANDSHAKE_GRACE_SECS: u64 = 30;
-        const DEAD_PEER_SECS: i64 = 180;
         let now = chrono::Utc::now();
         let been_up_long_enough = connected_at
-            .is_none_or(|t| t.elapsed().as_secs() >= HANDSHAKE_GRACE_SECS);
+            .is_none_or(|t| t.elapsed().as_secs() >= 30);
 
         if been_up_long_enough {
             let peer_dead = match last_handshake {
                 None => true,
-                Some(hs) => (now - hs).num_seconds() > DEAD_PEER_SECS,
+                Some(hs) => (now - hs).num_seconds() > 180,
             };
             if peer_dead {
                 warn!(
                     "WireGuard peer dead — no handshake in {}s, reporting Inactive",
                     match last_handshake {
-                        None => DEAD_PEER_SECS + 1,
+                        None => 181,
                         Some(hs) => (now - hs).num_seconds(),
                     }
                 );

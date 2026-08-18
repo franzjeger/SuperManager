@@ -346,8 +346,8 @@ pub fn load(id: &str) -> Result<Engagement> {
 }
 
 fn load_path(path: &Path) -> Result<Engagement> {
-    let bytes = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-    toml::from_str(&bytes).with_context(|| format!("parse {path:?}"))
+    let bytes = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Per-engagement save mutex. Prevents the load→modify→save race
@@ -365,6 +365,11 @@ fn engagement_lock(id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
         .clone()
 }
 
+/// Persist an engagement to disk.
+///
+/// # Panics
+///
+/// Panics if the per-engagement save mutex is poisoned.
 pub fn save(engagement: &Engagement) -> Result<()> {
     crate::customer::validate_slug(&engagement.id).context("invalid engagement id")?;
     if !engagement.customer_slug.is_empty() {
@@ -382,8 +387,8 @@ pub fn save(engagement: &Engagement) -> Result<()> {
     // existing TOML on a crash/ENOSPC.
     let tmp = path.with_extension("toml.tmp");
     let serialized = toml::to_string_pretty(engagement).context("serialize engagement")?;
-    std::fs::write(&tmp, serialized).with_context(|| format!("write {tmp:?}"))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename {path:?}"))?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 
@@ -392,13 +397,17 @@ pub fn delete(id: &str) -> Result<()> {
     let mut path = engagements_dir();
     path.push(format!("{id}.toml"));
     if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("delete {path:?}"))?;
+        std::fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
     }
     Ok(())
 }
 
 /// Append a one-line audit event to an engagement's log. Used
 /// by every active scan to record what happened.
+///
+/// # Panics
+///
+/// Panics if the per-engagement save mutex is poisoned.
 pub fn log_event(engagement_id: &str, event: EngagementEvent) -> Result<()> {
     // Acquire the engagement lock around the load→append→save
     // cycle. Without this, two concurrent log_event calls would
@@ -428,8 +437,8 @@ fn save_inner(engagement: &Engagement) -> Result<()> {
     path.push(format!("{}.toml", engagement.id));
     let tmp = path.with_extension("toml.tmp");
     let serialized = toml::to_string_pretty(engagement).context("serialize engagement")?;
-    std::fs::write(&tmp, serialized).with_context(|| format!("write {tmp:?}"))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename {path:?}"))?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 

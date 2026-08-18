@@ -74,7 +74,7 @@ pub async fn enumerate(domain: &str) -> Result<SubdomainResult> {
     }
     let entries: Vec<CrtEntry> = serde_json::from_slice(&bytes)
         .context("parse crt.sh JSON")?;
-    let cert_count = entries.len() as u32;
+    let cert_count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
 
     let mut found: HashSet<String> = HashSet::new();
     for entry in &entries {
@@ -114,8 +114,8 @@ fn extract_hostnames(blob: &str, apex: &str, out: &mut HashSet<String>) {
     for raw in blob.split(['\n', ' ', ',', ';']) {
         let mut name = raw.trim().to_lowercase();
         if name.is_empty() { continue; }
-        if let Some(rest) = name.strip_prefix("*.") {
-            name = rest.to_owned();
+        if name.starts_with("*.") {
+            name = name[2..].to_owned();
         }
         // Filter: only keep names that are within the apex.
         if name == apex_lc || name.ends_with(&format!(".{apex_lc}")) {

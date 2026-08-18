@@ -8,7 +8,7 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_engagement_list(&self, id: u64) -> Response {
+    pub(crate) fn handle_engagement_list(&self, id: u64) -> Response {
         match crate::engagement::list_all() {
             Ok(list) => match serde_json::to_value(&list) {
                 Ok(v) => Response::ok(id, v),
@@ -18,7 +18,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_save(
+    pub(crate) fn handle_engagement_save(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -40,7 +40,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_delete(
+    pub(crate) fn handle_engagement_delete(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -55,7 +55,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_set_schedule(
+    pub(crate) fn handle_engagement_set_schedule(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -94,7 +94,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_report(
+    pub(crate) fn handle_engagement_report(
         &self,
         id: u64,
         params: serde_json::Value,

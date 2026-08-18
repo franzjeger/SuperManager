@@ -143,7 +143,7 @@ pub async fn passive_scan(
         if let Some(existing) = by_ip.get_mut(&m.ip) {
             // Merge: keep ARP MAC + vendor, append mDNS services + hostname.
             if existing.hostname.is_none() {
-                existing.hostname = m.hostname.clone();
+                existing.hostname.clone_from(&m.hostname);
             }
             for service in m.services {
                 existing.services.push(service);
@@ -210,7 +210,7 @@ pub async fn passive_scan(
                 technique: crate::engagement::Technique::Recon,
                 target: customer_slug.unwrap_or("local").to_owned(),
                 action: "passive_scan".to_owned(),
-                findings: result.hosts.len() as u32,
+                findings: u32::try_from(result.hosts.len()).unwrap_or(u32::MAX),
                 notes: format!("{} hosts discovered", result.hosts.len()),
             },
         );
@@ -259,9 +259,8 @@ fn parse_arp(text: &str) -> Vec<DiscoveredHost> {
             continue;
         }
         // Parse "? (IP) at MAC on IFACE …"
-        let ip = match extract_between(line, '(', ')') {
-            Some(s) => s,
-            None => continue,
+        let Some(ip) = extract_between(line, '(', ')') else {
+            continue;
         };
         let mac = match line.split(" at ").nth(1) {
             Some(rest) => match rest.split_whitespace().next() {
@@ -411,7 +410,7 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
                 txt_records: entry.txt_records,
             });
             if host.hostname.is_none() {
-                host.hostname = entry.host.clone();
+                host.hostname.clone_from(&entry.host);
             }
         }
     }
@@ -884,8 +883,8 @@ fn oui_database() -> HashMap<String, String> {
 ///   - System Wireshark.app: bundled inside the .app
 ///
 /// File format is one line per OUI:
-///     08:00:20	Sun	Oracle Corporation
-///     8C:ED:E1	`UbiquitiI`	Ubiquiti Inc
+///     08:00:20    Sun    Oracle Corporation
+///     8C:ED:E1    `UbiquitiI`    Ubiquiti Inc
 /// We just take the first two whitespace-separated fields per
 /// line, lowercase the prefix, and overwrite our curated entry
 /// only when the curated table has no entry (so a curated
@@ -983,7 +982,7 @@ fn persist_inventory(customer_slug: &str, hosts: &[DiscoveredHost]) -> Result<()
     let mut path = dir;
     path.push("inventory.json");
     let bytes = serde_json::to_vec_pretty(hosts).context("serialize inventory")?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -993,7 +992,7 @@ pub fn load_inventory(customer_slug: &str) -> Result<Vec<DiscoveredHost>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let hosts: Vec<DiscoveredHost> =
         serde_json::from_slice(&bytes).context("deserialize inventory")?;
     Ok(hosts)
@@ -1327,7 +1326,7 @@ pub async fn active_scan(
                 technique: crate::engagement::Technique::Discovery,
                 target: format!("{} hosts", targets.len()),
                 action: "active_scan".into(),
-                findings: result.findings.len() as u32,
+                findings: u32::try_from(result.findings.len()).unwrap_or(u32::MAX),
                 notes: format!(
                     "{} hosts × {} ports → {} findings ({})",
                     result.hosts.len(),
@@ -1426,11 +1425,11 @@ fn persist_active_scan(customer_slug: &str, result: &ActiveScanResult) -> Result
     let mut path = dir.clone();
     path.push("active_scan.json");
     let bytes = serde_json::to_vec_pretty(result).context("serialize")?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     let mut findings_path = dir;
     findings_path.push("findings.json");
     let bytes = serde_json::to_vec_pretty(&result.findings).context("serialize findings")?;
-    std::fs::write(&findings_path, bytes).with_context(|| format!("write {findings_path:?}"))?;
+    std::fs::write(&findings_path, bytes).with_context(|| format!("write {}", findings_path.display()))?;
     Ok(())
 }
 
@@ -1440,7 +1439,7 @@ pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let findings: Vec<crate::vuln::Finding> =
         serde_json::from_slice(&bytes).context("deserialize findings")?;
     Ok(findings)
@@ -1498,9 +1497,9 @@ fn expand_cidr(cidr: &str, cap: usize) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
     let start = if prefix >= 31 { net } else { net + 1 };
-    let mut out = Vec::with_capacity(host_count as usize);
+    let mut out = Vec::with_capacity(usize::try_from(host_count).unwrap_or(usize::MAX));
     for i in 0..host_count {
-        let ip = start + i as u32;
+        let ip = start + u32::try_from(i).unwrap_or(u32::MAX);
         out.push(format!(
             "{}.{}.{}.{}",
             (ip >> 24) & 0xff,
