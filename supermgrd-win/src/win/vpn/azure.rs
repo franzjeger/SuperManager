@@ -193,6 +193,13 @@ impl Ikev2Backend {
         // ── Step 2 — Tempfiles ──────────────────────────────────────────────
         let tmp_dir = runtime_dir(&profile.id);
         std::fs::create_dir_all(&tmp_dir).map_err(VpnError::Io)?;
+        // This dir receives the OAuth access token (auth.txt) and the
+        // tls-auth key. Lock it to SYSTEM + Administrators before we
+        // write them — the inherited ProgramData default would leave
+        // the token readable by every authenticated local user. Fail
+        // the connect rather than drop a token into a world-readable
+        // location.
+        crate::win::paths::lock_down_secret_dir(&tmp_dir).map_err(VpnError::Io)?;
 
         let key_path = tmp_dir.join("tls-auth.key");
         let auth_path = tmp_dir.join("auth.txt");

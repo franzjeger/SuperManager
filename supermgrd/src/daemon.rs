@@ -3579,6 +3579,16 @@ impl DaemonService {
             let _ = std::fs::create_dir_all(backup_dir);
             for (filename, content) in obj {
                 if let Some(text) = content.as_str() {
+                    // The key comes straight from the imported backup
+                    // JSON (attacker-controllable). Reject path traversal
+                    // before joining — otherwise a key like
+                    // `../../../etc/cron.d/x` escapes the backups dir and
+                    // writes an arbitrary root-owned file. Same guard as
+                    // get_config_version.
+                    if filename.contains('/') || filename.contains("..") {
+                        warn!("import_all: skipping unsafe backup filename '{filename}'");
+                        continue;
+                    }
                     let path = backup_dir.join(filename);
                     if !path.exists()
                         && std::fs::write(&path, text).is_ok() {

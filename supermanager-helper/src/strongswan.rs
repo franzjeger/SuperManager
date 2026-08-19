@@ -325,6 +325,17 @@ impl Strongswan {
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
         self.resolve()?;
+        // Validate wire-supplied inputs BEFORE any of them reach a
+        // filesystem path or the root-loaded swanctl config. These
+        // arrive as deserialized IPC JSON — not a trusted typed source
+        // — so an unsanitized value can traverse out of the swanctl
+        // dir (profile_id) or inject arbitrary swanctl directives via
+        // an embedded newline (host / username / routes).
+        validate_profile_id(&args.profile_id)?;
+        validate_host(&args.host)?;
+        for route in &args.routes {
+            validate_route(route)?;
+        }
         // The display name only ever travelled the wire to be ignored. Log
         // it: /var/log/supermanager-helper.log is where a failed connect
         // gets diagnosed, and `profile_id` alone is a UUID nobody can match
@@ -409,6 +420,9 @@ impl Strongswan {
 
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
         self.resolve()?;
+        // Same wire-input guard as connect(): profile_id is
+        // interpolated into filesystem paths below.
+        validate_profile_id(&args.profile_id)?;
         let swanctl = self.swanctl.as_ref().unwrap();
         // best-effort: terminate the IKE SA. Even if it fails, also remove
         // the loaded config so a subsequent --load-all doesn't try to
@@ -1000,7 +1014,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         dpd_delay = 10s
         local {{
             auth = eap-mschapv2
-            eap_id = {username}{local_id_line}
+            eap_id = "{username}"{local_id_line}
         }}
         remote {{
             auth = psk
@@ -1020,10 +1034,10 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
 "#,
         id = id,
         host = args.host,
-        username = args.username,
         local_id_line = local_id_line,
         local_ts = local_ts,
         remote_ts = remote_ts,
+        username = escape_swanctl(&args.username),
     )
 }
 
@@ -1032,6 +1046,49 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
 /// already in this set.
 fn sanitize_name(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_hexdigit() || *c == '-' || *c == '_').collect()
+}
+
+/// Reject a `profile_id` that would escape the swanctl config dir or
+/// otherwise contain anything but our ident-safe alphabet. This value
+/// is interpolated into `conf.d/supermanager-<id>.conf` paths, so a
+/// `../../../etc/...` value would let a wire caller write root-owned
+/// files anywhere. We require it to survive `sanitize_name` unchanged
+/// (hex digits, `-`, `_`) and be non-empty — profile UUIDs already
+/// satisfy this.
+fn validate_profile_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty() || sanitize_name(id) != id {
+        anyhow::bail!("invalid profile_id '{id}' — only hex digits, '-' and '_' allowed");
+    }
+    Ok(())
+}
+
+/// Validate a server host (IP literal or DNS name). Interpolated raw
+/// into `remote_addrs` / `remote.id`, so anything outside this set —
+/// notably a newline — could inject swanctl directives. Hostname/IP
+/// characters only: alphanumerics, `.`, `-`, `:` (IPv6). Non-empty.
+fn validate_host(host: &str) -> anyhow::Result<()> {
+    let ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'));
+    if !ok {
+        anyhow::bail!("invalid host '{host}' — not an IP or hostname");
+    }
+    Ok(())
+}
+
+/// Validate a split-tunnel route as a CIDR-ish selector. Joined with
+/// commas into `remote_ts`; a newline would inject config. IPv4/IPv6
+/// address characters plus the `/prefix`. Non-empty.
+fn validate_route(route: &str) -> anyhow::Result<()> {
+    let ok = !route.is_empty()
+        && route
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() || matches!(b, b'.' | b':' | b'/'));
+    if !ok {
+        anyhow::bail!("invalid route '{route}' — not a CIDR");
+    }
+    Ok(())
 }
 
 /// Secrets file format per
@@ -1067,11 +1124,11 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     if !args.password.is_empty() {
         s.push_str(&format!(
             "    eap-{id} {{\n\
-             \x20       id = {username}\n\
+             \x20       id = \"{username}\"\n\
              \x20       secret = \"{secret}\"\n\
              \x20   }}\n",
             id = id,
-            username = args.username,
+            username = escape_swanctl(&args.username),
             secret = escape_swanctl(&args.password),
         ));
     }
@@ -1796,8 +1853,11 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         );
 
         let blank = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
+        // Match the local.id line specifically (newline + indent + `id = "`),
+        // not the always-present `eap_id = "…"` line which also contains the
+        // `id = "` substring now that the EAP identity is quoted.
         assert!(
-            !blank.contains("id = \""),
+            !blank.contains("\n            id = \""),
             "blank Local ID must emit no quoted local.id line:\n{blank}"
         );
     }
@@ -1840,8 +1900,9 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(s.contains("id-1 = 79.160.91.22"));
         assert!(s.contains("id-2 = %any"));
         assert!(s.contains(r#"secret = "psk-secret""#));
-        // EAP secret entry binds to the username
-        assert!(s.contains("id = alice"));
+        // EAP secret entry binds to the username (quoted to keep an
+        // identity with special characters from injecting directives)
+        assert!(s.contains(r#"id = "alice""#));
         assert!(s.contains(r#"secret = "pw""#));
     }
 

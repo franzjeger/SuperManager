@@ -58,8 +58,16 @@ pub struct Result_ {
 /// pf if it isn't already running. Idempotent.
 pub fn enable(args: EnableArgs) -> Result<Result_> {
     let iface = args.tunnel_interface;
-    if !iface.starts_with("utun") {
-        bail!("invalid tunnel_interface '{iface}' — must be utun*");
+    // Strict validation: this value is interpolated raw into the
+    // pf anchor ruleset below, so anything but `utun<digits>` could
+    // inject arbitrary pf rules (e.g. a trailing newline + `pass
+    // quick all`) and neuter the kill-switch. Must be exactly
+    // `utun` followed by one or more ASCII digits, nothing else.
+    let valid = iface.len() > 4
+        && iface.starts_with("utun")
+        && iface[4..].bytes().all(|b| b.is_ascii_digit());
+    if !valid {
+        bail!("invalid tunnel_interface '{iface}' — must be utun<N>");
     }
 
     // Build the anchor's pf rules. Order matters in pf: explicit
@@ -106,8 +114,20 @@ block return in all
     fs::write(ANCHOR_FILE, rules).context("writing anchor file")?;
 
     // Make sure pf is enabled. `pfctl -E` is idempotent — returns
-    // 0 with "pf enabled" or "pf already enabled".
-    let _ = Command::new("/sbin/pfctl").arg("-E").output();
+    // 0 with "pf enabled" or "pf already enabled". FAIL CLOSED: if
+    // enabling pf fails we must NOT report the kill-switch active,
+    // because with pf off the block rules below never apply and all
+    // traffic egresses unblocked while the GUI shows "protected".
+    let enable_pf = Command::new("/sbin/pfctl")
+        .arg("-E")
+        .output()
+        .context("running pfctl -E")?;
+    if !enable_pf.status.success() {
+        bail!(
+            "could not enable pf — kill-switch NOT active: {}",
+            String::from_utf8_lossy(&enable_pf.stderr).trim()
+        );
+    }
 
     // Load our anchor's rules. `-a <anchor>` loads into the
     // anchor namespace without touching the main ruleset.
