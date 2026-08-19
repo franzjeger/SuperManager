@@ -69,6 +69,12 @@ class AppState {
     /// browser flow or the daemon-side timeout expires).
     var pendingTailscaleAuthURL: URL?
 
+    /// The logged-in Tailscale profiles (accounts / tailnets) from
+    /// `tailscale switch --list`. Refreshed alongside status. Drives the
+    /// inline tailnet switcher in the header — one entry means there is
+    /// nothing to switch between yet, more than one means quick-swap.
+    var tailscaleProfiles: [TailscaleProfile] = []
+
     /// All configured UniFi controllers (standalone — not
     /// tied to SSH hosts). Refreshed on app launch via
     /// `refreshUnifiControllers()` and after any save/delete.

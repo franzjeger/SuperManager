@@ -53,13 +53,7 @@ struct TailscaleHeaderView: View {
                 Spacer(minLength: 0)
                 logoutMenu
             }
-            Text(tailnetLabel)
-                .font(.system(size: 13, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .help(tailnetLabel)
+            tailnetSwitcher
             Text(deviceLabel)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -467,6 +461,63 @@ struct TailscaleHeaderView: View {
 
     /// Headline string. Prefers the human-readable tailnet name, falls
     /// back to the MagicDNS suffix, then to a generic placeholder.
+    /// The tailnet name, as an inline quick-swap picker. When more than
+    /// one account is logged in this is how you move between tailnets
+    /// without a re-login; with one it still offers "Add another tailnet".
+    /// Falls back to a plain label before the first profile list arrives
+    /// (or when Tailscale isn't logged in), so nothing regresses there.
+    @ViewBuilder
+    private var tailnetSwitcher: some View {
+        if appState.tailscaleProfiles.isEmpty {
+            Text(tailnetLabel)
+                .font(.system(size: 13, weight: .semibold))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(tailnetLabel)
+        } else {
+            Menu {
+                ForEach(appState.tailscaleProfiles) { profile in
+                    Button {
+                        runAction { await appState.switchTailscaleProfile(profile.id) }
+                    } label: {
+                        // A checkmark marks the active tailnet; switching to
+                        // it is disabled since it would be a no-op reconnect.
+                        if profile.selected {
+                            Label(profile.displayName, systemImage: "checkmark")
+                        } else {
+                            Text(profile.displayName)
+                        }
+                    }
+                    .disabled(profile.selected)
+                }
+                Divider()
+                Button {
+                    runAction { await appState.addTailscaleAccount() }
+                } label: {
+                    Label("Add another tailnet…", systemImage: "plus")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(tailnetLabel)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize(horizontal: false, vertical: true)
+            .help("Switch tailnet or add another")
+        }
+    }
+
     private var tailnetLabel: String {
         if let name = appState.tailscaleStatus?.currentTailnetName, !name.isEmpty {
             return name
