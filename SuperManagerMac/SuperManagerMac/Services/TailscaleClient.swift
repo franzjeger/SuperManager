@@ -210,15 +210,51 @@ enum TailscaleClient {
     /// the tunnel up without surfacing any URL — `onAuthURL` won't
     /// fire in that case.
     static func login(onAuthURL: @escaping @Sendable (URL) -> Void) async throws {
+        // `up --force-reauth` re-authenticates the CURRENT profile even
+        // if the daemon thinks it is already logged in; without it a
+        // stale node-key can make `up` return without surfacing a URL.
+        try await runAuthFlow(args: ["up", "--force-reauth"], onAuthURL: onAuthURL)
+    }
+
+    /// Add another tailnet by logging in as a new account. `tailscale
+    /// login` surfaces the same browser auth URL; completing it as a
+    /// DIFFERENT account creates a new profile and makes it active (the
+    /// daemon keeps the previous ones — see `listProfiles`). Re-authing
+    /// the account already active just refreshes it.
+    static func addAccount(onAuthURL: @escaping @Sendable (URL) -> Void) async throws {
+        try await runAuthFlow(args: ["login"], onAuthURL: onAuthURL)
+    }
+
+    /// The logged-in profiles (accounts / tailnets), newest state from
+    /// `tailscale switch --list --json`.
+    static func listProfiles() async throws -> [TailscaleProfile] {
+        guard let bin = locateBinary() else { throw ClientError.notInstalled }
+        let output = try await runTask(bin: bin, args: ["switch", "--list", "--json"])
+        guard let data = output.data(using: .utf8), !data.isEmpty else { return [] }
+        return try JSONDecoder().decode([TailscaleProfile].self, from: data)
+    }
+
+    /// Switch the active profile. No re-authentication: the daemon
+    /// already holds the node key for each stored profile, so this is a
+    /// brief reconnect, not a login.
+    static func switchProfile(_ id: String) async throws {
+        guard let bin = locateBinary() else { throw ClientError.notInstalled }
+        _ = try await runTask(bin: bin, args: ["switch", id])
+    }
+
+    /// Run a `tailscale` subcommand that drives a browser auth flow,
+    /// scanning stderr for the login URL. Shared by `login` (re-auth the
+    /// current profile) and `addAccount` (log in a new one) so the
+    /// pipe-draining and URL-extraction live in one place.
+    private static func runAuthFlow(
+        args: [String],
+        onAuthURL: @escaping @Sendable (URL) -> Void
+    ) async throws {
         guard let bin = locateBinary() else { throw ClientError.notInstalled }
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = bin
-            // `--force-reauth` forces a fresh auth even if the
-            // daemon thinks it's already logged in. Without it, a
-            // stale node-key state can make `tailscale up` return
-            // immediately without surfacing a URL.
-            process.arguments = ["up", "--force-reauth"]
+            process.arguments = args
             let stderr = Pipe()
             let stdout = Pipe()
             process.standardError = stderr

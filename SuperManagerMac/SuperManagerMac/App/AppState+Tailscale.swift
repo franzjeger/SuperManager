@@ -59,6 +59,11 @@ extension AppState {
         // flip between Install / Start / Sign-in states without an
         // extra round-trip when the user navigates back.
         async let daemonRefresh: Void = refreshTailscaledDaemon()
+        // Logged-in profiles for the tailnet switcher. Non-fatal: an
+        // unreachable daemon just means an empty list, handled like status.
+        async let profilesTask: [TailscaleProfile] = {
+            (try? await TailscaleClient.listProfiles()) ?? []
+        }()
         do {
             let s = try await statusTask
             tailscaleStatus = s
@@ -87,6 +92,7 @@ extension AppState {
             DebugLog.write("[ts] keeping prior prefs (decode failed this round)")
         }
         await daemonRefresh
+        tailscaleProfiles = await profilesTask
         // MagicDNS backstop: open-source tailscaled on macOS
         // doesn't install the per-tailnet `/etc/resolver/<domain>`
         // nameserver file. Detect that condition and have the
@@ -237,6 +243,52 @@ extension AppState {
             // Spawned process exited (auth complete, cancelled, or
             // timed out). Refresh once; the visible sheet is cleared
             // by the polling loop's success-detection path.
+            await refreshTailscale()
+            if tailscaleStatus?.backendState == "Running" {
+                pendingTailscaleAuthURL = nil
+            }
+        } catch {
+            tailscaleActionError = error.localizedDescription
+            pendingTailscaleAuthURL = nil
+        }
+    }
+
+    /// Switch to another logged-in tailnet. Near-instant — the daemon
+    /// already holds each profile's node key — but a brief reconnect.
+    ///
+    /// Clears our exit-node routing FIRST. The split-default routes the
+    /// helper installs for an exit node are OS-level and not tied to a
+    /// tailnet, so carrying them into a profile that has no such node
+    /// would send traffic into a dead tunnel — the stale-route failure
+    /// this app has hit before. Best-effort; the switch proceeds anyway.
+    func switchTailscaleProfile(_ id: String) async {
+        tailscaleActionError = nil
+        _ = try? await HelperClient.shared.tailscaleRemoveExitRoutes()
+        _ = try? await TailscaleClient.setExitNode("")
+        do {
+            try await TailscaleClient.switchProfile(id)
+        } catch {
+            tailscaleActionError = error.localizedDescription
+        }
+        // Let the daemon settle on the new profile before we read it back.
+        try? await Task.sleep(for: .milliseconds(500))
+        await refreshTailscale()
+    }
+
+    /// Add another tailnet by logging in as a new account. Mirrors
+    /// `tailscaleLogin`, but `addAccount` creates a new profile instead
+    /// of re-authing the current one; completing the browser flow as a
+    /// different account is what makes it a separate tailnet.
+    func addTailscaleAccount() async {
+        tailscaleActionError = nil
+        do {
+            try await TailscaleClient.addAccount { [weak self] url in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.pendingTailscaleAuthURL = url
+                    NSWorkspace.shared.open(url)
+                }
+            }
             await refreshTailscale()
             if tailscaleStatus?.backendState == "Running" {
                 pendingTailscaleAuthURL = nil
