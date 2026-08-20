@@ -286,6 +286,7 @@ pub trait Daemon {
         password: &str,
         psk: &str,
         dns_servers: &str,
+        local_id: &str,
     ) -> fdo::Result<()>;
 
     /// Update an OpenVPN profile's credentials.
@@ -362,6 +363,7 @@ pub trait Daemon {
         password: &str,
         psk: &str,
         dns_servers: &str,
+        local_id: &str,
     ) -> fdo::Result<String>;
 
     /// Import an OpenVPN `.ovpn` configuration file.

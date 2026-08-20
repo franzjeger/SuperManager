@@ -552,6 +552,13 @@ pub fn show_fortigate_dialog(
     let dns_row = adw::EntryRow::builder()
         .title("DNS Servers (optional)")
         .build();
+    // IKE identity (IDi). A FortiGate hosting several dial-up tunnels on one
+    // public IP selects the tunnel by peer ID *before* authenticating, so a
+    // gateway configured that way rejects a client that does not send the
+    // expected identity. Empty keeps the previous behaviour (IDi = username).
+    let local_id_row = adw::EntryRow::builder()
+        .title("Local ID (optional, e.g. sybr-porsgrunn)")
+        .build();
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
@@ -560,6 +567,7 @@ pub fn show_fortigate_dialog(
     group.add(&pass_row);
     group.add(&psk_row);
     group.add(&dns_row);
+    group.add(&local_id_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let add_btn = gtk4::Button::builder()
@@ -626,6 +634,7 @@ pub fn show_fortigate_dialog(
         let pass_row = pass_row.clone();
         let psk_row = psk_row.clone();
         let dns_row = dns_row.clone();
+        let local_id_row = local_id_row.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         add_btn.connect_clicked(move |_| {
@@ -635,11 +644,12 @@ pub fn show_fortigate_dialog(
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
             let dns_servers = dns_row.text().trim().to_string();
+            let local_id = local_id_row.text().trim().to_string();
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
                 let msg = match dbus_import_fortigate(
-                    name, host, username, password, psk, dns_servers,
+                    name, host, username, password, psk, dns_servers, local_id,
                 )
                 .await
                 {
@@ -672,6 +682,7 @@ pub fn show_edit_fortigate_dialog(
     current_host: String,
     current_username: String,
     current_dns_servers: String,
+    current_local_id: String,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
@@ -698,6 +709,13 @@ pub fn show_edit_fortigate_dialog(
         .title("DNS Servers (optional)")
         .build();
     dns_row.set_text(&current_dns_servers);
+    // Prefilled from the profile, and blank clears it — that is the only way
+    // back to the default IDi once one has been set, so this is deliberately
+    // not a "blank means keep" field the way the password rows are.
+    let local_id_row = adw::EntryRow::builder()
+        .title("Local ID (optional, blank clears)")
+        .build();
+    local_id_row.set_text(&current_local_id);
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
@@ -706,6 +724,7 @@ pub fn show_edit_fortigate_dialog(
     group.add(&pass_row);
     group.add(&psk_row);
     group.add(&dns_row);
+    group.add(&local_id_row);
 
     let cancel_btn = gtk4::Button::builder().label("Cancel").build();
     let save_btn = gtk4::Button::builder()
@@ -773,6 +792,7 @@ pub fn show_edit_fortigate_dialog(
         let pass_row = pass_row.clone();
         let psk_row = psk_row.clone();
         let dns_row = dns_row.clone();
+        let local_id_row = local_id_row.clone();
         let rt = rt.clone();
         let tx = tx.clone();
         save_btn.connect_clicked(move |_| {
@@ -782,12 +802,13 @@ pub fn show_edit_fortigate_dialog(
             let password = pass_row.text().to_string();
             let psk = psk_row.text().to_string();
             let dns_servers = dns_row.text().trim().to_string();
+            let local_id = local_id_row.text().trim().to_string();
             let pid = profile_id.clone();
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
                 let msg = match dbus_update_fortigate(
-                    pid, name, host, username, password, psk, dns_servers,
+                    pid, name, host, username, password, psk, dns_servers, local_id,
                 )
                 .await
                 {

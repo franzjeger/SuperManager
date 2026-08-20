@@ -1995,7 +1995,7 @@ pub fn build_ui(
         let rt = rt.clone();
         let window = window.clone();
         vpn_detail.edit_creds_btn.connect_clicked(move |_| {
-            let (profile_id, backend, name, host, username, dns_servers) = {
+            let (profile_id, backend, name, host, username, dns_servers, local_id) = {
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let pid = s.selected_profile.clone();
                 let idx = pid.as_deref().and_then(|id| {
@@ -2015,6 +2015,7 @@ pub fn build_ui(
                                 .map(|ip| ip.to_string())
                                 .collect::<Vec<_>>()
                                 .join(", "),
+                            p.local_id.clone(),
                         )
                     }
                     None => return,
@@ -2022,7 +2023,7 @@ pub fn build_ui(
             };
             if backend.starts_with("FortiGate") {
                 vpn::dialogs::show_edit_fortigate_dialog(
-                    &window, profile_id, name, host, username, dns_servers, &rt, &tx,
+                    &window, profile_id, name, host, username, dns_servers, local_id, &rt, &tx,
                 );
             } else if backend == "OpenVPN3" {
                 vpn::dialogs::show_edit_openvpn_dialog(&window, profile_id, username, &rt, &tx);
@@ -3478,11 +3479,12 @@ pub fn build_ui(
                             .map(|ip| ip.to_string())
                             .collect::<Vec<_>>()
                             .join(", ");
+                        let local_id = p.local_id.clone();
                         drop(s);
                         if backend.starts_with("FortiGate") {
                             vpn::dialogs::show_edit_fortigate_dialog(
                                 &rx_window, profile_id, name, host, username, dns_servers,
-                                &rx_rt, &rx_tx,
+                                local_id, &rx_rt, &rx_tx,
                             );
                         } else if backend == "OpenVPN3" {
                             vpn::dialogs::show_edit_openvpn_dialog(

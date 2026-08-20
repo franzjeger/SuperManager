@@ -317,6 +317,10 @@ pub async fn dbus_set_auto_connect(profile_id: String, auto_connect: bool) -> an
 /// `dns_servers` is a free-form list (comma/semicolon/whitespace-separated)
 /// of IPv4/IPv6 addresses; pass an empty string to clear any override and
 /// fall back to the FortiGate's mode-config-pushed DNS.
+///
+/// `local_id` is the IKE identity (IDi). Empty clears it — which is the only
+/// way back to the default once one has been set, so this is deliberately not
+/// a "leave unchanged when blank" field.
 pub async fn dbus_update_fortigate(
     profile_id: String,
     name: String,
@@ -325,6 +329,7 @@ pub async fn dbus_update_fortigate(
     password: String,
     psk: String,
     dns_servers: String,
+    local_id: String,
 ) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
@@ -337,6 +342,7 @@ pub async fn dbus_update_fortigate(
             &password,
             &psk,
             &dns_servers,
+            &local_id,
         )
         .await
         .context("UpdateFortigate")?;
@@ -542,11 +548,12 @@ pub async fn dbus_import_fortigate(
     password: String,
     psk: String,
     dns_servers: String,
+    local_id: String,
 ) -> anyhow::Result<Vec<ProfileSummary>> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let _uuid = proxy
-        .import_fortigate(&name, &host, &username, &password, &psk, &dns_servers)
+        .import_fortigate(&name, &host, &username, &password, &psk, &dns_servers, &local_id)
         .await
         .context("ImportFortigate")?;
     let json = proxy.list_profiles().await.context("ListProfiles")?;
