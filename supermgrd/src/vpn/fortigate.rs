@@ -343,6 +343,45 @@ fn generate_swanctl_config(
             .join(",")
     };
 
+    // Dead Peer Detection. Without `dpd_delay` — which defaults to 0s, i.e.
+    // off — charon never notices a peer that vanished without a clean IKE
+    // DELETE. A firewall reboot mid-tunnel leaves the IKE_SA ESTABLISHED
+    // forever, and on this daemon that is worse than it sounds: the full-tunnel
+    // default route carries `src <virtual IP>`, so every packet keeps being
+    // sourced from an address the dead tunnel no longer owns. The machine has
+    // no working internet and `swanctl --list-sas` insists it is connected.
+    //
+    // `dpd_action = clear` is deliberately NOT the macOS helper's `restart`,
+    // and the difference is architectural rather than taste.
+    //
+    // This daemon owns the routes. `spawn_monitor_task` polls the backend, and
+    // when the SA is gone it runs `backend.disconnect()` to restore the saved
+    // default route, revert DNS and drop the endpoint host routes. That whole
+    // recovery path is already written and correct — it is keyed on the SA
+    // *disappearing*, which is exactly what `clear` produces.
+    //
+    // `restart` would re-negotiate under a fresh IKE_SA behind the daemon's
+    // back. Mode-config can hand out a different virtual IP, while the default
+    // route still says `src <old vip>`; the monitor would see an Active SA,
+    // reconcile would find nothing wrong, and the result is a black hole the
+    // GUI reports as Connected. That is a worse failure than today's, because
+    // today's is at least visible.
+    //
+    // macOS can afford `restart` because its tunnel is a utun device and its
+    // routes pin to the device, not to a source address.
+    //
+    // `clear` is also strongSwan's default for `dpd_action`, but it is set
+    // explicitly: the recovery design depends on it, and a line copied over
+    // from the helper would silently break it.
+    //
+    // Detection takes ~100s — the delay plus charon's default retransmit
+    // schedule. Do NOT try to shorten that with `retransmit_timeout`,
+    // `retransmit_base` or `retransmit_tries`: those are not swanctl.conf
+    // connection options at all (they live under `charon` in strongswan.conf,
+    // daemon-wide), and strongSwan 6.x rejects an unknown option by discarding
+    // the ENTIRE connection, so the tunnel would stop loading. A test below
+    // guards against a well-meaning re-add.
+
     // IKE identity (IDi). A FortiGate with several dial-up tunnels behind one
     // public IP picks the tunnel by peer ID *before* authentication, so a
     // profile that needs a specific identity cannot connect without this.
@@ -374,6 +413,7 @@ fn generate_swanctl_config(
   {conn} {{
     remote_addrs = {host}
     vips = 0.0.0.0
+    dpd_delay = 10s
     proposals = aes128-sha256-ecp384,aes256-sha256-ecp384,aes128gcm16-prfsha256-ecp384,aes256gcm16-prfsha384-ecp521,chacha20poly1305-prfsha256-ecp384,aes256-sha256-modp2048
     local {{
       auth = eap-mschapv2
@@ -387,6 +427,7 @@ fn generate_swanctl_config(
       {conn} {{
         remote_ts = {remote_ts}
         start_action = none
+        dpd_action = clear
       }}
     }}
   }}
@@ -1519,6 +1560,80 @@ impl VpnBackend for FortiGateBackend {
 mod tests {
     use super::*;
 
+
+    // -- Dead Peer Detection ---------------------------------------------
+
+    #[test]
+    fn dead_peer_detection_is_enabled() {
+        // `dpd_delay` defaults to 0s, i.e. off. Without it charon never
+        // notices a peer that vanished without a clean IKE DELETE: the IKE_SA
+        // stays ESTABLISHED, the full-tunnel default keeps sourcing packets
+        // from a virtual IP the dead tunnel no longer owns, and the machine has
+        // no internet while list-sas insists it is connected.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        assert!(
+            conf.contains("dpd_delay"),
+            "DPD off means a dead peer is never detected:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn a_dead_peer_clears_the_sa_rather_than_rebuilding_it() {
+        // The load-bearing choice, and the one place this backend deliberately
+        // differs from the macOS helper.
+        //
+        // This daemon owns the routes: `spawn_monitor_task` sees the SA vanish
+        // and runs `backend.disconnect()`, which restores the saved default
+        // route, reverts DNS and drops the endpoint host routes. `clear` is
+        // what produces that signal.
+        //
+        // `restart` re-negotiates under a fresh IKE_SA behind the daemon's
+        // back. Mode-config can assign a different virtual IP while the default
+        // route still carries `src <old vip>` — the monitor sees an Active SA,
+        // finds nothing to reconcile, and the result is a black hole the GUI
+        // reports as Connected. Worse than the bug being fixed, because it is
+        // invisible.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        assert!(
+            conf.contains("dpd_action = clear"),
+            "a detected-dead peer must close the SA so the daemon can clean up:\n{conf}"
+        );
+        assert!(
+            !conf.contains("dpd_action = restart"),
+            "restart rebuilds the tunnel behind the route manager's back:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn no_retransmit_option_reaches_swanctl() {
+        // `retransmit_timeout` / `_base` / `_tries` are not swanctl.conf
+        // connection options — they live under `charon` in strongswan.conf,
+        // daemon-wide. strongSwan 6.x rejects an unknown option by discarding
+        // the ENTIRE connection, so one of these added to speed up DPD
+        // detection stops the tunnel loading at all. Ported from the macOS
+        // helper's guard, which exists because someone tried it.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        assert!(
+            !conf.contains("retransmit_"),
+            "retransmit_* are invalid here and break the whole connection:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn dpd_settings_sit_at_the_levels_swanctl_expects() {
+        // `dpd_delay` is a connection option and `dpd_action` a child option.
+        // Swapped, strongSwan discards the connection as unknown-option and the
+        // tunnel silently stops loading — the same failure mode as the
+        // retransmit guard above, which is why this is pinned rather than
+        // trusted to review.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let children_at = conf.find("children").expect("children block");
+        let delay_at = conf.find("dpd_delay").expect("dpd_delay");
+        let action_at = conf.find("dpd_action").expect("dpd_action");
+        assert!(delay_at < children_at, "dpd_delay belongs on the connection");
+        assert!(action_at > children_at, "dpd_action belongs on the child");
+    }
+
     // -- Local ID (IDi) and swanctl escaping -----------------------------
 
     fn fg(local_id: &str) -> FortiGateConfig {
@@ -1789,3 +1904,4 @@ error: connecting to 'default' URI failed: No such file or directory
         assert_eq!(parse_sa_bytes(out), (50, 0));
     }
 }
+
