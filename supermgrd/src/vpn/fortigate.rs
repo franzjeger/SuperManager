@@ -211,6 +211,19 @@ fn classify_initiate_failure(message: &str) -> BackendError {
         )
     } else if upper.contains("TIMEOUT") || upper.contains("TIMED OUT") {
         BackendError::Timeout { seconds: 30 }
+    } else if upper.contains("INVALID_ID_INFORMATION") || upper.contains("INVALID_ID") {
+        // Distinct from a credential failure on purpose: nothing the operator
+        // types in the password field fixes this. Either we sent an IDi the
+        // gateway does not recognise, or the gateway sent an IDr that does not
+        // match the address we dialled — which is what `remote.id = <host>`
+        // pins. A FortiGate with `set localid` configured is the usual cause.
+        BackendError::AuthenticationFailed(
+            "The FortiGate rejected the IKE identity (INVALID_ID_INFORMATION). \
+             If the gateway is configured with its own local ID, it sends that \
+             instead of its address and will not match. Check Local ID on this \
+             profile, and the peer ID configured on the FortiGate."
+                .into(),
+        )
     } else if upper.contains("NO_PROPOSAL_CHOSEN")
         || upper.contains("NO MATCHING PROPOSAL")
     {
@@ -343,6 +356,29 @@ fn generate_swanctl_config(
             .join(",")
     };
 
+    // Remote identity, and the secrets entry it pairs with.
+    //
+    // `remote.id` defaults to `%any`, and the `ike-` secret carried no `id` at
+    // all — an unkeyed PSK matches every peer. That works with one profile and
+    // gets ambiguous with several: charon has multiple candidate PSKs for any
+    // peer and no basis to prefer one, so the wrong key can be offered and the
+    // failure looks intermittent rather than like a configuration problem.
+    //
+    // These two move together or not at all. Pinning `remote.id` while leaving
+    // the secret unkeyed adds a constraint with no lookup benefit; keying the
+    // secret while leaving `remote.id` open is what the macOS helper shipped
+    // broken twice, because a secret keyed only to `%any` does not match an
+    // IP-form IDr. `id-1 = <host>` catches the IP or FQDN the gateway sends,
+    // `%any` stays as the fallback for a gateway that sends an ID_ANY.
+    //
+    // The risk this takes on: a FortiGate with `set localid` configured sends
+    // that instead of its address, and pinning `remote.id` to the dialled host
+    // then rejects it. There is no override field yet, so `classify_initiate_failure`
+    // learned to name INVALID_ID_INFORMATION specifically — the macOS helper has
+    // had that message since it hit this, and Linux had no diagnostic for it at
+    // all. A gateway that does not fit now says so instead of failing as a
+    // generic auth error.
+
     // Dead Peer Detection. Without `dpd_delay` — which defaults to 0s, i.e.
     // off — charon never notices a peer that vanished without a clean IKE
     // DELETE. A firewall reboot mid-tunnel leaves the IKE_SA ESTABLISHED
@@ -422,6 +458,7 @@ fn generate_swanctl_config(
     }}
     remote {{
       auth = psk
+      id = {host}
     }}
     children {{
       {conn} {{
@@ -434,6 +471,8 @@ fn generate_swanctl_config(
 }}
 secrets {{
   ike-supermgr-{pid} {{
+    id-1 = {host}
+    id-2 = %any
     secret = "{psk}"
   }}
   eap-supermgr-{pid} {{
@@ -1561,6 +1600,86 @@ mod tests {
     use super::*;
 
 
+
+    // -- Remote identity and PSK lookup -----------------------------------
+
+    #[test]
+    fn the_remote_identity_is_pinned_to_the_gateway() {
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let remote_at = conf.find("remote {").expect("remote block");
+        let children_at = conf.find("children").expect("children block");
+        let id_at = conf[remote_at..children_at]
+            .find("id = fw.example.com")
+            .expect("remote.id must carry the gateway address");
+        // Nesting, not mere presence: mis-nested into `local {}` this would be
+        // our IDi rather than the peer's expected identity — the opposite
+        // meaning, and a substring-anywhere check would pass either way.
+        assert!(id_at > 0, "id must sit inside the remote block");
+    }
+
+    #[test]
+    fn the_psk_is_keyed_to_the_gateway_with_a_wildcard_fallback() {
+        // The pair `remote.id` depends on. An unkeyed PSK matches every peer,
+        // which is ambiguous once a second profile is loaded. `id-1` catches the
+        // IP or FQDN a FortiGate sends as IDr; `%any` alone does not — a secret
+        // keyed only to `%any` fails to match an IP-form IDr, which is the bug
+        // the macOS helper shipped twice.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let secrets_at = conf.find("secrets {").expect("secrets block");
+        let tail = &conf[secrets_at..];
+        assert!(tail.contains("id-1 = fw.example.com"), "{conf}");
+        assert!(tail.contains("id-2 = %any"), "{conf}");
+    }
+
+    #[test]
+    fn the_local_identity_is_not_confused_with_the_remote_one() {
+        // Both blocks carry an `id`, and they mean opposite things. Pinning the
+        // guard here so a future edit cannot quietly move one into the other.
+        let conf = generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true);
+        let local_at = conf.find("local {").expect("local block");
+        let remote_at = conf.find("remote {").expect("remote block");
+        let local_block = &conf[local_at..remote_at];
+        assert!(
+            local_block.contains(r#"id = "sybr-porsgrunn""#),
+            "our IDi belongs in local:\n{conf}"
+        );
+        assert!(
+            !local_block.contains("id = fw.example.com"),
+            "the gateway's identity must not land in local:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn an_identity_rejection_is_not_reported_as_a_bad_password() {
+        // Nothing typed into the password field fixes an ID mismatch, so it
+        // must not be described as a credential problem. Linux had no
+        // diagnostic for this at all before remote.id was pinned.
+        let e = classify_initiate_failure("received INVALID_ID_INFORMATION notify");
+        match e {
+            BackendError::AuthenticationFailed(msg) => {
+                assert!(msg.contains("identity"), "must name the identity: {msg}");
+                assert!(msg.contains("Local ID"), "must point at the field: {msg}");
+                assert!(
+                    !msg.contains("password and PSK"),
+                    "must not read as a credential failure: {msg}"
+                );
+            }
+            other => panic!("expected an auth-shaped error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_credential_failure_still_reads_as_one() {
+        // The new branch sits above the credential one; make sure it did not
+        // swallow it.
+        match classify_initiate_failure("received EAP_FAILURE") {
+            BackendError::AuthenticationFailed(msg) => {
+                assert!(msg.contains("password and PSK"), "{msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
     // -- Dead Peer Detection ---------------------------------------------
 
     #[test]
@@ -1904,4 +2023,5 @@ error: connecting to 'default' URI failed: No such file or directory
         assert_eq!(parse_sa_bytes(out), (50, 0));
     }
 }
+
 
