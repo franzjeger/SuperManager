@@ -343,6 +343,32 @@ fn generate_swanctl_config(
             .join(",")
     };
 
+    // IKE identity (IDi). A FortiGate with several dial-up tunnels behind one
+    // public IP picks the tunnel by peer ID *before* authentication, so a
+    // profile that needs a specific identity cannot connect without this.
+    //
+    // The field has existed on `FortiGateConfig` and in the macOS app since
+    // that feature shipped; this backend ignored it and hardcoded IDi to the
+    // EAP username, so a Linux client sent a different identity than a macOS
+    // client reading the very same profile.
+    //
+    // Empty keeps `id = <username>` rather than omitting the line the way the
+    // macOS helper does. That is a deliberate difference: omitting it makes
+    // strongSwan default IDi to the local IP, which would change the identity
+    // every existing Linux profile has been connecting with. Anyone who needs a
+    // particular IDi now sets it explicitly, and nobody's working tunnel moves
+    // underneath them. See `local_id_line` in the helper's `build_swanctl_conf`
+    // for the other half of this.
+    //
+    // Quoted and escaped so an arbitrary identity (FQDN, user@domain, keyid)
+    // parses. strongSwan auto-detects the ID type regardless of quoting.
+    let local_id = fg_cfg.local_id.trim();
+    let local_id_line = if local_id.is_empty() {
+        format!("id = {}", fg_cfg.username)
+    } else {
+        format!("id = \"{}\"", escape_swanctl(local_id))
+    };
+
     format!(
         r#"connections {{
   {conn} {{
@@ -351,7 +377,7 @@ fn generate_swanctl_config(
     proposals = aes128-sha256-ecp384,aes256-sha256-ecp384,aes128gcm16-prfsha256-ecp384,aes256gcm16-prfsha384-ecp521,chacha20poly1305-prfsha256-ecp384,aes256-sha256-modp2048
     local {{
       auth = eap-mschapv2
-      id = {user}
+      {local_id_line}
       eap_id = {user}
     }}
     remote {{
@@ -378,10 +404,37 @@ secrets {{
         conn = conn_name,
         host = fg_cfg.host,
         user = fg_cfg.username,
-        psk = psk,
-        pw = password,
+        local_id_line = local_id_line,
+        // Escaped, not interpolated raw. swanctl values are double-quoted
+        // strings, so a PSK or password containing `"` used to terminate the
+        // string early and leave the remainder to be parsed as config —
+        // whereupon strongSwan discards the whole connection and the tunnel
+        // fails to load with nothing pointing at the password as the cause.
+        // The macOS helper has escaped these since it was written.
+        psk = escape_swanctl(psk),
+        pw = escape_swanctl(password),
         pid = profile_id_simple,
     )
+}
+
+/// Escape a value for a double-quoted swanctl string.
+///
+/// Twin of `escape_swanctl` in `supermanager-helper::strongswan`. Duplicated
+/// rather than shared because that crate is macOS-only and does not depend on
+/// `supermgr-core`; if it ever does, this is the first thing to move.
+///
+/// Newlines are dropped rather than escaped: they are not valid inside a
+/// swanctl value, and a secret containing one is already broken — silently
+/// truncating at the newline would be worse than removing it.
+fn escape_swanctl(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .flat_map(|c| match c {
+            '\\' => vec!['\\', '\\'],
+            '"' => vec!['\\', '"'],
+            other => vec![other],
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1465,6 +1518,99 @@ impl VpnBackend for FortiGateBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Local ID (IDi) and swanctl escaping -----------------------------
+
+    fn fg(local_id: &str) -> FortiGateConfig {
+        FortiGateConfig {
+            host: "fw.example.com".to_owned(),
+            username: "alice".to_owned(),
+            password: supermgr_core::vpn::profile::SecretRef::new("pw".to_owned()),
+            psk: supermgr_core::vpn::profile::SecretRef::new("psk".to_owned()),
+            dns_servers: Vec::new(),
+            routes: Vec::new(),
+            local_id: local_id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_local_id_reaches_the_swanctl_config() {
+        // The bug this fixes: the field existed on the profile and in the macOS
+        // app, and this backend never read it — so a gateway that routes by
+        // peer ID before authentication could not be reached from Linux at all.
+        let conf = generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true);
+        assert!(
+            conf.contains(r#"id = "sybr-porsgrunn""#),
+            "local_id must be emitted as the IKE identity:\n{conf}"
+        );
+        assert!(
+            conf.contains("eap_id = alice"),
+            "the EAP identity is separate and stays the username"
+        );
+    }
+
+    #[test]
+    fn an_empty_local_id_keeps_the_previous_identity() {
+        // Deliberately NOT the macOS behaviour of omitting the line. Omitting
+        // it makes strongSwan default IDi to the local IP, which would change
+        // the identity every existing Linux profile connects with. Nobody's
+        // working tunnel moves because we added a field.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        assert!(conf.contains("id = alice"), "{conf}");
+        assert!(!conf.contains(r#"id = """#), "must not emit an empty identity");
+    }
+
+    #[test]
+    fn a_whitespace_only_local_id_counts_as_unset() {
+        let conf = generate_swanctl_config("c", "p", &fg("   "), "pw", "psk", true);
+        assert!(conf.contains("id = alice"), "{conf}");
+    }
+
+    #[test]
+    fn a_quote_in_a_secret_cannot_escape_its_string() {
+        // Found while adding local_id. swanctl values are double-quoted, and
+        // these were interpolated raw — so a PSK containing `"` terminated the
+        // string early and left the rest to be parsed as config, whereupon
+        // strongSwan discards the whole connection and the tunnel fails to load
+        // with nothing pointing at the password as the cause.
+        let conf = generate_swanctl_config("c", "p", &fg(""), r#"pa"ss"#, r#"p"sk"#, true);
+        assert!(conf.contains(r#"secret = "p\"sk""#), "PSK not escaped:\n{conf}");
+        assert!(conf.contains(r#"secret = "pa\"ss""#), "password not escaped:\n{conf}");
+
+        // Every quote in the rendered file is either a delimiter or escaped.
+        for (i, line) in conf.lines().enumerate() {
+            let unescaped = line
+                .char_indices()
+                .filter(|(j, c)| *c == '"' && (*j == 0 || line.as_bytes()[j - 1] != b'\\'))
+                .count();
+            assert!(
+                unescaped % 2 == 0,
+                "line {i} has an unbalanced quote: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_in_a_secret_is_escaped() {
+        // A domain-qualified password like `CORP\alice` is entirely ordinary.
+        let conf = generate_swanctl_config("c", "p", &fg(""), r"CORP\alice", "psk", true);
+        assert!(conf.contains(r#"secret = "CORP\\alice""#), "{conf}");
+    }
+
+    #[test]
+    fn a_newline_in_a_secret_is_dropped_not_smuggled() {
+        // A newline would end the value and let the remainder be read as
+        // config directives. Dropping is defensive; the secret is already
+        // broken if it contains one.
+        let conf = generate_swanctl_config("c", "p", &fg(""), "a\nb", "psk", true);
+        assert!(conf.contains(r#"secret = "ab""#), "{conf}");
+    }
+
+    #[test]
+    fn a_local_id_with_a_quote_is_escaped_too() {
+        let conf = generate_swanctl_config("c", "p", &fg(r#"we"ird"#), "pw", "psk", true);
+        assert!(conf.contains(r#"id = "we\"ird""#), "{conf}");
+    }
 
     /// Verbatim stderr from `swanctl --load-all` on a machine where
     /// strongswan.service is installed but not started — the state Arch

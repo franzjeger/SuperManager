@@ -494,6 +494,12 @@ pub struct ProfileSummary {
     /// Customer / tenant tag for grouping. Empty = ungrouped.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub customer: String,
+    /// IKE identity (IDi) for FortiGate/IKEv2 profiles; empty when unset or not
+    /// applicable. Carried on the summary so an edit form can prefill it
+    /// without fetching the whole profile — same reason `username` and
+    /// `dns_servers` are here.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local_id: String,
 }
 
 impl From<&Profile> for ProfileSummary {
@@ -537,6 +543,10 @@ impl From<&Profile> for ProfileSummary {
             },
             kill_switch: p.kill_switch,
             customer: p.customer.clone(),
+            local_id: match &p.config {
+                ProfileConfig::FortiGate(fg) => fg.local_id.clone(),
+                _ => String::new(),
+            },
         }
     }
 }

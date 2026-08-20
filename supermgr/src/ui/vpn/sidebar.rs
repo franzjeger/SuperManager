@@ -500,6 +500,7 @@ mod tests {
             dns_servers: Vec::new(),
             kill_switch: false,
             customer: String::new(),
+            local_id: String::new(),
         }
     }
 

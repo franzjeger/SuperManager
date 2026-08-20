@@ -1118,6 +1118,7 @@ impl DaemonService {
         password: String,
         psk: String,
         dns_servers: String,
+        local_id: String,
     ) -> fdo::Result<String> {
         let profile_id = Uuid::new_v4();
 
@@ -1167,7 +1168,9 @@ impl DaemonService {
             psk: SecretRef::new(psk_label),
             dns_servers,
             routes: Vec::new(),
-            local_id: String::new(),
+            // Trimmed here rather than at the swanctl template so the stored
+            // profile is what the operator will see echoed back in the editor.
+            local_id: local_id.trim().to_owned(),
         };
 
         let profile = Profile {
@@ -1620,6 +1623,7 @@ impl DaemonService {
         password: &str,
         psk: &str,
         dns_servers: &str,
+        local_id: &str,
     ) -> fdo::Result<()> {
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
@@ -1650,6 +1654,10 @@ impl DaemonService {
         fg.host = sanitize_fortigate_host(host);
         fg.username = username.trim().to_owned();
         fg.dns_servers = parsed_dns;
+        // Empty clears it, which is the only way to go back to the default IDi
+        // once one has been set. A "leave unchanged on empty" rule here would
+        // make the field one-way.
+        fg.local_id = local_id.trim().to_owned();
 
         // Update secrets only when the caller supplies a non-empty value.
         if !password.is_empty() {
