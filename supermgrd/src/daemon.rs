@@ -21,7 +21,11 @@ use anyhow::Context as _;
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
-use zbus::{fdo, interface, SignalContext};
+// zbus 5 renamed `SignalContext` to `SignalEmitter` and moved it under
+// `object_server`. `SignalEmitter::new(&conn, path) -> Result<Self>` has the
+// same shape as the old constructor, so this is a rename and not a rework.
+use zbus::object_server::SignalEmitter;
+use zbus::{fdo, interface};
 
 use supermgr_core::{
     vpn::backend::{BackendStatus, VpnBackend},
@@ -712,7 +716,7 @@ impl DaemonService {
     /// Returns immediately; progress is reported via `StateChanged` signals.
     async fn connect(
         &self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctx: SignalEmitter<'_>,
         profile_id: &str,
     ) -> fdo::Result<()> {
         let id = Uuid::parse_str(profile_id)
@@ -740,7 +744,7 @@ impl DaemonService {
     /// Tear down the active tunnel.
     async fn disconnect(
         &self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctx: SignalEmitter<'_>,
     ) -> fdo::Result<()> {
         crate::audit::log_event("VPN_DISCONNECT", "");
         let backend = {
@@ -2049,7 +2053,7 @@ impl DaemonService {
     async fn tailscale_set_exit_node(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
-        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         value: &str,
     ) -> fdo::Result<()> {
         crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_EXIT_NODE).await?;
@@ -2378,7 +2382,7 @@ impl DaemonService {
     /// Returns an operation ID; progress is reported via `SshOperationProgress` signals.
     async fn ssh_push_key(
         &self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctx: SignalEmitter<'_>,
         key_id: &str,
         host_ids_json: &str,
         use_sudo: bool,
@@ -2531,7 +2535,7 @@ impl DaemonService {
     /// Returns an operation ID; progress is reported via `SshOperationProgress` signals.
     async fn ssh_revoke_key(
         &self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctx: SignalEmitter<'_>,
         key_id: &str,
         host_ids_json: &str,
         use_sudo: bool,
@@ -3099,7 +3103,7 @@ impl DaemonService {
     /// Return the SSH command string for connecting to the given host.
     async fn ssh_connect_command(
         &self,
-        #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(signal_emitter)] ctx: SignalEmitter<'_>,
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         #[zbus(connection)] conn: &zbus::Connection,
         host_id: &str,
@@ -4342,19 +4346,19 @@ impl DaemonService {
     /// Emitted on every VPN state transition.  `state_json` is a JSON-encoded
     /// [`supermgr_core::vpn::state::VpnState`].
     #[zbus(signal)]
-    async fn state_changed(ctx: &SignalContext<'_>, state_json: String) -> zbus::Result<()>;
+    async fn state_changed(ctx: &SignalEmitter<'_>, state_json: String) -> zbus::Result<()>;
 
     /// Emitted approximately every 5 seconds while a tunnel is active.
     /// `stats_json` is a JSON-encoded [`supermgr_core::vpn::state::TunnelStats`].
     #[zbus(signal)]
-    async fn stats_updated(ctx: &SignalContext<'_>, stats_json: String) -> zbus::Result<()>;
+    async fn stats_updated(ctx: &SignalEmitter<'_>, stats_json: String) -> zbus::Result<()>;
 
     /// Emitted during Azure Entra ID authentication to present the device-code
     /// challenge to the user.  The GUI should show `user_code` and direct the
     /// user to `verification_url` (typically `https://microsoft.com/devicelogin`).
     #[zbus(signal)]
     async fn auth_challenge(
-        ctx: &SignalContext<'_>,
+        ctx: &SignalEmitter<'_>,
         user_code: String,
         verification_url: String,
     ) -> zbus::Result<()>;
@@ -4363,7 +4367,7 @@ impl DaemonService {
     /// per-host progress.
     #[zbus(signal)]
     async fn ssh_operation_progress(
-        ctx: &SignalContext<'_>,
+        ctx: &SignalEmitter<'_>,
         operation_id: String,
         host_label: String,
         message: String,
@@ -4693,7 +4697,7 @@ impl DaemonService {
     async fn findings_set_disposition(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
-        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         scope: &str,
         key: &str,
         disposition: &str,
@@ -5173,7 +5177,7 @@ impl DaemonService {
     /// Emitted when the reachability of an SSH host changes.
     #[zbus(signal)]
     async fn host_health_changed(
-        ctx: &SignalContext<'_>,
+        ctx: &SignalEmitter<'_>,
         host_id: String,
         reachable: bool,
     ) -> zbus::Result<()>;
@@ -5674,7 +5678,7 @@ pub(crate) async fn remove_kill_switch() {
 pub async fn connect_profile(
     profile: Profile,
     state: Arc<Mutex<DaemonState>>,
-    ctx: SignalContext<'_>,
+    ctx: SignalEmitter<'_>,
 ) -> fdo::Result<()> {
     let id = profile.id;
 
@@ -6029,10 +6033,10 @@ async fn try_autoconnect(state: &Arc<Mutex<DaemonState>>, conn: &zbus::Connectio
             return;
         }
     };
-    let ctx = match SignalContext::new(conn, object_path) {
+    let ctx = match SignalEmitter::new(conn, object_path) {
         Ok(c) => c,
         Err(e) => {
-            error!("auto-connect: SignalContext: {e}");
+            error!("auto-connect: SignalEmitter: {e}");
             return;
         }
     };
@@ -6353,7 +6357,7 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
                         supermgr_core::dbus::DBUS_OBJECT_PATH,
                     )
                     .expect("static object path is valid");
-                    if let Ok(ctx) = SignalContext::new(&conn, object_path) {
+                    if let Ok(ctx) = SignalEmitter::new(&conn, object_path) {
                         let _ = DaemonService::host_health_changed(
                             &ctx,
                             id.to_string(),
@@ -6436,7 +6440,7 @@ pub fn spawn_monitor_task(
                                 supermgr_core::dbus::DBUS_OBJECT_PATH,
                             )
                             .expect("static object path is valid");
-                            if let Ok(ctx) = SignalContext::new(&conn, object_path) {
+                            if let Ok(ctx) = SignalEmitter::new(&conn, object_path) {
                                 let _ = DaemonService::stats_updated(&ctx, json).await;
                             }
                         }
@@ -6521,7 +6525,7 @@ pub fn spawn_monitor_task(
                             supermgr_core::dbus::DBUS_OBJECT_PATH,
                         )
                         .expect("static path");
-                        if let Ok(ctx) = SignalContext::new(&conn, object_path) {
+                        if let Ok(ctx) = SignalEmitter::new(&conn, object_path) {
                             if let Ok(json) = state_to_json(&error_state) {
                                 let _ = DaemonService::state_changed(&ctx, json).await;
                             }
@@ -6567,7 +6571,7 @@ pub fn spawn_monitor_task(
                                 let object_path = zbus::zvariant::ObjectPath::try_from(
                                     supermgr_core::dbus::DBUS_OBJECT_PATH,
                                 ).expect("static path");
-                                if let Ok(ctx) = SignalContext::new(&conn_c, object_path) {
+                                if let Ok(ctx) = SignalEmitter::new(&conn_c, object_path) {
                                     info!("auto-reconnect: connecting '{}'", profile.name);
                                     if let Err(e) = connect_profile(
                                         profile.clone(), Arc::clone(&state_c), ctx,
