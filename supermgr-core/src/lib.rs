@@ -29,6 +29,7 @@ pub mod error;
 pub mod findings;
 pub mod findings_store;
 pub mod host;
+pub mod backup;
 pub mod keyring;
 pub mod paths;
 pub mod secret_lifecycle;

@@ -97,6 +97,15 @@ pub trait SecretStore: Send + Sync {
 
     /// Delete the secret stored under `label`.
     async fn delete(&self, label: &str) -> Result<(), SecretError>;
+
+    /// Every stored secret as `label -> base64(bytes)`, for building a
+    /// portable backup. The default returns empty: enumerable stores
+    /// (the file-backed one) override it, while stores that cannot list
+    /// their contents (macOS Keychain, Windows Credential Manager) leave
+    /// it empty and let the caller supply those secrets another way.
+    async fn read_all(&self) -> Result<std::collections::HashMap<String, String>, SecretError> {
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 // ---------------------------------------------------------------------------

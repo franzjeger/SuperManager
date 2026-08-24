@@ -148,6 +148,8 @@ impl EngineServer {
         let id = req.id;
         match req.method.as_str() {
             // -- Profile methods --
+            "backup_export" => self.handle_backup_export(id).await,
+            "backup_import" => self.handle_backup_import(id, req.params).await,
             "list_profiles" => self.handle_list_profiles(id).await,
             "vpn_get_profile" => self.handle_vpn_get_profile(id, req.params).await,
             "vpn_add_ikev2_profile" => self.handle_vpn_add_ikev2_profile(id, req.params).await,
