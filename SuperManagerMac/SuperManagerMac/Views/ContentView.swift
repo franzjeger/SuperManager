@@ -22,6 +22,10 @@ struct ContentView: View {
     /// Drives the visual drop-zone overlay during a drag-and-drop
     /// VPN import. Bound to `.onDrop(isTargeted:)`.
     @State private var vpnImportTargeted = false
+    /// Presents the VPN-client installer when a driver is missing.
+    @State private var showingVpnDependencies = false
+    /// Bumped after an install so the missing-clients banner re-evaluates.
+    @State private var vpnDepRefresh = 0
     /// Last drop-import error (e.g. "unknown extension" or daemon
     /// rejection). Surfaced as a transient alert so it doesn't
     /// linger after the user moves on.
@@ -669,6 +673,48 @@ struct ContentView: View {
         }
     }
 
+    /// Warns, right where VPN profiles live, when a client SuperManager
+    /// drives is not installed — profiles of that type can't connect
+    /// until it is. The installer itself has always existed but was
+    /// buried in Settings; this surfaces it at the point of use. Renders
+    /// nothing when every client is present.
+    @ViewBuilder
+    private var vpnDependencyBanner: some View {
+        let _ = vpnDepRefresh  // re-evaluate `Dependencies.missing` after an install
+        let missing = Dependencies.missing
+        if !missing.isEmpty {
+            Button {
+                showingVpnDependencies = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(missing.count) VPN client\(missing.count == 1 ? "" : "s") not installed")
+                            .font(.callout.weight(.medium))
+                        Text(missing.map(\.id).joined(separator: ", "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    Spacer(minLength: 0)
+                    Text("Install\u{2026}")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tint)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.bottom, 6)
+            .help("SuperManager drives these VPN clients; a profile of a missing type cannot connect until its client is installed.")
+        }
+    }
+
     private var vpnListColumn: some View {
         VStack(spacing: 0) {
             // Search field — same control as SSH so muscle memory
@@ -678,6 +724,8 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .focused($searchFieldFocused)
                 .padding(8)
+
+            vpnDependencyBanner
 
             if appState.vpnProfiles.isEmpty {
                 ContentUnavailableView {
@@ -704,6 +752,23 @@ struct ContentView: View {
             } else {
                 vpnProfileList
             }
+        }
+        .sheet(isPresented: $showingVpnDependencies) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Install VPN clients")
+                    .font(.title3.weight(.semibold))
+                Text("SuperManager drives the real VPN clients rather than reimplementing them. Install the ones you need; Homebrew handles the first three.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                DependencyCard(onInstalled: { vpnDepRefresh += 1 })
+                HStack {
+                    Spacer()
+                    Button("Done") { showingVpnDependencies = false }
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(20)
+            .frame(width: 460)
         }
     }
 
