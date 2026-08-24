@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
 /// — it just orchestrates pickers, surfaces progress, and shows
 /// success / failure inline.
 struct BackupSettingsView: View {
+    @Environment(AppState.self) private var appState
     @State private var status: BackupStatus = .idle
     @State private var lastResult: String?
     @State private var error: String?
@@ -50,6 +51,24 @@ struct BackupSettingsView: View {
                     pickVerifyFile()
                 } label: {
                     Label("Verify Backup…", systemImage: "checkmark.seal")
+                }
+                .disabled(isWorking)
+            }
+
+            Section("Portable backup (Mac \u{2194} Linux)") {
+                Text("A single `.json` backup that also restores on the Linux build. Carries everything the `.tar.gz` does, plus the IKEv2/OpenVPN passwords the Mac keeps in the Keychain \u{2014} so it is at least as sensitive; it is written owner-only (0600).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button {
+                    runPortableExport()
+                } label: {
+                    Label("Export Portable Backup\u{2026}", systemImage: "arrow.up.doc")
+                }
+                .disabled(isWorking)
+                Button {
+                    runPortableImport()
+                } label: {
+                    Label("Import Portable Backup\u{2026}", systemImage: "arrow.down.doc")
                 }
                 .disabled(isWorking)
             }
@@ -197,6 +216,63 @@ struct BackupSettingsView: View {
                     self.status = .idle
                     self.error = error.localizedDescription
                 }
+            }
+        }
+    }
+
+    private func runPortableExport() {
+        let panel = NSSavePanel()
+        panel.title = "Export Portable Backup"
+        panel.nameFieldStringValue = "supermanager-portable-backup.json"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        status = .exporting
+        lastResult = nil
+        Task { @MainActor in
+            do {
+                let data = try await PortableBackup.export(client: appState.client)
+                try data.write(to: url, options: [.atomic])
+                // Owner-only: the file carries private keys and passwords.
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: url.path)
+                let size = ByteCountFormatter.string(
+                    fromByteCount: Int64(data.count), countStyle: .file)
+                status = .idle
+                lastResult = "Exported \(size) to \(url.lastPathComponent)"
+            } catch {
+                status = .idle
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    private func runPortableImport() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Portable Backup"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        status = .restoring
+        lastResult = nil
+        Task { @MainActor in
+            do {
+                let data = try Data(contentsOf: url)
+                let summary = try await PortableBackup.restore(
+                    from: data, client: appState.client)
+                await appState.refreshProfiles()
+                await appState.refreshHosts()
+                status = .idle
+                lastResult =
+                    "Imported \(summary.profiles) profile(s), \(summary.sshKeys) key(s), "
+                    + "\(summary.hosts) host(s), \(summary.secrets) secret(s)"
+            } catch {
+                status = .idle
+                self.error = error.localizedDescription
             }
         }
     }
