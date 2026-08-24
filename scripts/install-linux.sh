@@ -196,6 +196,7 @@ arch)
     # install rather than a security posture.
     PKGS_CORE=(polkit openssh sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
+    PKGS_TOOLS=(bind net-tools tcpdump samba net-snmp pandoc-cli python-weasyprint)
     PKGS_OPTIONAL=(freerdp remmina networkmanager)
     ;;
 debian)
@@ -205,6 +206,7 @@ debian)
     PKGS_GUI=(libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libssl-dev libdbus-1-dev libglib2.0-dev)
     PKGS_CORE=(polkitd openssh-client sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan strongswan-swanctl openvpn)
+    PKGS_TOOLS=(dnsutils net-tools tcpdump smbclient samba-common-bin snmp pandoc weasyprint)
     PKGS_OPTIONAL=(freerdp3-x11 remmina network-manager)
     ;;
 fedora)
@@ -214,6 +216,7 @@ fedora)
     PKGS_GUI=(gtk4-devel libadwaita-devel vte291-gtk4-devel openssl-devel dbus-devel glib2-devel)
     PKGS_CORE=(polkit openssh-clients sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
+    PKGS_TOOLS=(bind-utils net-tools tcpdump samba-client net-snmp-utils pandoc python3-weasyprint)
     PKGS_OPTIONAL=(freerdp remmina NetworkManager)
     ;;
 suse)
@@ -223,6 +226,7 @@ suse)
     PKGS_GUI=(gtk4-devel libadwaita-devel vte-devel libopenssl-devel dbus-1-devel glib2-devel)
     PKGS_CORE=(polkit openssh sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
+    PKGS_TOOLS=(bind-utils net-tools tcpdump samba-client net-snmp pandoc python3-WeasyPrint)
     PKGS_OPTIONAL=(freerdp remmina NetworkManager)
     ;;
 esac
@@ -255,6 +259,7 @@ if [ "$PRINT_DEPS" = 1 ]; then
     printf 'gui            %s\n' "${PKGS_GUI[*]}"
     printf 'core           %s\n' "${PKGS_CORE[*]}"
     printf 'vpn            %s\n' "${PKGS_VPN[*]}"
+    printf 'tools          %s\n' "${PKGS_TOOLS[*]}"
     printf 'optional       %s\n' "${PKGS_OPTIONAL[*]}"
     exit 0
 fi
@@ -267,6 +272,7 @@ if [ "$DO_DEPS" = 1 ]; then
     REQUIRED=(
         ${PKGS_RUST[@]+"${PKGS_RUST[@]}"}
         "${PKGS_BUILD[@]}" "${PKGS_GUI[@]}" "${PKGS_CORE[@]}" "${PKGS_VPN[@]}"
+        "${PKGS_TOOLS[@]}"
     )
 
     say "Installing dependencies (${#REQUIRED[@]} packages, $FAMILY)"
@@ -358,6 +364,22 @@ if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
        straight to the build once you have.)"
 fi
 note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
+
+# Package installation succeeding does not guarantee that every runtime CLI
+# exists (transitional and split packages are common).  Fail here with the
+# useful names instead of letting an individual feature fail much later.
+MISSING_TOOLS=()
+for tool in ssh sshpass nft wg wg-quick swanctl ipsec openvpn dig host arp \
+            ifconfig tcpdump smbclient nmblookup snmpget snmpwalk pandoc \
+            weasyprint pkexec; do
+    command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS+=("$tool")
+done
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+    die "runtime tools missing after dependency installation: ${MISSING_TOOLS[*]}
+       One or more packages are split or renamed on this distro release.
+       Install the packages providing these commands, then re-run."
+fi
+note "all required VPN, discovery, capture, and report tools present"
 
 # ---------------------------------------------------------------------------
 # 3. Build
@@ -556,13 +578,23 @@ sudo systemctl daemon-reload
 # without it the GUI's first connection is refused by the bus.
 sudo systemctl reload dbus 2>/dev/null || sudo systemctl reload messagebus 2>/dev/null || true
 
-# strongswan is only needed for IKEv2/FortiGate IPsec profiles, so a
-# failure to enable it is not a failure to install SuperManager.
-if systemctl list-unit-files 2>/dev/null | grep -qE '^strongswan(-starter)?\.service'; then
-    sudo systemctl enable --now strongswan 2>/dev/null \
-        || sudo systemctl enable --now strongswan-starter 2>/dev/null \
-        || warn "could not start strongswan — IKEv2 profiles will not connect until it runs"
-fi
+# strongSwan is a declared runtime dependency.  Unit names differ between
+# distributions, so try the known names directly instead of parsing
+# `list-unit-files` (whose output and aliases vary by systemd version).
+say "Starting strongSwan"
+STRONGSWAN_UNIT=""
+for unit in strongswan.service strongswan-swanctl.service strongswan-starter.service; do
+    if sudo systemctl enable --now "$unit" >/dev/null 2>&1; then
+        STRONGSWAN_UNIT="$unit"
+        break
+    fi
+done
+[ -n "$STRONGSWAN_UNIT" ] || die "strongSwan was installed, but no supported service could be enabled.
+       Tried: strongswan.service, strongswan-swanctl.service, strongswan-starter.service"
+sudo systemctl is-active --quiet "$STRONGSWAN_UNIT" \
+    || die "$STRONGSWAN_UNIT was enabled but did not start.
+       Logs: sudo journalctl -u $STRONGSWAN_UNIT -n 50"
+note "$STRONGSWAN_UNIT is enabled and running"
 
 # `enable` then `restart`, NOT `enable --now`.
 #

@@ -1,6 +1,18 @@
+start_strongswan() {
+    local unit
+    for unit in strongswan.service strongswan-swanctl.service strongswan-starter.service; do
+        if systemctl enable --now "$unit" >/dev/null 2>&1; then
+            echo "  strongSwan:       $unit enabled and running"
+            return 0
+        fi
+    done
+    echo "error: strongSwan was installed but its service could not be enabled" >&2
+    return 1
+}
+
 post_install() {
     systemctl daemon-reload
-    systemctl enable --now strongswan.service >/dev/null 2>&1 || true
+    start_strongswan || return 1
     systemctl enable --now supermgrd.service >/dev/null 2>&1 || true
     cat <<EOF
 
@@ -19,6 +31,7 @@ EOF
 
 post_upgrade() {
     systemctl daemon-reload
+    start_strongswan || return 1
     systemctl try-restart supermgrd.service >/dev/null 2>&1 || true
 }
 

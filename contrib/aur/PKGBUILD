@@ -16,6 +16,15 @@ depends=(
     'openvpn'
     'nftables'
     'openssh'
+    # Network discovery, packet analysis, and report export.  These are
+    # runtime tools invoked by the engine, not Rust build dependencies.
+    'bind'
+    'net-tools'
+    'tcpdump'
+    'samba'
+    'net-snmp'
+    'pandoc-cli'
+    'python-weasyprint'
     # Not optional: the daemon's credential-reading methods are gated on
     # polkit and fail closed, so without it a working install behaves
     # like a broken one.
