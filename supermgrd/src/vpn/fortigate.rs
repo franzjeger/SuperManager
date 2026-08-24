@@ -345,13 +345,17 @@ fn generate_swanctl_config(
     psk: &str,
     full_tunnel: bool,
 ) -> String {
+    // Split tunnel: the profile's routes plus a host prefix for any assigned
+    // DNS server the routes don't cover. A gateway can hand out a resolver
+    // outside its own split-include list; without the extra selector that
+    // nameserver matches no IPsec policy, and every lookup burns a ~5 s
+    // timeout before falling back. See `split_ts_with_dns` for the full story.
     let remote_ts = if full_tunnel {
         "0.0.0.0/0,::/0".to_owned()
     } else {
-        fg_cfg
-            .routes
+        supermgr_core::vpn::profile::split_ts_with_dns(&fg_cfg.routes, &fg_cfg.dns_servers)
             .iter()
-            .map(|r| r.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(",")
     };
@@ -832,7 +836,21 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
     match proxy.call_method("SetLinkDNS", &(ifindex, &dns_addrs)).await {
         Ok(_) => info!("SetLinkDNS({iface_name}, {} server(s)) — ok", dns_addrs.len()),
         Err(e) => {
-            error!("SetLinkDNS for {iface_name} failed: {e}");
+            // A system without systemd-resolved is a configuration, not a
+            // failure: charon's resolve plugin writes the pushed servers to
+            // /etc/resolv.conf itself, so DNS still works — an ERROR here
+            // sends whoever reads the log hunting for a problem that isn't
+            // one. Anything else from resolved is a real failure.
+            let msg = e.to_string();
+            if msg.contains("org.freedesktop.resolve1") || msg.contains("NameHasNoOwner") {
+                warn!(
+                    "systemd-resolved is not running — skipping per-link DNS for \
+                     {iface_name}; strongSwan's resolve plugin manages /etc/resolv.conf \
+                     instead"
+                );
+            } else {
+                error!("SetLinkDNS for {iface_name} failed: {e}");
+            }
             return None;
         }
     }
@@ -1302,8 +1320,15 @@ impl VpnBackend for FortiGateBackend {
                     }
                 }
             } else {
-                // Split-tunnel: add a route for each remote traffic selector with src=VIP.
-                for route_cidr in &fg_cfg.routes {
+                // Split-tunnel: add a route for each remote traffic selector
+                // with src=VIP. Iterate the SAME list generate_swanctl_config
+                // proposed as `remote_ts` — the routes plus a host prefix for
+                // any profile DNS server they don't cover — or the assigned
+                // resolver ends up with a negotiated selector but no kernel
+                // route, which is the same dead nameserver dressed differently.
+                for route_cidr in
+                    &supermgr_core::vpn::profile::split_ts_with_dns(&fg_cfg.routes, &fg_cfg.dns_servers)
+                {
                     let cidr = route_cidr.to_string();
                     info!("installing split-tunnel route: {cidr} dev {outbound_dev} src {vip}");
 
@@ -1336,9 +1361,12 @@ impl VpnBackend for FortiGateBackend {
         // (lines like "[IKE] installing DNS server 1.2.3.4 via resolvconf").
         // strongSwan's own resolvconf integration fails on systemd-networkd
         // systems, so we handle DNS ourselves via systemd-resolved D-Bus.
-        let effective_dns: Vec<std::net::IpAddr> = if !fg_cfg.dns_servers.is_empty() {
-            fg_cfg.dns_servers.clone()
-        } else {
+        // DNS pushed by the gateway via mode-config, parsed from the initiate
+        // output UNCONDITIONALLY — not only when the profile has no servers of
+        // its own. charon's resolve plugin installs pushed servers into
+        // /etc/resolv.conf on its own authority, so a pushed resolver matters
+        // even when the profile brings a different list.
+        let pushed_dns: Vec<std::net::IpAddr> = {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let mut pushed: Vec<std::net::IpAddr> = Vec::new();
             for line in stdout.lines() {
@@ -1360,6 +1388,33 @@ impl VpnBackend for FortiGateBackend {
             }
             pushed
         };
+        let effective_dns: Vec<std::net::IpAddr> = if !fg_cfg.dns_servers.is_empty() {
+            fg_cfg.dns_servers.clone()
+        } else {
+            pushed_dns.clone()
+        };
+
+        // A pushed resolver never made it into the proposed selectors — those
+        // were generated from the profile before this negotiation ran, and
+        // selectors cannot be widened after the fact. If it falls outside the
+        // set we DID propose, charon has just written a nameserver into
+        // /etc/resolv.conf that no IPsec policy can reach: the classic
+        // "every lookup stalls ~5 s, full tunnel is fine" failure. Say
+        // precisely what to fix instead of leaving a silent time bomb.
+        if !profile.full_tunnel {
+            let selectors =
+                supermgr_core::vpn::profile::split_ts_with_dns(&fg_cfg.routes, &fg_cfg.dns_servers);
+            for dns in &pushed_dns {
+                if !selectors.iter().any(|n| n.contains(dns)) {
+                    warn!(
+                        "gateway pushed DNS server {dns} outside the split-tunnel \
+                         selectors — lookups against it will hang until timeout before \
+                         falling back; add {dns} to the profile's dns_servers and \
+                         reconnect to give it a selector"
+                    );
+                }
+            }
+        }
 
         let dns_configured_ifindex = if !effective_dns.is_empty() {
             // Attach DNS to a dedicated dummy netdev so RevertLink on disconnect
@@ -1765,6 +1820,44 @@ mod tests {
             routes: Vec::new(),
             local_id: local_id.to_owned(),
         }
+    }
+
+    // -- Split-tunnel DNS reachability ------------------------------------
+
+    #[test]
+    fn split_tunnel_keeps_the_assigned_dns_reachable() {
+        // The live bug: gateway pushes 10.20.3.0/24 + 10.20.21.0/24 as split
+        // routes and 10.20.200.1 as DNS. Without a host selector for the
+        // resolver, it matches no policy and every lookup times out for ~5 s.
+        let mut cfg = fg("");
+        cfg.routes = vec!["10.20.3.0/24".parse().unwrap(), "10.20.21.0/24".parse().unwrap()];
+        cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
+        assert!(
+            conf.contains("remote_ts = 10.20.3.0/24,10.20.21.0/24,10.20.200.1/32"),
+            "the DNS server needs a host selector in remote_ts:\n{conf}"
+        );
+    }
+
+    #[test]
+    fn a_dns_server_inside_a_route_adds_no_extra_selector() {
+        let mut cfg = fg("");
+        cfg.routes = vec!["10.20.200.0/24".parse().unwrap()];
+        cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
+        assert!(conf.contains("remote_ts = 10.20.200.0/24\n"), "{conf}");
+        assert!(!conf.contains("10.20.200.1/32"), "already covered — no duplicate:\n{conf}");
+    }
+
+    #[test]
+    fn full_tunnel_ignores_dns_selectors() {
+        // The catch-all covers the resolver; adding host prefixes would only
+        // churn the config for gateways that dislike extra selectors.
+        let mut cfg = fg("");
+        cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true);
+        assert!(conf.contains("remote_ts = 0.0.0.0/0,::/0"), "{conf}");
+        assert!(!conf.contains("10.20.200.1"), "{conf}");
     }
 
     #[test]

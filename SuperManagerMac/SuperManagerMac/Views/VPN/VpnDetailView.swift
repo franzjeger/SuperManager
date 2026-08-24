@@ -1432,7 +1432,11 @@ struct VpnDetailView: View {
             // template `remote_ts` per the user's choice. Empty
             // routes + `full_tunnel = true` is the default and means
             // "everything through the tunnel"; non-empty routes +
-            // `full_tunnel = false` is split mode.
+            // `full_tunnel = false` is split mode. DNS servers ride
+            // along so the helper can grow `remote_ts` with a host
+            // selector for a resolver the routes don't cover — a
+            // gateway can assign DNS outside its own split-include
+            // list, and an unreachable resolver stalls every lookup.
             let result = try await HelperClient.shared.vpnConnect(
                 profileId: profile.id,
                 name: profile.name,
@@ -1442,6 +1446,7 @@ struct VpnDetailView: View {
                 sharedSecret: psk,
                 fullTunnel: profile.fullTunnel,
                 routes: cfg.routes,
+                dnsServers: cfg.dnsServers,
                 localId: cfg.localId
             )
             if let ok = result["ok"] as? Bool, !ok {

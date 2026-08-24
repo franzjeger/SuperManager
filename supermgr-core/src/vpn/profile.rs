@@ -1026,6 +1026,57 @@ pub fn effective_allowed_ips(
     Ok(out)
 }
 
+/// Split-tunnel traffic selectors with the tunnel's own DNS servers
+/// guaranteed reachable.
+///
+/// The failure this prevents: a gateway hands out an internal DNS server
+/// (IKEv2 `INTERNAL_IP4_DNS`) that sits *outside* the split-include
+/// prefixes it also hands out. The client obediently installs both — a
+/// nameserver, and a selector set that cannot reach it. Every lookup then
+/// burns a full resolver timeout (~5 s) against the dead server before
+/// falling back to a local one, which the user experiences as "every page
+/// load hangs, full tunnel is fine". Seen live against a FortiGate whose
+/// split profile carried 10.20.3.0/24 + 10.20.21.0/24 while assigning
+/// 10.20.200.1 as DNS.
+///
+/// IPsec selectors are negotiated with the peer, so a client cannot patch
+/// this up after the fact with a kernel route — packets to the DNS server
+/// would match no policy and be dropped. The host prefixes have to be part
+/// of the proposed `remote_ts`. A gateway that narrows them away leaves us
+/// no worse off than today; one that accepts them (FortiGate accepts
+/// selectors inside its own address space) makes the assigned DNS usable.
+///
+/// Full tunnel never needs this — the catch-all covers everything — so
+/// callers apply it on the split branch only. A DNS server already inside
+/// one of the routes is not duplicated.
+#[must_use = "the returned selectors must be used as remote_ts; ignoring them leaves the assigned DNS unreachable"]
+pub fn split_ts_with_dns(routes: &[IpNet], dns_servers: &[IpAddr]) -> Vec<IpNet> {
+    let mut out = routes.to_vec();
+    out.extend(uncovered_dns_hosts(&out, dns_servers));
+    out
+}
+
+/// Host prefixes for the DNS servers that no entry in `covered` reaches.
+///
+/// The WireGuard-shaped half of the same problem `split_ts_with_dns`
+/// solves for IKEv2: a split profile whose AllowedIPs don't cover the
+/// profile's DNS servers configures a resolver the tunnel cannot carry.
+/// WireGuard's cryptokey routing means a prefix may belong to exactly one
+/// peer, so this function only *computes* the missing host prefixes — the
+/// caller decides which peer's AllowedIPs they join (in practice the
+/// first peer; split profiles overwhelmingly have one). Duplicate servers
+/// in `dns_servers` produce one prefix.
+#[must_use = "the returned prefixes must be added to a peer's AllowedIPs; ignoring them leaves the DNS unreachable"]
+pub fn uncovered_dns_hosts(covered: &[IpNet], dns_servers: &[IpAddr]) -> Vec<IpNet> {
+    let mut extra: Vec<IpNet> = Vec::new();
+    for &dns in dns_servers {
+        if !covered.iter().chain(extra.iter()).any(|n| n.contains(&dns)) {
+            extra.push(IpNet::from(dns));
+        }
+    }
+    extra
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1123,57 @@ mod tests {
     fn split_tunnel_with_only_specific_prefixes_is_fine() {
         let peer = vec![ip("192.168.4.0/24")];
         assert_eq!(effective_allowed_ips(&peer, &[], false, "p").unwrap(), peer);
+    }
+
+    /// The live failure this function exists for: gateway assigns a DNS
+    /// server outside its own split-include list. The selector set must
+    /// grow a host prefix for it or every lookup times out against a
+    /// nameserver no policy can reach.
+    #[test]
+    fn dns_outside_the_split_routes_gets_a_host_prefix() {
+        let routes = vec![ip("10.20.3.0/24"), ip("10.20.21.0/24")];
+        let dns = vec!["10.20.200.1".parse().unwrap()];
+        assert_eq!(
+            split_ts_with_dns(&routes, &dns),
+            vec![ip("10.20.3.0/24"), ip("10.20.21.0/24"), ip("10.20.200.1/32")]
+        );
+    }
+
+    #[test]
+    fn dns_already_covered_by_a_route_is_not_duplicated() {
+        let routes = vec![ip("10.20.200.0/24")];
+        let dns = vec!["10.20.200.1".parse().unwrap()];
+        assert_eq!(split_ts_with_dns(&routes, &dns), routes);
+    }
+
+    #[test]
+    fn ipv6_dns_gets_a_128_and_families_do_not_cross_match() {
+        // An IPv4 route must not be treated as covering an IPv6 resolver.
+        let routes = vec![ip("10.20.3.0/24")];
+        let dns = vec!["fd00::53".parse().unwrap()];
+        assert_eq!(
+            split_ts_with_dns(&routes, &dns),
+            vec![ip("10.20.3.0/24"), ip("fd00::53/128")]
+        );
+    }
+
+    #[test]
+    fn no_dns_servers_leaves_the_routes_untouched() {
+        let routes = vec![ip("10.20.3.0/24")];
+        assert_eq!(split_ts_with_dns(&routes, &[]), routes);
+    }
+
+    #[test]
+    fn uncovered_dns_hosts_returns_only_the_missing_prefixes() {
+        let covered = vec![ip("10.0.0.0/8")];
+        let dns = vec!["10.0.0.53".parse().unwrap(), "192.168.7.1".parse().unwrap()];
+        assert_eq!(uncovered_dns_hosts(&covered, &dns), vec![ip("192.168.7.1/32")]);
+    }
+
+    #[test]
+    fn uncovered_dns_hosts_dedupes_repeated_servers() {
+        let dns = vec!["192.168.7.1".parse().unwrap(), "192.168.7.1".parse().unwrap()];
+        assert_eq!(uncovered_dns_hosts(&[], &dns), vec![ip("192.168.7.1/32")]);
     }
 
     #[test]

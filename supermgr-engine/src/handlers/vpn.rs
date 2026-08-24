@@ -818,24 +818,46 @@ impl EngineServer {
         }
         out.push('\n');
 
+        // AllowedIPs are reconciled for every peer BEFORE the blocks are
+        // written, because DNS coverage is a cross-peer property: a split
+        // profile whose AllowedIPs don't cover its own DNS servers renders a
+        // config with an unreachable resolver (the same failure the IKEv2
+        // backend fixes with DNS selectors — every lookup stalls until
+        // timeout). Cryptokey routing allows a prefix in only one peer, so
+        // any missing host prefixes join the first peer's list; split
+        // profiles overwhelmingly have exactly one peer.
+        let mut peer_allowed: Vec<Vec<ipnet::IpNet>> = Vec::with_capacity(wg.peers.len());
+        for peer in &wg.peers {
+            match effective_allowed_ips(&peer.allowed_ips, &wg.split_routes, full_tunnel, pid_str)
+            {
+                Ok(v) => peer_allowed.push(v),
+                Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
+            }
+        }
+        if !full_tunnel {
+            let all: Vec<ipnet::IpNet> = peer_allowed.iter().flatten().copied().collect();
+            let missing = supermgr_core::vpn::profile::uncovered_dns_hosts(&all, &wg.dns);
+            if !missing.is_empty() {
+                if let Some(first) = peer_allowed.first_mut() {
+                    tracing::info!(
+                        profile = %pid_str,
+                        "wireguard render: adding host prefixes for DNS servers \
+                         outside AllowedIPs: {missing:?}"
+                    );
+                    first.extend(missing);
+                }
+            }
+        }
+
         // One [Peer] block per peer. Per-peer PSKs (if present) are
         // looked up the same way the private key was. A failed PSK
         // lookup is non-fatal — the peer is still added without one.
-        for peer in &wg.peers {
+        for (peer, allowed) in wg.peers.iter().zip(&peer_allowed) {
             let _ = writeln!(out, "[Peer]");
             let _ = writeln!(out, "PublicKey = {}", peer.public_key);
             if let Some(ref ep) = peer.endpoint {
                 let _ = writeln!(out, "Endpoint = {ep}");
             }
-            let allowed = match effective_allowed_ips(
-                &peer.allowed_ips,
-                &wg.split_routes,
-                full_tunnel,
-                pid_str,
-            ) {
-                Ok(v) => v,
-                Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
-            };
             if !allowed.is_empty() {
                 let ips = allowed
                     .iter()

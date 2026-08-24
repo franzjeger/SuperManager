@@ -1259,6 +1259,25 @@ impl VpnBackend for WireGuardBackend {
                 )
                 .map_err(BackendError::Config)?;
             }
+            // Same class of failure as the IKEv2 backend's DNS selectors: a
+            // split profile whose AllowedIPs don't cover its own DNS servers
+            // configures a resolver the tunnel can't carry, and every lookup
+            // stalls until timeout. Cryptokey routing allows a prefix in only
+            // one peer, so the missing host prefixes go to the first peer —
+            // split profiles overwhelmingly have exactly one.
+            let all_allowed: Vec<ipnet::IpNet> =
+                cfg.peers.iter().flat_map(|p| p.allowed_ips.iter().copied()).collect();
+            let missing =
+                supermgr_core::vpn::profile::uncovered_dns_hosts(&all_allowed, &cfg.dns);
+            if !missing.is_empty() {
+                if let Some(first) = cfg.peers.first_mut() {
+                    info!(
+                        "split tunnel: adding host prefixes for DNS servers outside \
+                         AllowedIPs: {missing:?}"
+                    );
+                    first.allowed_ips.extend(missing);
+                }
+            }
             std::borrow::Cow::Owned(cfg)
         };
         let wg_cfg = effective_cfg.as_ref();

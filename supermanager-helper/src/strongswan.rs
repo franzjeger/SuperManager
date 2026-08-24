@@ -115,6 +115,16 @@ pub struct ConnectArgs {
     /// selector in the strongSwan child config.
     #[serde(default)]
     pub routes: Vec<String>,
+    /// DNS servers the profile assigns while the tunnel is up. Only
+    /// consulted when `full_tunnel=false`: any server the `routes`
+    /// don't already cover gets a host-prefix `remote_ts` selector,
+    /// because a gateway can hand out a resolver outside its own
+    /// split-include list — the nameserver then matches no IPsec
+    /// policy and every lookup burns a ~5 s timeout before falling
+    /// back. `#[serde(default)]` keeps connect args from an older GUI
+    /// deserialising cleanly (they just don't get the safety net).
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
     /// Optional IKE identity to send as IDi (`local.id`). Empty means
     /// omit it so strongSwan defaults IDi to the local IP (today's
     /// behaviour). `#[serde(default)]` keeps replayed connect args from
@@ -942,7 +952,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         // pretends to work.
         return String::new();
     } else {
-        args.routes.join(",")
+        split_ts_with_dns(&args.routes, &args.dns_servers).join(",")
     };
     let id = sanitize_name(&args.profile_id);
     // FortiGate dial-up IKEv2 + EAP-MSCHAPv2 expects:
@@ -1025,6 +1035,29 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         local_ts = local_ts,
         remote_ts = remote_ts,
     )
+}
+
+/// The split-tunnel `remote_ts` list with the profile's DNS servers
+/// guaranteed a selector.
+///
+/// Same logic as `split_ts_with_dns` in supermgr-core (the Linux daemon's
+/// copy), operating on the strings the GUI sends: a gateway can assign a
+/// resolver outside its own split-include prefixes, and IPsec selectors
+/// are negotiated — a kernel route can't patch it up afterwards, the host
+/// prefix has to be proposed in `remote_ts`. Servers already inside a
+/// route are not duplicated. Entries that don't parse (route or server)
+/// are left alone / skipped rather than failing the connect: `remote_ts`
+/// validity is charon's call, not ours.
+fn split_ts_with_dns(routes: &[String], dns_servers: &[String]) -> Vec<String> {
+    let parsed: Vec<ipnet::IpNet> = routes.iter().filter_map(|r| r.parse().ok()).collect();
+    let mut out = routes.to_vec();
+    for server in dns_servers {
+        let Ok(ip) = server.parse::<std::net::IpAddr>() else { continue };
+        if !parsed.iter().any(|n| n.contains(&ip)) {
+            out.push(ipnet::IpNet::from(ip).to_string());
+        }
+    }
+    out
 }
 
 /// `connections.<name>` keys must be ident-like. We only accept hex digits,
@@ -1568,8 +1601,60 @@ mod tests {
             shared_secret: psk.to_owned(),
             full_tunnel: true,
             routes: Vec::new(),
+            dns_servers: Vec::new(),
             local_id: String::new(),
         }
+    }
+
+    // -- Split-tunnel DNS reachability ------------------------------------
+
+    #[test]
+    fn split_tunnel_gives_the_assigned_dns_a_selector() {
+        // The live bug: split routes 10.20.3.0/24 + 10.20.21.0/24, assigned
+        // DNS 10.20.200.1. Without a host selector the resolver matches no
+        // IPsec policy and every lookup times out for ~5 s.
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.full_tunnel = false;
+        a.routes = vec!["10.20.3.0/24".to_owned(), "10.20.21.0/24".to_owned()];
+        a.dns_servers = vec!["10.20.200.1".to_owned()];
+        let conf = build_swanctl_conf(&a);
+        assert!(
+            conf.contains("remote_ts = 10.20.3.0/24,10.20.21.0/24,10.20.200.1/32"),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn a_dns_server_the_routes_cover_is_not_duplicated() {
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.full_tunnel = false;
+        a.routes = vec!["10.20.200.0/24".to_owned()];
+        a.dns_servers = vec!["10.20.200.1".to_owned()];
+        let conf = build_swanctl_conf(&a);
+        assert!(conf.contains("remote_ts = 10.20.200.0/24\n"), "{conf}");
+        assert!(!conf.contains("10.20.200.1/32"), "{conf}");
+    }
+
+    #[test]
+    fn full_tunnel_does_not_grow_dns_selectors() {
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.dns_servers = vec!["10.20.200.1".to_owned()];
+        let conf = build_swanctl_conf(&a);
+        assert!(conf.contains("remote_ts = 0.0.0.0/0"), "{conf}");
+        assert!(!conf.contains("10.20.200.1"), "{conf}");
+    }
+
+    #[test]
+    fn garbage_dns_entries_do_not_break_the_conf() {
+        let mut a = args("79.160.91.22", "alice", "pw", "secret");
+        a.full_tunnel = false;
+        a.routes = vec!["10.20.3.0/24".to_owned()];
+        a.dns_servers = vec!["not-an-ip".to_owned(), "fd00::53".to_owned()];
+        let conf = build_swanctl_conf(&a);
+        assert!(
+            conf.contains("remote_ts = 10.20.3.0/24,fd00::53/128"),
+            "unparseable server skipped, v6 server kept:\n{conf}"
+        );
     }
 
     /// Verbatim `swanctl --list-sas` from strongSwan 6.0.6, captured from a

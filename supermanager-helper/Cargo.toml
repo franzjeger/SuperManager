@@ -24,6 +24,9 @@ anyhow             = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid               = { workspace = true }
+# Split-tunnel `remote_ts` needs CIDR containment checks so the assigned
+# DNS server gets a host selector only when the routes don't cover it.
+ipnet              = { workspace = true }
 libc               = "0.2"
 # WireGuard module hashes profile UUIDs into a 12-char interface name
 # (kernel's IFNAMSIZ-1 limit). Workspace already pins SHA-256.
