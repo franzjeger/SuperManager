@@ -20,6 +20,7 @@ use std::{
 use anyhow::Context as _;
 use tokio::sync::{watch, Mutex};
 use tracing::{debug, error, info, warn};
+use supermgr_core::backup::PortableBackup;
 use uuid::Uuid;
 use zbus::{fdo, interface, SignalContext};
 
@@ -3359,9 +3360,9 @@ impl DaemonService {
         crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let state = self.state.lock().await;
 
-        let profiles: Vec<&Profile> = state.profiles.values().collect();
-        let ssh_keys: Vec<&SshKey> = state.ssh_keys.values().collect();
-        let hosts: Vec<&Host> = state.hosts.values().collect();
+        let profiles: Vec<Profile> = state.profiles.values().cloned().collect();
+        let ssh_keys: Vec<SshKey> = state.ssh_keys.values().cloned().collect();
+        let hosts: Vec<Host> = state.hosts.values().cloned().collect();
 
         // Include all secrets so the backup is self-contained.
         let all_secrets: std::collections::HashMap<String, String> =
@@ -3422,16 +3423,20 @@ impl DaemonService {
             }
         }
 
-        let backup = serde_json::json!({
-            "version": 3,
-            "exported_at": chrono::Utc::now().to_rfc3339(),
-            "profiles": profiles,
-            "ssh_keys": ssh_keys,
-            "hosts": hosts,
-            "secrets": all_secrets,
-            "gui_settings": gui_settings,
-            "config_backups": config_backups,
-        });
+        // Build the shared PortableBackup type rather than an ad-hoc
+        // json!{}. This is the anti-drift lock: if the format struct in
+        // supermgr-core changes, this stops compiling, so the Linux
+        // export can't silently diverge from what the macOS side reads.
+        let backup = PortableBackup {
+            version: supermgr_core::backup::BACKUP_VERSION,
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            profiles,
+            ssh_keys,
+            hosts,
+            secrets: all_secrets,
+            gui_settings,
+            config_backups,
+        };
 
         serde_json::to_string_pretty(&backup)
             .map_err(|e| fdo::Error::Failed(format!("JSON serialisation failed: {e}")))
@@ -3444,7 +3449,13 @@ impl DaemonService {
     /// existing data.  Returns a JSON summary:
     /// `{"profiles": N, "ssh_keys": N, "hosts": N}`.
     async fn import_all(&self, data: &str) -> fdo::Result<String> {
-        let backup: serde_json::Value = serde_json::from_str(data)
+        // Deserialize into the shared PortableBackup type: field names
+        // and item shapes are now compiler-checked against supermgr-core,
+        // so the Linux import can't drift from the format the macOS side
+        // writes. A backup produced by our own tools parses strictly;
+        // Profile/SshKey/Host carry serde defaults for evolving fields,
+        // so an older backup still loads.
+        let backup: PortableBackup = serde_json::from_str(data)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
 
         let mut imported_profiles: u32 = 0;
@@ -3453,145 +3464,111 @@ impl DaemonService {
 
         let mut state = self.state.lock().await;
 
-        // --- Profiles ---
-        if let Some(arr) = backup.get("profiles").and_then(|v| v.as_array()) {
-            for item in arr {
-                match serde_json::from_value::<Profile>(item.clone()) {
-                    Ok(mut profile) => {
-                        let new_id = Uuid::new_v4();
-                        profile.id = new_id;
-                        if let Err(e) = state.save_profile(&profile) {
-                            warn!("import_all: failed to save profile '{}': {e}", profile.name);
-                            continue;
-                        }
-                        info!("import_all: imported profile '{}' as {new_id}", profile.name);
-                        state.profiles.insert(new_id, profile);
-                        imported_profiles += 1;
-                    }
-                    Err(e) => {
-                        warn!("import_all: skipping malformed profile: {e}");
-                    }
-                }
+        // --- Profiles --- (each gets a fresh id so it never collides)
+        for mut profile in backup.profiles {
+            let new_id = Uuid::new_v4();
+            profile.id = new_id;
+            if let Err(e) = state.save_profile(&profile) {
+                warn!("import_all: failed to save profile '{}': {e}", profile.name);
+                continue;
             }
+            info!("import_all: imported profile '{}' as {new_id}", profile.name);
+            state.profiles.insert(new_id, profile);
+            imported_profiles += 1;
         }
 
         // --- SSH keys ---
-        if let Some(arr) = backup.get("ssh_keys").and_then(|v| v.as_array()) {
-            for item in arr {
-                match serde_json::from_value::<SshKey>(item.clone()) {
-                    Ok(mut key) => {
-                        let new_id = Uuid::new_v4();
-                        key.id = new_id;
-                        let path = state.ssh_key_dir.join(format!("{new_id}.toml"));
-                        match toml::to_string_pretty(&key) {
-                            Ok(text) => {
-                                if let Err(e) = std::fs::create_dir_all(&state.ssh_key_dir) {
-                                    warn!("import_all: mkdir ssh_key_dir: {e}");
-                                    continue;
-                                }
-                                if let Err(e) = std::fs::write(&path, &text) {
-                                    warn!("import_all: write SSH key file: {e}");
-                                    continue;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("import_all: TOML serialise SSH key: {e}");
-                                continue;
-                            }
-                        }
-                        info!("import_all: imported SSH key '{}' as {new_id}", key.name);
-                        state.ssh_keys.insert(new_id, key);
-                        imported_keys += 1;
+        for mut key in backup.ssh_keys {
+            let new_id = Uuid::new_v4();
+            key.id = new_id;
+            let path = state.ssh_key_dir.join(format!("{new_id}.toml"));
+            match toml::to_string_pretty(&key) {
+                Ok(text) => {
+                    if let Err(e) = std::fs::create_dir_all(&state.ssh_key_dir) {
+                        warn!("import_all: mkdir ssh_key_dir: {e}");
+                        continue;
                     }
-                    Err(e) => {
-                        warn!("import_all: skipping malformed SSH key: {e}");
+                    if let Err(e) = std::fs::write(&path, &text) {
+                        warn!("import_all: write SSH key file: {e}");
+                        continue;
                     }
                 }
+                Err(e) => {
+                    warn!("import_all: TOML serialise SSH key: {e}");
+                    continue;
+                }
             }
+            info!("import_all: imported SSH key '{}' as {new_id}", key.name);
+            state.ssh_keys.insert(new_id, key);
+            imported_keys += 1;
         }
 
         // --- SSH hosts ---
-        if let Some(arr) = backup.get("hosts").and_then(|v| v.as_array()) {
-            for item in arr {
-                match serde_json::from_value::<Host>(item.clone()) {
-                    Ok(mut host) => {
-                        let new_id = Uuid::new_v4();
-                        host.id = new_id;
-                        let path = state.host_dir.join(format!("{new_id}.toml"));
-                        match toml::to_string_pretty(&host) {
-                            Ok(text) => {
-                                if let Err(e) = std::fs::create_dir_all(&state.host_dir) {
-                                    warn!("import_all: mkdir host_dir: {e}");
-                                    continue;
-                                }
-                                if let Err(e) = std::fs::write(&path, &text) {
-                                    warn!("import_all: write SSH host file: {e}");
-                                    continue;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("import_all: TOML serialise SSH host: {e}");
-                                continue;
-                            }
-                        }
-                        info!("import_all: imported SSH host '{}' as {new_id}", host.label);
-                        state.hosts.insert(new_id, host);
-                        imported_hosts += 1;
+        for mut host in backup.hosts {
+            let new_id = Uuid::new_v4();
+            host.id = new_id;
+            let path = state.host_dir.join(format!("{new_id}.toml"));
+            match toml::to_string_pretty(&host) {
+                Ok(text) => {
+                    if let Err(e) = std::fs::create_dir_all(&state.host_dir) {
+                        warn!("import_all: mkdir host_dir: {e}");
+                        continue;
                     }
-                    Err(e) => {
-                        warn!("import_all: skipping malformed SSH host: {e}");
+                    if let Err(e) = std::fs::write(&path, &text) {
+                        warn!("import_all: write SSH host file: {e}");
+                        continue;
                     }
                 }
+                Err(e) => {
+                    warn!("import_all: TOML serialise SSH host: {e}");
+                    continue;
+                }
             }
+            info!("import_all: imported SSH host '{}' as {new_id}", host.label);
+            state.hosts.insert(new_id, host);
+            imported_hosts += 1;
         }
 
-        // --- Secrets ---
+        // --- Secrets --- (stored under their original labels; the
+        // re-ided profiles keep the SecretRef strings that point at them)
         let mut imported_secrets: u32 = 0;
-        if let Some(obj) = backup.get("secrets").and_then(|v| v.as_object()) {
-            for (label, value) in obj {
-                if let Some(encoded) = value.as_str() {
-                    if let Err(e) = secrets::store_secret_raw(label, encoded).await {
-                        warn!("import_all: failed to store secret '{label}': {e}");
-                    } else {
-                        imported_secrets += 1;
-                    }
-                }
+        for (label, encoded) in &backup.secrets {
+            if let Err(e) = secrets::store_secret_raw(label, encoded).await {
+                warn!("import_all: failed to store secret '{label}': {e}");
+            } else {
+                imported_secrets += 1;
             }
+        }
+        if imported_secrets > 0 {
             info!("import_all: restored {imported_secrets} secret(s)");
         }
 
         // --- GUI settings ---
         let mut restored_settings = false;
-        if let Some(settings_val) = backup.get("gui_settings") {
-            if !settings_val.is_null() {
-                // Write to all likely config paths.
-                let home = std::env::var("HOME").unwrap_or_default();
-                let config_dir = std::env::var("XDG_CONFIG_HOME")
-                    .unwrap_or_else(|_| format!("{home}/.config"));
-                let settings_dir = format!("{config_dir}/supermgr");
-                let _ = std::fs::create_dir_all(&settings_dir);
-                let path = format!("{settings_dir}/settings.json");
-                if let Ok(text) = serde_json::to_string_pretty(settings_val) {
-                    if std::fs::write(&path, &text).is_ok() {
-                        info!("import_all: restored GUI settings to {path}");
-                        restored_settings = true;
-                    }
+        if !backup.gui_settings.is_null() {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let config_dir = std::env::var("XDG_CONFIG_HOME")
+                .unwrap_or_else(|_| format!("{home}/.config"));
+            let settings_dir = format!("{config_dir}/supermgr");
+            let _ = std::fs::create_dir_all(&settings_dir);
+            let path = format!("{settings_dir}/settings.json");
+            if let Ok(text) = serde_json::to_string_pretty(&backup.gui_settings) {
+                if std::fs::write(&path, &text).is_ok() {
+                    info!("import_all: restored GUI settings to {path}");
+                    restored_settings = true;
                 }
             }
         }
 
         // --- FortiGate config backups ---
         let mut restored_backups: u32 = 0;
-        if let Some(obj) = backup.get("config_backups").and_then(|v| v.as_object()) {
+        {
             let backup_dir = std::path::Path::new("/etc/supermgrd/backups");
             let _ = std::fs::create_dir_all(backup_dir);
-            for (filename, content) in obj {
-                if let Some(text) = content.as_str() {
-                    let path = backup_dir.join(filename);
-                    if !path.exists()
-                        && std::fs::write(&path, text).is_ok() {
-                            restored_backups += 1;
-                        }
+            for (filename, text) in &backup.config_backups {
+                let path = backup_dir.join(filename);
+                if !path.exists() && std::fs::write(&path, text).is_ok() {
+                    restored_backups += 1;
                 }
             }
             if restored_backups > 0 {
