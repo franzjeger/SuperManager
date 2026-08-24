@@ -32,3 +32,34 @@ final class PortableBackupTests: XCTestCase {
         XCTAssertFalse(PortableBackup.isKeychainLabel(""))
     }
 }
+
+extension PortableBackupTests {
+    func testExpectedLabelsFromFortiGateConfig() {
+        let cfg: [String: Any] = [
+            "backend": "forti_gate",
+            "password": "vpn/abc/password",
+            "psk": "vpn/abc/psk",
+        ]
+        let labels = PortableBackup.expectedKeychainLabels(config: cfg)
+        XCTAssertEqual(Set(labels), ["vpn/abc/password", "vpn/abc/psk"])
+    }
+
+    func testWireGuardConfigHasNoExpectedKeychainLabels() {
+        let cfg: [String: Any] = ["backend": "wire_guard", "private_key": "vpn/abc/wg-private-key"]
+        XCTAssertTrue(PortableBackup.expectedKeychainLabels(config: cfg).isEmpty)
+    }
+
+    func testOpenVpnCredentialFieldsAreExpected() {
+        let cfg: [String: Any] = [
+            "backend": "open_vpn",
+            "ovpn_username": "vpn/x/ovpn-username",
+            "ovpn_password": "vpn/x/ovpn-password",
+        ]
+        XCTAssertEqual(Set(PortableBackup.expectedKeychainLabels(config: cfg)),
+                       ["vpn/x/ovpn-username", "vpn/x/ovpn-password"])
+    }
+
+    func testNilConfigYieldsNoLabels() {
+        XCTAssertTrue(PortableBackup.expectedKeychainLabels(config: nil).isEmpty)
+    }
+}
