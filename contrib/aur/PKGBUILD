@@ -16,6 +16,11 @@ depends=(
     'openvpn'
     'nftables'
     'openssh'
+    # The Tailscale page is a first-class feature, and the daemon's repair
+    # path can only start a service, not conjure the package mid-session
+    # without a network round-trip. A dependency means the page works on
+    # first launch instead of greeting the operator with its own absence.
+    'tailscale'
     # Network discovery, packet analysis, and report export.  These are
     # runtime tools invoked by the engine, not Rust build dependencies.
     'bind'

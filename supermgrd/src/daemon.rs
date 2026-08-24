@@ -2059,6 +2059,50 @@ impl DaemonService {
             .map_err(fdo::Error::Failed)
     }
 
+    /// Diagnose the local Tailscale stack.
+    ///
+    /// Returns a [`crate::tailscale::TailscaleHealth`] as JSON. Never fails
+    /// with a Tailscale problem — those are states in the payload, each with
+    /// a remedy the GUI can offer. Ungated for the same reason
+    /// `tailscale_list_nodes` is: it reads local state and changes nothing.
+    async fn tailscale_health(&self) -> fdo::Result<String> {
+        let health = crate::tailscale::health().await;
+        serde_json::to_string(&health)
+            .map_err(|e| fdo::Error::Failed(format!("serialise health: {e}")))
+    }
+
+    /// Bring the Tailscale stack up as far as it can go without a human:
+    /// install the package, enable and start tailscaled, `tailscale up` a
+    /// stopped backend. Returns a summary of the steps taken.
+    ///
+    /// Gated: every step changes system state as root. See
+    /// `polkit::ACTION_TAILSCALE_REPAIR`.
+    async fn tailscale_repair(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_REPAIR).await?;
+        crate::tailscale::repair().await.map_err(fdo::Error::Failed)
+    }
+
+    /// Start an interactive Tailscale login and return the URL to visit.
+    ///
+    /// May legitimately return an empty string when the control plane is
+    /// slow to hand out the URL — it then appears in `TailscaleHealth`'s
+    /// `auth_url` shortly, which the GUI polls during a login anyway.
+    ///
+    /// Gated behind the same action as repair: a login decides which
+    /// tailnet — whose tailnet — this machine becomes reachable from.
+    async fn tailscale_login(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::MessageHeader<'_>,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_REPAIR).await?;
+        crate::tailscale::login_start().await.map_err(fdo::Error::Failed)
+    }
+
     /// Return a single SSH key as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String> {
         let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;

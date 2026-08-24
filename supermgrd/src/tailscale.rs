@@ -18,7 +18,264 @@ use tracing::{debug, warn};
 // The node shape is shared with the GUI, which deserializes it straight off
 // D-Bus — see `supermgr_core::tailscale`. Re-exported so existing
 // `crate::tailscale::TailscaleNode` paths keep resolving.
-pub use supermgr_core::tailscale::TailscaleNode;
+pub use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
+
+/// Diagnose the local Tailscale stack: CLI present, daemon answering,
+/// backend state, pending login URL.
+///
+/// Never returns `Err` — the whole point of this function is that every
+/// failure mode of the stack is a *state* with a remedy, not an error. The
+/// GUI renders the returned struct; `TailscaleRepair` and `TailscaleLogin`
+/// consume it to decide what needs doing.
+pub async fn health() -> TailscaleHealth {
+    let out = match tokio::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .await
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return TailscaleHealth {
+                detail: "the tailscale CLI is not installed".to_owned(),
+                ..TailscaleHealth::default()
+            };
+        }
+        Err(e) => {
+            return TailscaleHealth {
+                cli_present: true,
+                detail: format!("failed to spawn tailscale: {e}"),
+                ..TailscaleHealth::default()
+            };
+        }
+    };
+
+    // `tailscale status --json` reports logged-out and stopped states as
+    // JSON on stdout with exit 0 or 1 depending on version; a daemon that
+    // is not running at all yields no JSON and a "failed to connect" on
+    // stderr. Parseable JSON is therefore the discriminator, not the exit
+    // code.
+    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return TailscaleHealth {
+            cli_present: true,
+            detail: if stderr.is_empty() {
+                format!("tailscale status produced no JSON (exit {})", out.status)
+            } else {
+                stderr
+            },
+            ..TailscaleHealth::default()
+        };
+    };
+
+    health_from_status_json(&raw)
+}
+
+/// The pure part of [`health`], split out so the state mapping is testable
+/// without a tailscaled.
+fn health_from_status_json(raw: &serde_json::Value) -> TailscaleHealth {
+    let backend_state = raw
+        .get("BackendState")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    TailscaleHealth {
+        cli_present: true,
+        // The CLI got JSON out of the daemon, so the daemon is up — however
+        // unhappy the backend state says it is.
+        daemon_running: true,
+        auth_url: raw
+            .get("AuthURL")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        backend_state,
+        detail: String::new(),
+    }
+}
+
+/// Which package manager this host uses, by which binary exists.
+///
+/// Checked in order of specificity, not popularity — a host with both
+/// `pacman` and `apt` (containers do this) is far more likely to be Arch
+/// with a stray tool than Debian with pacman installed.
+fn detect_package_manager() -> Option<(&'static str, &'static [&'static str])> {
+    const CANDIDATES: &[(&str, &[&str])] = &[
+        ("pacman", &["-S", "--noconfirm", "--needed", "tailscale"]),
+        ("apt-get", &["install", "-y", "tailscale"]),
+        ("dnf", &["install", "-y", "tailscale"]),
+        ("zypper", &["--non-interactive", "install", "tailscale"]),
+    ];
+    CANDIDATES
+        .iter()
+        .find(|(pm, _)| which_exists(pm))
+        .copied()
+}
+
+/// `command -v` without the shell: walk PATH for an executable file.
+fn which_exists(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file()
+            && std::fs::metadata(&candidate)
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o111 != 0
+                })
+                .unwrap_or(false)
+    })
+}
+
+/// Bring the local Tailscale stack up as far as it can go without a human:
+/// install the package if the CLI is missing, start and enable tailscaled,
+/// and `tailscale up` if the backend was deliberately stopped. Login is the
+/// one step this cannot do — that is [`login_start`]'s job, because it needs
+/// a browser and a person.
+///
+/// Idempotent by construction: each step is skipped when its condition
+/// already holds, so calling this on a healthy stack does nothing. Returns a
+/// human-readable summary of the steps actually taken.
+///
+/// The package name is a constant and the package manager is detected, not
+/// caller-supplied — nothing from the bus reaches these command lines.
+pub async fn repair() -> Result<String, String> {
+    let mut done: Vec<String> = Vec::new();
+    let mut state = health().await;
+
+    if !state.cli_present {
+        let Some((pm, args)) = detect_package_manager() else {
+            return Err(
+                "the tailscale CLI is missing and no supported package manager \
+                 (pacman, apt-get, dnf, zypper) was found — install it manually, \
+                 see https://tailscale.com/install"
+                    .to_owned(),
+            );
+        };
+        debug!(pm, "tailscale::repair: installing tailscale");
+        let out = tokio::process::Command::new(pm)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+            .await
+            .map_err(|e| format!("failed to run {pm}: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(format!(
+                "{pm} could not install tailscale ({}): {stderr}. If the package \
+                 is not in this distribution's repositories, add Tailscale's own — \
+                 see https://tailscale.com/install",
+                out.status
+            ));
+        }
+        done.push(format!("installed the tailscale package via {pm}"));
+    }
+
+    // Enable + start in one systemctl call. Also the remedy when the unit
+    // exists but is stopped, and a no-op (exit 0) when already both.
+    let out = tokio::process::Command::new("systemctl")
+        .args(["enable", "--now", "tailscaled"])
+        .output()
+        .await
+        .map_err(|e| format!("failed to run systemctl: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        return Err(format!("could not start tailscaled: {stderr}"));
+    }
+    if !state.daemon_running {
+        done.push("started and enabled the tailscaled service".to_owned());
+    }
+
+    // `tailscale down` leaves BackendState "Stopped"; the daemon runs but
+    // carries no traffic. `up` with no arguments resumes with existing
+    // prefs. The timeout matters: against a logged-out node `up` would
+    // otherwise block on the interactive login this method deliberately
+    // does not perform.
+    state = health().await;
+    if state.daemon_running && state.backend_state == "Stopped" {
+        let out = tokio::process::Command::new("tailscale")
+            .args(["up", "--timeout=15s"])
+            .output()
+            .await
+            .map_err(|e| format!("failed to run tailscale up: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            return Err(format!("tailscale up failed: {stderr}"));
+        }
+        done.push("brought the tailscale backend up".to_owned());
+    }
+
+    if done.is_empty() {
+        Ok("nothing to repair — the Tailscale stack is already as far up \
+            as it can get without a login"
+            .to_owned())
+    } else {
+        Ok(done.join("; "))
+    }
+}
+
+/// Start an interactive login and return the URL a person must visit.
+///
+/// Spawns `tailscale login` detached — it blocks until the browser flow
+/// completes, which can be minutes away — and then polls the daemon's
+/// status for the `AuthURL` it registers. Control-plane round-trips can be
+/// slow, so an empty string is a legitimate return: the URL was not there
+/// yet, but it will appear in [`health`]'s `auth_url` shortly, and the GUI
+/// polls that anyway. Distinguishing "not yet" from "failed" is exactly
+/// what the health polling is for.
+///
+/// Calling this twice is safe: tailscaled hands every `login` the same
+/// pending URL until it is used, and the detached child exits on its own
+/// when the login completes or tailscaled drops the attempt.
+pub async fn login_start() -> Result<String, String> {
+    let state = health().await;
+    if !state.cli_present || !state.daemon_running {
+        return Err("tailscale is not installed or tailscaled is not running — \
+                    repair first, then log in"
+            .to_owned());
+    }
+    if state.is_running() {
+        return Err("already logged in".to_owned());
+    }
+    if !state.auth_url.is_empty() {
+        // A login is already pending; reuse its URL rather than spawning a
+        // second child to be told the same thing.
+        return Ok(state.auth_url);
+    }
+
+    let mut child = tokio::process::Command::new("tailscale")
+        .arg("login")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("failed to start tailscale login: {e}"))?;
+    // Reap the child whenever it finishes; its lifetime is the login flow's,
+    // not this method's.
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+    });
+
+    // The URL comes from a control-plane round-trip that is usually fast
+    // and occasionally ~30s. Poll briefly here so the common case returns
+    // the URL directly; past the deadline, hand the wait over to the GUI's
+    // health polling instead of holding the bus call open.
+    const ATTEMPTS: u32 = 8;
+    for _ in 0..ATTEMPTS {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let state = health().await;
+        if !state.auth_url.is_empty() {
+            return Ok(state.auth_url);
+        }
+        if state.is_running() {
+            // Logged in before we even saw the URL — some other flow (CLI,
+            // another session) completed it. Nothing left to visit.
+            return Ok(String::new());
+        }
+    }
+    Ok(String::new())
+}
 
 /// Run `tailscale status --json` and parse the output into a normalized
 /// node list. Returns an error string suitable for surfacing to the GUI on
@@ -283,5 +540,44 @@ mod tests {
         assert!(is_plausible_exit_node("100.96.91.67"));
         assert!(is_plausible_exit_node("fd7a:115c:a1e0::4832:5b44"));
         assert!(is_plausible_exit_node("cachyos-x8664.tailb0b06a.ts.net"));
+    }
+
+    #[test]
+    fn health_maps_needs_login_with_pending_url() {
+        // The logged-out-with-pending-login shape, as tailscale 1.102
+        // reports it. The URL must pass through verbatim — the GUI opens it.
+        let raw = serde_json::json!({
+            "BackendState": "NeedsLogin",
+            "AuthURL": "https://login.tailscale.com/a/abc123",
+        });
+        let h = health_from_status_json(&raw);
+        assert!(h.cli_present && h.daemon_running);
+        assert!(h.needs_login());
+        assert!(!h.is_running());
+        assert_eq!(h.auth_url, "https://login.tailscale.com/a/abc123");
+    }
+
+    #[test]
+    fn health_maps_running_and_stopped() {
+        let running = health_from_status_json(&serde_json::json!({"BackendState": "Running"}));
+        assert!(running.is_running());
+        assert!(running.auth_url.is_empty());
+
+        // `tailscale down`: daemon up, carrying nothing. Neither running
+        // nor a login problem — the repair path's `tailscale up` case.
+        let stopped = health_from_status_json(&serde_json::json!({"BackendState": "Stopped"}));
+        assert!(!stopped.is_running());
+        assert!(!stopped.needs_login());
+        assert_eq!(stopped.backend_state, "Stopped");
+    }
+
+    #[test]
+    fn health_tolerates_schema_without_backend_state() {
+        // An unrecognisable JSON shape must not read as "Running" — an
+        // empty backend_state fails both is_running and needs_login, which
+        // the GUI renders as its generic broken state.
+        let h = health_from_status_json(&serde_json::json!({}));
+        assert!(!h.is_running());
+        assert!(!h.needs_login());
     }
 }

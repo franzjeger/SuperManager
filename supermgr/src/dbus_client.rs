@@ -12,7 +12,7 @@ use supermgr_core::{
     vpn::state::{state_from_json, VpnState},
     ssh::key::SshKeySummary,
     host::HostSummary,
-    tailscale::TailscaleNode,
+    tailscale::{TailscaleHealth, TailscaleNode},
     compliance::{CheckDefinition, ComplianceRun, RunSummary},
     findings_store::{Disposition, PersistedFinding, StoreSummary},
 };
@@ -509,6 +509,50 @@ pub async fn dbus_tailscale_list_nodes() -> anyhow::Result<Vec<TailscaleNode>> {
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy.tailscale_list_nodes().await.context("TailscaleListNodes")?;
     serde_json::from_str(&json).context("parse tailscale nodes")
+}
+
+/// Call `TailscaleHealth` on the daemon.
+///
+/// The `Err` here is only ever "could not reach supermgrd" — every state of
+/// the Tailscale stack itself, however broken, comes back as `Ok` with the
+/// remedy encoded in the fields. Keeping that distinction is the point: the
+/// page offers a fix for Tailscale states and shows an error for bus ones.
+pub async fn dbus_tailscale_health() -> anyhow::Result<TailscaleHealth> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy.tailscale_health().await.context("TailscaleHealth")?;
+    serde_json::from_str(&json).context("parse tailscale health")
+}
+
+/// Call `TailscaleRepair`: install the package, start tailscaled, bring a
+/// stopped backend up. Returns the daemon's summary of what it did.
+///
+/// Polkit-gated on the daemon side; a dismissed prompt arrives as an error.
+pub async fn dbus_tailscale_repair() -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.tailscale_repair().await.map_err(|e| {
+        anyhow::anyhow!(describe_daemon_error(
+            &anyhow::Error::new(e),
+            "Could not repair the Tailscale stack"
+        ))
+    })
+}
+
+/// Call `TailscaleLogin`: start an interactive login, get the URL to open.
+///
+/// An empty URL is not a failure — the control plane had not handed one out
+/// yet, and it will surface in `TailscaleHealth.auth_url`, which the caller
+/// polls during a login anyway.
+pub async fn dbus_tailscale_login() -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.tailscale_login().await.map_err(|e| {
+        anyhow::anyhow!(describe_daemon_error(
+            &anyhow::Error::new(e),
+            "Could not start the Tailscale login"
+        ))
+    })
 }
 
 /// Call `TailscaleSetExitNode`. Empty `value` clears the selection.

@@ -324,6 +324,22 @@ if [ "$DO_DEPS" = 1 ]; then
         fi
     fi
 
+    # Tailscale, best-effort: the package lives in the default repositories
+    # on Arch and openSUSE but in Tailscale's own repo on Debian and Fedora,
+    # so a miss here is expected on half the supported distros. Never fatal —
+    # the daemon's TailscaleRepair path can finish the job from the GUI once
+    # the repo exists, and the Tailscale page explains itself meanwhile.
+    if ! command -v tailscale >/dev/null 2>&1; then
+        say "Installing Tailscale"
+        if "${INSTALL_CMD[@]}" tailscale >/dev/null 2>&1; then
+            note "installed tailscale"
+        else
+            warn "tailscale is not in this distro's default repositories."
+            warn "Add Tailscale's own (https://tailscale.com/install) and re-run,"
+            warn "or use the Install button on the app's Tailscale page later."
+        fi
+    fi
+
     # Best-effort: RDP/VNC clients and NetworkManager integration. Named
     # separately and never fatal, because SuperManager works without
     # them — they light up buttons rather than carry features.
@@ -595,6 +611,20 @@ sudo systemctl is-active --quiet "$STRONGSWAN_UNIT" \
     || die "$STRONGSWAN_UNIT was enabled but did not start.
        Logs: sudo journalctl -u $STRONGSWAN_UNIT -n 50"
 note "$STRONGSWAN_UNIT is enabled and running"
+
+# Tailscale is best-effort where strongSwan is fatal: the binary may
+# legitimately be absent (distro repo doesn't carry it, see the deps
+# phase), and the daemon's repair path can start the service later from
+# the GUI. What must not happen is tailscale being installed and its page
+# opening on "not running" anyway — hence enable --now whenever it exists.
+if command -v tailscale >/dev/null 2>&1; then
+    say "Starting Tailscale"
+    if sudo systemctl enable --now tailscaled >/dev/null 2>&1; then
+        note "tailscaled is enabled and running"
+    else
+        warn "tailscaled could not be enabled — the app's Tailscale page can repair this"
+    fi
+fi
 
 # `enable` then `restart`, NOT `enable --now`.
 #

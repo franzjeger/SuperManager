@@ -10,9 +10,21 @@ start_strongswan() {
     return 1
 }
 
+# Non-fatal, unlike strongSwan: the daemon's Tailscale repair path can
+# start this later from the GUI, so a failure here degrades to a button
+# instead of failing the whole install.
+start_tailscaled() {
+    if systemctl enable --now tailscaled.service >/dev/null 2>&1; then
+        echo "  Tailscale:        tailscaled enabled and running"
+    else
+        echo "  Tailscale:        tailscaled could not be enabled — the app's Tailscale page can repair this" >&2
+    fi
+}
+
 post_install() {
     systemctl daemon-reload
     start_strongswan || return 1
+    start_tailscaled
     systemctl enable --now supermgrd.service >/dev/null 2>&1 || true
     cat <<EOF
 
@@ -32,6 +44,7 @@ EOF
 post_upgrade() {
     systemctl daemon-reload
     start_strongswan || return 1
+    start_tailscaled
     systemctl try-restart supermgrd.service >/dev/null 2>&1 || true
 }
 

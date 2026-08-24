@@ -101,4 +101,30 @@
     </defaults>
   </action>
 
+  <action id="org.supermgr.daemon.tailscale-repair">
+    <description>Install, start, or log in the local Tailscale stack</description>
+    <message>Authentication is required to set up Tailscale on this machine</message>
+
+    <!--
+      One action for the whole remediation path — install the package,
+      enable tailscaled, initiate a login — because it is one decision:
+      "make Tailscale work on this machine". Splitting it would re-prompt
+      the operator to start the service they just authorized installing.
+
+      Gated because each step changes system state as root, and the login
+      step is the quiet one: it binds this machine to whatever tailnet the
+      authenticating browser account belongs to. Ungated, any local
+      account could join the machine to a tailnet they control and reach
+      it from anywhere.
+
+      auth_admin_keep so install, start, and login in one sitting is one
+      prompt, not three.
+    -->
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
 </policyconfig>

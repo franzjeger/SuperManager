@@ -1,12 +1,12 @@
-//! Tailscale page — the tailnet as a device list.
+//! Tailscale page — the tailnet as a device list, with self-heal.
 //!
 //! # What this can and cannot do
 //!
-//! Two things: list the tailnet, and choose an exit node. Both are backed by a
-//! daemon method — `TailscaleListNodes` and `TailscaleSetExitNode`. There is
-//! still no bring-up and no login flow, and the page does not pretend
-//! otherwise: no disabled buttons hinting at features that are not behind
-//! them.
+//! List the tailnet, choose an exit node, and repair a broken stack. The
+//! first two are `TailscaleListNodes` and `TailscaleSetExitNode`; the third
+//! is `TailscaleHealth` + `TailscaleRepair` + `TailscaleLogin`. The one
+//! thing the page cannot do for you is the browser half of a login — it
+//! opens the URL and waits.
 //!
 //! # Exit nodes
 //!
@@ -20,14 +20,28 @@
 //! packet this machine sends goes, and this bus is reachable by every local
 //! account. A dismissed prompt comes back as an error and is shown as one.
 //!
-//! # Why three states and not two
+//! # Broken is a state with a button, not an error
 //!
 //! An empty list and a broken tailscale are different facts, and collapsing
 //! them into "no devices" is how someone spends ten minutes wondering why
-//! their tailnet is missing when the answer is that tailscaled is not running.
-//! Every failure the daemon can report is somebody else's software being
-//! absent or asleep — CLI not installed, daemon down, not logged in — so the
-//! error text is surfaced verbatim rather than summarised into a shrug.
+//! their tailnet is missing when the answer is that tailscaled is not
+//! running. It used to stop there — the failure was at least named. But
+//! naming a condition the daemon can fix, on a machine the operator manages
+//! with this very app, is a dead end wearing a diagnosis: every state of
+//! the stack the daemon can distinguish (CLI missing, service stopped,
+//! logged out, brought down) renders as that state *with the button that
+//! fixes it*. Only the states nobody but a human can fix — the browser
+//! login, an unreachable supermgrd — render without a remedy attached.
+//!
+//! # The login flow, from this side
+//!
+//! Log in → daemon spawns `tailscale login` and hands back the URL (or the
+//! URL arrives on a later health poll — the control plane can be slow) →
+//! [`AppMsg::TailscaleLoginUrl`] opens the browser once → this page shows
+//! "waiting" while a poll task watches `TailscaleHealth` → the moment the
+//! backend reports `Running`, the poll fetches nodes and the page becomes
+//! the device list. The poll is bounded; someone abandoning the browser tab
+//! leaves the page saying it is still logged out, which is the truth.
 
 use std::sync::mpsc;
 
@@ -35,10 +49,42 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use libadwaita::prelude::*;
 
-use supermgr_core::tailscale::TailscaleNode;
+use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 
 use crate::app::AppMsg;
 use crate::ui::design::{self, Status};
+
+/// Which daemon method a remedy button invokes. Two, not one per state:
+/// repair covers everything the daemon can do unattended (install, start,
+/// bring up), login is the one flow that needs a browser and a human.
+enum Remedy {
+    Repair,
+    Login,
+}
+
+/// Diagnose the stack and send whichever message renders the truth: the
+/// device list when everything is up, the health state otherwise.
+///
+/// This is the page's single entry point for "show me the current state" —
+/// used on page open, after a repair, after a login, after a timeout. One
+/// function so the health-before-nodes ordering cannot be forgotten at one
+/// of the call sites.
+pub async fn refresh(tx: &mpsc::Sender<AppMsg>) {
+    match crate::dbus_client::dbus_tailscale_health().await {
+        Err(e) => {
+            tx.send(AppMsg::TailscaleHealthUpdated(Err(format!("{e:#}")))).ok();
+        }
+        Ok(h) if h.is_running() => {
+            let nodes = crate::dbus_client::dbus_tailscale_list_nodes()
+                .await
+                .map_err(|e| format!("{e:#}"));
+            tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok();
+        }
+        Ok(h) => {
+            tx.send(AppMsg::TailscaleHealthUpdated(Ok(h))).ok();
+        }
+    }
+}
 
 /// Handles the page needs in order to re-render without being rebuilt.
 pub struct TailscaleView {
@@ -129,11 +175,198 @@ impl TailscaleView {
         }
     }
 
+    /// Render the outcome of a `TailscaleHealth` call — the not-up states.
+    ///
+    /// Same shape as [`Self::render`], same reason: the whole `Result` comes
+    /// in so the error path is decided here, once. Every state the daemon can
+    /// repair gets the button that repairs it; the two it cannot — the
+    /// browser half of a login, an unreachable supermgrd — render as what
+    /// they are.
+    pub fn render_health(&self, result: &Result<TailscaleHealth, String>) {
+        match result {
+            Err(message) => self.show_status(
+                design::icon_name(design::icons::VPN_OFF),
+                "Tailscale is not answering",
+                message,
+            ),
+            Ok(h) if !h.cli_present => self.show_remedy(
+                "Tailscale is not installed",
+                "SuperManager can install the tailscale package and start \
+                 its service. An authentication prompt will appear.",
+                "Install Tailscale",
+                Remedy::Repair,
+            ),
+            Ok(h) if !h.daemon_running => self.show_remedy(
+                "Tailscale is installed but not running",
+                "The tailscaled service is stopped. SuperManager can start \
+                 it and enable it at boot.",
+                "Start Tailscale",
+                Remedy::Repair,
+            ),
+            Ok(h) if h.needs_login() => self.show_remedy(
+                "This machine is logged out of Tailscale",
+                "Logging in opens a browser page. The tailnet appears here \
+                 by itself once the login completes.",
+                "Log in to Tailscale",
+                Remedy::Login,
+            ),
+            // `tailscale down`: the daemon runs but was told to carry
+            // nothing. Distinct from "not running" because the remedy the
+            // daemon applies is `tailscale up`, not systemctl.
+            Ok(h) if h.backend_state == "Stopped" => self.show_remedy(
+                "Tailscale is switched off",
+                "tailscaled is running but has been brought down. \
+                 SuperManager can bring it back up.",
+                "Bring Tailscale up",
+                Remedy::Repair,
+            ),
+            // Healthy, so a node listing is on its way — whoever sent this
+            // message follows it with one. Render the in-between honestly.
+            Ok(h) if h.is_running() => self.show_status(
+                design::icon_name(design::icons::MESH),
+                "Reading the tailnet",
+                "Asking the local Tailscale daemon which devices it can see.",
+            ),
+            // "Starting", or a state this build has never heard of. No
+            // button, because no remedy is known to apply; the detail or the
+            // state name is the most honest thing available.
+            Ok(h) => {
+                let description = if h.detail.is_empty() {
+                    format!("tailscaled reports state \u{201c}{}\u{201d}.", h.backend_state)
+                } else {
+                    h.detail.clone()
+                };
+                self.show_status(
+                    design::icon_name(design::icons::VPN_OFF),
+                    "Tailscale is not ready",
+                    &description,
+                );
+            }
+        }
+    }
+
     fn show_status(&self, icon: &str, title: &str, description: &str) {
         self.status_slot
             .set_child(Some(&design::empty_state(icon, title, description)));
         self.stack.set_visible_child_name("status");
         self.subtitle.set_text("");
+    }
+
+    /// A full-page status whose description names the next action and whose
+    /// child performs it.
+    fn show_remedy(&self, title: &str, description: &str, button_label: &str, remedy: Remedy) {
+        let page = design::empty_state(
+            design::icon_name(design::icons::VPN_OFF),
+            title,
+            description,
+        );
+        let button = gtk4::Button::with_label(button_label);
+        button.add_css_class("suggested-action");
+        button.add_css_class("pill");
+        button.set_halign(gtk4::Align::Center);
+        match remedy {
+            Remedy::Repair => self.wire_repair_button(&button),
+            Remedy::Login => self.wire_login_button(&button),
+        }
+        page.set_child(Some(&button));
+        self.status_slot.set_child(Some(&page));
+        self.stack.set_visible_child_name("status");
+        self.subtitle.set_text("");
+    }
+
+    /// Ask the daemon to repair the stack, then re-render whatever is true
+    /// afterwards.
+    ///
+    /// The button disables itself and the whole status page is replaced by a
+    /// "working" one, so a slow package installation does not look like a
+    /// dead click. The ending is always [`refresh`]: on success it renders
+    /// the next state (often the login prompt), on failure it re-renders the
+    /// unrepaired state with its button back — the toast carries the error.
+    fn wire_repair_button(&self, button: &gtk4::Button) {
+        let rt = self.rt.clone();
+        let tx = self.tx.clone();
+        let status_slot = self.status_slot.clone();
+        button.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            status_slot.set_child(Some(&design::empty_state(
+                design::icon_name(design::icons::MESH),
+                "Repairing Tailscale",
+                "Installing the package and starting the service as needed. \
+                 An authentication prompt may appear.",
+            )));
+            let tx = tx.clone();
+            rt.spawn(async move {
+                if let Err(e) = crate::dbus_client::dbus_tailscale_repair().await {
+                    tx.send(AppMsg::OperationFailed(format!("{e:#}"))).ok();
+                }
+                refresh(&tx).await;
+            });
+        });
+    }
+
+    /// Start a login, open the URL, and watch health until the tailnet
+    /// appears.
+    ///
+    /// The URL can arrive on the login call or on a later health tick —
+    /// control-plane round-trips are usually fast and occasionally half a
+    /// minute — so both paths feed [`AppMsg::TailscaleLoginUrl`], guarded to
+    /// fire once. The poll is bounded: five minutes of somebody not
+    /// finishing the browser flow ends with the page saying the machine is
+    /// still logged out, which it is.
+    fn wire_login_button(&self, button: &gtk4::Button) {
+        let rt = self.rt.clone();
+        let tx = self.tx.clone();
+        let status_slot = self.status_slot.clone();
+        button.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            status_slot.set_child(Some(&design::empty_state(
+                design::icon_name(design::icons::MESH),
+                "Waiting for the browser login",
+                "A Tailscale login page is opening in your browser. This \
+                 page updates by itself once the login completes.",
+            )));
+            let tx = tx.clone();
+            rt.spawn(async move {
+                let mut url_opened = false;
+                match crate::dbus_client::dbus_tailscale_login().await {
+                    Err(e) => {
+                        tx.send(AppMsg::OperationFailed(format!("{e:#}"))).ok();
+                        refresh(&tx).await;
+                        return;
+                    }
+                    Ok(url) if !url.is_empty() => {
+                        tx.send(AppMsg::TailscaleLoginUrl(url)).ok();
+                        url_opened = true;
+                    }
+                    // Empty URL: the control plane had not handed one out
+                    // within the daemon's patience. The poll below picks it
+                    // up from health.auth_url.
+                    Ok(_) => {}
+                }
+                const TICKS: u32 = 150; // × 2 s = five minutes
+                for _ in 0..TICKS {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    match crate::dbus_client::dbus_tailscale_health().await {
+                        // Transient bus trouble mid-poll: keep going, the
+                        // deadline bounds the total wait either way.
+                        Err(_) => {}
+                        Ok(h) if h.is_running() => {
+                            refresh(&tx).await;
+                            return;
+                        }
+                        Ok(h) => {
+                            if !url_opened && !h.auth_url.is_empty() {
+                                tx.send(AppMsg::TailscaleLoginUrl(h.auth_url.clone())).ok();
+                                url_opened = true;
+                            }
+                        }
+                    }
+                }
+                // Timed out. Render the truth — still logged out — with the
+                // login button back.
+                refresh(&tx).await;
+            });
+        });
     }
 
     fn show_nodes(&self, nodes: &[TailscaleNode]) {

@@ -472,6 +472,31 @@ pub trait Daemon {
     /// is choosing where every packet this machine sends goes.
     async fn tailscale_set_exit_node(&self, value: &str) -> fdo::Result<()>;
 
+    /// Diagnose the local Tailscale stack.
+    ///
+    /// Returns a [`crate::tailscale::TailscaleHealth`] as JSON. Tailscale
+    /// being broken is not an error here — it is the payload: CLI missing,
+    /// daemon stopped, logged out, and brought down are distinct states,
+    /// each with a remedy the GUI can offer.
+    async fn tailscale_health(&self) -> fdo::Result<String>;
+
+    /// Bring the Tailscale stack up as far as it can go without a human:
+    /// install the package, enable and start tailscaled, `tailscale up` a
+    /// stopped backend. Returns a summary of the steps taken. Idempotent.
+    ///
+    /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): every step
+    /// changes system state as root.
+    async fn tailscale_repair(&self) -> fdo::Result<String>;
+
+    /// Start an interactive Tailscale login; returns the URL to open in a
+    /// browser. May return an empty string when the control plane is slow —
+    /// the URL then appears in `TailscaleHealth.auth_url`, which the GUI
+    /// polls during a login.
+    ///
+    /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): a login
+    /// decides whose tailnet this machine becomes reachable from.
+    async fn tailscale_login(&self) -> fdo::Result<String>;
+
     /// Return the full [`crate::ssh::key::SshKey`] serialised as JSON.
     async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String>;
 

@@ -88,6 +88,54 @@ impl TailscaleNode {
     }
 }
 
+/// The local Tailscale stack's condition, as far as the daemon can tell.
+///
+/// Produced by the daemon (`supermgrd::tailscale::health`), consumed by the
+/// GUI over D-Bus as JSON. Exists because "Tailscale is broken" is four
+/// different facts with four different remedies — CLI not installed, service
+/// not running, logged out, brought down — and an error string collapses them
+/// into a dead end. Each field maps to exactly one remediation the daemon can
+/// perform, so the GUI can offer the fix instead of describing the failure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TailscaleHealth {
+    /// The `tailscale` binary exists and could be spawned. When false the
+    /// remedy is `TailscaleRepair` (package installation) and every other
+    /// field is meaningless.
+    pub cli_present: bool,
+    /// The local tailscaled answered the CLI. When false the remedy is
+    /// starting the service, which `TailscaleRepair` also does.
+    pub daemon_running: bool,
+    /// tailscaled's own `BackendState` string, verbatim: `Running`,
+    /// `NeedsLogin`, `Stopped`, `Starting`, `NoState`. Verbatim rather than
+    /// re-encoded because tailscale owns this vocabulary and inventing a
+    /// parallel one means two lists to keep in step.
+    pub backend_state: String,
+    /// Interactive login URL, when tailscaled has one pending. Non-empty
+    /// only in `NeedsLogin` after a login has been initiated — the GUI opens
+    /// it in a browser and keeps polling until the state leaves `NeedsLogin`.
+    pub auth_url: String,
+    /// Human-readable detail for states the fields above cannot express —
+    /// the spawn error, the CLI's stderr. Never a substitute for them.
+    pub detail: String,
+}
+
+impl TailscaleHealth {
+    /// Whether the stack is fully up: node listing will succeed and the
+    /// device list is worth fetching.
+    #[must_use]
+    pub fn is_running(&self) -> bool {
+        self.cli_present && self.daemon_running && self.backend_state == "Running"
+    }
+
+    /// Whether the only thing missing is a human authenticating in a
+    /// browser — the one condition the daemon cannot repair by itself.
+    #[must_use]
+    pub fn needs_login(&self) -> bool {
+        self.cli_present && self.daemon_running && self.backend_state == "NeedsLogin"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +192,32 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back.id, n.id);
         assert_eq!(back.tailscale_ips, n.tailscale_ips);
+    }
+
+    #[test]
+    fn health_running_requires_all_three_layers() {
+        // Each layer being down has a different remedy; `is_running` must
+        // only say yes when none of them is needed.
+        let mut h = TailscaleHealth {
+            cli_present: true,
+            daemon_running: true,
+            backend_state: "Running".into(),
+            ..TailscaleHealth::default()
+        };
+        assert!(h.is_running());
+        h.backend_state = "NeedsLogin".into();
+        assert!(!h.is_running());
+        assert!(h.needs_login());
+        h.daemon_running = false;
+        assert!(!h.needs_login(), "a dead daemon is not a login problem");
+    }
+
+    #[test]
+    fn health_deserializes_with_missing_fields() {
+        // The daemon and GUI can be upgraded independently; an older daemon
+        // sending fewer fields must not blank the whole page.
+        let h: TailscaleHealth = serde_json::from_str("{}").unwrap();
+        assert!(!h.cli_present);
+        assert!(h.auth_url.is_empty());
     }
 }

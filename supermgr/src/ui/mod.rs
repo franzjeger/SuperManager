@@ -971,20 +971,21 @@ pub fn build_ui(
                     vpn_add_group.set_visible(false);
                     ssh_keys_add_group.set_visible(false);
                     ssh_hosts_add_group.set_visible(false);
-                    // Nothing to add: the page is read-only.
+                    // Nothing to add: devices join a tailnet by logging in
+                    // on the device, not from a + menu here.
                     add_menu_btn.set_visible(false);
                     // Refresh on arrival. Tailnet membership changes on a
                     // human timescale, so a poll would spend a subprocess
                     // every few seconds to tell us nothing; opening the page
                     // is the signal that someone wants to know.
+                    //
+                    // Health-first: when the stack is broken the page gets
+                    // the state with its repair button instead of a listing
+                    // error. `tailscale::refresh` owns that ordering for
+                    // every caller.
                     let tx = tx.clone();
                     rt.spawn(async move {
-                        let msg = AppMsg::TailscaleNodesUpdated(
-                            crate::dbus_client::dbus_tailscale_list_nodes()
-                                .await
-                                .map_err(|e| format!("{e:#}")),
-                        );
-                        tx.send(msg).ok();
+                        tailscale::refresh(&tx).await;
                     });
                 }
                 "vpn" => {
@@ -3246,6 +3247,24 @@ pub fn build_ui(
                         info!("tailscale list failed: {}", e);
                     }
                     rx_tailscale_view.render(&result);
+                }
+                AppMsg::TailscaleHealthUpdated(result) => {
+                    // Same no-toast reasoning as the node list: a broken
+                    // stack is the page's own state — now with the button
+                    // that fixes it — not a transient notification.
+                    if let Err(ref e) = result {
+                        info!("tailscale health failed: {}", e);
+                    }
+                    rx_tailscale_view.render_health(&result);
+                }
+                AppMsg::TailscaleLoginUrl(url) => {
+                    // Same launcher the Entra device-code flow uses. The
+                    // sender guarantees this fires once per login attempt,
+                    // so a failed launch is recoverable by clicking the
+                    // login button again rather than by us retrying into a
+                    // browser that already refused.
+                    let launcher = gtk4::UriLauncher::new(&url);
+                    launcher.launch(Some(&rx_window), gio::Cancellable::NONE, |_| {});
                 }
                 AppMsg::OperationFailed(msg) => {
                     error!("operation failed: {}", msg);

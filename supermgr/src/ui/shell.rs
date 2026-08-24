@@ -336,9 +336,9 @@ mod tests {
         // "Soon" badge on a working screen — and worse, `ui::mod` would then
         // register a placeholder under the same id as the real page.
         //
-        // `tailscale` earns its place on a read-only list: the daemon exposes
-        // one method, TailscaleListNodes, and the page shows exactly what that
-        // returns. It claims no control it does not have.
+        // `tailscale` lists the tailnet, selects exit nodes, and repairs a
+        // broken stack (install, start, login) through the daemon. Every
+        // control on the page is backed by a daemon method.
         let built: Vec<&str> = all_sections()
             .iter()
             .filter(|s| s.built)

@@ -84,6 +84,27 @@ pub const ACTION_SSH_CONNECT: &str = "org.supermgr.daemon.ssh-connect";
 /// and a control that irritating gets worked around.
 pub const ACTION_TAILSCALE_EXIT_NODE: &str = "org.supermgr.daemon.tailscale-exit-node";
 
+/// Repairing the local Tailscale stack: installing the package, starting
+/// tailscaled, initiating a login.
+///
+/// One action for the whole remediation path rather than one per step,
+/// because they are one decision — "make Tailscale work on this machine" —
+/// and an operator who authorized the install being re-prompted to start
+/// the service it installed would experience that as the same question
+/// asked twice.
+///
+/// Gated because every step changes system state as root: package
+/// installation writes to the filesystem, `systemctl enable` persists
+/// across reboots, and a login binds this machine to whatever tailnet the
+/// authenticating browser account belongs to. That last one is the quiet
+/// one: ungated, any local account could join this machine to a tailnet
+/// *they* control and reach it from anywhere.
+///
+/// `auth_admin_keep` because the natural flow is install → start → login
+/// in one sitting; three prompts for one intention is how policy files get
+/// deleted.
+pub const ACTION_TAILSCALE_REPAIR: &str = "org.supermgr.daemon.tailscale-repair";
+
 #[zbus::proxy(
     interface = "org.freedesktop.PolicyKit1.Authority",
     default_service = "org.freedesktop.PolicyKit1",
@@ -181,8 +202,12 @@ mod tests {
     /// unchecked, so keep the two in step — the assertions below are the
     /// only thing standing between a typo and a method that denies
     /// everybody for a reason nobody can see.
-    const ALL_ACTIONS: &[&str] =
-        &[ACTION_SECRETS, ACTION_SSH_CONNECT, ACTION_TAILSCALE_EXIT_NODE];
+    const ALL_ACTIONS: &[&str] = &[
+        ACTION_SECRETS,
+        ACTION_SSH_CONNECT,
+        ACTION_TAILSCALE_EXIT_NODE,
+        ACTION_TAILSCALE_REPAIR,
+    ];
 
     #[test]
     fn every_action_the_daemon_uses_is_declared_in_the_policy_file() {
@@ -353,6 +378,35 @@ mod tests {
              the method decides which host every packet from this machine leaves \
              through — ungated, one local user can redirect another's traffic."
         );
+    }
+
+    /// Both remediation methods sit behind the repair action. Same
+    /// comment-stripping shape as the tests above, and the reason is worth
+    /// spelling out per method: `tailscale_repair` installs packages and
+    /// enables services as root; `tailscale_login` binds this machine to
+    /// whatever tailnet the authenticating account belongs to, so ungated
+    /// it would let any local user join the machine to a tailnet they
+    /// control.
+    #[test]
+    fn tailscale_repair_and_login_are_gated() {
+        let daemon = include_str!("daemon.rs");
+        for method in ["async fn tailscale_repair", "async fn tailscale_login"] {
+            let body: String = daemon
+                .split(method)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{method} exists"))
+                .split("\n    /// ")
+                .next()
+                .expect("something follows the method")
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                body.contains("authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_REPAIR)"),
+                "{method} no longer authorizes against {ACTION_TAILSCALE_REPAIR}"
+            );
+        }
     }
 
     /// The guard runs before anything with a side effect.

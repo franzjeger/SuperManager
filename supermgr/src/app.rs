@@ -248,6 +248,21 @@ pub enum AppMsg {
     /// state, not a transient toast. "tailscaled is not running" needs to stay
     /// on screen until it stops being true.
     TailscaleNodesUpdated(Result<Vec<TailscaleNode>, String>),
+    /// Outcome of a `TailscaleHealth` call, for the Tailscale page.
+    ///
+    /// Sent instead of `TailscaleNodesUpdated` when the stack is not up —
+    /// the page then renders the state with its remedy (install, start, log
+    /// in) rather than a dead-end error. Same reasoning as above for
+    /// carrying the whole `Result`: a broken stack is page state, not a
+    /// toast.
+    TailscaleHealthUpdated(Result<supermgr_core::tailscale::TailscaleHealth, String>),
+    /// A Tailscale login handed out its browser URL. Open it once.
+    ///
+    /// Separate from `TailscaleHealthUpdated` because the health poll sees
+    /// the same URL on every tick while the login is pending, and opening a
+    /// browser tab per tick is an attack on the operator. The poll task
+    /// sends this exactly once.
+    TailscaleLoginUrl(String),
     /// Copy text to clipboard and show a toast.
     CopyToClipboard(String),
     /// Show a success toast with the given message.
