@@ -123,4 +123,42 @@ impl SecretStore for FileSecretStore {
         }
         Ok(())
     }
+
+    async fn read_all(&self) -> Result<std::collections::HashMap<String, String>, SecretError> {
+        self.read_map()
+            .await
+            .map_err(|e| SecretError::ServiceUnavailable(format!("read_all: {e}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use supermgr_core::keyring::SecretStore;
+
+    #[tokio::test]
+    async fn read_all_returns_every_stored_secret_as_base64() {
+        let dir = std::env::temp_dir().join(format!("smfs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = FileSecretStore::new(dir.join("secrets.json"));
+
+        store.store("vpn/a/wg-private-key", b"keybytes").await.unwrap();
+        store.store("ssh/b/password", b"hunter2").await.unwrap();
+
+        let all = store.read_all().await.unwrap();
+        assert_eq!(all.len(), 2);
+        // Values are base64 of the stored bytes — the exact form the
+        // portable backup carries.
+        assert_eq!(all.get("vpn/a/wg-private-key").map(String::as_str), Some("a2V5Ynl0ZXM="));
+        assert_eq!(all.get("ssh/b/password").map(String::as_str), Some("aHVudGVyMg=="));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn read_all_is_empty_when_nothing_stored() {
+        let dir = std::env::temp_dir().join(format!("smfs-{}", uuid::Uuid::new_v4()));
+        let store = FileSecretStore::new(dir.join("secrets.json"));
+        assert!(store.read_all().await.unwrap().is_empty());
+    }
 }

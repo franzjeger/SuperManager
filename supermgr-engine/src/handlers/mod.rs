@@ -7,6 +7,7 @@
 //! from the path. The dispatch table itself stays in `server.rs`.
 
 pub mod ssh;
+pub mod backup;
 pub mod fortigate;
 pub mod unifi;
 pub mod compliance;
