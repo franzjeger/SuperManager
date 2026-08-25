@@ -228,6 +228,7 @@ struct TailscaleHeaderView: View {
                 Label("Settings…", systemImage: "gear")
             }
             exitNodeSubmenu
+            acceptRoutesToggle
             Divider()
             Button {
                 Task { await appState.refreshTailscale() }
@@ -381,6 +382,35 @@ struct TailscaleHeaderView: View {
         .help(exits.isEmpty
               ? "No online peer in your tailnet is advertising as an exit node."
               : "Pre-flight + auto-revert + route guardian + connectivity watchdog. Worst-case ~10s before auto-recovery.")
+    }
+
+    /// Quick "accept subnet routes" toggle inline in the header menu.
+    /// The same pref (`RouteAll`) also lives in the settings sheet as
+    /// "Accept routes advertised by other peers", but it was buried
+    /// there. This is the control you reach for to hit a LAN host
+    /// (e.g. 192.168.200.x) behind a subnet router *without* selecting
+    /// an exit node, so it earns a spot next to the exit-node picker.
+    ///
+    /// Unlike an exit node, accepting subnet routes is additive — it
+    /// never rewrites the system default route — so it needs none of
+    /// the exit-node safety machinery. Same checkmark idiom as the
+    /// exit-node "None" item.
+    @ViewBuilder
+    private var acceptRoutesToggle: some View {
+        let on = appState.tailscalePrefs?.routeAll ?? false
+        Button {
+            let newValue = !on
+            Task {
+                await appState.applyTailscalePref(
+                    optimistic: { $0.routeAll = newValue },
+                    cli: { try await TailscaleClient.setAcceptRoutes(newValue) }
+                )
+            }
+        } label: {
+            if on { Image(systemName: "checkmark") }
+            Text("Accept subnet routes")
+        }
+        .help("Accept subnet routes advertised by peers — reach LAN hosts behind a subnet router without an exit node.")
     }
 
     private var exitNodeMenuLabel: String {
