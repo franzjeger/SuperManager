@@ -36,12 +36,14 @@ pub fn spawn(
     let show = MenuItem::new("Show window", true, None);
     let hide = MenuItem::new("Hide window", true, None);
     let disconnect = MenuItem::new("Quick disconnect VPN", true, None);
+    let updates = MenuItem::new("Check for updates\u{2026}", true, None);
     let quit = MenuItem::new("Quit", true, None);
 
     let dashboard_id = dashboard.id().clone();
     let show_id = show.id().clone();
     let hide_id = hide.id().clone();
     let disconnect_id = disconnect.id().clone();
+    let updates_id = updates.id().clone();
     let quit_id = quit.id().clone();
 
     if let Err(e) = menu.append_items(&[
@@ -50,6 +52,7 @@ pub fn spawn(
         &PredefinedMenuItem::separator(),
         &disconnect,
         &PredefinedMenuItem::separator(),
+        &updates,
         &hide,
         &PredefinedMenuItem::separator(),
         &quit,
@@ -126,6 +129,16 @@ pub fn spawn(
                             }
                         }
                     }
+                });
+            } else if id == updates_id {
+                // Land on the Settings page (view 4), where the update
+                // status and the Install button live, and start the check
+                // through the same callback the page's own button uses.
+                let _ = weak.upgrade_in_event_loop(|w| {
+                    let _ = w.show();
+                    w.window().set_minimized(false);
+                    w.set_current_view(4);
+                    w.invoke_check_updates();
                 });
             } else if id == quit_id {
                 let _ = weak.upgrade_in_event_loop(|w| {

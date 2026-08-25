@@ -46,6 +46,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cargo build (release)
+        env:
+          # The tag is the release version (the crate versions stay 1.0.0).
+          # build.rs stamps this into SUPERMGR_VERSION — what the in-app
+          # update check compares against GitHub — and into the exes'
+          # numeric VS_FIXEDFILEINFO, which the MSI's ProductVersion binds
+          # to. Without it every MSI says 1.0.0 and MajorUpgrade cannot
+          # tell releases apart.
+          SUPERMGR_RELEASE_VERSION: ${{ github.ref_name }}
         run: |
           cargo build --release `
             -p supermgrd-win `

@@ -2,6 +2,7 @@
 //! `main.rs` so off-Windows builds skip Slint entirely.
 
 mod tray;
+mod update;
 
 use std::{sync::Arc, time::Duration};
 
@@ -40,6 +41,9 @@ pub fn run() -> anyhow::Result<()> {
     let rt_handle = rt.handle().clone();
 
     let window = AppWindow::new().context("create main window")?;
+    // Real version, not the .slint placeholder default: from the release
+    // tag in CI builds, the crate version in dev builds (see build.rs).
+    window.set_app_version(update::CURRENT_VERSION.into());
 
     let connection: ConnectionSlot = Arc::new(Mutex::new(None));
     let host_cache: HostCache = Arc::new(Mutex::new(Vec::new()));
@@ -845,6 +849,135 @@ fn bind_callbacks(
                 w.set_last_error("".into());
                 w.set_last_status_message("".into());
             }
+        });
+    }
+
+    // Check for updates (Settings → About, and the tray menu). The busy
+    // flag is shared with install-update so a double-click cannot race
+    // two checks or two downloads at once.
+    let update_busy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let weak = window.as_weak();
+        let rt = rt.clone();
+        let busy = update_busy.clone();
+        window.on_check_updates(move || {
+            use std::sync::atomic::Ordering;
+            if busy.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let weak = weak.clone();
+            let busy = busy.clone();
+            let _ = weak.upgrade_in_event_loop(|w| {
+                w.set_update_status("Checking GitHub releases\u{2026}".into());
+            });
+            rt.spawn(async move {
+                let result = update::check().await;
+                let _ = weak.upgrade_in_event_loop(move |w| match result {
+                    Ok(Some(info)) => {
+                        w.set_update_available(true);
+                        w.set_update_status(
+                            format!(
+                                "Version {} is available (installed: {}).",
+                                info.version,
+                                update::CURRENT_VERSION
+                            )
+                            .into(),
+                        );
+                    }
+                    Ok(None) => {
+                        w.set_update_available(false);
+                        w.set_update_status(
+                            format!("Up to date ({}).", update::CURRENT_VERSION).into(),
+                        );
+                    }
+                    Err(e) => {
+                        w.set_update_status(format!("Update check failed: {e:#}").into());
+                    }
+                });
+                busy.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    // Install update: re-check (the offered version can be minutes old),
+    // download to %TEMP%, verify against the published SHA-256, start the
+    // installer, and quit — the MSI's MajorUpgrade replaces this install
+    // and restarts the service in its own transaction.
+    {
+        let weak = window.as_weak();
+        let rt = rt.clone();
+        let busy = update_busy;
+        window.on_install_update(move || {
+            use std::sync::atomic::Ordering;
+            if busy.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let weak = weak.clone();
+            let busy = busy.clone();
+            rt.spawn(async move {
+                fn status(weak: &slint::Weak<AppWindow>, msg: String) {
+                    let _ = weak.upgrade_in_event_loop(move |w| w.set_update_status(msg.into()));
+                }
+
+                let info = match update::check().await {
+                    Ok(Some(i)) => i,
+                    Ok(None) => {
+                        let _ = weak.upgrade_in_event_loop(|w| w.set_update_available(false));
+                        status(&weak, format!("Already up to date ({}).", update::CURRENT_VERSION));
+                        busy.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                    Err(e) => {
+                        status(&weak, format!("Update check failed: {e:#}"));
+                        busy.store(false, Ordering::SeqCst);
+                        return;
+                    }
+                };
+
+                // Progress at ~5 MB granularity — every chunk would flood
+                // the event loop for no visible benefit.
+                let weak_progress = weak.clone();
+                let name = info.name.clone();
+                let mut last_bucket = u64::MAX;
+                let downloaded = update::download(&info, |got, total| {
+                    let bucket = got / (5 * 1024 * 1024);
+                    if bucket != last_bucket {
+                        last_bucket = bucket;
+                        let msg = if total > 0 {
+                            format!(
+                                "Downloading {name}\u{2026} {} / {} MB",
+                                got / (1024 * 1024),
+                                total / (1024 * 1024)
+                            )
+                        } else {
+                            format!("Downloading {name}\u{2026} {} MB", got / (1024 * 1024))
+                        };
+                        status(&weak_progress, msg);
+                    }
+                })
+                .await;
+
+                match downloaded.and_then(|path| update::launch(&path).map(|()| path)) {
+                    Ok(path) => {
+                        info!("update installer started: {}", path.display());
+                        status(
+                            &weak,
+                            "Installer verified and started \u{2014} SuperManager closes now."
+                                .into(),
+                        );
+                        // A beat for the message, then get out of the
+                        // installer's way — it replaces this binary.
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                        let _ = slint::invoke_from_event_loop(|| {
+                            slint::quit_event_loop().ok();
+                        });
+                    }
+                    Err(e) => {
+                        status(&weak, format!("Update failed: {e:#}"));
+                        busy.store(false, Ordering::SeqCst);
+                    }
+                }
+            });
         });
     }
 }

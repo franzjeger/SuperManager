@@ -58,6 +58,21 @@ If you already manage WireGuard and OpenVPN out-of-band (e.g. via
 Group Policy / Intune), grab the bare **`SuperManager-<version>.msi`**
 instead — same payload as the bundle minus the chained installers.
 
+## Updating
+
+In-app: **Settings → About → Check for updates** (also in the tray
+menu). It asks the GitHub API for the newest release, and when one is
+newer than the running build it downloads the `SuperManager-Setup` exe
+(falling back to the bare MSI) into `%TEMP%`, verifies it against the
+`.sha256` sidecar CI published — the only integrity check there is
+while the artifacts are unsigned — starts the installer, and exits.
+The MSI's `MajorUpgrade` removes the old version and restarts the
+service in the same transaction, so the update is one UAC prompt.
+
+A release with no `.sha256` sidecar is refused rather than run
+unverified. Manual updates keep working exactly as before: run the
+newer installer yourself.
+
 ### Manual service registration (developer flow)
 
 For local builds without an MSI, the same registration steps live in
@@ -134,6 +149,14 @@ either upstream installer.
 
 The script runs `cargo build --release` (skip with `-SkipBuild`), then
 compiles the `.wxs` and emits `installer\wix\SuperManager.msi`. The MSI:
+
+> **Versioning:** release CI exports `SUPERMGR_RELEASE_VERSION` from the
+> git tag before building; `build.rs` stamps it into the exes'
+> VS_FIXEDFILEINFO (which the MSI's ProductVersion binds to) and into
+> the in-app update check. A local build without that variable is
+> versioned as the crate version (1.0.0) — fine for dev, but such an
+> MSI will not upgrade another 1.0.0 install, and every published
+> release offers to replace it.
 
 - Installs the three binaries under `%ProgramFiles%\SuperManager\bin\`.
 - Registers `supermgrd-win.exe` as the `SuperManager` Windows Service

@@ -395,6 +395,12 @@ export component AppWindow inherits Window {
     in property <string> app-version: "1.5.0";
     in property <string> data-root: "C:\\ProgramData\\SuperManager";
 
+    // In-app updater (Settings → About). Status text is written by the
+    // Rust side as the check/download progresses; update-available flips
+    // the "Install update" button in.
+    in property <string> update-status: "";
+    in property <bool>   update-available: false;
+
     // ----- Navigation -----
     in-out property <int> current-view: 0;
 
@@ -465,6 +471,9 @@ export component AppWindow inherits Window {
     callback connect-profile(string);
     callback disconnect-vpn();
     callback dismiss-error();
+
+    callback check-updates();
+    callback install-update();
 
     // ======================================================================
     // Root layout
@@ -1293,6 +1302,26 @@ export component AppWindow inherits Window {
                                 HorizontalBox {
                                     Text { text: "License"; color: #374151; font-size: 13px; min-width: 160px; }
                                     Text { text: "GPL-3.0-or-later"; color: #0f172a; font-size: 13px; }
+                                }
+                                HorizontalBox {
+                                    Text { text: "Updates"; color: #374151; font-size: 13px; min-width: 160px; vertical-alignment: center; }
+                                    VerticalBox {
+                                        spacing: 6px;
+                                        padding: 0;
+                                        HorizontalBox {
+                                            spacing: 8px;
+                                            padding: 0;
+                                            GhostBtn { text: "Check for updates"; clicked => { root.check-updates(); } }
+                                            if root.update-available: PrimaryBtn { text: "Install update"; clicked => { root.install-update(); } }
+                                            Rectangle { horizontal-stretch: 1; }
+                                        }
+                                        if root.update-status != "": Text {
+                                            text: root.update-status;
+                                            color: #64748b;
+                                            font-size: 12px;
+                                            wrap: word-wrap;
+                                        }
+                                    }
                                 }
                             }
                         }

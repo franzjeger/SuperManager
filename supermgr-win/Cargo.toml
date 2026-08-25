@@ -45,6 +45,14 @@ winit = "0.30"
 # our own code.
 arboard = { version = "3.4", default-features = false }
 
+# In-app updater: GitHub Releases API + installer download (reqwest),
+# SHA-256 verification against the published .sha256 sidecar (sha2),
+# streaming the download to disk (futures-util). Windows-gated with the
+# rest of the UI stack because only `src/win/update.rs` uses them.
+reqwest      = { workspace = true }
+sha2         = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
 # Slint code generation runs in build.rs; the slint-build crate produces Rust
 # from the `.slint` UI files at compile time. `winres` embeds the
 # VS_FIXEDFILEINFO version resource for File Explorer Properties + the MSI.

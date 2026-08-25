@@ -119,6 +119,7 @@ FILES=(
     "contrib/icons/hicolor/256.png|/usr/share/icons/hicolor/256x256/apps/org.supermgr.SuperManager.png|644"
     "contrib/man/supermgr.1|/usr/share/man/man1/supermgr.1|644"
     "contrib/man/supermgrd.8|/usr/share/man/man8/supermgrd.8|644"
+    "scripts/update-linux.sh|/usr/bin/supermgr-update|755"
 )
 
 # ---------------------------------------------------------------------------
@@ -134,6 +135,11 @@ if [ "$DO_UNINSTALL" = 1 ]; then
         dest="${entry#*|}"; dest="${dest%|*}"
         [ -e "$dest" ] && { sudo rm -f "$dest"; note "removed $dest"; }
     done
+    if [ -e /etc/supermgr/checkout-path ]; then
+        sudo rm -f /etc/supermgr/checkout-path
+        sudo rmdir /etc/supermgr 2>/dev/null || true
+        note "removed /etc/supermgr/checkout-path"
+    fi
     sudo systemctl daemon-reload
     note ""
     note "Left in place, because they are yours and not ours to delete:"
@@ -151,8 +157,15 @@ fi
 # "what would this install" from anywhere, including a machine that is
 # not the one being installed onto.
 if [ "$PRINT_DEPS" != 1 ]; then
-    [ "$(id -u)" != 0 ] || die "run this as your normal user, not root — it calls sudo where it needs to.
+    # Root is refused because the build must not run as root (a root-owned
+    # target/ is a nuisance to clean up). With --no-build there is no build,
+    # and root is how supermgr-update's polkit path legitimately arrives here
+    # — pkexec runs the install phase as root when there is no terminal to
+    # ask for sudo in.
+    if [ "$(id -u)" = 0 ] && [ "$DO_BUILD" = 1 ]; then
+        die "run this as your normal user, not root — it calls sudo where it needs to.
        Building as root leaves a root-owned target/ directory behind."
+    fi
 
     command -v sudo >/dev/null || die "sudo not found — this needs it to install system files"
     command -v systemctl >/dev/null || die "no systemd found. SuperManager's daemon ships as a systemd unit;
@@ -476,6 +489,13 @@ done
 # widen it.
 sudo install -dm750 /etc/supermgrd
 
+# Where this checkout lives, so the installed supermgr-update can find its
+# way back without guessing. Kept apart from /etc/supermgrd on purpose:
+# that directory is the daemon's state and survives an uninstall, this one
+# is ours and does not.
+sudo install -dm755 /etc/supermgr
+printf '%s\n' "$REPO_ROOT" | sudo tee /etc/supermgr/checkout-path >/dev/null
+
 if command -v update-desktop-database >/dev/null; then
     sudo update-desktop-database /usr/share/applications 2>/dev/null || true
 fi
@@ -570,11 +590,17 @@ else
         || die "could not create the 'supermgr' group — the GUI would be locked out of the daemon"
 fi
 
-# `SUDO_USER` is the account that ran sudo. The script refuses to run as root
-# outright (see the check near the top), so this is set in every supported
-# invocation; the fallback exists so a stray `sudo -u` cannot silently skip the
-# membership and leave a broken install.
-TARGET_USER="${SUDO_USER:-$(id -un)}"
+# `SUDO_USER` is the account that ran sudo. `PKEXEC_UID` is polkit's
+# equivalent, set when supermgr-update's GUI path runs the install phase as
+# root via pkexec — without it that path would fall through to `id -un`,
+# see root, and skip the group membership with only a warning. The final
+# fallback exists so a stray `sudo -u` cannot silently skip the membership
+# and leave a broken install.
+TARGET_USER="${SUDO_USER:-}"
+if [ -z "$TARGET_USER" ] && [ -n "${PKEXEC_UID:-}" ]; then
+    TARGET_USER="$(id -un "$PKEXEC_UID" 2>/dev/null || true)"
+fi
+[ -n "$TARGET_USER" ] || TARGET_USER="$(id -un)"
 NEEDS_RELOGIN=0
 if [ "$TARGET_USER" = root ]; then
     warn "could not tell which user to add to 'supermgr' — add yours by hand:"
@@ -659,6 +685,7 @@ fi
 
 say "Installed"
 note "Launch:      supermgr        (or find SuperManager in your app menu)"
+note "Update:      supermgr-update (or Settings → Updates in the app)"
 note "Daemon:      sudo systemctl status supermgrd"
 note "Logs:        sudo journalctl -u supermgrd -f"
 note "Uninstall:   ./scripts/install-linux.sh --uninstall"

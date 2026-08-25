@@ -580,6 +580,115 @@ pub fn show_settings_dialog(
         });
     }
 
+    // --- Updates group ---
+    //
+    // Linux installs build from a git checkout, so "version" means "commit"
+    // here, and updating means pull → rebuild → reinstall — all owned by
+    // supermgr-update (scripts/update-linux.sh). This page only asks GitHub
+    // whether origin/main has moved and, on request, runs that script with
+    // its output streamed into a dialog. Mac gets the same feature from
+    // Sparkle; this is the source-install equivalent.
+    let updates_group = adw::PreferencesGroup::builder()
+        .title("Updates")
+        .description("This install is built from the git checkout")
+        .build();
+
+    let version_row = adw::ActionRow::builder()
+        .title("Installed version")
+        .subtitle(format!(
+            "{} · commit {}",
+            crate::update::VERSION,
+            crate::update::short_commit()
+        ))
+        .build();
+    updates_group.add(&version_row);
+
+    let check_row = adw::ActionRow::builder()
+        .title("Check for updates")
+        .subtitle("Compares this build against origin/main on GitHub")
+        .build();
+    let check_btn = gtk4::Button::builder()
+        .label("Check")
+        .valign(gtk4::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    check_row.add_suffix(&check_btn);
+    updates_group.add(&check_row);
+
+    let install_row = adw::ActionRow::builder()
+        .title("Install update")
+        .subtitle("Runs supermgr-update: pull, rebuild, reinstall, restart the daemon")
+        .build();
+    let install_btn = gtk4::Button::builder()
+        .label("Update now")
+        .valign(gtk4::Align::Center)
+        // Enabled by a completed check — updating blind would spend minutes
+        // rebuilding before the script can say "nothing to do".
+        .sensitive(false)
+        .build();
+    install_row.add_suffix(&install_btn);
+    updates_group.add(&install_row);
+
+    {
+        let rt = rt.clone();
+        let check_row = check_row.clone();
+        let install_btn = install_btn.clone();
+        check_btn.connect_clicked(move |btn| {
+            btn.set_sensitive(false);
+            check_row.set_subtitle("Checking\u{2026}");
+            let (utx, urx) = mpsc::channel();
+            rt.spawn(async move {
+                let _ = utx.send(crate::update::check().await);
+            });
+            let btn = btn.clone();
+            let check_row = check_row.clone();
+            let install_btn = install_btn.clone();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                use crate::update::CheckOutcome;
+                match urx.try_recv() {
+                    Ok(outcome) => {
+                        btn.set_sensitive(true);
+                        // Enabled on every completed check, not only when
+                        // behind: the script itself is the authority (it
+                        // answers "nothing to do" when current), and the
+                        // GitHub answer can be stale by the time the user
+                        // clicks.
+                        install_btn.set_sensitive(true);
+                        match outcome {
+                            CheckOutcome::UpToDate => {
+                                check_row.set_subtitle("Up to date with origin/main");
+                            }
+                            CheckOutcome::UpdateAvailable { commits, latest } => {
+                                check_row.set_subtitle(&format!(
+                                    "{commits} new commit(s) \u{2014} latest: {latest}"
+                                ));
+                                install_btn.add_css_class("suggested-action");
+                            }
+                            CheckOutcome::Unknown(reason) => {
+                                check_row.set_subtitle(&format!("Cannot tell: {reason}"));
+                            }
+                        }
+                        gtk4::glib::ControlFlow::Break
+                    }
+                    Err(mpsc::TryRecvError::Empty) => gtk4::glib::ControlFlow::Continue,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        btn.set_sensitive(true);
+                        check_row.set_subtitle("Check failed");
+                        gtk4::glib::ControlFlow::Break
+                    }
+                }
+            });
+        });
+    }
+
+    {
+        let rt = rt.clone();
+        let window = window.clone();
+        install_btn.connect_clicked(move |_| {
+            show_update_dialog(&window, &rt);
+        });
+    }
+
     // One page per topic, rather than seven groups in one scroller. The
     // groups themselves are untouched — this only decides which page each
     // one is on.
@@ -604,6 +713,11 @@ pub fn show_settings_dialog(
             "Backup",
             "document-save-symbolic",
             vec![&backup_group],
+        ),
+        (
+            "Updates",
+            "software-update-available-symbolic",
+            vec![&updates_group],
         ),
     ] {
         let page = adw::PreferencesPage::builder()
@@ -649,6 +763,111 @@ pub fn show_settings_dialog(
     }
 
     dialog.present(Some(window));
+}
+
+/// Modal dialog that runs `supermgr-update --yes` and streams its output.
+///
+/// The updater is a child process, not in-process logic: the same script a
+/// terminal user runs, so the two paths cannot drift. Closing is blocked
+/// while it runs — half an update with no output on screen is exactly the
+/// "install looks broken" state the installer scripts go out of their way
+/// to avoid.
+fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Handle) {
+    use crate::update::UpdaterEvent;
+
+    let dialog = adw::Dialog::builder()
+        .title("Updating SuperManager")
+        .content_width(680)
+        .content_height(460)
+        .can_close(false)
+        .build();
+
+    let view = gtk4::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .monospace(true)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .left_margin(12)
+        .right_margin(12)
+        .top_margin(8)
+        .bottom_margin(8)
+        .build();
+    let scroll = gtk4::ScrolledWindow::builder().child(&view).vexpand(true).build();
+
+    let status = gtk4::Label::builder()
+        .label("Running supermgr-update \u{2014} pulling, rebuilding, reinstalling\u{2026}")
+        .xalign(0.0)
+        .wrap(true)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(12)
+        .build();
+
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    content.append(&adw::HeaderBar::new());
+    content.append(&scroll);
+    content.append(&status);
+    dialog.set_child(Some(&content));
+    dialog.present(Some(window));
+
+    let (utx, urx) = mpsc::channel();
+    crate::update::run_updater(rt, utx);
+
+    let buffer = view.buffer();
+    gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+        loop {
+            match urx.try_recv() {
+                Ok(UpdaterEvent::Line(line)) => {
+                    let mut end = buffer.end_iter();
+                    buffer.insert(&mut end, &strip_ansi(&line));
+                    buffer.insert(&mut end, "\n");
+                    // Keep the newest line on screen; a build log that has
+                    // to be scrolled by hand reads as a hung update.
+                    let mark = buffer.create_mark(None, &buffer.end_iter(), false);
+                    view.scroll_to_mark(&mark, 0.0, false, 0.0, 1.0);
+                    buffer.delete_mark(&mark);
+                }
+                Ok(UpdaterEvent::Done(ok)) => {
+                    dialog.set_can_close(true);
+                    status.set_label(if ok {
+                        "Done. The daemon is already running the new version \u{2014} \
+                         restart SuperManager to update this window too."
+                    } else {
+                        "The update did not complete \u{2014} see the output above."
+                    });
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                Err(mpsc::TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    dialog.set_can_close(true);
+                    status.set_label("The updater stopped unexpectedly.");
+                    return gtk4::glib::ControlFlow::Break;
+                }
+            }
+        }
+    });
+}
+
+/// Drop ANSI escape sequences from a line of script output.
+///
+/// The install scripts colour their output for terminals; a `GtkTextView`
+/// would render the raw `\x1b[1m` bytes instead. Skips from each escape
+/// character to the letter that terminates a CSI sequence.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c2 in chars.by_ref() {
+                if c2.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Small dialog to set or change the master password.

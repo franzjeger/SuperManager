@@ -53,6 +53,7 @@ mod master_password;
 mod settings;
 mod tray;
 mod ui;
+mod update;
 
 use std::sync::{Arc, Mutex};
 

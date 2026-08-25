@@ -73,6 +73,19 @@ There are no prebuilt Linux binaries, so it builds from source; expect a
 few minutes the first time. The [manual steps](#linux) are still
 documented if you'd rather do it yourself.
 
+Updates after that are one command — or one click:
+
+```bash
+supermgr-update            # fetch, rebuild, reinstall if origin moved
+supermgr-update --check    # just tell me; exit 10 = update available
+```
+
+The install records where the checkout lives, so `supermgr-update` works
+from anywhere. In the app, **Settings → Updates** does the same thing:
+checks your build's commit against `origin/main` on GitHub and runs
+`supermgr-update` with its output streamed into a dialog (elevating via
+polkit, since there is no terminal to ask for `sudo` in).
+
 ### Windows
 
 Download **`SuperManager-Setup-<version>.exe`** from the
@@ -81,6 +94,11 @@ is a single bootstrapper that chain-installs WireGuard, OpenVPN, and
 SuperManager itself — one UAC prompt, no separate installs. If you
 already manage WireGuard and OpenVPN through Intune or Group Policy,
 take the bare `.msi` instead. See [WINDOWS.md](WINDOWS.md).
+
+Updates after that are in-app: **Settings → About → Check for updates**
+(also in the tray menu) compares against the newest GitHub release,
+downloads the installer, verifies it against the published SHA-256, and
+hands over to it.
 
 ### What works out of the box, and what needs a tool
 
