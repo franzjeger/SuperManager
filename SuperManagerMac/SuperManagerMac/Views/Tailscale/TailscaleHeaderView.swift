@@ -32,6 +32,8 @@ struct TailscaleHeaderView: View {
     @State private var showingSettings = false
     /// Drives the helper-log viewer sheet.
     @State private var showingHelperLog = false
+    /// Drives the tailnet device-manager sheet.
+    @State private var showingDeviceManager = false
     /// Confirmation alert for exit-node selection — exit-noding on
     /// macOS open-source tailscaled can break internet if the peer
     /// goes unreachable. We make the user confirm before any non-empty
@@ -85,6 +87,10 @@ struct TailscaleHeaderView: View {
         }
         .sheet(isPresented: $showingHelperLog) {
             HelperLogView()
+        }
+        .sheet(isPresented: $showingDeviceManager) {
+            TailscaleDevicesView()
+                .environment(appState)
         }
         // Exit-node confirmation. Exit-noding rewrites the system
         // default route through the peer's TUN — if the peer is
@@ -226,6 +232,11 @@ struct TailscaleHeaderView: View {
                 showingSettings = true
             } label: {
                 Label("Settings…", systemImage: "gear")
+            }
+            Button {
+                showingDeviceManager = true
+            } label: {
+                Label("Manage tailnet devices…", systemImage: "externaldrive.badge.xmark")
             }
             exitNodeSubmenu
             acceptRoutesToggle
