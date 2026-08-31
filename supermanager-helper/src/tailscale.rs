@@ -85,8 +85,8 @@ pub struct InstallResult {
 ///     Could be a transient crash; UI shows "Start" button.
 ///   • `!installed` — plist not present. UI shows "Install" button.
 pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
-    let installed = Path::new(LAUNCH_DAEMON_PLIST).exists()
-        && Path::new(DAEMON_INSTALL_PATH).exists();
+    let installed =
+        Path::new(LAUNCH_DAEMON_PLIST).exists() && Path::new(DAEMON_INSTALL_PATH).exists();
 
     if !installed {
         return Ok(DaemonStatus {
@@ -104,8 +104,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
         .context("running launchctl print")?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let running = stdout.contains("state = running")
-        || stdout.contains("state = waiting"); // waiting == launchd has it queued
+    let running = stdout.contains("state = running") || stdout.contains("state = waiting"); // waiting == launchd has it queued
 
     Ok(DaemonStatus {
         running,
@@ -259,6 +258,24 @@ fn detect_local_gateway() -> Option<String> {
     None
 }
 
+/// `detect_local_gateway`, tolerant of a transiently-missing default
+/// route. Enabling an exit node makes tailscaled briefly `route delete`
+/// the physical default before the route guardian restores it (~1s).
+/// A single lookup can land in that gap and return `None`, which made
+/// `install_exit_routes` bail with "could not detect local default
+/// gateway" and leave the exit node half-installed. Poll for up to ~2s.
+fn detect_local_gateway_resilient() -> Option<String> {
+    for attempt in 0..10 {
+        if let Some(gw) = detect_local_gateway() {
+            return Some(gw);
+        }
+        if attempt < 9 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+    None
+}
+
 /// Snapshot tailscaled's currently-connected external endpoints
 /// from `lsof -p <pid> -i -P -n`. We pull IP addresses from
 /// remote-side fields like `udp 1.2.3.4:41641` or
@@ -286,8 +303,12 @@ fn collect_tailscaled_underlay_ips(pid: u32) -> Vec<String> {
             if let Some(colon) = endpoint.rfind(':') {
                 let ip = &endpoint[..colon];
                 // Skip IPv6 (square brackets present) for now
-                if ip.starts_with('[') { continue; }
-                if !is_routeable_public_ipv4(ip) { continue; }
+                if ip.starts_with('[') {
+                    continue;
+                }
+                if !is_routeable_public_ipv4(ip) {
+                    continue;
+                }
                 if !ips.contains(&ip.to_string()) {
                     ips.push(ip.to_string());
                 }
@@ -297,24 +318,206 @@ fn collect_tailscaled_underlay_ips(pid: u32) -> Vec<String> {
     ips
 }
 
+/// Collect every tailnet peer's ADVERTISED candidate endpoint public
+/// IPs from `tailscale debug netmap` (each peer's `Endpoints`).
+///
+/// `collect_tailscaled_underlay_ips` only sees the sockets tailscaled
+/// has open *right now*. If a peer — crucially the exit node — is on a
+/// DERP relay at exit-install time, only the DERP server is pinned and
+/// the peer's DIRECT endpoint gets swallowed by the `0.0.0.0/1` split
+/// route, so it can never upgrade off the slow relay. That is the
+/// network-dependent "exit node is slow" bug: whether the direct
+/// endpoint happened to be an open socket at install time decided it.
+///
+/// The netmap lists a peer's direct endpoints regardless of the
+/// transport currently in use, so pinning them keeps the direct path
+/// reachable in every case. Best-effort: falls back to the older endpoint
+/// history API and logs failures; the caller still has open-socket exemptions.
+fn collect_peer_endpoint_ips() -> Vec<String> {
+    let Some(cli) = tailscale_cli() else {
+        tracing::warn!("cannot collect peer endpoints: tailscale CLI not found");
+        return vec![];
+    };
+    let netmap = Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "debug", "netmap"])
+        .output();
+    match netmap {
+        Ok(out) if out.status.success() => match parse_netmap_endpoint_ips(&out.stdout) {
+            Ok(ips) if !ips.is_empty() => return ips,
+            Ok(_) => tracing::warn!("tailscale netmap contained no public peer endpoints"),
+            Err(e) => tracing::warn!("could not parse tailscale netmap: {e}"),
+        },
+        Ok(out) => tracing::warn!(
+            "tailscale debug netmap unavailable; trying compatibility fallback: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::warn!(
+            "could not run tailscale debug netmap; trying compatibility fallback: {e}"
+        ),
+    }
+
+    collect_exit_peer_endpoint_ips_compat(cli)
+}
+
+fn parse_netmap_endpoint_ips(bytes: &[u8]) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).context("decoding netmap JSON")?;
+    let mut ips = Vec::<String>::new();
+    if let Some(peers) = v.get("Peers").and_then(|p| p.as_array()) {
+        for peer in peers {
+            let Some(eps) = peer.get("Endpoints").and_then(|e| e.as_array()) else {
+                continue;
+            };
+            for ep in eps {
+                let Some(s) = ep.as_str() else { continue };
+                if s.starts_with('[') {
+                    continue; // IPv6 endpoint, skip
+                }
+                if let Some(colon) = s.rfind(':') {
+                    let ip = &s[..colon];
+                    if is_routeable_public_ipv4(ip) && !ips.contains(&ip.to_string()) {
+                        ips.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(ips)
+}
+
+/// Compatibility path for tailscaled versions that predate `debug netmap`.
+/// `status --json` identifies the selected exit peer; endpoint-change history
+/// then exposes the most recent advertised candidate set for that one peer.
+fn collect_exit_peer_endpoint_ips_compat(cli: &str) -> Vec<String> {
+    let status = match Command::new(cli)
+        .args(["--socket=/var/run/tailscaled.socket", "status", "--json"])
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        Ok(out) => {
+            tracing::warn!(
+                "tailscale status fallback failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return vec![];
+        }
+        Err(e) => {
+            tracing::warn!("could not run tailscale status fallback: {e}");
+            return vec![];
+        }
+    };
+    let peer_ips = match parse_selected_exit_peer_ips(&status) {
+        Ok(ips) => ips,
+        Err(e) => {
+            tracing::warn!("could not parse tailscale status fallback: {e}");
+            return vec![];
+        }
+    };
+
+    let mut endpoints = Vec::new();
+    for peer_ip in peer_ips {
+        let changes = match Command::new(cli)
+            .args([
+                "--socket=/var/run/tailscaled.socket",
+                "debug",
+                "peer-endpoint-changes",
+                &peer_ip,
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => out.stdout,
+            Ok(out) => {
+                tracing::warn!(
+                    peer = %peer_ip,
+                    "tailscale endpoint-history fallback failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(peer = %peer_ip, "could not run endpoint-history fallback: {e}");
+                continue;
+            }
+        };
+        match parse_latest_endpoint_change_ips(&changes) {
+            Ok(ips) => {
+                for ip in ips {
+                    if !endpoints.contains(&ip) {
+                        endpoints.push(ip);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(peer = %peer_ip, "could not parse endpoint history: {e}"),
+        }
+    }
+    endpoints
+}
+
+fn parse_selected_exit_peer_ips(bytes: &[u8]) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).context("decoding status JSON")?;
+    let mut ips = Vec::new();
+    if let Some(peers) = v.get("Peer").and_then(|p| p.as_object()) {
+        for peer in peers
+            .values()
+            .filter(|p| p.get("ExitNode").and_then(serde_json::Value::as_bool) == Some(true))
+        {
+            if let Some(addrs) = peer.get("TailscaleIPs").and_then(|a| a.as_array()) {
+                if let Some(ip) = addrs
+                    .iter()
+                    .filter_map(|a| a.as_str())
+                    .find(|a| a.contains('.'))
+                {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+    Ok(ips)
+}
+
+fn parse_latest_endpoint_change_ips(bytes: &[u8]) -> Result<Vec<String>> {
+    let events: Vec<serde_json::Value> =
+        serde_json::from_slice(bytes).context("decoding endpoint-change JSON")?;
+    let Some(endpoints) = events.iter().rev().find_map(|event| {
+        let what = event.get("What")?.as_str()?;
+        what.contains("new-Endpoints")
+            .then(|| event.get("To")?.as_array())
+            .flatten()
+    }) else {
+        return Ok(Vec::new());
+    };
+    let mut ips = Vec::new();
+    for endpoint in endpoints.iter().filter_map(|e| e.as_str()) {
+        if endpoint.starts_with('[') {
+            continue;
+        }
+        if let Some((ip, _port)) = endpoint.rsplit_once(':') {
+            if is_routeable_public_ipv4(ip) && !ips.iter().any(|seen| seen == ip) {
+                ips.push(ip.to_string());
+            }
+        }
+    }
+    Ok(ips)
+}
+
 /// Quick check: looks like a public IPv4 we should bypass-pin.
 /// Skip loopback (127), link-local (169.254), RFC1918 (10/8,
 /// 172.16/12, 192.168/16), CGNAT/tailnet (100.64/10), multicast.
 fn is_routeable_public_ipv4(ip: &str) -> bool {
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 { return false; }
-    let nums: Option<Vec<u8>> = parts.iter().map(|s| s.parse::<u8>().ok()).collect();
-    let n = match nums { Some(v) if v.len() == 4 => v, _ => return false };
-    match n[0] {
-        0 | 127 => false,                  // unspecified, loopback
-        10 => false,                       // RFC1918
-        100 if (64..=127).contains(&n[1]) => false, // CGNAT / tailnet
-        169 if n[1] == 254 => false,       // link-local
-        172 if (16..=31).contains(&n[1]) => false, // RFC1918
-        192 if n[1] == 168 => false,       // RFC1918
-        224..=239 => false,                // multicast
-        _ => true,
-    }
+    let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let [first, second, _, _] = addr.octets();
+    !matches!(
+        (first, second),
+        (0, _)
+            | (10, _)
+            | (100, 64..=127)
+            | (127, _)
+            | (169, 254)
+            | (172, 16..=31)
+            | (192, 168)
+            | (224..=255, _)
+    )
 }
 
 /// State file recording the exemption routes installed for the
@@ -329,7 +532,12 @@ fn write_exemption_state(ips: &[String]) {
 
 fn read_exemption_state() -> Vec<String> {
     fs::read_to_string(EXEMPTION_STATE_FILE)
-        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).map(String::from).collect())
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -417,8 +625,8 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     let utun = detect_tailscale_utun()
         .context("could not find Tailscale utun interface — is tailscaled running?")?;
     tracing::info!(utun = %utun, "install_exit_routes: detected utun");
-    let local_gateway = detect_local_gateway()
-        .context("could not detect local default gateway")?;
+    let local_gateway =
+        detect_local_gateway_resilient().context("could not detect local default gateway")?;
 
     // 1. **Exemption snapshot** — read tailscaled's currently
     // active underlay endpoints (UDP/TCP to public IPs) BEFORE we
@@ -433,10 +641,21 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     // physical interface, sidestepping the routing table for its
     // own packets. We can't do that without the entitlement, so
     // we pin each underlay IP to the local default explicitly.
-    let exempt_ips = match find_tailscaled_pid() {
+    let mut exempt_ips = match find_tailscaled_pid() {
         Some(pid) => collect_tailscaled_underlay_ips(pid),
         None => return Err(anyhow::anyhow!("tailscaled not running")),
     };
+    // Also pin every tailnet peer's advertised direct endpoints (from
+    // the netmap), not just the sockets tailscaled has open right now.
+    // Without this, an exit node that is on a DERP relay at this instant
+    // never gets its direct endpoint exempted, so it is swallowed by the
+    // 0/1 split route below and stays on the slow relay forever — the
+    // network-dependent "exit node is slow" bug. See collect_peer_endpoint_ips.
+    for ip in collect_peer_endpoint_ips() {
+        if !exempt_ips.contains(&ip) {
+            exempt_ips.push(ip);
+        }
+    }
 
     // Defensive: nuke any previously-installed exemption routes
     // (could be stale from a half-applied earlier run).
@@ -492,10 +711,18 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     }
 
     // 3. Idempotent: nuke any existing split routes before adding.
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-net", "128.0.0.0/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "::/1"]).output();
-    let _ = Command::new("/sbin/route").args(["delete", "-inet6", "-net", "8000::/1"]).output();
+    let _ = Command::new("/sbin/route")
+        .args(["delete", "-net", "0.0.0.0/1"])
+        .output();
+    let _ = Command::new("/sbin/route")
+        .args(["delete", "-net", "128.0.0.0/1"])
+        .output();
+    let _ = Command::new("/sbin/route")
+        .args(["delete", "-inet6", "-net", "::/1"])
+        .output();
+    let _ = Command::new("/sbin/route")
+        .args(["delete", "-inet6", "-net", "8000::/1"])
+        .output();
 
     // 4. Install IPv4 split.
     let r1 = Command::new("/sbin/route")
@@ -504,31 +731,49 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
         .context("route add 0.0.0.0/1")?;
     if !r1.status.success() {
         rollback_exemptions(&installed_exemptions);
-        bail!("route add 0.0.0.0/1 failed: {}",
-              String::from_utf8_lossy(&r1.stderr).trim());
+        bail!(
+            "route add 0.0.0.0/1 failed: {}",
+            String::from_utf8_lossy(&r1.stderr).trim()
+        );
     }
     let r2 = Command::new("/sbin/route")
         .args(["-q", "add", "-net", "128.0.0.0/1", "-interface", &utun])
         .output()
         .context("route add 128.0.0.0/1")?;
     if !r2.status.success() {
-        let _ = Command::new("/sbin/route").args(["delete", "-net", "0.0.0.0/1"]).output();
+        let _ = Command::new("/sbin/route")
+            .args(["delete", "-net", "0.0.0.0/1"])
+            .output();
         rollback_exemptions(&installed_exemptions);
-        bail!("route add 128.0.0.0/1 failed: {}",
-              String::from_utf8_lossy(&r2.stderr).trim());
+        bail!(
+            "route add 128.0.0.0/1 failed: {}",
+            String::from_utf8_lossy(&r2.stderr).trim()
+        );
     }
     // IPv6 best-effort. Ignore failures — many networks are v4-only.
     let _ = Command::new("/sbin/route")
-        .args(["-q", "add", "-inet6", "-net", "::/1", "-interface", &utun]).output();
+        .args(["-q", "add", "-inet6", "-net", "::/1", "-interface", &utun])
+        .output();
     let _ = Command::new("/sbin/route")
-        .args(["-q", "add", "-inet6", "-net", "8000::/1", "-interface", &utun]).output();
+        .args([
+            "-q",
+            "add",
+            "-inet6",
+            "-net",
+            "8000::/1",
+            "-interface",
+            &utun,
+        ])
+        .output();
 
+    let message = format!(
+        "Exit routes installed via {utun} (with {} underlay exemptions via {local_gateway})",
+        installed_exemptions.len()
+    );
+    tracing::info!("install_exit_routes: done — {message}");
     Ok(InstallResult {
         success: true,
-        message: format!(
-            "Exit routes installed via {utun} (with {} underlay exemptions via {local_gateway})",
-            installed_exemptions.len()
-        ),
+        message,
     })
 }
 
@@ -556,6 +801,7 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
     if args.servers.is_empty() {
         bail!("force_dns_state requires at least one server");
     }
+    let servers = validate_dns_servers(&args.servers)?;
     // Find the active service UUID. We look in
     // Setup:/Network/Service/<UUID>/DNS keys and pick the one
     // that has IPv4 servers in its config.
@@ -567,7 +813,7 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
     // overwrites the dictionary at that key.
     let mut script = String::from("d.init\n");
     script.push_str("d.add ServerAddresses *");
-    for s in &args.servers {
+    for s in &servers {
         script.push(' ');
         script.push_str(s);
     }
@@ -596,15 +842,16 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
     }
 
     // Flush macOS resolver caches so apps pick up immediately.
-    let _ = Command::new("/usr/bin/dscacheutil").arg("-flushcache").status();
-    let _ = Command::new("/usr/bin/killall").args(["-HUP", "mDNSResponder"]).status();
+    let _ = Command::new("/usr/bin/dscacheutil")
+        .arg("-flushcache")
+        .status();
+    let _ = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
 
     Ok(InstallResult {
         success: true,
-        message: format!(
-            "Wrote State DNS for service {uuid}: {}",
-            args.servers.join(", ")
-        ),
+        message: format!("Wrote State DNS for service {uuid}: {}", servers.join(", ")),
     })
 }
 
@@ -620,15 +867,21 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
 pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
-    let service = detect_active_network_service()
-        .unwrap_or_else(|| "Wi-Fi".to_string());
+    let service = detect_active_network_service().unwrap_or_else(|| "Wi-Fi".to_string());
+    let clear =
+        args.servers.is_empty() || matches!(args.servers.as_slice(), [server] if server == "empty");
+    let servers = if clear {
+        Vec::new()
+    } else {
+        validate_dns_servers(&args.servers)?
+    };
 
     let mut cmd = Command::new("/usr/sbin/networksetup");
     cmd.arg("-setdnsservers").arg(&service);
-    if args.servers.is_empty() || args.servers == vec!["empty".to_string()] {
+    if clear {
         cmd.arg("empty");
     } else {
-        for s in &args.servers {
+        for s in &servers {
             cmd.arg(s);
         }
     }
@@ -639,15 +892,23 @@ pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let _ = Command::new("/usr/bin/dscacheutil").arg("-flushcache").status();
-    let _ = Command::new("/usr/bin/killall").args(["-HUP", "mDNSResponder"]).status();
+    let _ = Command::new("/usr/bin/dscacheutil")
+        .arg("-flushcache")
+        .status();
+    let _ = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .status();
 
     Ok(InstallResult {
         success: true,
         message: format!(
             "Set DNS on '{}' to {}",
             service,
-            if args.servers.is_empty() { "empty (DHCP)".to_string() } else { args.servers.join(", ") }
+            if clear {
+                "empty (DHCP)".to_string()
+            } else {
+                servers.join(", ")
+            }
         ),
     })
 }
@@ -655,6 +916,21 @@ pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
 #[derive(Deserialize, Debug)]
 pub struct SetDnsArgs {
     pub servers: Vec<String>,
+}
+
+pub(crate) fn validate_dns_servers(servers: &[String]) -> Result<Vec<String>> {
+    if servers.len() > 8 {
+        bail!("at most 8 DNS servers are allowed");
+    }
+    servers
+        .iter()
+        .map(|server| {
+            server
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.to_string())
+                .with_context(|| format!("invalid DNS server address: {server:?}"))
+        })
+        .collect()
 }
 
 /// Find the user-facing network service name for the primary
@@ -689,8 +965,7 @@ fn detect_active_network_service() -> Option<String> {
 /// pinging Cloudflare goes through Tailscale forever.
 pub fn test_exit_reachability(_: TestExitArgs) -> Result<TestExitResult> {
     tracing::info!("test_exit_reachability: starting");
-    let utun = detect_tailscale_utun()
-        .context("tailscale utun not found — daemon not running?")?;
+    let utun = detect_tailscale_utun().context("tailscale utun not found — daemon not running?")?;
     tracing::info!(utun = %utun, "test_exit_reachability: utun detected");
 
     // Cloudflare's public DNS endpoint. Universal, fast, has HTTPS.
@@ -733,10 +1008,14 @@ pub fn test_exit_reachability(_: TestExitArgs) -> Result<TestExitResult> {
     let probe = Command::new("/usr/bin/curl")
         .args([
             "-sS",
-            "--max-time", "8",
-            "--connect-timeout", "8",
-            "-o", "/dev/null",
-            "-w", "%{http_code}",
+            "--max-time",
+            "8",
+            "--connect-timeout",
+            "8",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
             &format!("https://{test_ip}"),
         ])
         .output();
@@ -941,7 +1220,9 @@ pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallRe
                    timeout 5\n";
     fs::write(&path, content).with_context(|| format!("writing {path}"))?;
     let _ = Command::new("/bin/chmod").args(["0644", &path]).status();
-    let _ = Command::new("/usr/sbin/chown").args(["root:wheel", &path]).status();
+    let _ = Command::new("/usr/sbin/chown")
+        .args(["root:wheel", &path])
+        .status();
     // Force macOS to pick up the new resolver file. Without this,
     // queries for the tailnet domain still fall through to the
     // default DNS until the next configd reload.
@@ -1122,10 +1403,17 @@ pub fn current_exit_node() -> (String, String) {
     let Ok(o) = out else {
         return (String::new(), String::new());
     };
-    let v: serde_json::Value =
-        serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null);
-    let id = v.get("ExitNodeID").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let mut ip = v.get("ExitNodeIP").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let v: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap_or(serde_json::Value::Null);
+    let id = v
+        .get("ExitNodeID")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let mut ip = v
+        .get("ExitNodeIP")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     if ip.is_empty() && !id.is_empty() {
         ip = resolve_exit_node_ip(&id).unwrap_or_default();
     }
@@ -1220,7 +1508,10 @@ pub(crate) fn local_uplink_up() -> bool {
 /// default itself points at a utun (some tailscaled builds install one), fall
 /// back to the OS's primary hardware service.
 fn physical_uplink_iface() -> Option<String> {
-    if let Ok(out) = Command::new("/sbin/route").args(["-n", "get", "default"]).output() {
+    if let Ok(out) = Command::new("/sbin/route")
+        .args(["-n", "get", "default"])
+        .output()
+    {
         let s = String::from_utf8_lossy(&out.stdout);
         for line in s.lines() {
             if let Some(rest) = line.trim().strip_prefix("interface:") {
@@ -1338,7 +1629,9 @@ pub fn reconcile_exit_node() {
             // disruption can't itself trip panic_reset.
             crate::connectivity_watchdog::pause_for(20);
             match install_exit_routes(ExitRoutesArgs::default()) {
-                Ok(_) => tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established"),
+                Ok(_) => {
+                    tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established")
+                }
                 Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
             }
         }
@@ -1346,7 +1639,9 @@ pub fn reconcile_exit_node() {
             code = %r.response_code,
             "reconcile: exit node not reachable yet — staying on local uplink"
         ),
-        Err(e) => tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink"),
+        Err(e) => {
+            tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink")
+        }
     }
 }
 
@@ -1589,7 +1884,9 @@ pub fn ensure_plist_current() {
                 tracing::warn!("tailscaled plist refresh: write failed: {e}");
                 return;
             }
-            let _ = Command::new("/bin/chmod").args(["0644", LAUNCH_DAEMON_PLIST]).status();
+            let _ = Command::new("/bin/chmod")
+                .args(["0644", LAUNCH_DAEMON_PLIST])
+                .status();
             let _ = Command::new("/usr/sbin/chown")
                 .args(["root:wheel", LAUNCH_DAEMON_PLIST])
                 .status();
@@ -1702,6 +1999,78 @@ fn reload_daemon() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parses_public_endpoints_from_netmap() {
+        let netmap = br#"{
+            "Peers": [
+                {"Endpoints": ["8.8.8.8:41641", "[2001:db8::1]:41641", "10.0.0.2:41641"]},
+                {"Endpoints": ["1.1.1.1:443", "8.8.8.8:41641"]}
+            ]
+        }"#;
+        assert_eq!(
+            parse_netmap_endpoint_ips(netmap).unwrap(),
+            ["8.8.8.8", "1.1.1.1"]
+        );
+    }
+
+    #[test]
+    fn status_fallback_selects_only_the_active_exit_peer() {
+        let status = br#"{
+            "Peer": {
+                "one": {"ExitNode": false, "TailscaleIPs": ["100.64.0.1"]},
+                "two": {"ExitNode": true, "TailscaleIPs": ["100.64.0.2", "fd7a::2"]}
+            }
+        }"#;
+        assert_eq!(
+            parse_selected_exit_peer_ips(status).unwrap(),
+            ["100.64.0.2"]
+        );
+    }
+
+    #[test]
+    fn endpoint_history_uses_latest_advertised_set() {
+        let changes = br#"[
+            {"What":"updateFromNode-new-Endpoints","To":["9.9.9.9:41641"]},
+            {"What":"updateFromNode-DERP","From":"","To":"127.3.3.40:3"},
+            {"What":"updateFromNode-new-Endpoints","To":[
+                "8.8.4.4:41641", "[2001:db8::4]:41641", "10.0.0.4:41641"
+            ]}
+        ]"#;
+        assert_eq!(
+            parse_latest_endpoint_change_ips(changes).unwrap(),
+            ["8.8.4.4"]
+        );
+    }
+
+    #[test]
+    fn routeable_ipv4_filter_rejects_non_public_ranges() {
+        for ip in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(!is_routeable_public_ipv4(ip), "accepted {ip}");
+        }
+        assert!(is_routeable_public_ipv4("8.8.8.8"));
+    }
+
+    #[test]
+    fn dns_servers_are_parsed_and_normalized() {
+        assert_eq!(
+            validate_dns_servers(&["2001:0db8::1".to_string(), "1.1.1.1".to_string()]).unwrap(),
+            ["2001:db8::1", "1.1.1.1"]
+        );
+        assert!(validate_dns_servers(&["1.1.1.1\nquit".to_string()]).is_err());
+        assert!(validate_dns_servers(&["empty".to_string()]).is_err());
+    }
+
     /// The whole point of the reload rework: a plist that already matches
     /// the template but a daemon that is NOT loaded must still reload.
     /// That is the state a prior lost bootstrap race leaves behind, and
@@ -1723,7 +2092,6 @@ mod tests {
         assert_eq!(plist_action(false, true), PlistAction::WriteThenReload);
         assert_eq!(plist_action(false, false), PlistAction::WriteThenReload);
     }
-
 
     /// The watchdog pause both wake paths arm before scheduling reconciles
     /// (`connectivity_watchdog::pause_for(45)`, main.rs wake detector and the
@@ -1859,6 +2227,9 @@ An asterisk (*) denotes that a network service is disabled.
         assert!(plist.starts_with("<?xml"));
         assert!(plist.contains(LAUNCH_LABEL));
         assert!(plist.contains(DAEMON_INSTALL_PATH));
-        assert_eq!(plist.matches("<dict>").count(), plist.matches("</dict>").count());
+        assert_eq!(
+            plist.matches("<dict>").count(),
+            plist.matches("</dict>").count()
+        );
     }
 }

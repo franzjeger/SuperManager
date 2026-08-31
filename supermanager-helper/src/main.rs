@@ -41,6 +41,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -369,7 +370,8 @@ async fn handle_connection(
     mut stream: UnixStream,
     controllers: Controllers,
 ) -> anyhow::Result<()> {
-    debug!("client connected");
+    let peer_uid = peer_effective_uid(&stream).context("reading socket peer credentials")?;
+    debug!(peer_uid, "client connected");
 
     loop {
         let mut len_buf = [0u8; 4];
@@ -391,7 +393,7 @@ async fn handle_connection(
         stream.read_exact(&mut buf).await?;
 
         let response = match serde_json::from_slice::<Request>(&buf) {
-            Ok(req) => dispatch(req, &controllers).await,
+            Ok(req) => dispatch(req, &controllers, peer_uid).await,
             Err(e) => Response::err(0, -32700, format!("parse error: {e}")),
         };
 
@@ -402,7 +404,18 @@ async fn handle_connection(
     }
 }
 
-async fn dispatch(req: Request, controllers: &Controllers) -> Response {
+fn peer_effective_uid(stream: &UnixStream) -> anyhow::Result<libc::uid_t> {
+    let mut uid = 0;
+    let mut gid = 0;
+    let rc = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if rc == 0 {
+        Ok(uid)
+    } else {
+        Err(std::io::Error::last_os_error()).context("getpeereid")
+    }
+}
+
+async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t) -> Response {
     let strongswan = &controllers.strongswan;
     let wireguard = &controllers.wireguard;
     let openvpn = &controllers.openvpn;
@@ -1006,7 +1019,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // See `traffic_capture::run` for the full validation
         // logic; the helper just calls into it.
         "traffic_capture" => {
-            match traffic_capture::run(req.params).await {
+            match traffic_capture::run(req.params, peer_uid).await {
                 Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
             }

@@ -12,9 +12,10 @@ members = [
     "supermanager-helper",
 ]
 # `cargo build` / `cargo test` (no -p / --workspace) only touches this
-# list: the two crates that build anywhere, with no GTK, launchd, Apple
-# SDK or Windows SDK needed. It keeps a bare `cargo build` fast and
-# portable on any dev machine.
+# list: the shared core crate, which builds anywhere with no GTK, launchd,
+# Apple SDK or Windows SDK needed. It keeps a bare `cargo build` fast and
+# portable on any dev machine. `supermgr-mcp` is intentionally excluded:
+# its daemon-client transport exists only on Linux and Windows.
 #
 # It is NOT the set CI builds. Every CI job names its crates with `-p`
 # (see .github/workflows/ci.yml) — relying on this list would have meant
@@ -23,11 +24,11 @@ members = [
 #
 # Per-host invocations:
 #   cargo build -p supermgrd -p supermgr -p supermgr-engine   # Linux
-#   cargo build --workspace                                   # macOS only
+#   cargo build -p supermgr-core -p supermgr-engine -p supermgrd-mac \
+#     -p supermanager-helper                                  # macOS
 #   cargo build -p supermgrd-win -p supermgr-win              # Windows
 default-members = [
     "supermgr-core",
-    "supermgr-mcp",
 ]
 
 # ---------------------------------------------------------------------------

@@ -363,8 +363,8 @@ note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
 # 3. Build
 #
 # The crates are named explicitly. A bare `cargo build` honours
-# `default-members`, which is only the two crates that build on every
-# platform — it produces neither supermgrd nor supermgr, and the install
+# `default-members`, which is only the portable shared core crate — it
+# produces neither supermgrd nor supermgr, and the install
 # step below would then fail on a missing file.
 # ---------------------------------------------------------------------------
 

@@ -520,8 +520,8 @@ cargo build   -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -
 cargo test    -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -p supermgr
 cargo clippy --all-targets -p supermgr-core -p supermgr-engine -p supermgr-mcp -p supermgrd -p supermgr
 
-# macOS — everything, including the SwiftUI app
-cargo test --workspace
+# macOS — Rust crates plus the SwiftUI app
+cargo test -p supermgr-core -p supermgr-engine -p supermgrd-mac -p supermanager-helper
 cd SuperManagerMac && xcodegen generate && xcodebuild test \
     -project SuperManager.xcodeproj -scheme SuperManagerMac -destination 'platform=macOS'
 
@@ -530,9 +530,8 @@ cargo test -p supermgr-core -p supermgr-mcp -p supermgrd-win -p supermgr-win
 ```
 
 `default-members` in the workspace `Cargo.toml` is deliberately just
-`supermgr-core` + `supermgr-mcp`, so a bare `cargo build` stays fast and portable on
-any machine. It is **not** the set to build or test against — see the Linux build
-note above.
+`supermgr-core`, so a bare `cargo build` stays fast and portable on any machine.
+It is **not** the set to build or test against — see the platform commands above.
 
 Extra system packages the tests need beyond the build dependencies:
 

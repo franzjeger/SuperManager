@@ -175,8 +175,8 @@ jobs:
   # and the engine.
   #
   # These are named explicitly with `-p`. A bare `cargo build` obeys
-  # `default-members`, which is only supermgr-core + supermgr-mcp — so it
-  # silently skipped supermgrd and supermgr (~35k lines and 50-odd tests)
+  # `default-members`, which is only supermgr-core — so it silently skips
+  # supermgrd and supermgr (~35k lines and 50-odd tests)
   # while this job installed GTK for them. Naming the crates is what makes
   # the job mean what its title says.
   #
@@ -342,10 +342,15 @@ jobs:
             -p supermgrd-mac \
             -p supermanager-helper
 
+      # The workspace default must stay host-portable. This caught
+      # `supermgr-mcp` being listed as a default even though its daemon-client
+      # transport is compiled only on Linux and Windows.
+      - name: Test portable workspace defaults
+        run: cargo test
+
       - name: Tests (Mac crates)
         run: |
           cargo test \
-            -p supermgr-core \
             -p supermgr-engine \
             -p supermgrd-mac \
             -p supermanager-helper

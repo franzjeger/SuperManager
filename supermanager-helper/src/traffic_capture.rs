@@ -13,20 +13,23 @@
 //!
 //!   - **Output-path lockdown**: the path MUST be inside the
 //!     caller's `~/Library/Application Support/SuperManager/`
-//!     directory. The helper resolves the user's HOME via
-//!     `SUDO_USER` (set by launchd via the agent->daemon path
-//!     when invoked from the user app) or, in development, via
-//!     the `HOME` env. No path containing `..` is accepted.
+//!     directory. The helper resolves the authenticated Unix-socket peer's
+//!     home through the system account database. No path containing `..` is
+//!     accepted, and `tcpdump` receives a pre-opened no-follow descriptor.
 //!   - **BPF filter sanity check**: length-capped, no shell
 //!     metacharacters (we pass it as a separate argv anyway,
 //!     but layered defence is cheap).
 //!   - **Duration cap**: 600 seconds. Longer captures should be
 //!     done with Wireshark by hand — we're a recon tool, not a
 //!     long-haul collector.
-//!   - **Interface allowlist**: only well-known interface names
-//!     (`en0`/`en1`/`utun*`/`lo0`). Rejects everything else.
+//!   - **Interface validation**: accepts only short alphanumeric BSD interface
+//!     names and logs names outside the common macOS set.
 
+use std::ffi::CStr;
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -58,22 +61,20 @@ pub struct CaptureReport {
     pub packet_count_estimate: u64,
 }
 
-pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
-    let p: Params = serde_json::from_value(raw_params)
-        .map_err(|e| anyhow!("bad params: {e}"))?;
+pub async fn run(raw_params: serde_json::Value, peer_uid: libc::uid_t) -> Result<CaptureReport> {
+    let p: Params = serde_json::from_value(raw_params).map_err(|e| anyhow!("bad params: {e}"))?;
     let duration = p.duration_secs.clamp(1, 600);
 
     validate_interface(&p.interface)?;
     validate_bpf(&p.bpf_filter)?;
-    let output_path = validate_output_path(&p.output_path)?;
-
-    // Make sure the parent directory exists. Owned by root after
-    // creation; the actual pcap will be chmod'd 0644 below so the
-    // calling user can read it.
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("create capture dir {}: {e}", parent.display()))?;
-    }
+    let user_home = home_dir_for_uid(peer_uid)?;
+    let output_path = validate_output_path(&p.output_path, &user_home)?;
+    let output_file = create_capture_file(&output_path)?;
+    std::os::unix::fs::fchown(&output_file, Some(peer_uid), None)
+        .map_err(|e| anyhow!("assign capture to uid {peer_uid}: {e}"))?;
+    let capture_fd = output_file
+        .try_clone()
+        .map_err(|e| anyhow!("clone capture descriptor: {e}"))?;
 
     // Run tcpdump. The `-G <duration> -W 1` combo tells tcpdump
     // to rotate the capture file every `duration` seconds and
@@ -91,22 +92,30 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
     let bpf_filter = p.bpf_filter.clone();
     let mut child = tokio::process::Command::new("tcpdump")
         .args([
-            "-i", &p.interface,
-            "-w", &output_path.to_string_lossy(),
-            "-G", &duration.to_string(),
-            "-W", "1",
+            "-i",
+            &p.interface,
+            // Stream through the descriptor opened above. Giving tcpdump the
+            // pathname would let a symlink swap redirect this root process.
+            "-w",
+            "-",
+            "-G",
+            &duration.to_string(),
+            "-W",
+            "1",
             "-q",
             // Snap length — limit per-packet capture to 1600
             // bytes. Enough for any reasonable ASCII protocol
             // exchange. Bigger captures bloat the pcap without
             // value for cleartext-credential audit.
-            "-s", "1600",
+            "-s",
+            "1600",
             // Pass the BPF as a single argv string. tcpdump
             // joins multiple bare args internally; the explicit
             // single-string form means we never need to worry
             // about shell quoting.
             &bpf_filter,
         ])
+        .stdout(Stdio::from(capture_fd))
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| anyhow!("spawn tcpdump: {e}"))?;
@@ -132,21 +141,11 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
         tracing::warn!(exit, "tcpdump exited non-zero");
     }
 
-    // chmod 0644 so the calling user can read the pcap (Wireshark,
-    // strings, our own engine analyser, …) without re-prompting
-    // for admin. The pcap is in the user's own data dir so this
-    // doesn't broaden the attack surface.
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(
-            &output_path,
-            std::fs::Permissions::from_mode(0o644),
-        ) {
-            tracing::warn!("could not chmod 0644 {}: {e}", output_path.display());
-        }
-    }
-
-    let meta = std::fs::metadata(&output_path)
+    output_file
+        .sync_all()
+        .map_err(|e| anyhow!("flush capture {}: {e}", output_path.display()))?;
+    let meta = output_file
+        .metadata()
         .map_err(|e| anyhow!("stat pcap {}: {e}", output_path.display()))?;
     let size_bytes = meta.len();
 
@@ -158,6 +157,16 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
         completed_cleanly: status.success(),
         packet_count_estimate: estimate_packet_count(size_bytes),
     })
+}
+
+fn create_capture_file(path: &Path) -> Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| anyhow!("securely create capture {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -182,12 +191,30 @@ fn validate_interface(name: &str) -> Result<()> {
     // via the BSD-name regex above. Anything matching the regex
     // but not in this list will still run, but tracing logs it.
     let recognised = [
-        "en0", "en1", "en2", "en3", "en4", "en5",
-        "lo0", "bridge0", "bridge100", "bridge101",
-        "utun0", "utun1", "utun2", "utun3", "utun4", "utun5",
-        "utun6", "utun7", "utun8", "utun9",
-        "awdl0", "llw0",
-        "vmnet1", "vmnet8",
+        "en0",
+        "en1",
+        "en2",
+        "en3",
+        "en4",
+        "en5",
+        "lo0",
+        "bridge0",
+        "bridge100",
+        "bridge101",
+        "utun0",
+        "utun1",
+        "utun2",
+        "utun3",
+        "utun4",
+        "utun5",
+        "utun6",
+        "utun7",
+        "utun8",
+        "utun9",
+        "awdl0",
+        "llw0",
+        "vmnet1",
+        "vmnet8",
     ];
     if !recognised.contains(&name) {
         tracing::info!("traffic_capture: unrecognised interface {name} (running anyway)");
@@ -207,8 +234,8 @@ fn validate_bpf(expr: &str) -> Result<()> {
     // colons, square brackets (for tcp[12] etc.), ampersands +
     // pipes (and/or), arithmetic + comparison operators.
     let allowed: &[char] = &[
-        ' ', '\t', '.', '/', '(', ')', ':', '[', ']',
-        '&', '|', '<', '>', '=', '-', '!', '+', '*', '%',
+        ' ', '\t', '.', '/', '(', ')', ':', '[', ']', '&', '|', '<', '>', '=', '-', '!', '+', '*',
+        '%',
     ];
     for c in expr.chars() {
         if !c.is_ascii_alphanumeric() && !allowed.contains(&c) {
@@ -220,7 +247,7 @@ fn validate_bpf(expr: &str) -> Result<()> {
 
 /// Confirm the output path is under the caller's data directory
 /// and contains no `..`. Returns the canonical path.
-fn validate_output_path(raw: &str) -> Result<PathBuf> {
+fn validate_output_path(raw: &str, user_home: &Path) -> Result<PathBuf> {
     if raw.is_empty() {
         return Err(anyhow!("empty output path"));
     }
@@ -232,10 +259,19 @@ fn validate_output_path(raw: &str) -> Result<PathBuf> {
     if raw.contains("..") {
         return Err(anyhow!("output path must not contain `..`"));
     }
-    // Must be under the user's SuperManager data dir.
-    let user_home = user_home_dir()?;
+    // Resolve both the allowed root and the destination parent before opening.
+    // This rejects existing symlink components that escape the user's data dir.
     let allowed_prefix = user_home.join("Library/Application Support/SuperManager");
-    if !p.starts_with(&allowed_prefix) {
+    let allowed_prefix = allowed_prefix
+        .canonicalize()
+        .map_err(|e| anyhow!("resolve allowed capture directory: {e}"))?;
+    let parent = p
+        .parent()
+        .ok_or_else(|| anyhow!("output path has no parent"))?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| anyhow!("capture parent must already exist: {e}"))?;
+    if !parent.starts_with(&allowed_prefix) {
         return Err(anyhow!(
             "output path must be under {}",
             allowed_prefix.display()
@@ -247,49 +283,44 @@ fn validate_output_path(raw: &str) -> Result<PathBuf> {
     if ext != "pcap" && ext != "pcapng" {
         return Err(anyhow!("output path must end in .pcap or .pcapng"));
     }
-    Ok(p.to_path_buf())
+    let filename = p
+        .file_name()
+        .ok_or_else(|| anyhow!("output path has no filename"))?;
+    Ok(parent.join(filename))
 }
 
-/// Resolve the calling user's home directory. The helper runs
-/// as root so its own `$HOME` is `/var/root`. We need the user's
-/// home for the path-prefix check. macOS launchd sets
-/// `SUDO_USER` / `USER` when one launchd domain invokes another;
-/// in dev when the helper is foregrounded we fall back to `HOME`.
-fn user_home_dir() -> Result<PathBuf> {
-    // First try SUDO_USER (set when invoked via sudo / per-user agent).
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        if !user.is_empty() && user != "root" {
-            return Ok(PathBuf::from(format!("/Users/{user}")));
-        }
+/// Resolve the authenticated socket peer's home directory without consulting
+/// daemon-wide environment variables or guessing among `/Users` entries.
+fn home_dir_for_uid(uid: libc::uid_t) -> Result<PathBuf> {
+    let suggested = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    let buffer_len = usize::try_from(suggested).unwrap_or(16_384).max(1024);
+    let mut buffer = vec![0_u8; buffer_len];
+    let mut passwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            uid,
+            passwd.as_mut_ptr(),
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 {
+        return Err(anyhow!(
+            "getpwuid_r({uid}) failed: {}",
+            std::io::Error::from_raw_os_error(rc)
+        ));
     }
-    // Try USER if it's not root.
-    if let Ok(user) = std::env::var("USER") {
-        if !user.is_empty() && user != "root" {
-            return Ok(PathBuf::from(format!("/Users/{user}")));
-        }
+    if result.is_null() {
+        return Err(anyhow!("no account exists for socket peer uid {uid}"));
     }
-    // Fall back to scanning /Users for a non-Shared entry. The
-    // helper is single-user macOS — there's usually exactly one
-    // candidate.
-    let entries = std::fs::read_dir("/Users")
-        .map_err(|e| anyhow!("read /Users: {e}"))?;
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == "Shared" || name.starts_with('.') {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            candidates.push(path);
-        }
+    let passwd = unsafe { passwd.assume_init() };
+    if passwd.pw_dir.is_null() {
+        return Err(anyhow!("account for uid {uid} has no home directory"));
     }
-    candidates.sort();
-    candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("could not resolve user home dir"))
+    let home = unsafe { CStr::from_ptr(passwd.pw_dir) };
+    Ok(PathBuf::from(home.to_string_lossy().into_owned()))
 }
 
 /// Very rough pcap-size → packet-count estimate. A pcap file has
@@ -297,13 +328,25 @@ fn user_home_dir() -> Result<PathBuf> {
 /// average TCP payload + headers ~80 bytes, that's ~96 bytes per
 /// captured packet at our snap length. Used only as a GUI hint.
 fn estimate_packet_count(bytes: u64) -> u64 {
-    if bytes <= 24 { return 0; }
+    if bytes <= 24 {
+        return 0;
+    }
     (bytes - 24) / 96
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn capture_tree() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(
+            home.path()
+                .join("Library/Application Support/SuperManager/captures"),
+        )
+        .unwrap();
+        home
+    }
 
     #[test]
     fn rejects_empty_interface() {
@@ -358,32 +401,54 @@ mod tests {
 
     #[test]
     fn rejects_relative_output_path() {
-        assert!(validate_output_path("captures/x.pcap").is_err());
+        let home = capture_tree();
+        assert!(validate_output_path("captures/x.pcap", home.path()).is_err());
     }
 
     #[test]
     fn rejects_path_with_dotdot() {
         // Must be absolute AND no `..` AND must start with the
         // user's SuperManager dir. The dotdot rule alone fails it.
-        let p = "/Users/somebody/Library/Application Support/SuperManager/captures/../../etc/x.pcap";
-        assert!(validate_output_path(p).is_err());
+        let p =
+            "/Users/somebody/Library/Application Support/SuperManager/captures/../../etc/x.pcap";
+        let home = capture_tree();
+        assert!(validate_output_path(p, home.path()).is_err());
     }
 
     #[test]
     fn rejects_non_pcap_extension() {
-        // Build a path under the test home (won't actually exist;
-        // we only validate the prefix + extension).
-        // Note: this test can't fully verify the home-prefix
-        // check without a real user — it just confirms the
-        // extension gate.
-        let bad_ext = format!(
-            "/Users/{}/Library/Application Support/SuperManager/captures/x.sh",
-            std::env::var("USER").unwrap_or_else(|_| "test".into())
-        );
-        let res = validate_output_path(&bad_ext);
-        // Either rejects on prefix OR extension — both are valid
-        // failure modes. The point is: it MUST fail.
+        let home = capture_tree();
+        let bad_ext = home
+            .path()
+            .join("Library/Application Support/SuperManager/captures/x.sh");
+        let res = validate_output_path(bad_ext.to_str().unwrap(), home.path());
         assert!(res.is_err(), "must reject .sh extension: got {res:?}");
+    }
+
+    #[test]
+    fn rejects_parent_symlink_that_escapes_capture_root() {
+        let home = capture_tree();
+        let outside = tempfile::tempdir().unwrap();
+        let link = home
+            .path()
+            .join("Library/Application Support/SuperManager/escape");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let requested = link.join("capture.pcap");
+        assert!(validate_output_path(requested.to_str().unwrap(), home.path()).is_err());
+    }
+
+    #[test]
+    fn secure_create_refuses_a_final_symlink() {
+        let home = capture_tree();
+        let victim = home.path().join("victim");
+        std::fs::write(&victim, b"do not overwrite").unwrap();
+        let planted = home
+            .path()
+            .join("Library/Application Support/SuperManager/captures/planted.pcap");
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+
+        assert!(create_capture_file(&planted).is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not overwrite");
     }
 
     #[test]
