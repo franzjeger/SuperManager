@@ -419,7 +419,15 @@ echo "→ Distribution zip: $DIST_ZIP ($(du -h "$DIST_ZIP" | cut -f1))"
 # ---- 8. Sparkle signature ---------------------------------------------------
 
 echo "→ Computing Sparkle EdDSA signature"
-SPARKLE_SIG_LINE="$("$SIGN_UPDATE" "$DIST_ZIP")"
+if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
+    # Headless CI must not ask Keychain for this value: sign_update may wait
+    # forever for an access prompt that no runner can answer. Sparkle supports
+    # reading the exported key from stdin specifically for secret stores.
+    SPARKLE_SIG_LINE="$(printf '%s' "$SPARKLE_PRIVATE_KEY" \
+        | "$SIGN_UPDATE" --ed-key-file - "$DIST_ZIP")"
+else
+    SPARKLE_SIG_LINE="$("$SIGN_UPDATE" "$DIST_ZIP")"
+fi
 # `sign_update` prints e.g. `sparkle:edSignature="..." length="12345"`
 echo "  $SPARKLE_SIG_LINE"
 

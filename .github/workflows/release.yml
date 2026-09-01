@@ -136,30 +136,6 @@ jobs:
           chmod 600 "$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8"
           echo "AC_API_KEY_PATH=$HOME/.appstoreconnect/AuthKey_${AC_API_KEY_ID}.p8" >> "$GITHUB_ENV"
 
-      # Stage the Sparkle private key into the same temp keychain
-      # so `sign_update` can find it. Sparkle's tool looks for a
-      # generic password labelled `https://sparkle-project.org`.
-      - name: Stage Sparkle EdDSA key
-        env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          # The secret is the raw private-key string (base64 of the
-          # 32-byte ed25519 seed), exported on the dev machine via:
-          #   security find-generic-password -a ed25519 \
-          #     -s 'https://sparkle-project.org' -w | tr -d '\n'
-          security add-generic-password \
-            -a ed25519 \
-            -s 'https://sparkle-project.org' \
-            -w "$SPARKLE_PRIVATE_KEY" \
-            -T /usr/bin/security \
-            build.keychain
-          # ACL grant so sign_update can read it without a prompt
-          security set-key-partition-list \
-            -S apple-tool:,apple:,unsigned: \
-            -s -k "$KCHAIN_PW" \
-            build.keychain
-
       # Pre-resolve SwiftPM packages so `release.sh` can find
       # `generate_keys`/`sign_update` inside DerivedData.
       - name: Resolve SwiftPM packages
@@ -178,6 +154,9 @@ jobs:
           # release.sh treats empty DEVELOPER_ID_INSTALLER as "build unsigned pkg".
           AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
           AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+          # release.sh pipes this to sign_update via --ed-key-file -.
+          # Reading it back from Keychain can hang on a headless runner.
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           # AC_API_KEY_PATH set by the earlier step via GITHUB_ENV
         run: |
           set -euo pipefail
