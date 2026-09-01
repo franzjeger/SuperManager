@@ -137,7 +137,9 @@ xcodebuild \
     -scheme SuperManagerMac \
     -configuration Release \
     -destination 'platform=macOS' \
-    -allowProvisioningUpdates \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY="" \
     clean build \
     2>&1 | grep -E '(error:|warning:|BUILD)' || true
 
