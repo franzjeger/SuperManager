@@ -69,7 +69,7 @@ jobs:
       - name: Install build deps
         run: |
           brew update
-          brew install xcodegen pandoc xcbeautify
+          brew install xcodegen pandoc xcbeautify tailscale
 
       # Set up a *temporary* keychain just for this run. We import
       # the Developer ID cert into it, then nuke the keychain at
