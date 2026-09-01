@@ -70,10 +70,18 @@ if [ -z "${DEVELOPER_ID_INSTALLER:-}" ]; then
     echo "   Set it to enable .pkg signing and notarisation."
 fi
 
-# Tag must not already exist.
+# A local release starts before its tag is created, so reusing an existing
+# version is an error. GitHub Actions is intentionally triggered *by* that
+# tag, though; allow only the exact tag that started the current CI run.
 if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
-    echo "error: tag v$VERSION already exists. Pick a different version." >&2
-    exit 1
+    if [ "${GITHUB_ACTIONS:-}" = "true" ] && \
+       [ "${GITHUB_REF_TYPE:-}" = "tag" ] && \
+       [ "${GITHUB_REF_NAME:-}" = "v$VERSION" ]; then
+        echo "  using trigger tag v$VERSION"
+    else
+        echo "error: tag v$VERSION already exists. Pick a different version." >&2
+        exit 1
+    fi
 fi
 
 # Developer ID cert must be in Keychain.
