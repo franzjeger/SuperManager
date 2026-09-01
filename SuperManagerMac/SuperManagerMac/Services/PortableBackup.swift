@@ -19,6 +19,16 @@ enum PortableBackup {
         let secrets: Int
     }
 
+    struct ExportResult {
+        let data: Data
+        /// Names of profiles whose VPN credentials the Keychain would not
+        /// hand over, so they are NOT in this backup. Empty on a clean
+        /// export. Non-empty most often after updating from an
+        /// Apple-Development dev build to the Developer-ID release, whose
+        /// different Keychain access group hides the old items.
+        let incompleteProfiles: [String]
+    }
+
     enum BackupError: LocalizedError {
         case malformedEngineResponse
         case malformedFile(String)
@@ -49,7 +59,7 @@ enum PortableBackup {
     /// The portable backup bytes: the engine's JSON with the Keychain
     /// credentials merged into its `secrets` map. Write these 0600 — a
     /// populated backup carries private keys and passwords in the clear.
-    static func export(client: ServiceClient) async throws -> Data {
+    static func export(client: ServiceClient) async throws -> ExportResult {
         struct ExportResp: Decodable { let backup: String }
         let resp: ExportResp = try await client.call("backup_export")
 
@@ -62,18 +72,41 @@ enum PortableBackup {
 
         var secrets = root["secrets"] as? [String: String] ?? [:]
         let profiles = root["profiles"] as? [[String: Any]] ?? []
+        var incomplete: [String] = []
         for profile in profiles {
-            guard let pid = profile["id"] as? String else { continue }
-            for account in VPNKeychain.accounts(for: pid) {
-                if let data = try? VPNKeychain.getData(account: account) {
-                    secrets[account] = data.base64EncodedString()
+            // Only the credentials this profile actually references — a
+            // WireGuard profile has none of these, a FortiGate has
+            // password+psk. Reading them (not all four blindly) is what
+            // lets us tell a genuinely-missing credential from an unused
+            // slot.
+            let expected = expectedKeychainLabels(config: profile["config"] as? [String: Any])
+            guard !expected.isEmpty else { continue }
+            let name = (profile["name"] as? String) ?? (profile["id"] as? String) ?? "?"
+            var missedOne = false
+            for label in expected {
+                if let data = try? VPNKeychain.getData(account: label) {
+                    secrets[label] = data.base64EncodedString()
+                } else {
+                    missedOne = true
                 }
             }
+            if missedOne { incomplete.append(name) }
         }
         root["secrets"] = secrets
 
-        return try JSONSerialization.data(
+        let data = try JSONSerialization.data(
             withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+        return ExportResult(data: data, incompleteProfiles: incomplete.sorted())
+    }
+
+    /// The Keychain secret labels a profile's config actually references
+    /// (its used credentials), pulled from the SecretRef fields. Pure, so
+    /// the "what should this backup contain" rule is testable.
+    static func expectedKeychainLabels(config: [String: Any]?) -> [String] {
+        guard let config else { return [] }
+        return ["password", "psk", "ovpn_username", "ovpn_password"].compactMap { field in
+            (config[field] as? String).flatMap { $0.hasPrefix("vpn/") ? $0 : nil }
+        }
     }
 
     /// Restore a portable backup: the Keychain-bound secrets go to the
