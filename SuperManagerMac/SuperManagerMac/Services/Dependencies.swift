@@ -79,6 +79,25 @@ enum Dependencies {
 
     static var missing: [Tool] { all.filter { !$0.isInstalled } }
 
+    /// For a tool Homebrew can't supply (`formula == nil`), the shell
+    /// command that builds and installs it. Run in Terminal, not
+    /// captured in-app: the OpenVPN 3 build takes minutes and ends in a
+    /// `sudo install`, so its progress and password prompt have to be
+    /// visible. `nil` when brew can do the job instead.
+    static func terminalBuildCommand(for id: String) -> String? {
+        switch id {
+        case "openvpn3":
+            // The documented --with-openvpn3 path: installs the build
+            // deps (cmake, asio, jsoncpp, openssl@3, lz4) and runs
+            // contrib/build-openvpn3-mac.sh.
+            return "curl -fsSL "
+                + "https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh"
+                + " | bash -s -- --deps-only --with-openvpn3"
+        default:
+            return nil
+        }
+    }
+
     // MARK: - Installing
 
     enum InstallError: LocalizedError {

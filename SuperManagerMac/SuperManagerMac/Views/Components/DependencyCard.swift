@@ -94,7 +94,45 @@ struct DependencyCard: View {
                 Button("Install") { install(tool) }
                     .controlSize(.small)
                     .disabled(Dependencies.brewPath == nil || installing != nil)
+            } else if Dependencies.terminalBuildCommand(for: tool.id) != nil {
+                // No brew formula: build it in Terminal, where the
+                // multi-minute compile and its sudo prompt are visible.
+                Button("Build in Terminal\u{2026}") { buildInTerminal(tool) }
+                    .controlSize(.small)
+                    .disabled(installing != nil)
             }
+        }
+    }
+
+    /// Launch the tool's build command in Terminal by opening a small
+    /// `.command` file. Deliberately not run in-process: it needs a
+    /// visible progress log and an interactive `sudo`, neither of which
+    /// the captured-output installer above can offer.
+    private func buildInTerminal(_ tool: Dependencies.Tool) {
+        guard let cmd = Dependencies.terminalBuildCommand(for: tool.id) else { return }
+        let script = """
+            #!/bin/bash
+            echo "Building \(tool.id) for SuperManager. This takes a few minutes and"
+            echo "may ask for your password to install the finished binary."
+            echo
+            \(cmd)
+            status=$?
+            echo
+            if [ $status -eq 0 ]; then
+                echo "Done — you can close this window and return to SuperManager."
+            else
+                echo "Build failed (exit $status). Leave this window open to read the error."
+            fi
+            """
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("supermanager-build-\(tool.id).command")
+        do {
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o755], ofItemAtPath: url.path)
+            NSWorkspace.shared.open(url)
+        } catch {
+            failure = "Could not start the build: \(error.localizedDescription)"
         }
     }
 

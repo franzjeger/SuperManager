@@ -233,15 +233,26 @@ struct BackupSettingsView: View {
         lastResult = nil
         Task { @MainActor in
             do {
-                let data = try await PortableBackup.export(client: appState.client)
-                try data.write(to: url, options: [.atomic])
+                let result = try await PortableBackup.export(client: appState.client)
+                try result.data.write(to: url, options: [.atomic])
                 // Owner-only: the file carries private keys and passwords.
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: url.path)
                 let size = ByteCountFormatter.string(
-                    fromByteCount: Int64(data.count), countStyle: .file)
+                    fromByteCount: Int64(result.data.count), countStyle: .file)
                 status = .idle
                 lastResult = "Exported \(size) to \(url.lastPathComponent)"
+                if !result.incompleteProfiles.isEmpty {
+                    // Surface the silent gap: these VPN credentials were not
+                    // readable (usually the dev-build -> Developer-ID Keychain
+                    // access-group change) and are absent from the backup.
+                    self.error =
+                        "Backup written, but the VPN credentials for "
+                        + "\(result.incompleteProfiles.count) profile(s) could not be read "
+                        + "from the Keychain and are NOT included: "
+                        + "\(result.incompleteProfiles.joined(separator: ", ")). "
+                        + "Re-enter each profile's password once, then export again."
+                }
             } catch {
                 status = .idle
                 self.error = error.localizedDescription
