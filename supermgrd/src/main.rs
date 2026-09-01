@@ -27,6 +27,7 @@
 
 mod audit;
 mod polkit;
+mod recon;
 mod vpn;
 mod ssh;
 mod daemon;
@@ -144,9 +145,13 @@ async fn main() -> anyhow::Result<()> {
     daemon_state
         .load_profiles()
         .context("failed to load profiles")?;
+    daemon_state
+        .load_customers()
+        .context("failed to load customer catalog")?;
 
     let profile_count = daemon_state.profiles.len();
     info!("loaded {} VPN profile(s)", profile_count);
+    info!("loaded {} customer(s)", daemon_state.customers.len());
 
     // -----------------------------------------------------------------------
     // 2b. SSH data (keys and hosts)

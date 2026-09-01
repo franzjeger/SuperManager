@@ -1,4 +1,4 @@
-//! Embed the git commit the GUI was built from.
+//! Embed the git commit and nearest tagged version the GUI was built from.
 //!
 //! Linux installs build from a checkout of `main` rather than from tagged
 //! release artifacts, so the crate version alone cannot answer "is there a
@@ -21,6 +21,17 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=SUPERMGR_GIT_COMMIT={commit}");
+
+    let version = Command::new("git")
+        .args(["describe", "--tags", "--always"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".into()));
+    println!("cargo:rustc-env=SUPERMGR_BUILD_VERSION={version}");
 
     // Rebuild when HEAD moves — .git/HEAD changes on branch switches, the
     // per-branch ref file changes on commits/pulls. Missing paths are fine:

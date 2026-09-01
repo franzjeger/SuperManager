@@ -19,6 +19,8 @@
 #   --check       Only report. Exit 0 = up to date, 10 = update available.
 #   --force       Rebuild + reinstall even when already up to date.
 #   --yes, -y     Don't ask before updating.
+#   --installed-commit SHA
+#                 Also compare the running GUI build (used by the GUI).
 #   --help, -h    This text.
 #
 # The GUI does not update itself in place: a running supermgr keeps the old
@@ -29,13 +31,19 @@ set -euo pipefail
 DO_CHECK=0
 FORCE=0
 ASSUME_YES=0
+INSTALLED_COMMIT=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --check)   DO_CHECK=1 ;;
         --force)   FORCE=1 ;;
         -y|--yes)  ASSUME_YES=1 ;;
-        -h|--help) sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --installed-commit)
+            [ $# -ge 2 ] || { echo "--installed-commit requires a SHA" >&2; exit 2; }
+            INSTALLED_COMMIT="$2"
+            shift
+            ;;
+        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -45,6 +53,11 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+
+if [ -n "$INSTALLED_COMMIT" ] \
+   && [[ ! "$INSTALLED_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+    die "--installed-commit must be a full hexadecimal Git commit ID"
+fi
 
 [ "$(id -u)" != 0 ] || die "run this as your normal user, not root — the build belongs to you.
        The install phase elevates on its own (sudo in a terminal, polkit from the GUI)."
@@ -123,14 +136,28 @@ diverged)
     ;;
 esac
 
+# A checkout can already be at origin/main while the installed GUI still runs
+# an older build. This is common after a manual `git pull`; comparing only HEAD
+# would say "nothing to do" and leave the old binary installed.
+BINARY_STALE=0
+if [ -n "$INSTALLED_COMMIT" ] && [ "$INSTALLED_COMMIT" != "$REMOTE" ]; then
+    if git -C "$CHECKOUT" cat-file -e "$INSTALLED_COMMIT^{commit}" 2>/dev/null \
+       && git -C "$CHECKOUT" merge-base --is-ancestor "$INSTALLED_COMMIT" "$REMOTE"; then
+        BINARY_STALE=1
+        note "installed GUI is older than origin ($(printf '%.7s' "$INSTALLED_COMMIT"))"
+    else
+        warn "installed GUI commit is not an ancestor of origin; leaving source-state decision unchanged"
+    fi
+fi
+
 if [ "$DO_CHECK" = 1 ]; then
-    if [ "$STATE" = behind ]; then
+    if [ "$STATE" = behind ] || [ "$BINARY_STALE" = 1 ]; then
         exit 10
     fi
     exit 0
 fi
 
-if [ "$STATE" != behind ] && [ "$FORCE" != 1 ]; then
+if [ "$STATE" != behind ] && [ "$BINARY_STALE" != 1 ] && [ "$FORCE" != 1 ]; then
     note "nothing to do (use --force to rebuild + reinstall anyway)"
     exit 0
 fi

@@ -23,6 +23,7 @@
 
 pub mod compliance;
 pub mod console;
+pub mod customers;
 pub mod design;
 pub mod navigation;
 mod lock;
@@ -30,6 +31,7 @@ pub mod palette;
 mod preferences;
 pub mod shell;
 pub mod provisioning;
+pub mod recon;
 pub mod security;
 pub mod ssh;
 pub mod tailscale;
@@ -506,9 +508,28 @@ pub fn build_ui(
     security_page_ref.set_icon_name(Some(design::icon_name(design::icons::SHIELD)));
 
     // =========================================================================
+    // Customers page — stable customer/site catalog and asset ownership
+    // =========================================================================
+    let customer_view = customers::build_customer_page(&window, &rt, &tx);
+    view_stack.add_titled(&customer_view.widget, Some("customers"), "Customers");
+    let customer_page_ref = view_stack.page(&customer_view.widget);
+    customer_page_ref.set_icon_name(Some(design::icon_name(&[
+        "system-users-symbolic",
+        "avatar-default-symbolic",
+    ])));
+    // Load once at startup so Fleet/SSH/VPN can render customer ownership
+    // before the customer page itself has ever been opened.
+    customer_view.refresh(None);
+
+    let recon_view = recon::build_recon_page(&app_state, &window, &rt, &tx);
+    view_stack.add_titled(&recon_view.widget, Some("recon"), "Recon");
+    let recon_page_ref = view_stack.page(&recon_view.widget);
+    recon_page_ref.set_icon_name(Some(design::icon_name(design::icons::SEARCH)));
+
+    // =========================================================================
     // Dashboard page (standalone, full-width)
     // =========================================================================
-    let (dashboard_flow_box, dashboard_widget) =
+    let (dashboard_flow_box, dashboard_stack, dashboard_widget) =
         ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
 
     // "fleet" is the id the navigation sidebar addresses this page by. The
@@ -928,11 +949,19 @@ pub fn build_ui(
         let tx = tx.clone();
         let nav_compliance_view = std::rc::Rc::clone(&compliance_view);
         let nav_security_view = std::rc::Rc::clone(&security_view);
+        let nav_customer_view = std::rc::Rc::clone(&customer_view);
         let nav_app_state = Arc::clone(&app_state);
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
             let page = page.as_deref().unwrap_or("vpn");
             match page {
+                "customers" => {
+                    vpn_add_group.set_visible(false);
+                    ssh_keys_add_group.set_visible(false);
+                    ssh_hosts_add_group.set_visible(false);
+                    add_menu_btn.set_visible(false);
+                    nav_customer_view.refresh(None);
+                }
                 "compliance" => {
                     vpn_add_group.set_visible(false);
                     ssh_keys_add_group.set_visible(false);
@@ -2887,6 +2916,8 @@ pub fn build_ui(
     let rx_tailscale_view = std::rc::Rc::clone(&tailscale_view);
     let rx_compliance_view = std::rc::Rc::clone(&compliance_view);
     let rx_security_view = std::rc::Rc::clone(&security_view);
+    let rx_customer_view = std::rc::Rc::clone(&customer_view);
+    let rx_recon_view = std::rc::Rc::clone(&recon_view);
     // Holds the run between ComplianceRunFinished and ComplianceContextLoaded.
     // The run arrives first because it is what took seven SSH round-trips; the
     // library and history are cheap follow-ups that redraw it with detail.
@@ -2906,6 +2937,7 @@ pub fn build_ui(
     let rx_console_panel = console_panel.clone();
     let rx_ssh_host_detail = ssh_host_detail.clone();
     let rx_dashboard_flow_box = dashboard_flow_box.clone();
+    let rx_dashboard_stack = dashboard_stack.clone();
     let rx_notif_list = notif_list.clone();
     let rx_notif_btn = notif_btn.clone();
 
@@ -2945,6 +2977,10 @@ pub fn build_ui(
                         s.profiles.clone(),
                         &rx_rt,
                     );
+                    // The first customer fetch may have raced daemon startup.
+                    // Once the daemon is confirmed reachable, reload the
+                    // ownership snapshot that Fleet/SSH/VPN share.
+                    rx_customer_view.refresh(None);
                 }
                 AppMsg::ImportSucceeded { profiles, toast } => {
                     {
@@ -3159,6 +3195,70 @@ pub fn build_ui(
                     rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available = false;
                     rx_banner.set_revealed(true);
                 }
+                AppMsg::CustomerDataRefreshed { result, toast } => match result {
+                    Ok((customers, hosts, profiles)) => {
+                        {
+                            let mut state = rx_app_state
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            state.customers = customers;
+                            state.hosts = hosts;
+                            state.profiles = profiles;
+                        }
+                        let state = rx_app_state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        rx_customer_view.render(
+                            &state.customers,
+                            &state.hosts,
+                            &state.profiles,
+                        );
+                        populate_ssh_host_list(
+                            &rx_ssh_host_list,
+                            &state.hosts,
+                            state.selected_ssh_host.as_deref(),
+                            &rx_window,
+                            &rx_rt,
+                            &rx_tx,
+                            &state.ssh_filter,
+                            &state.host_health,
+                        );
+                        populate_vpn_sidebar(
+                            &rx_profile_list,
+                            &state.profiles,
+                            &state.vpn_state,
+                            state.selected_profile.as_deref(),
+                            &rx_window,
+                            &rx_rt,
+                            &rx_tx,
+                            &state.vpn_filter,
+                        );
+                        drop(state);
+                        ssh::dashboard::populate_dashboard(
+                            &rx_dashboard_stack,
+                            &rx_dashboard_flow_box,
+                            &rx_app_state,
+                            &rx_rt,
+                            &rx_tx,
+                        );
+                        if let Some(message) = toast {
+                            rx_toast_overlay.add_toast(adw::Toast::new(&message));
+                        }
+                    }
+                    Err(message) => {
+                        error!("customer refresh failed: {message}");
+                        rx_customer_view.render_error(&message);
+                        if toast.is_some() {
+                            rx_toast_overlay.add_toast(adw::Toast::new(&format!(
+                                "Customer change failed: {message}"
+                            )));
+                        }
+                    }
+                },
+                AppMsg::ReconScanFinished(result) => match result {
+                    Ok(result) => rx_recon_view.show_result(&result),
+                    Err(message) => rx_recon_view.show_error(&message),
+                },
                 AppMsg::ComplianceRunFinished { host_id, result } => {
                     match result {
                         Ok(run) => {
@@ -4013,7 +4113,7 @@ fn show_about_dialog(window: &adw::ApplicationWindow) {
     let dialog = adw::AboutDialog::builder()
         .application_name("SuperManager")
         .application_icon("org.supermgr.SuperManager")
-        .version(env!("CARGO_PKG_VERSION"))
+        .version(crate::update::VERSION)
         .developer_name("Sybr AS")
         .website("https://github.com/franzjeger/SuperManager")
         .issue_url("https://github.com/franzjeger/SuperManager/issues")

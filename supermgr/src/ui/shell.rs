@@ -62,6 +62,7 @@ pub struct Section {
 /// of ten from reading as a list of ten.
 pub const MANAGE: &[Section] = &[
     Section { id: "fleet",     title: "Fleet",     icon: design::icons::GRID,              built: true },
+    Section { id: "customers", title: "Customers", icon: &["system-users-symbolic", "avatar-default-symbolic"], built: true },
     Section { id: "hosts",     title: "SSH",       icon: design::icons::HOST,               built: true },
     Section { id: "keys",      title: "Keys",      icon: design::icons::KEY,        built: true },
     Section { id: "vpn",       title: "VPN",       icon: design::icons::VPN,            built: true },
@@ -74,7 +75,7 @@ pub const OPERATE: &[Section] = &[
     Section { id: "console",      title: "Console",      icon: design::icons::TERMINAL, built: true },
     Section { id: "compliance",   title: "Compliance",   icon: &["emblem-ok-symbolic", "dialog-ok"],         built: true },
     Section { id: "security",     title: "Security",     icon: design::icons::SHIELD,     built: true },
-    Section { id: "recon",        title: "Recon",        icon: design::icons::SEARCH,     built: false },
+    Section { id: "recon",        title: "Recon",        icon: design::icons::SEARCH,     built: true },
 ];
 
 /// Every section, both groups.
@@ -345,8 +346,8 @@ mod tests {
             .map(|s| s.id)
             .collect();
         for id in [
-            "fleet", "hosts", "keys", "vpn", "tailscale", "compliance", "provisioning",
-            "console", "security",
+            "fleet", "customers", "hosts", "keys", "vpn", "tailscale", "compliance", "provisioning",
+            "console", "security", "recon",
         ] {
             assert!(built.contains(&id), "'{id}' exists but is marked unbuilt");
         }
@@ -387,10 +388,6 @@ mod tests {
             .filter(|s| !s.built)
             .map(|s| s.id)
             .collect();
-        assert_eq!(
-            unbuilt,
-            ["recon"],
-            "the set of unimplemented sections changed"
-        );
+        assert!(unbuilt.is_empty(), "all navigation sections now have implementations");
     }
 }

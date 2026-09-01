@@ -3,12 +3,14 @@
 
 use serde_json::Value;
 use supermgr_core::{
+    customer::Customer,
     vpn::profile::ProfileSummary,
     vpn::state::VpnState,
     ssh::key::SshKeySummary,
     host::HostSummary,
     tailscale::TailscaleNode,
     compliance::{CheckDefinition, ComplianceRun, RunSummary},
+    recon::ReconScanResult,
 };
 
 /// Which top-level section is active in the UI.
@@ -42,6 +44,8 @@ pub struct AppState {
     pub ssh_keys: Vec<SshKeySummary>,
     /// SSH hosts returned by `SshListHosts`.
     pub hosts: Vec<HostSummary>,
+    /// Stable customers/sites used to group hosts and VPN profiles.
+    pub customers: Vec<Customer>,
     /// UUID string of the SSH key selected in the sidebar, if any.
     pub selected_ssh_key: Option<String>,
     /// UUID string of the SSH host selected in the sidebar, if any.
@@ -203,6 +207,15 @@ pub enum AppMsg {
     DaemonUnavailable,
     /// A user-initiated operation failed; show this message as a toast.
     OperationFailed(String),
+    /// Customer catalog and asset summaries were refreshed as one snapshot.
+    CustomerDataRefreshed {
+        /// Snapshot, or a persistent page error.
+        result: Result<(Vec<Customer>, Vec<HostSummary>, Vec<ProfileSummary>), String>,
+        /// Optional success message for a completed write.
+        toast: Option<String>,
+    },
+    /// An explicit private-range reconnaissance scan completed.
+    ReconScanFinished(Result<ReconScanResult, String>),
     /// A compliance scan finished. Carries the whole `Result` so the page can
     /// show a failed scan as its own state rather than a toast that vanishes.
     ComplianceRunFinished {

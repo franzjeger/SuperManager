@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use tracing::{error, info};
 
 use supermgr_core::{
+    customer::Customer,
     dbus::DaemonProxy,
     vpn::profile::ProfileSummary,
     vpn::state::{state_from_json, VpnState},
@@ -15,6 +16,7 @@ use supermgr_core::{
     tailscale::{TailscaleHealth, TailscaleNode},
     compliance::{CheckDefinition, ComplianceRun, RunSummary},
     findings_store::{Disposition, PersistedFinding, StoreSummary},
+    recon::ReconScanResult,
 };
 
 use crate::app::{AppMsg, AppState};
@@ -160,6 +162,95 @@ pub async fn fetch_initial_ssh_state(app_state: &Arc<Mutex<AppState>>) -> anyhow
     s.ssh_keys = keys;
     s.hosts = hosts;
     Ok(())
+}
+
+/// Fetch the stable customer catalog together with every assignable asset.
+/// Keeping this a single snapshot prevents the page from briefly showing
+/// stale links after an assignment has completed.
+pub async fn dbus_customer_data(
+) -> anyhow::Result<(Vec<Customer>, Vec<HostSummary>, Vec<ProfileSummary>)> {
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let (customers_json, hosts_json, profiles_json) = tokio::try_join!(
+        proxy.customer_catalog(),
+        proxy.list_hosts(),
+        proxy.list_profiles(),
+    )?;
+    Ok((
+        serde_json::from_str(&customers_json).context("parse customer catalog")?,
+        serde_json::from_str(&hosts_json).context("parse SSH hosts")?,
+        serde_json::from_str(&profiles_json).context("parse VPN profiles")?,
+    ))
+}
+
+pub async fn dbus_customer_save(customer: &Customer) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = serde_json::to_string(customer).context("serialise customer")?;
+    proxy.customer_save(&json).await.context("CustomerSave")
+}
+
+pub async fn dbus_customer_delete(slug: &str) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy.customer_delete(slug).await.context("CustomerDelete")
+}
+
+pub async fn dbus_customer_assign_host(
+    customer_slug: &str,
+    site_id: &str,
+    host_id: &str,
+) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy
+        .customer_assign_host(customer_slug, site_id, host_id)
+        .await
+        .context("CustomerAssignHost")
+}
+
+pub async fn dbus_customer_assign_profile(
+    customer_slug: &str,
+    profile_id: &str,
+) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy
+        .customer_assign_profile(customer_slug, profile_id)
+        .await
+        .context("CustomerAssignProfile")
+}
+
+pub async fn dbus_export_customer_docs(customer_slug: &str) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    proxy
+        .export_customer_docs(customer_slug)
+        .await
+        .context("ExportCustomerDocs")
+}
+
+pub async fn dbus_fortigate_compliance(host_id: &str) -> anyhow::Result<serde_json::Value> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let json = proxy
+        .fortigate_compliance_check(host_id)
+        .await
+        .context("FortigateComplianceCheck")?;
+    serde_json::from_str(&json).context("parse FortiGate compliance report")
+}
+
+pub async fn dbus_recon_scan(target_cidr: &str, ports: &[u16]) -> anyhow::Result<ReconScanResult> {
+    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
+    let ports_json = serde_json::to_string(ports).context("serialise recon ports")?;
+    let json = proxy
+        .recon_scan(target_cidr, &ports_json)
+        .await
+        .context("ReconScan")?;
+    serde_json::from_str(&json).context("parse recon result")
 }
 
 /// Read a `.conf` file from `path`, call `ImportWireGuard` on the daemon,

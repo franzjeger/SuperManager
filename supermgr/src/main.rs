@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stdout)
         .init();
 
-    info!(version = env!("CARGO_PKG_VERSION"), "supermgr starting");
+    info!(version = update::VERSION, "supermgr starting");
 
     // `--print-palette` reports what the application makes of the desktop's
     // colour scheme and stops. When the window comes up looking like the

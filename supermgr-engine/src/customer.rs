@@ -30,106 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Customer {
-    /// URL-safe identifier, derived from `display_name` at create
-    /// time. Stable across renames.
-    pub slug: String,
-
-    pub display_name: String,
-
-    /// Free-form contact / billing info. Surfaces on PDF report
-    /// covers in later phases. Empty is fine.
-    #[serde(default)]
-    pub contact_name: String,
-    #[serde(default)]
-    pub contact_email: String,
-    #[serde(default)]
-    pub notes: String,
-
-    /// Default template suggested when the user opens a render
-    /// dialog without explicitly picking one. Optional — if
-    /// unset the GUI defaults to "branch_office".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_template: Option<String>,
-
-    /// Domains that must be allowed past FortiGuard's
-    /// Newly-Observed-Domains (NOD) / Newly-Registered-Domains
-    /// (NRD) categories on management VLANs. Typical entries:
-    ///
-    ///   - `*.unifi.<customer-domain>`     (their UniFi controller)
-    ///   - `*.ui.com`                      (Ubiquiti's cloud)
-    ///   - `*.ubnt.com`
-    ///   - `*.synology.<customer-domain>`  (NAS / surveillance)
-    ///
-    /// The template engine merges these with a hardcoded set of
-    /// universally-required infrastructure domains (Ubiquiti
-    /// cloud, FortiGuard, Microsoft updates) when generating
-    /// the MGMT-VLAN DNS filter profile.
-    #[serde(default)]
-    pub mgmt_allowlist_domains: Vec<String>,
-
-    /// Primary public domain for the customer — drives the DNS
-    /// health audit (SPF/DKIM/DMARC/DNSSEC). When empty, the
-    /// audit falls back to extracting the domain from
-    /// `contact_email`.
-    #[serde(default)]
-    pub primary_domain: String,
-
-    pub sites: Vec<Site>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Site {
-    /// Stable id within the customer. Used as the lookup key when
-    /// a deployment is recorded against a specific site.
-    pub id: String,
-
-    pub display_name: String,
-
-    /// Postal address — appears on PDF reports.
-    #[serde(default)]
-    pub address: String,
-
-    /// FortiGate hostnames at this site. The provisioning view
-    /// uses these to filter the host picker, and compliance can
-    /// roll up scores per-site.
-    #[serde(default)]
-    pub host_ids: Vec<String>,
-
-    /// "fiber" / "dhcp" / "pppoe" / "static". Free-form for now;
-    /// templates branch on it. Future enhancement: enum.
-    #[serde(default)]
-    pub wan_type: String,
-
-    /// Public WAN IP if static. Empty for DHCP / PPPoE / unknown.
-    #[serde(default)]
-    pub wan_static_ip: String,
-
-    /// Default LAN subnet — the CIDR that VLAN 1 / native sits on.
-    /// Templates use this as the base for derived VLAN subnets
-    /// (`set ip {{ site.lan_base | nth_subnet(n) }}`).
-    #[serde(default)]
-    pub lan_base: String,
-
-    /// Custom VLAN map. Each entry produces a `config system
-    /// interface` block in the rendered template.
-    #[serde(default)]
-    pub vlans: Vec<Vlan>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Vlan {
-    pub id: u16,
-    pub name: String,
-    pub subnet: String,
-    /// "wan" | "internal" | "iot" | "guest" | "voice" — drives
-    /// which firewall policy class the template generates.
-    #[serde(default)]
-    pub purpose: String,
-}
+pub use supermgr_core::customer::{Customer, Site, Vlan};
 
 // ---------------------------------------------------------------------------
 // Persistence
@@ -146,24 +47,7 @@ fn customers_dir() -> PathBuf {
 /// alphanumerics + hyphens only, collapsing runs of separators.
 /// Stable across re-runs: same input always produces same slug.
 pub fn slugify(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut last_was_dash = true; // suppress leading dashes
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-            last_was_dash = false;
-        } else if !last_was_dash {
-            out.push('-');
-            last_was_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push_str("customer");
-    }
-    out
+    supermgr_core::customer::slugify(name)
 }
 
 /// List all customers on disk, sorted by display name. Errors on

@@ -159,7 +159,7 @@ pub fn build_ssh_host_list() -> gtk4::ListBox {
 // Populate
 // ---------------------------------------------------------------------------
 
-/// Rebuild the host list from the current SSH hosts, grouped by `group`.
+/// Rebuild the host list from the current SSH hosts, grouped by customer.
 ///
 /// Ungrouped hosts (empty group string) appear under an "Ungrouped" header.
 /// Group headers are non-activatable bold labels.
@@ -194,6 +194,7 @@ pub fn populate_ssh_host_list(
                     || h.hostname.to_lowercase().contains(&filter_lower)
                     || h.username.to_lowercase().contains(&filter_lower)
                     || h.group.to_lowercase().contains(&filter_lower)
+                    || h.customer.to_lowercase().contains(&filter_lower)
             })
             .collect()
     };
@@ -212,10 +213,13 @@ pub fn populate_ssh_host_list(
         return;
     }
 
-    // Group hosts by their group field.
+    // Customer ownership is the primary operational boundary. Keep the old
+    // technical group as the fallback for records not yet migrated.
     let mut groups: BTreeMap<String, Vec<&HostSummary>> = BTreeMap::new();
     for host in &filtered {
-        let group_name = if host.group.is_empty() {
+        let group_name = if !host.customer.is_empty() {
+            host.customer.clone()
+        } else if host.group.is_empty() {
             "Ungrouped".to_owned()
         } else {
             host.group.clone()

@@ -37,6 +37,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::customer::Customer;
 use crate::host::Host;
 use crate::ssh::key::SshKey;
 use crate::vpn::profile::Profile;
@@ -74,6 +75,10 @@ pub struct PortableBackup {
     #[serde(default)]
     pub hosts: Vec<Host>,
 
+    /// Stable customer/site catalog and its links to managed hosts.
+    #[serde(default)]
+    pub customers: Vec<Customer>,
+
     /// The secret store as `label -> base64(bytes)`. The single most
     /// important section — without it, restored profiles reference key
     /// material that isn't there.
@@ -101,6 +106,7 @@ impl PortableBackup {
             profiles: Vec::new(),
             ssh_keys: Vec::new(),
             hosts: Vec::new(),
+            customers: Vec::new(),
             secrets: HashMap::new(),
             gui_settings: serde_json::Value::Null,
             config_backups: HashMap::new(),
@@ -115,6 +121,7 @@ impl PortableBackup {
             profiles: self.profiles.len(),
             ssh_keys: self.ssh_keys.len(),
             hosts: self.hosts.len(),
+            customers: self.customers.len(),
             secrets: self.secrets.len(),
         }
     }
@@ -135,6 +142,8 @@ pub struct BackupCounts {
     pub ssh_keys: usize,
     /// Number of SSH hosts.
     pub hosts: usize,
+    /// Number of customer catalog entries.
+    pub customers: usize,
     /// Number of stored secrets.
     pub secrets: usize,
 }
@@ -149,7 +158,7 @@ mod tests {
         let json = serde_json::to_string(&b).unwrap();
         let back: PortableBackup = serde_json::from_str(&json).unwrap();
         assert_eq!(back.version, BACKUP_VERSION);
-        assert_eq!(back.counts(), BackupCounts { profiles: 0, ssh_keys: 0, hosts: 0, secrets: 0 });
+        assert_eq!(back.counts(), BackupCounts { profiles: 0, ssh_keys: 0, hosts: 0, customers: 0, secrets: 0 });
     }
 
     /// Wire-compatibility with the JSON the Linux daemon emits: a

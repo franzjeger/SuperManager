@@ -18,8 +18,8 @@ use std::sync::mpsc::Sender;
 
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 
-/// Crate version, for display next to the commit.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Nearest Git tag plus commit distance, or the crate version outside Git.
+pub const VERSION: &str = env!("SUPERMGR_BUILD_VERSION");
 /// Full hash of the commit this binary was built from, or `unknown` when
 /// the build happened outside a git checkout.
 pub const GIT_COMMIT: &str = env!("SUPERMGR_GIT_COMMIT");
@@ -59,9 +59,8 @@ pub async fn check() -> CheckOutcome {
         );
     }
 
-    let url = format!(
-        "https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...main"
-    );
+    let url =
+        format!("https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...main");
     let resp = match reqwest::Client::new()
         .get(&url)
         .header("User-Agent", "SuperManager-Update-Check")
@@ -127,8 +126,15 @@ pub enum UpdaterEvent {
 /// rest of the app uses (see the threading-model note in `main.rs`).
 pub fn run_updater(rt: &tokio::runtime::Handle, tx: Sender<UpdaterEvent>) {
     rt.spawn(async move {
-        let child = tokio::process::Command::new("supermgr-update")
-            .arg("--yes")
+        let mut command = tokio::process::Command::new("supermgr-update");
+        command.arg("--yes");
+        if GIT_COMMIT != "unknown" {
+            // The checkout may already have been pulled without rebuilding.
+            // Tell the script what is actually running so it can still detect
+            // and install that pending rebuild.
+            command.args(["--installed-commit", GIT_COMMIT]);
+        }
+        let child = command
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

@@ -231,6 +231,7 @@ pub fn populate_vpn_sidebar(
             .filter(|p| {
                 p.name.to_lowercase().contains(&filter_lower)
                     || p.backend.as_str().to_lowercase().contains(&filter_lower)
+                    || p.customer.to_lowercase().contains(&filter_lower)
             })
             .collect()
     };
@@ -266,7 +267,12 @@ pub fn populate_vpn_sidebar(
 
     for profile in &sorted {
         let view = row_view(profile, vpn_state, now_secs);
-        let subtitle = row_subtitle(profile.backend.as_str(), &view.meta);
+        let base_subtitle = row_subtitle(profile.backend.as_str(), &view.meta);
+        let subtitle = if profile.customer.is_empty() {
+            base_subtitle
+        } else {
+            format!("{} · {}", profile.customer, base_subtitle)
+        };
 
         let row = adw::ActionRow::builder()
             .title(profile.name.as_str())

@@ -29,7 +29,7 @@ pub fn build_ssh_dashboard(
     app_state: &Arc<Mutex<AppState>>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
-) -> (gtk4::FlowBox, gtk4::Widget) {
+) -> (gtk4::FlowBox, gtk4::Stack, gtk4::Widget) {
     let outer_stack = gtk4::Stack::new();
 
     // Empty state. Names both routes in, because "no devices" on a screen
@@ -262,7 +262,11 @@ pub fn build_ssh_dashboard(
         });
     }
 
-    (flow_box.clone(), outer_stack.upcast())
+    (
+        flow_box.clone(),
+        outer_stack.clone(),
+        outer_stack.upcast(),
+    )
 }
 
 /// Check if any label in the widget tree has the "error" CSS class (offline dot).
@@ -302,14 +306,13 @@ fn collect_card_text(widget: &gtk4::Widget) -> String {
 /// Rebuild the dashboard cards from current AppState, then kick off async
 /// fetches for each device with API.  Also fetches from UI.com Site Manager
 /// cloud API if an API key is configured in settings.
-fn populate_dashboard(
+pub fn populate_dashboard(
     outer_stack: &gtk4::Stack,
     flow_box: &gtk4::FlowBox,
     app_state: &Arc<Mutex<AppState>>,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    eprintln!(">>> populate_dashboard called");
     info!("populate_dashboard called");
 
     // Clear existing cards.
@@ -890,7 +893,7 @@ fn make_progress_row(label_text: &str, bar_name: &str, pct_name: &str) -> gtk4::
 /// Build a single device card for the flow box.
 fn build_device_card(
     host: &HostSummary,
-    _app_state: &Arc<Mutex<AppState>>,
+    app_state: &Arc<Mutex<AppState>>,
 ) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -933,6 +936,25 @@ fn build_device_card(
     header.append(&health_dot);
     header.append(&name_lbl);
     card.append(&header);
+
+    if !host.customer.is_empty() {
+        let customer = app_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .customers
+            .iter()
+            .find(|customer| customer.slug == host.customer)
+            .map(|customer| customer.display_name.as_str())
+            .unwrap_or(host.customer.as_str())
+            .to_owned();
+        let customer_label = gtk4::Label::builder()
+            .label(&customer)
+            .css_classes(["caption", "accent"])
+            .halign(gtk4::Align::Start)
+            .margin_start(12)
+            .build();
+        card.append(&customer_label);
+    }
 
     // Hostname + model subtitle.
     let host_lbl = gtk4::Label::builder()

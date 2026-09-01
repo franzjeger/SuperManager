@@ -30,6 +30,10 @@ impl EngineServer {
             backup.ssh_keys = state.ssh_keys.values().cloned().collect();
             backup.hosts = state.ssh_hosts.values().cloned().collect();
         }
+        match crate::customer::list_all() {
+            Ok(customers) => backup.customers = customers,
+            Err(e) => tracing::warn!("backup export: read customers: {e:#}"),
+        }
         match self.secrets.read_all().await {
             Ok(secrets) => backup.secrets = secrets,
             Err(e) => {
@@ -77,7 +81,8 @@ impl EngineServer {
         }
 
         let mut state = self.state.lock().await;
-        let (mut profiles, mut ssh_keys, mut hosts) = (0usize, 0usize, 0usize);
+        let (mut profiles, mut ssh_keys, mut hosts, mut customers) =
+            (0usize, 0usize, 0usize, 0usize);
         for p in backup.profiles {
             match state.save_profile(&p) {
                 Ok(()) => {
@@ -105,6 +110,12 @@ impl EngineServer {
                 Err(e) => tracing::warn!("backup import: save ssh host: {e}"),
             }
         }
+        for customer in backup.customers {
+            match crate::customer::save(&customer) {
+                Ok(()) => customers += 1,
+                Err(e) => tracing::warn!("backup import: save customer: {e:#}"),
+            }
+        }
 
         Response::ok(
             id,
@@ -112,6 +123,7 @@ impl EngineServer {
                 "profiles": profiles,
                 "ssh_keys": ssh_keys,
                 "hosts": hosts,
+                "customers": customers,
                 "secrets": imported_secrets,
             }),
         )

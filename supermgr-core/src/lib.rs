@@ -25,6 +25,8 @@ pub mod protocol;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod client;
 pub mod compliance;
+pub mod customer;
+pub mod recon;
 pub mod error;
 pub mod findings;
 pub mod findings_store;
@@ -48,4 +50,3 @@ pub use ssh::key::{SshKey, SshKeySummary, SshKeyType};
 pub use ssh::known_hosts::{HostKeyCheck, KnownHostsStore};
 pub use vpn::profile::{Profile, ProfileConfig, ProfileSummary, SecretRef};
 pub use vpn::state::{ErrorCode, TunnelStats, VpnState};
-

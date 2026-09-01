@@ -159,6 +159,19 @@ pub fn show_add_host_dialog(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
+    show_add_host_dialog_prefilled(window, keys, rt, tx, "", "", 22);
+}
+
+/// Open Add Host with data from a Recon result already filled in.
+pub fn show_add_host_dialog_prefilled(
+    window: &adw::ApplicationWindow,
+    keys: &[SshKeySummary],
+    rt: &tokio::runtime::Handle,
+    tx: &mpsc::Sender<AppMsg>,
+    initial_label: &str,
+    initial_hostname: &str,
+    initial_port: u16,
+) {
     use std::rc::Rc;
 
     let dialog = adw::Dialog::builder()
@@ -166,16 +179,26 @@ pub fn show_add_host_dialog(
         .content_width(420)
         .build();
 
-    let label_row = adw::EntryRow::builder().title("Label").build();
-    let hostname_row = adw::EntryRow::builder().title("Hostname").build();
-    let port_row = adw::EntryRow::builder().title("Port").text("22").build();
+    let label_row = adw::EntryRow::builder()
+        .title("Label")
+        .text(initial_label)
+        .build();
+    let hostname_row = adw::EntryRow::builder()
+        .title("Hostname")
+        .text(initial_hostname)
+        .build();
+    let port_row = adw::EntryRow::builder()
+        .title("Port")
+        .text(initial_port.to_string())
+        .build();
     let username_row = adw::EntryRow::builder().title("Username").build();
     let group_row = adw::EntryRow::builder()
         .title("Group (optional)")
         .build();
 
     let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OpenWrt", "FortiGate", "Windows", "Custom",
+        "Linux", "UniFi", "pfSense", "OPNsense", "Sophos", "OpenWrt", "FortiGate",
+        "Windows", "Custom",
     ]);
     let device_row = adw::ComboRow::builder()
         .title("Device type")

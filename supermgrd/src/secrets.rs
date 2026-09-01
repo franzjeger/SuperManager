@@ -148,11 +148,27 @@ pub async fn read_all_secrets() -> Result<HashMap<String, String>> {
     read_map().await
 }
 
-/// Store a pre-encoded (base64) secret directly — used by backup import
-/// to avoid double-encoding.
-pub async fn store_secret_raw(label: &str, base64_value: &str) -> Result<()> {
+/// Atomically add a batch of pre-encoded secrets during backup restore.
+///
+/// Every value is validated before the store is touched, and existing labels
+/// are rejected rather than overwritten. A failed import therefore cannot
+/// replace a credential that belongs to an existing profile, host, or key.
+pub async fn import_secrets_raw(entries: &HashMap<String, String>) -> Result<()> {
+    for (label, encoded) in entries {
+        STANDARD
+            .decode(encoded)
+            .with_context(|| format!("invalid base64 for imported secret '{label}'"))?;
+    }
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
     let mut map = read_map().await?;
-    map.insert(label.to_owned(), base64_value.to_owned());
+    if let Some(label) = entries.keys().find(|label| map.contains_key(*label)) {
+        anyhow::bail!("refusing to overwrite existing secret '{label}'");
+    }
+    map.extend(entries.clone());
     write_map(&map).await
 }
 
@@ -273,5 +289,25 @@ mod tests {
         assert_eq!(secrets_path(), path);
         store_secret("supermgr/test/isolation", b"x").await.unwrap();
         assert!(path.exists(), "secret went somewhere else entirely");
+    }
+
+    #[tokio::test]
+    async fn backup_import_is_atomic_and_never_overwrites() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let _store = test_store(&tmp.path().join("secrets.json"));
+
+        store_secret("existing", b"keep-me").await.unwrap();
+        let entries = HashMap::from([
+            ("existing".to_owned(), STANDARD.encode(b"replacement")),
+            ("new".to_owned(), STANDARD.encode(b"new-value")),
+        ]);
+
+        assert!(import_secrets_raw(&entries).await.is_err());
+        assert_eq!(retrieve_secret("existing").await.unwrap(), b"keep-me");
+        assert!(retrieve_secret("new").await.is_err());
+
+        let invalid = HashMap::from([("bad".to_owned(), "not base64!".to_owned())]);
+        assert!(import_secrets_raw(&invalid).await.is_err());
+        assert!(retrieve_secret("bad").await.is_err());
     }
 }

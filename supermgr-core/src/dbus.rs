@@ -547,6 +547,33 @@ pub trait Daemon {
     /// host whose customer tag is empty.
     async fn export_customer_docs(&self, customer: &str) -> fdo::Result<String>;
 
+    /// Return the stable customer/site catalog as JSON.
+    async fn customer_catalog(&self) -> fdo::Result<String>;
+
+    /// Create or update one customer record from JSON.
+    async fn customer_save(&self, customer_json: &str) -> fdo::Result<()>;
+
+    /// Delete an empty customer from the catalog.
+    async fn customer_delete(&self, slug: &str) -> fdo::Result<()>;
+
+    /// Attach one managed host to exactly one customer/site.
+    async fn customer_assign_host(
+        &self,
+        customer_slug: &str,
+        site_id: &str,
+        host_id: &str,
+    ) -> fdo::Result<()>;
+
+    /// Attach a VPN profile to a customer.
+    async fn customer_assign_profile(
+        &self,
+        customer_slug: &str,
+        profile_id: &str,
+    ) -> fdo::Result<()>;
+
+    /// Scan a bounded private IPv4 CIDR for selected TCP ports.
+    async fn recon_scan(&self, target_cidr: &str, ports_json: &str) -> fdo::Result<String>;
+
     /// Delete an SSH host by UUID string.
     async fn delete_host(&self, host_id: &str) -> fdo::Result<()>;
 

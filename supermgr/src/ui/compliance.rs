@@ -2,12 +2,8 @@
 //!
 //! # Scope, and why it is narrower than the macOS app's
 //!
-//! Linux hosts only. The daemon exposes the Linux baseline (seven checks over
-//! SSH) and not the FortiGate one, because FortiGate compliance wants a REST
-//! client `supermgrd` does not have. So a FortiGate host appears in the picker
-//! with its reason rather than being hidden — "no scan button because this
-//! platform cannot audit FortiGate yet" is a different message from "this
-//! device has no baseline", and both are better than a silently missing row.
+//! Linux hosts use the typed SSH baseline. FortiGate appliances use the
+//! daemon's REST-backed CIS audit and open its vendor-specific report.
 //!
 //! Which baseline applies to which device type comes from
 //! [`DeviceType::compliance_dispatch`] in core, shared with the macOS app so
@@ -128,7 +124,7 @@ impl ComplianceView {
 
         match dispatch {
             ComplianceDispatch::LinuxBaseline => {
-                row.set_subtitle(&format!("{}@{}", host.username, host.hostname));
+                row.set_subtitle(&host_subtitle(host, &format!("{}@{}", host.username, host.hostname)));
                 let btn = gtk4::Button::with_label("Run scan");
                 btn.add_css_class("suggested-action");
                 btn.set_valign(gtk4::Align::Center);
@@ -158,15 +154,31 @@ impl ComplianceView {
                 row.add_suffix(&btn);
             }
             ComplianceDispatch::FortigateBaseline => {
-                // Deliberately shown rather than hidden. A FortiGate host that
-                // simply vanished from this list reads as a bug in the list.
-                row.set_subtitle(
-                    "FortiGate baseline is not available on Linux yet — the daemon has no REST client for it.",
-                );
-                row.add_suffix(&design::badge("Not on Linux"));
+                row.set_subtitle(&host_subtitle(host, "FortiGate CIS configuration baseline"));
+                let btn = gtk4::Button::with_label("Run scan");
+                btn.add_css_class("suggested-action");
+                btn.set_valign(gtk4::Align::Center);
+                let rt = self.rt.clone();
+                let tx = self.tx.clone();
+                let host_id = host.id.to_string();
+                btn.connect_clicked(move |button| {
+                    button.set_sensitive(false);
+                    button.set_label("Scanning…");
+                    let tx = tx.clone();
+                    let host_id = host_id.clone();
+                    rt.spawn(async move {
+                        match crate::dbus_client::dbus_fortigate_compliance(&host_id).await {
+                            Ok(data) => tx.send(AppMsg::FortigateCompliance { host_id, data }).ok(),
+                            Err(error) => tx.send(AppMsg::OperationFailed(format!(
+                                "FortiGate compliance scan failed: {error}"
+                            ))).ok(),
+                        };
+                    });
+                });
+                row.add_suffix(&btn);
             }
             ComplianceDispatch::NotApplicable => {
-                row.set_subtitle("No CIS baseline exists for this device type.");
+                row.set_subtitle(&host_subtitle(host, "No CIS baseline exists for this device type."));
                 row.add_suffix(&design::badge("N/A"));
             }
         }
@@ -325,6 +337,14 @@ impl ComplianceView {
     }
 }
 
+fn host_subtitle(host: &HostSummary, detail: &str) -> String {
+    if host.customer.is_empty() {
+        detail.to_owned()
+    } else {
+        format!("{} · {detail}", host.customer)
+    }
+}
+
 /// A wrapping label row for long text — descriptions and remediation snippets
 /// are sentences, not values, and truncating them defeats the point.
 fn detail_row(label: &str, value: &str) -> adw::ActionRow {
@@ -391,10 +411,9 @@ mod tests {
     }
 
     #[test]
-    fn only_linux_hosts_get_a_scan_button() {
-        // The page offers what the daemon can actually run. FortiGate needs a
-        // REST client supermgrd does not have, so offering the button would
-        // produce a failure the operator cannot act on.
+    fn linux_and_fortigate_hosts_have_real_baselines() {
+        // Dispatch stays shared with core so both working scan buttons map to
+        // an actual daemon implementation and every other device says N/A.
         assert_eq!(
             DeviceType::Linux.compliance_dispatch(),
             ComplianceDispatch::LinuxBaseline

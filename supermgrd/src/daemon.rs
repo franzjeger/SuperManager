@@ -11,7 +11,7 @@
 //! are spawned as separate tasks so the D-Bus method returns immediately.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
     time::Duration,
@@ -25,6 +25,7 @@ use uuid::Uuid;
 use zbus::{fdo, interface, SignalContext};
 
 use supermgr_core::{
+    customer::Customer,
     vpn::backend::{BackendStatus, VpnBackend},
     dbus::core_error_to_fdo,
     vpn::profile::{
@@ -83,10 +84,15 @@ pub struct DaemonState {
     /// Directory where VPN profile TOML files are persisted.
     pub profile_dir: PathBuf,
 
-    /// The kill-switch mode that was installed when the current VPN connected
-    /// with kill_switch=true.  Stored so the monitor task can reinstall a
-    /// stricter variant (without `ct state established,related accept`) when
-    /// the VPN drops unexpectedly, ensuring existing connections are also cut.
+    /// Stable customer/site catalog, keyed by customer slug.
+    pub customers: std::collections::HashMap<String, Customer>,
+
+    /// Directory containing one customer TOML file per stable slug.
+    pub customer_dir: PathBuf,
+
+    /// The kill-switch mode that nftables successfully installed for the
+    /// current VPN. The monitor uses this actual state, rather than the profile
+    /// preference alone, before claiming traffic is being blocked.
     pub active_kill_switch_mode: Option<KillSwitchMode>,
 
     /// SSH keys, keyed by UUID.
@@ -154,6 +160,8 @@ impl DaemonState {
             vpn_state: VpnState::Disconnected,
             active_backend: None,
             profile_dir,
+            customers: std::collections::HashMap::new(),
+            customer_dir: base.join("customers"),
             active_kill_switch_mode: None,
             ssh_keys: std::collections::HashMap::new(),
             hosts: std::collections::HashMap::new(),
@@ -208,6 +216,66 @@ impl DaemonState {
     /// Delete a profile's on-disk file.
     pub fn delete_profile_file(&self, id: Uuid) -> anyhow::Result<()> {
         let path = self.profile_dir.join(format!("{id}.toml"));
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// Load the customer/site catalog from disk.
+    pub fn load_customers(&mut self) -> anyhow::Result<()> {
+        if !self.customer_dir.exists() {
+            std::fs::create_dir_all(&self.customer_dir)?;
+            return Ok(());
+        }
+        let mut paths = std::fs::read_dir(&self.customer_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path)?;
+            match toml::from_str::<Customer>(&text) {
+                Ok(customer) => match customer.validate() {
+                    Ok(()) if path.file_stem().and_then(|s| s.to_str()) == Some(&customer.slug) => {
+                        if self.customers.contains_key(&customer.slug) {
+                            warn!("skipping duplicate customer slug '{}' from {:?}", customer.slug, path);
+                            continue;
+                        }
+                        info!("loaded customer '{}' from {:?}", customer.display_name, path);
+                        self.customers.insert(customer.slug.clone(), customer);
+                    }
+                    Ok(()) => warn!(
+                        "skipping customer {:?}: filename must match stable slug '{}'",
+                        path, customer.slug
+                    ),
+                    Err(e) => warn!("skipping invalid customer {:?}: {e}", path),
+                },
+                Err(e) => warn!("skipping malformed customer {:?}: {e}", path),
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist one customer record by stable slug.
+    pub fn save_customer(&self, customer: &Customer) -> anyhow::Result<()> {
+        customer.validate().map_err(anyhow::Error::msg)?;
+        std::fs::create_dir_all(&self.customer_dir)?;
+        let path = self.customer_dir.join(format!("{}.toml", customer.slug));
+        let text = toml::to_string_pretty(customer)?;
+        let temporary = path.with_extension("toml.tmp");
+        std::fs::write(&temporary, text)?;
+        std::fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    /// Delete a customer catalog file after relationship checks have passed.
+    pub fn delete_customer_file(&self, slug: &str) -> anyhow::Result<()> {
+        supermgr_core::customer::validate_id(slug).map_err(anyhow::Error::msg)?;
+        let path = self.customer_dir.join(format!("{slug}.toml"));
         if path.exists() {
             std::fs::remove_file(path)?;
         }
@@ -577,6 +645,221 @@ pub async fn audit_orphaned_secrets(state: &DaemonState) {
 }
 
 // ---------------------------------------------------------------------------
+// Backup import preparation
+// ---------------------------------------------------------------------------
+
+/// Return `true` only for a plain filename that cannot escape the directory
+/// used for imported FortiGate configuration snapshots.
+fn safe_backup_filename(filename: &str) -> bool {
+    use std::path::Component;
+
+    !filename.is_empty()
+        && !filename.chars().any(char::is_control)
+        && matches!(
+            std::path::Path::new(filename).components().collect::<Vec<_>>().as_slice(),
+            [Component::Normal(_)]
+        )
+}
+
+/// Replace entity UUID path segments in a secret label. Labels that do not
+/// contain an entity UUID are namespaced to this import so restoring the same
+/// backup twice cannot make the two records share a credential.
+fn remap_secret_label(
+    label: &str,
+    entity_ids: &HashMap<Uuid, Uuid>,
+    import_id: Uuid,
+) -> String {
+    let mut changed = false;
+    let remapped = label
+        .split('/')
+        .map(|segment| {
+            Uuid::parse_str(segment)
+                .ok()
+                .and_then(|old_id| entity_ids.get(&old_id))
+                .map_or_else(
+                    || segment.to_owned(),
+                    |new_id| {
+                        changed = true;
+                        if segment.len() == 32 {
+                            new_id.simple().to_string()
+                        } else {
+                            new_id.hyphenated().to_string()
+                        }
+                    },
+                )
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+
+    if changed {
+        remapped
+    } else {
+        format!("supermgr/import/{}/{label}", import_id.simple())
+    }
+}
+
+fn remap_secret_ref(secret: &mut SecretRef, entity_ids: &HashMap<Uuid, Uuid>, import_id: Uuid) {
+    secret.0 = remap_secret_label(secret.label(), entity_ids, import_id);
+}
+
+/// Validate and re-ID one portable backup as a coherent unit before any
+/// destination files or secrets are touched.
+///
+/// Relationships are mapped to their newly imported counterparts. References
+/// to records outside the backup are cleared rather than accidentally binding
+/// to an unrelated record that happens to exist on the destination machine.
+fn prepare_backup_import(mut backup: PortableBackup) -> Result<PortableBackup, String> {
+    for filename in backup.config_backups.keys() {
+        if !safe_backup_filename(filename) {
+            return Err(format!(
+                "unsafe config-backup filename '{filename}': expected one plain filename"
+            ));
+        }
+    }
+
+    let mut seen_ids = HashSet::new();
+    let mut entity_ids = HashMap::new();
+    let mut profile_ids = HashMap::new();
+    let mut key_ids = HashMap::new();
+    let mut host_ids = HashMap::new();
+
+    for item in &backup.profiles {
+        if !seen_ids.insert(item.id) {
+            return Err(format!("duplicate entity UUID {} (profile)", item.id));
+        }
+        let new_id = Uuid::new_v4();
+        profile_ids.insert(item.id, new_id);
+        entity_ids.insert(item.id, new_id);
+    }
+    for item in &backup.ssh_keys {
+        if !seen_ids.insert(item.id) {
+            return Err(format!("duplicate entity UUID {} (SSH key)", item.id));
+        }
+        let new_id = Uuid::new_v4();
+        key_ids.insert(item.id, new_id);
+        entity_ids.insert(item.id, new_id);
+    }
+    for item in &backup.hosts {
+        if !seen_ids.insert(item.id) {
+            return Err(format!("duplicate entity UUID {} (SSH host)", item.id));
+        }
+        let new_id = Uuid::new_v4();
+        host_ids.insert(item.id, new_id);
+        entity_ids.insert(item.id, new_id);
+    }
+
+    // Older customer files sometimes linked a site by hostname/IP instead
+    // of the host UUID. Resolve those tokens while both forms are still
+    // available, then persist only the new imported UUID.
+    let legacy_host_ids: HashMap<String, Uuid> = backup
+        .hosts
+        .iter()
+        .flat_map(|host| {
+            [
+                (host.hostname.to_lowercase(), host.id),
+                (host.label.to_lowercase(), host.id),
+            ]
+        })
+        .collect();
+    let mut linked_hosts = HashSet::new();
+    for customer in &mut backup.customers {
+        customer.validate()?;
+        for site in &mut customer.sites {
+            let mut remapped = Vec::with_capacity(site.host_ids.len());
+            for token in &site.host_ids {
+                let old_id = Uuid::parse_str(token).ok().or_else(|| {
+                    legacy_host_ids.get(&token.to_lowercase()).copied()
+                });
+                let Some(new_id) = old_id.and_then(|id| host_ids.get(&id).copied()) else {
+                    return Err(format!(
+                        "customer '{}' site '{}' references host '{}' which is not in the backup",
+                        customer.display_name, site.display_name, token
+                    ));
+                };
+                if !linked_hosts.insert(new_id) {
+                    return Err(format!(
+                        "host '{token}' is linked to more than one customer/site in the backup"
+                    ));
+                }
+                remapped.push(new_id.to_string());
+            }
+            site.host_ids = remapped;
+        }
+    }
+
+    let import_id = Uuid::new_v4();
+
+    for profile in &mut backup.profiles {
+        profile.id = profile_ids[&profile.id];
+        match &mut profile.config {
+            ProfileConfig::WireGuard(config) => {
+                remap_secret_ref(&mut config.private_key, &entity_ids, import_id);
+                for peer in &mut config.peers {
+                    if let Some(secret) = &mut peer.preshared_key {
+                        remap_secret_ref(secret, &entity_ids, import_id);
+                    }
+                }
+            }
+            ProfileConfig::FortiGate(config) => {
+                remap_secret_ref(&mut config.password, &entity_ids, import_id);
+                remap_secret_ref(&mut config.psk, &entity_ids, import_id);
+            }
+            ProfileConfig::ForticlientSslvpn(config) => {
+                remap_secret_ref(&mut config.password, &entity_ids, import_id);
+            }
+            ProfileConfig::OpenVpn(config) => {
+                if let Some(secret) = &mut config.password {
+                    remap_secret_ref(secret, &entity_ids, import_id);
+                }
+            }
+            ProfileConfig::AzureVpn(_) | ProfileConfig::Generic(_) => {}
+        }
+    }
+
+    for key in &mut backup.ssh_keys {
+        key.id = key_ids[&key.id];
+        remap_secret_ref(&mut key.private_key_ref, &entity_ids, import_id);
+        key.deployed_to = key
+            .deployed_to
+            .iter()
+            .filter_map(|old_id| host_ids.get(old_id).copied())
+            .collect();
+    }
+
+    for host in &mut backup.hosts {
+        host.id = host_ids[&host.id];
+        host.auth_key_id = host.auth_key_id.and_then(|id| key_ids.get(&id).copied());
+        host.vpn_profile_id = host
+            .vpn_profile_id
+            .and_then(|id| profile_ids.get(&id).copied());
+        host.proxy_jump = host.proxy_jump.and_then(|id| host_ids.get(&id).copied());
+        for secret in [
+            &mut host.auth_password_ref,
+            &mut host.auth_cert_ref,
+            &mut host.api_token_ref,
+            &mut host.unifi_api_token_ref,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            remap_secret_ref(secret, &entity_ids, import_id);
+        }
+    }
+
+    let old_secrets = std::mem::take(&mut backup.secrets);
+    for (old_label, encoded) in old_secrets {
+        let new_label = remap_secret_label(&old_label, &entity_ids, import_id);
+        if backup.secrets.insert(new_label.clone(), encoded).is_some() {
+            return Err(format!(
+                "secret labels collide after import remapping: '{new_label}'"
+            ));
+        }
+    }
+
+    Ok(backup)
+}
+
+// ---------------------------------------------------------------------------
 // D-Bus service object
 // ---------------------------------------------------------------------------
 
@@ -688,6 +971,55 @@ impl DaemonService {
         })?;
         Ok((hostname, port, creds))
     }
+
+    async fn delete_profile_inner(&self, profile_id: &str) -> fdo::Result<()> {
+        let id = Uuid::parse_str(profile_id)
+            .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
+        let mut state = self.state.lock().await;
+        if state.vpn_state.profile_id() == Some(id) && !state.vpn_state.is_idle() {
+            return Err(fdo::Error::Failed(
+                "Cannot delete active profile — disconnect first".into(),
+            ));
+        }
+        let Some(profile) = state.profiles.remove(&id) else {
+            return Err(fdo::Error::UnknownObject(format!("profile {id} not found")));
+        };
+        state
+            .delete_profile_file(id)
+            .map_err(|e| fdo::Error::Failed(format!("delete file: {e}")))?;
+        drop(state);
+        delete_owned_secrets(&profile, &format!("profile {id}")).await;
+        info!("deleted profile {id}");
+        Ok(())
+    }
+
+    async fn delete_ssh_key_inner(&self, key_id: &str) -> fdo::Result<()> {
+        let id = Uuid::parse_str(key_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let mut state = self.state.lock().await;
+        let key = state.ssh_keys.remove(&id);
+        if key.is_some() {
+            let _ = state.delete_ssh_key_file(id);
+        }
+        drop(state);
+        if let Some(key) = key {
+            delete_owned_secrets(&key, &format!("ssh key {id}")).await;
+        }
+        Ok(())
+    }
+
+    async fn delete_host_inner(&self, host_id: &str) -> fdo::Result<()> {
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
+        let mut state = self.state.lock().await;
+        let host = state.hosts.remove(&id);
+        let _ = state.delete_host_file(id);
+        drop(state);
+        if let Some(host) = host {
+            delete_owned_secrets(&host, &format!("host {id}")).await;
+        }
+        Ok(())
+    }
 }
 
 #[interface(name = "org.supermgr.Daemon1")]
@@ -714,8 +1046,11 @@ impl DaemonService {
     async fn connect(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -742,7 +1077,10 @@ impl DaemonService {
     async fn disconnect(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         crate::audit::log_event("VPN_DISCONNECT", "");
         let backend = {
             let mut state = self.state.lock().await;
@@ -826,7 +1164,12 @@ impl DaemonService {
     }
 
     /// Clear the in-memory log buffer.
-    async fn clear_logs(&self) -> fdo::Result<()> {
+    async fn clear_logs(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let mut buf = self.log_buffer.lock().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         buf.clear();
         Ok(())
@@ -836,7 +1179,13 @@ impl DaemonService {
     ///
     /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
     /// `"info"`, `"debug"`, or `"trace"`.
-    async fn set_log_level(&self, level: &str) -> fdo::Result<()> {
+    async fn set_log_level(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        level: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         info!("set_log_level: changing to '{level}'");
         (self.set_log_level)(level).map_err(fdo::Error::Failed)
     }
@@ -851,10 +1200,13 @@ impl DaemonService {
     /// `on_host_down` and `on_vpn_disconnect` control which events fire.
     async fn set_webhook(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         url: String,
         on_host_down: bool,
         on_vpn_disconnect: bool,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let mut state = self.state.lock().await;
         state.webhook_url = url;
         state.webhook_on_host_down = on_host_down;
@@ -899,7 +1251,12 @@ impl DaemonService {
     /// Send a test message to the configured webhook URL.
     ///
     /// Returns `"ok"` on success or an error if no URL is configured.
-    async fn test_webhook(&self) -> fdo::Result<String> {
+    async fn test_webhook(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let url = {
             let state = self.state.lock().await;
             state.webhook_url.clone()
@@ -959,7 +1316,14 @@ impl DaemonService {
     ///
     /// Every error path emits a `tracing::error!` so that nothing fails
     /// silently in the daemon log.
-    async fn import_wireguard(&self, conf_text: &str, name: &str) -> fdo::Result<String> {
+    async fn import_wireguard(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        conf_text: &str,
+        name: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         info!("import_wireguard called, len={}", conf_text.len());
 
         let name = name.trim();
@@ -1113,6 +1477,8 @@ impl DaemonService {
     /// Returns the new profile's UUID string.
     async fn import_fortigate(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         name: String,
         host: String,
         username: String,
@@ -1121,6 +1487,7 @@ impl DaemonService {
         dns_servers: String,
         local_id: String,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let profile_id = Uuid::new_v4();
 
         let name = name.trim().to_string();
@@ -1223,11 +1590,14 @@ impl DaemonService {
     /// configuration does not require user authentication (e.g. certificate-only).
     async fn import_openvpn(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         conf_text: &str,
         name: &str,
         username: &str,
         password: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let name = name.trim();
         let username = username.trim();
         if name.is_empty() {
@@ -1323,7 +1693,13 @@ impl DaemonService {
     /// Detects whether the TOML represents a VPN profile, SSH key, or SSH host
     /// based on its contents and imports it accordingly.  Returns a JSON object
     /// with `{ "type": "vpn"|"ssh_key"|"ssh_host", "id": "<uuid>" }`.
-    async fn import_toml(&self, toml_text: &str) -> fdo::Result<String> {
+    async fn import_toml(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        toml_text: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         use base64::Engine as _;
 
         // --- Parse into a generic TOML table to detect type -----------------
@@ -1502,9 +1878,12 @@ impl DaemonService {
     /// Fails if the profile UUID is not found.
     async fn rename_profile(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         new_name: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1533,9 +1912,12 @@ impl DaemonService {
     /// Set the auto_connect flag on a profile and persist it.
     async fn set_auto_connect(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         auto_connect: bool,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1560,9 +1942,12 @@ impl DaemonService {
     /// Set the kill_switch flag on a profile and persist it.
     async fn set_kill_switch(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         enabled: bool,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1589,9 +1974,12 @@ impl DaemonService {
     /// Pass an empty string to remove the tag (un-group the profile).
     async fn set_profile_customer(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         customer: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
         let trimmed = customer.trim().to_owned();
@@ -1617,6 +2005,8 @@ impl DaemonService {
     /// Update a FortiGate profile's connection details and credentials.
     async fn update_fortigate(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         name: &str,
         host: &str,
@@ -1626,6 +2016,7 @@ impl DaemonService {
         dns_servers: &str,
         local_id: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1685,10 +2076,13 @@ impl DaemonService {
     /// Update an OpenVPN profile's username and optionally its password.
     async fn update_openvpn_credentials(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         username: &str,
         password: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1732,9 +2126,12 @@ impl DaemonService {
     /// Set the full_tunnel flag on a profile and persist it.
     async fn set_full_tunnel(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         full_tunnel: bool,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1759,9 +2156,12 @@ impl DaemonService {
     /// Set the split_routes list for a WireGuard profile and persist it.
     async fn set_split_routes(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
         routes: Vec<String>,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1798,37 +2198,14 @@ impl DaemonService {
     }
 
     /// Delete a profile by UUID string.
-    async fn delete_profile(&self, profile_id: &str) -> fdo::Result<()> {
-        let id = Uuid::parse_str(profile_id)
-            .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
-
-        let mut state = self.state.lock().await;
-
-        // Refuse to delete a profile that is currently in use.
-        if state.vpn_state.profile_id() == Some(id) && !state.vpn_state.is_idle() {
-            return Err(fdo::Error::Failed(
-                "Cannot delete active profile — disconnect first".into(),
-            ));
-        }
-
-        let Some(profile) = state.profiles.remove(&id) else {
-            return Err(fdo::Error::UnknownObject(format!("profile {id} not found")));
-        };
-
-        state
-            .delete_profile_file(id)
-            .map_err(|e| fdo::Error::Failed(format!("delete file: {e}")))?;
-
-        // Removing the record used to be the whole of it, which left the
-        // interface private key, every peer PSK, the FortiGate password and
-        // group PSK, and any cached Azure refresh token sitting in the
-        // secrets file forever — and `export_all` tars that file whole.
-        // `secret_labels` is the one place that knows what a profile owns.
-        drop(state);
-        delete_owned_secrets(&profile, &format!("profile {id}")).await;
-
-        info!("deleted profile {}", id);
-        Ok(())
+    async fn delete_profile(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        self.delete_profile_inner(profile_id).await
     }
 
     /// Rotate the WireGuard private key for the given profile.
@@ -1836,7 +2213,13 @@ impl DaemonService {
     /// Generates a new key pair, overwrites the stored private key in the
     /// secret service, updates the profile's `updated_at` timestamp, saves
     /// the profile to disk, and returns the new base64-encoded public key.
-    async fn rotate_wireguard_key(&self, profile_id: &str) -> fdo::Result<String> {
+    async fn rotate_wireguard_key(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         use wireguard_control::KeyPair;
 
         let id = Uuid::parse_str(profile_id)
@@ -1910,10 +2293,13 @@ impl DaemonService {
     /// Returns the new profile's UUID string on success.
     async fn import_azure_vpn(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         azure_xml: &str,
         vpn_settings_xml: &str,
         name: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let name = name.trim();
         if name.is_empty() {
             return Err(fdo::Error::InvalidArgs("name must not be empty".into()));
@@ -1969,7 +2355,16 @@ impl DaemonService {
     // =======================================================================
 
     /// Generate a new SSH key pair of the given type.
-    async fn ssh_generate_key(&self, key_type: &str, name: &str, description: &str, tags_json: &str) -> fdo::Result<String> {
+    async fn ssh_generate_key(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        key_type: &str,
+        name: &str,
+        description: &str,
+        tags_json: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let kt: SshKeyType = match key_type.to_ascii_lowercase().as_str() {
             "ed25519" | "ssh-ed25519" => SshKeyType::Ed25519,
             "rsa-2048" | "rsa2048" => SshKeyType::Rsa2048,
@@ -2112,19 +2507,14 @@ impl DaemonService {
     }
 
     /// Delete an SSH key by UUID.
-    async fn ssh_delete_key(&self, key_id: &str) -> fdo::Result<()> {
-        let id = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
-        let mut state = self.state.lock().await;
-        let key = state.ssh_keys.remove(&id);
-        if key.is_some() {
-            let _ = state.delete_ssh_key_file(id);
-        }
-        drop(state);
-
-        if let Some(key) = key {
-            delete_owned_secrets(&key, &format!("ssh key {id}")).await;
-        }
-        Ok(())
+    async fn ssh_delete_key(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        key_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        self.delete_ssh_key_inner(key_id).await
     }
 
     /// Export the public key in OpenSSH authorized_keys format.
@@ -2152,13 +2542,28 @@ impl DaemonService {
     }
 
     /// Scan a directory for SSH key files.
-    async fn ssh_import_keys_scan(&self, directory: &str) -> fdo::Result<String> {
+    async fn ssh_import_keys_scan(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        directory: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let candidates = supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(directory));
         serde_json::to_string(&candidates).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
     /// Import an existing SSH key pair.
-    async fn ssh_import_key(&self, name: &str, public_key: &str, private_key_pem: &str, key_type: &str) -> fdo::Result<String> {
+    async fn ssh_import_key(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        name: &str,
+        public_key: &str,
+        private_key_pem: &str,
+        key_type: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let kt: SshKeyType = match key_type {
             "ED25519" | "ed25519" | "ssh-ed25519" => SshKeyType::Ed25519,
             "RSA" | "rsa" | "ssh-rsa" => SshKeyType::Rsa4096, // default RSA to 4096
@@ -2208,7 +2613,13 @@ impl DaemonService {
     }
 
     /// Add a new SSH host from a JSON-serialised object.
-    async fn add_host(&self, host_json: &str) -> fdo::Result<String> {
+    async fn add_host(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_json: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let mut host: Host = serde_json::from_str(host_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host JSON: {e}")))?;
         host.id = Uuid::new_v4();
@@ -2216,8 +2627,23 @@ impl DaemonService {
         host.created_at = now;
         host.updated_at = now;
 
+        if host.label.trim().is_empty() || host.hostname.trim().is_empty() {
+            return Err(fdo::Error::InvalidArgs(
+                "host label and hostname are required".into(),
+            ));
+        }
+        host.hostname = host.hostname.trim().trim_end_matches('.').to_owned();
+
         let id_str = host.id.to_string();
         let mut state = self.state.lock().await;
+        if let Some(existing) = state.hosts.values().find(|existing| {
+            same_host_endpoint(existing, &host.hostname, host.port)
+        }) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "{}:{} is already managed as '{}'",
+                host.hostname, host.port, existing.label
+            )));
+        }
         tokio::fs::create_dir_all(&state.host_dir).await
             .map_err(|e| fdo::Error::Failed(format!("create dir: {e}")))?;
         state.save_host(&host).map_err(|e| fdo::Error::Failed(format!("save: {e}")))?;
@@ -2230,18 +2656,47 @@ impl DaemonService {
     ///
     /// Merges the provided JSON fields into the existing host, preserving
     /// fields not present in the update (e.g. `api_token_ref`, `auth_password_ref`).
-    async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()> {
+    async fn update_host(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        host_json: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let updates: serde_json::Value = serde_json::from_str(host_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host JSON: {e}")))?;
 
         let mut state = self.state.lock().await;
+        let current = state.hosts.get(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        let proposed_hostname = updates
+            .get("hostname")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&current.hostname)
+            .trim()
+            .trim_end_matches('.')
+            .to_owned();
+        let proposed_port = updates
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u16::try_from(v).ok())
+            .unwrap_or(current.port);
+        if let Some(existing) = state.hosts.values().find(|existing| {
+            existing.id != id && same_host_endpoint(existing, &proposed_hostname, proposed_port)
+        }) {
+            return Err(fdo::Error::InvalidArgs(format!(
+                "{}:{} is already managed as '{}'",
+                proposed_hostname, proposed_port, existing.label
+            )));
+        }
         let host = state.hosts.get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
         // Apply only the fields present in the update.
         if let Some(v) = updates.get("label").and_then(|v| v.as_str()) { host.label = v.to_owned(); }
-        if let Some(v) = updates.get("hostname").and_then(|v| v.as_str()) { host.hostname = v.to_owned(); }
+        if updates.get("hostname").is_some() { host.hostname = proposed_hostname; }
         if let Some(v) = updates.get("port").and_then(|v| v.as_u64()) { host.port = v as u16; }
         if let Some(v) = updates.get("username").and_then(|v| v.as_str()) { host.username = v.to_owned(); }
         if let Some(v) = updates.get("group").and_then(|v| v.as_str()) { host.group = v.to_owned(); }
@@ -2309,7 +2764,13 @@ impl DaemonService {
     ///
     /// Flips the `pinned` boolean and persists the change.  Returns the
     /// refreshed host list (JSON array of summaries) so the GUI can update.
-    async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String> {
+    async fn toggle_host_pin(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
@@ -2358,14 +2819,258 @@ impl DaemonService {
         Ok(crate::docs::render_customer_doc(customer, &profiles, &hosts))
     }
 
+    /// Return the stable customer/site catalog.
+    async fn customer_catalog(&self) -> fdo::Result<String> {
+        let state = self.state.lock().await;
+        let mut customers: Vec<Customer> = state.customers.values().cloned().collect();
+        customers.sort_by(|a, b| {
+            a.display_name
+                .to_lowercase()
+                .cmp(&b.display_name.to_lowercase())
+        });
+        serde_json::to_string(&customers)
+            .map_err(|e| fdo::Error::Failed(format!("serialise customer catalog: {e}")))
+    }
+
+    /// Create or update one customer record.
+    async fn customer_save(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        customer_json: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        let mut customer: Customer = serde_json::from_str(customer_json)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid customer JSON: {e}")))?;
+        customer.display_name = customer.display_name.trim().to_owned();
+        if customer.slug.trim().is_empty() {
+            customer.slug = supermgr_core::customer::slugify(&customer.display_name);
+        }
+
+        let state = self.state.lock().await;
+        customer
+            .validate()
+            .map_err(fdo::Error::InvalidArgs)?;
+
+        // Turn every legacy IP/hostname token into the real record ID while
+        // the one object that knows both is available. New writes therefore
+        // cannot perpetuate the identity split that caused duplicate hosts.
+        let mut linked = std::collections::HashSet::new();
+        for site in &mut customer.sites {
+            let mut normalised = Vec::new();
+            for token in &site.host_ids {
+                let host = Uuid::parse_str(token)
+                    .ok()
+                    .and_then(|id| state.hosts.get(&id))
+                    .or_else(|| {
+                        state
+                            .hosts
+                            .values()
+                            .find(|h| h.hostname.eq_ignore_ascii_case(token))
+                    })
+                    .ok_or_else(|| {
+                        fdo::Error::InvalidArgs(format!(
+                            "site '{}' references unknown host '{token}'",
+                            site.display_name
+                        ))
+                    })?;
+                let id = host.id.to_string();
+                if !linked.insert(id.clone()) {
+                    return Err(fdo::Error::InvalidArgs(format!(
+                        "host '{}' is attached to more than one site",
+                        host.label
+                    )));
+                }
+                normalised.push(id);
+            }
+            site.host_ids = normalised;
+        }
+
+        for other in state.customers.values().filter(|c| c.slug != customer.slug) {
+            for site in &other.sites {
+                if let Some(host_id) = site.host_ids.iter().find(|id| linked.contains(*id)) {
+                    return Err(fdo::Error::InvalidArgs(format!(
+                        "host '{host_id}' is already attached to customer '{}'",
+                        other.display_name
+                    )));
+                }
+            }
+        }
+
+        state
+            .save_customer(&customer)
+            .map_err(|e| fdo::Error::Failed(format!("save customer: {e}")))?;
+        drop(state);
+        let mut state = self.state.lock().await;
+        state.customers.insert(customer.slug.clone(), customer);
+        Ok(())
+    }
+
+    /// Delete a customer only after every asset has been explicitly detached.
+    async fn customer_delete(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        slug: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        supermgr_core::customer::validate_id(slug).map_err(fdo::Error::InvalidArgs)?;
+        let mut state = self.state.lock().await;
+        let customer = state
+            .customers
+            .get(slug)
+            .ok_or_else(|| fdo::Error::UnknownObject("customer not found".into()))?;
+        let linked_hosts = customer.sites.iter().map(|s| s.host_ids.len()).sum::<usize>();
+        let tagged_hosts = state.hosts.values().filter(|h| h.customer == slug).count();
+        let tagged_profiles = state
+            .profiles
+            .values()
+            .filter(|p| p.customer == slug)
+            .count();
+        if linked_hosts + tagged_hosts + tagged_profiles > 0 {
+            return Err(fdo::Error::Failed(format!(
+                "customer still owns {linked_hosts} site link(s), {tagged_hosts} host tag(s) and {tagged_profiles} VPN profile(s); detach them first"
+            )));
+        }
+        state
+            .delete_customer_file(slug)
+            .map_err(|e| fdo::Error::Failed(format!("delete customer: {e}")))?;
+        state.customers.remove(slug);
+        Ok(())
+    }
+
+    /// Attach a host to one customer/site, removing every stale link first.
+    async fn customer_assign_host(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        customer_slug: &str,
+        site_id: &str,
+        host_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        let id = Uuid::parse_str(host_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid host UUID".into()))?;
+        let mut state = self.state.lock().await;
+        let mut host = state
+            .hosts
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
+        let hostname = host.hostname.clone();
+        let mut customers = state.customers.clone();
+
+        for customer in customers.values_mut() {
+            for site in &mut customer.sites {
+                site.host_ids.retain(|token| {
+                    token != host_id && !token.eq_ignore_ascii_case(&hostname)
+                });
+            }
+        }
+
+        if customer_slug.is_empty() {
+            if !site_id.is_empty() {
+                return Err(fdo::Error::InvalidArgs(
+                    "a site cannot be selected without a customer".into(),
+                ));
+            }
+            host.customer.clear();
+        } else {
+            supermgr_core::customer::validate_id(customer_slug)
+                .map_err(fdo::Error::InvalidArgs)?;
+            let customer = customers
+                .get_mut(customer_slug)
+                .ok_or_else(|| fdo::Error::UnknownObject("customer not found".into()))?;
+            if !site_id.is_empty() {
+                let site = customer
+                    .sites
+                    .iter_mut()
+                    .find(|s| s.id == site_id)
+                    .ok_or_else(|| fdo::Error::UnknownObject("site not found".into()))?;
+                site.host_ids.push(host_id.to_owned());
+            }
+            host.customer = customer_slug.to_owned();
+        }
+        host.updated_at = chrono::Utc::now();
+
+        for customer in customers.values() {
+            state
+                .save_customer(customer)
+                .map_err(|e| fdo::Error::Failed(format!("save customer links: {e}")))?;
+        }
+        state
+            .save_host(&host)
+            .map_err(|e| fdo::Error::Failed(format!("save host assignment: {e}")))?;
+        state.customers = customers;
+        state.hosts.insert(id, host);
+        Ok(())
+    }
+
+    /// Attach or detach a VPN profile from a customer.
+    async fn customer_assign_profile(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        customer_slug: &str,
+        profile_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        let id = Uuid::parse_str(profile_id)
+            .map_err(|_| fdo::Error::InvalidArgs("invalid profile UUID".into()))?;
+        let mut state = self.state.lock().await;
+        if !customer_slug.is_empty() && !state.customers.contains_key(customer_slug) {
+            return Err(fdo::Error::UnknownObject("customer not found".into()));
+        }
+        let profile = state
+            .profiles
+            .get_mut(&id)
+            .ok_or_else(|| fdo::Error::UnknownObject("profile not found".into()))?;
+        profile.customer = customer_slug.to_owned();
+        profile.updated_at = chrono::Utc::now();
+        let profile = profile.clone();
+        state
+            .save_profile(&profile)
+            .map_err(|e| fdo::Error::Failed(format!("save profile assignment: {e}")))?;
+        Ok(())
+    }
+
+    /// Scan an explicitly selected private IPv4 range for common TCP services.
+    async fn recon_scan(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        target_cidr: &str,
+        ports_json: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
+        let ports: Vec<u16> = if ports_json.trim().is_empty() {
+            crate::recon::DEFAULT_PORTS.to_vec()
+        } else {
+            serde_json::from_str(ports_json)
+                .map_err(|e| fdo::Error::InvalidArgs(format!("invalid ports JSON: {e}")))?
+        };
+        let managed = {
+            let state = self.state.lock().await;
+            state.hosts.values().cloned().collect::<Vec<_>>()
+        };
+        let result = crate::recon::scan(target_cidr, &ports, &managed)
+            .await
+            .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        serde_json::to_string(&result)
+            .map_err(|e| fdo::Error::Failed(format!("serialise recon result: {e}")))
+    }
+
     /// Set or clear the customer/tenant tag on an SSH host.
     ///
     /// Pass an empty string to remove the tag (un-group the host).
     async fn ssh_set_host_customer(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         customer: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let trimmed = customer.trim().to_owned();
@@ -2386,21 +3091,14 @@ impl DaemonService {
     }
 
     /// Delete an SSH host by UUID.
-    async fn delete_host(&self, host_id: &str) -> fdo::Result<()> {
-        let id = Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
-        let mut state = self.state.lock().await;
-        let host = state.hosts.remove(&id);
-        let _ = state.delete_host_file(id);
-        drop(state);
-
-        // Same omission the profile path had. A host can hold four separate
-        // credentials — SSH password, OpenSSH certificate, a FortiGate /
-        // OPNsense / Sophos API token, and UniFi controller credentials —
-        // and every one of them outlived the host record until now.
-        if let Some(host) = host {
-            delete_owned_secrets(&host, &format!("host {id}")).await;
-        }
-        Ok(())
+    async fn delete_host(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        self.delete_host_inner(host_id).await
     }
 
     /// List all SSH hosts as a JSON array of summaries.
@@ -2424,10 +3122,13 @@ impl DaemonService {
     async fn ssh_push_key(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         key_id: &str,
         host_ids_json: &str,
         use_sudo: bool,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let kid = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid key UUID".into()))?;
         let host_ids: Vec<String> = serde_json::from_str(host_ids_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host IDs JSON: {e}")))?;
@@ -2577,10 +3278,13 @@ impl DaemonService {
     async fn ssh_revoke_key(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         key_id: &str,
         host_ids_json: &str,
         use_sudo: bool,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let kid = Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid key UUID".into()))?;
         let host_ids: Vec<String> = serde_json::from_str(host_ids_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host IDs JSON: {e}")))?;
@@ -2746,7 +3450,14 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("password is not valid UTF-8: {e}")))
     }
 
-    async fn ssh_set_password(&self, host_id: &str, password: &str) -> fdo::Result<()> {
+    async fn ssh_set_password(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        password: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -2769,7 +3480,14 @@ impl DaemonService {
     }
 
     /// Store an OpenSSH certificate for the given host.
-    async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()> {
+    async fn ssh_set_certificate(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        certificate: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -2792,7 +3510,15 @@ impl DaemonService {
     }
 
     /// Store a FortiGate REST API token and optional port for the given host.
-    async fn ssh_set_api_token(&self, host_id: &str, token: &str, port: u16) -> fdo::Result<()> {
+    async fn ssh_set_api_token(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        token: &str,
+        port: u16,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -2820,10 +3546,13 @@ impl DaemonService {
     /// stores it, and returns the token string.
     async fn fortigate_generate_api_token(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         api_user: &str,
         api_port: u16,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -2931,7 +3660,13 @@ impl DaemonService {
     }
 
     /// Retrieve the stored FortiGate API token for a host (for copying to clipboard).
-    async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String> {
+    async fn fortigate_get_api_token(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -2954,11 +3689,14 @@ impl DaemonService {
     /// Call the FortiGate REST API on a host.
     async fn fortigate_api(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         method: &str,
         path: &str,
         body: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3063,10 +3801,13 @@ impl DaemonService {
     /// assigned to `ssh-public-key1`.  Returns a JSON result with status.
     async fn fortigate_push_ssh_key(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         key_id: &str,
         admin_user: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let hid = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid host UUID".into()))?;
         let kid = Uuid::parse_str(key_id)
@@ -3097,7 +3838,7 @@ impl DaemonService {
         // Delegate to the existing fortigate_api method.
         let path = format!("/api/v2/cmdb/system/admin/{admin_user}");
         let resp = self
-            .fortigate_api(host_id, "PUT", &path, &body.to_string())
+            .fortigate_api(conn, hdr, host_id, "PUT", &path, &body.to_string())
             .await?;
 
         Ok(resp)
@@ -3106,7 +3847,14 @@ impl DaemonService {
     /// Execute a shell command on a remote SSH host and return the result.
     ///
     /// Returns JSON: `{ "stdout": "...", "stderr": "...", "exit_code": N }`.
-    async fn ssh_execute_command(&self, host_id: &str, command: &str) -> fdo::Result<String> {
+    async fn ssh_execute_command(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        command: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3368,7 +4116,14 @@ impl DaemonService {
     ///
     /// Returns `true` if an entry was removed, `false` if there was nothing
     /// recorded for that address.
-    async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool> {
+    async fn ssh_forget_host_key(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        hostname: &str,
+        port: u16,
+    ) -> fdo::Result<bool> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let store = {
             let state = self.state.lock().await;
             Arc::clone(&state.known_hosts)
@@ -3407,6 +4162,7 @@ impl DaemonService {
         let profiles: Vec<Profile> = state.profiles.values().cloned().collect();
         let ssh_keys: Vec<SshKey> = state.ssh_keys.values().cloned().collect();
         let hosts: Vec<Host> = state.hosts.values().cloned().collect();
+        let customers: Vec<Customer> = state.customers.values().cloned().collect();
 
         // Include all secrets so the backup is self-contained.
         let all_secrets: std::collections::HashMap<String, String> =
@@ -3456,6 +4212,9 @@ impl DaemonService {
         if backup_dir.is_dir() {
             if let Ok(entries) = std::fs::read_dir(backup_dir) {
                 for entry in entries.flatten() {
+                    if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                        continue;
+                    }
                     if let Ok(name) = entry.file_name().into_string() {
                         if name.ends_with(".conf") {
                             if let Ok(content) = std::fs::read_to_string(entry.path()) {
@@ -3477,6 +4236,7 @@ impl DaemonService {
             profiles,
             ssh_keys,
             hosts,
+            customers,
             secrets: all_secrets,
             gui_settings,
             config_backups,
@@ -3492,7 +4252,13 @@ impl DaemonService {
     /// Each imported item receives a new UUID so it never collides with
     /// existing data.  Returns a JSON summary:
     /// `{"profiles": N, "ssh_keys": N, "hosts": N}`.
-    async fn import_all(&self, data: &str) -> fdo::Result<String> {
+    async fn import_all(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        data: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
         // Deserialize into the shared PortableBackup type: field names
         // and item shapes are now compiler-checked against supermgr-core,
         // so the Linux import can't drift from the format the macOS side
@@ -3501,17 +4267,28 @@ impl DaemonService {
         // so an older backup still loads.
         let backup: PortableBackup = serde_json::from_str(data)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid JSON: {e}")))?;
+        let backup = prepare_backup_import(backup)
+            .map_err(|e| fdo::Error::InvalidArgs(format!("invalid backup: {e}")))?;
+
+        // Import all credentials in one atomic secrets-file update and refuse
+        // collisions. `prepare_backup_import` has already moved every label
+        // into a fresh namespace, so an existing label indicates corruption
+        // rather than something we should silently overwrite.
+        secrets::import_secrets_raw(&backup.secrets)
+            .await
+            .map_err(|e| fdo::Error::Failed(format!("restore secrets: {e}")))?;
+        let imported_secrets = backup.secrets.len() as u32;
 
         let mut imported_profiles: u32 = 0;
         let mut imported_keys: u32 = 0;
         let mut imported_hosts: u32 = 0;
+        let mut imported_customers: u32 = 0;
 
         let mut state = self.state.lock().await;
 
-        // --- Profiles --- (each gets a fresh id so it never collides)
-        for mut profile in backup.profiles {
-            let new_id = Uuid::new_v4();
-            profile.id = new_id;
+        // --- Profiles --- (already re-IDed as one coherent import graph)
+        for profile in backup.profiles {
+            let new_id = profile.id;
             if let Err(e) = state.save_profile(&profile) {
                 warn!("import_all: failed to save profile '{}': {e}", profile.name);
                 continue;
@@ -3522,9 +4299,8 @@ impl DaemonService {
         }
 
         // --- SSH keys ---
-        for mut key in backup.ssh_keys {
-            let new_id = Uuid::new_v4();
-            key.id = new_id;
+        for key in backup.ssh_keys {
+            let new_id = key.id;
             let path = state.ssh_key_dir.join(format!("{new_id}.toml"));
             match toml::to_string_pretty(&key) {
                 Ok(text) => {
@@ -3548,9 +4324,8 @@ impl DaemonService {
         }
 
         // --- SSH hosts ---
-        for mut host in backup.hosts {
-            let new_id = Uuid::new_v4();
-            host.id = new_id;
+        for host in backup.hosts {
+            let new_id = host.id;
             let path = state.host_dir.join(format!("{new_id}.toml"));
             match toml::to_string_pretty(&host) {
                 Ok(text) => {
@@ -3573,16 +4348,36 @@ impl DaemonService {
             imported_hosts += 1;
         }
 
-        // --- Secrets --- (stored under their original labels; the
-        // re-ided profiles keep the SecretRef strings that point at them)
-        let mut imported_secrets: u32 = 0;
-        for (label, encoded) in &backup.secrets {
-            if let Err(e) = secrets::store_secret_raw(label, encoded).await {
-                warn!("import_all: failed to store secret '{label}': {e}");
+        // --- Customers/sites ---
+        // Existing slugs are merged rather than replaced. This makes a
+        // repeated restore safe: new host IDs join the existing site while
+        // contact details already maintained on this machine are retained.
+        for customer in backup.customers {
+            let merged = if let Some(existing) = state.customers.get(&customer.slug) {
+                let mut merged = existing.clone();
+                for imported_site in customer.sites {
+                    if let Some(site) = merged.sites.iter_mut().find(|s| s.id == imported_site.id) {
+                        for host_id in imported_site.host_ids {
+                            if !site.host_ids.contains(&host_id) {
+                                site.host_ids.push(host_id);
+                            }
+                        }
+                    } else {
+                        merged.sites.push(imported_site);
+                    }
+                }
+                merged
             } else {
-                imported_secrets += 1;
+                customer
+            };
+            if let Err(e) = state.save_customer(&merged) {
+                warn!("import_all: failed to save customer '{}': {e}", merged.display_name);
+                continue;
             }
+            state.customers.insert(merged.slug.clone(), merged);
+            imported_customers += 1;
         }
+
         if imported_secrets > 0 {
             info!("import_all: restored {imported_secrets} secret(s)");
         }
@@ -3607,12 +4402,28 @@ impl DaemonService {
         // --- FortiGate config backups ---
         let mut restored_backups: u32 = 0;
         {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt as _;
+
             let backup_dir = std::path::Path::new("/etc/supermgrd/backups");
             let _ = std::fs::create_dir_all(backup_dir);
             for (filename, text) in &backup.config_backups {
                 let path = backup_dir.join(filename);
-                if !path.exists() && std::fs::write(&path, text).is_ok() {
-                    restored_backups += 1;
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                {
+                    Ok(mut file) => {
+                        if file.write_all(text.as_bytes()).is_ok() {
+                            restored_backups += 1;
+                        } else {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => warn!("import_all: could not create '{}': {e}", path.display()),
                 }
             }
             if restored_backups > 0 {
@@ -3624,6 +4435,7 @@ impl DaemonService {
             "profiles": imported_profiles,
             "ssh_keys": imported_keys,
             "hosts": imported_hosts,
+            "customers": imported_customers,
             "secrets": imported_secrets,
             "settings": restored_settings,
             "config_backups": restored_backups,
@@ -3632,7 +4444,7 @@ impl DaemonService {
         info!(
             "import_all: imported {imported_profiles} profile(s), \
              {imported_keys} SSH key(s), {imported_hosts} SSH host(s), \
-             {imported_secrets} secret(s), settings={restored_settings}, \
+             {imported_customers} customer(s), {imported_secrets} secret(s), settings={restored_settings}, \
              {restored_backups} config backup(s)"
         );
 
@@ -3647,7 +4459,14 @@ impl DaemonService {
     ///
     /// The host must be a UniFi device type.  Connects via SSH and runs the
     /// `set-inform` command, returning the command output.
-    async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String> {
+    async fn unifi_set_inform(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        inform_url: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3690,11 +4509,14 @@ impl DaemonService {
     /// Returns the JSON response body.
     async fn unifi_api(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         method: &str,
         path: &str,
         body: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3793,11 +4615,14 @@ impl DaemonService {
     /// the URL on the host and the credentials in the secret service.
     async fn unifi_set_controller(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         url: &str,
         username: &str,
         password: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3862,11 +4687,14 @@ impl DaemonService {
     /// is set to point at it and `api_port` is updated.
     async fn opnsense_set_credentials(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         port: u16,
         api_key: &str,
         api_secret: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         if api_key.trim().is_empty() || api_secret.is_empty() {
@@ -3945,11 +4773,14 @@ impl DaemonService {
     /// can hit any endpoint without re-implementing credential handling.
     async fn opnsense_api(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         method: &str,
         path: &str,
         body: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -3989,7 +4820,13 @@ impl DaemonService {
     /// Mirrors `fortigate_backup_config`: uses the same `/etc/supermgrd/backups/`
     /// directory and `<host>_<ts>.xml` naming so all vendor backups land in
     /// one place. Returns the filename written.
-    async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String> {
+    async fn opnsense_backup_config(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let (hostname, port, creds) = self.load_opnsense_creds(&id).await?;
@@ -4057,11 +4894,14 @@ impl DaemonService {
     /// publishes WebAdmin on the standard port). Defaults to 4444 if 0.
     async fn sophos_set_credentials(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         port: u16,
         username: &str,
         password: &str,
     ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         if username.trim().is_empty() || password.is_empty() {
@@ -4138,7 +4978,14 @@ impl DaemonService {
     /// in the `<Status code="N">` tag of the response body. Use
     /// [`crate::sophos::looks_successful`] to discriminate at a glance, or
     /// parse the body for finer-grained checks.
-    async fn sophos_xml_api(&self, host_id: &str, inner_xml: &str) -> fdo::Result<String> {
+    async fn sophos_xml_api(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+        inner_xml: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let (hostname, port, creds) = self.load_sophos_creds(&id).await?;
@@ -4166,7 +5013,13 @@ impl DaemonService {
     /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
     /// `{"ssh": "timeout", "api": "auth_failed"}`.  The `api` field is only
     /// present when the host has a FortiGate API token configured.
-    async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String> {
+    async fn test_host_connection(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -4271,10 +5124,13 @@ impl DaemonService {
     /// and returns the filename.
     async fn save_config_version(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         customer: &str,
         device_type: &str,
         config: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         use std::io::Write;
 
         let dir = PathBuf::from("/etc/supermgrd/configs");
@@ -4398,7 +5254,13 @@ impl DaemonService {
     ///
     /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and
     /// saves to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
-    async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String> {
+    async fn fortigate_backup_config(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -4534,9 +5396,12 @@ impl DaemonService {
     /// reply does not lose a result that took seven round-trips to produce.
     async fn compliance_run_linux(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         triggered_by: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         use supermgr_core::compliance::TriggerKind;
 
         let id = Uuid::parse_str(host_id)
@@ -4720,6 +5585,7 @@ impl DaemonService {
         disposition: &str,
         note: &str,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let parsed: supermgr_core::findings_store::Disposition =
             serde_json::from_str(disposition).map_err(|e| {
                 fdo::Error::InvalidArgs(format!("disposition is not valid JSON: {e}"))
@@ -4759,7 +5625,13 @@ impl DaemonService {
             .map_err(|e| fdo::Error::Failed(format!("serialise drift: {e}")))
     }
 
-    async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String> {
+    async fn fortigate_compliance_check(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        host_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let id = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -5063,11 +5935,14 @@ impl DaemonService {
     /// Returns a unique forward ID string.
     async fn ssh_start_port_forward(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
         host_id: &str,
         local_port: u16,
         remote_host: &str,
         remote_port: u16,
     ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let hid = Uuid::parse_str(host_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
 
@@ -5160,7 +6035,13 @@ impl DaemonService {
     }
 
     /// Stop an active port forward.
-    async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()> {
+    async fn ssh_stop_port_forward(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        forward_id: &str,
+    ) -> fdo::Result<()> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         let mut state = self.state.lock().await;
         let entry = state
             .port_forwards
@@ -5415,7 +6296,7 @@ async fn connect_via_jump(
 // ---------------------------------------------------------------------------
 
 /// How the kill switch should allow VPN traffic through.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) enum KillSwitchMode {
     /// Traffic goes through a named virtual NIC (WireGuard, OpenVPN tun).
     ///
@@ -5563,20 +6444,18 @@ fn sanitize_fortigate_host(raw: &str) -> String {
     s.trim_end_matches(':').to_owned()
 }
 
-/// Install an nftables kill-switch that drops all non-VPN traffic.
-///
-/// All rules are applied atomically via a single `nft -f -` invocation so
-/// there is no window where the DROP policy is active but the allow rules
-/// are not yet installed.
-async fn install_kill_switch(mode: &KillSwitchMode) {
-    use tokio::io::AsyncWriteExt as _;
+/// Endpoint identity used to prevent duplicate managed-host rows.
+fn same_host_endpoint(host: &Host, hostname: &str, port: u16) -> bool {
+    host.port == port
+        && host
+            .hostname
+            .trim()
+            .trim_end_matches('.')
+            .eq_ignore_ascii_case(hostname.trim().trim_end_matches('.'))
+}
 
-    // Best-effort removal of any stale table from a previous run.
-    let _ = tokio::process::Command::new("nft")
-        .args(["delete", "table", "inet", "supermgr_killswitch"])
-        .status()
-        .await;
-
+/// Build the complete nftables transaction for a kill-switch mode.
+fn render_kill_switch(mode: &KillSwitchMode) -> Result<String, String> {
     // Build the complete ruleset as a single nft script so the table, chain,
     // and all allow rules are created atomically.  This prevents the race
     // where the chain's DROP policy is active before the accept rules are in
@@ -5592,82 +6471,126 @@ async fn install_kill_switch(mode: &KillSwitchMode) {
 
     match &mode {
         KillSwitchMode::Interface { iface, allowed_ips } => {
+            if !iface.is_empty()
+                && (iface.len() > 15
+                    || !iface
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte)))
+            {
+                return Err(format!("unsafe or invalid VPN interface name '{iface}'"));
+            }
             if !iface.is_empty() {
                 script.push_str(&format!("\t\toif \"{iface}\" accept;\n"));
             }
             for ip in allowed_ips {
-                // Distinguish IPv4 vs IPv6 for the nft address-family keyword.
-                if ip.contains(':') {
-                    script.push_str(&format!("\t\tip6 daddr {ip} accept;\n"));
-                } else {
-                    script.push_str(&format!("\t\tip daddr {ip} accept;\n"));
-                }
+                let ip = ip
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| format!("invalid kill-switch allow-list IP '{ip}'"))?;
+                let family = if ip.is_ipv6() { "ip6" } else { "ip" };
+                script.push_str(&format!("\t\t{family} daddr {ip} accept;\n"));
             }
         }
         KillSwitchMode::IPsec { server_ip, allowed_ips } => {
             // Allow IKE key-exchange packets to reach the VPN server.
-            script.push_str(&format!("\t\tip daddr {server_ip} accept;\n"));
+            let server_ip = server_ip
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| format!("VPN server did not resolve to an IP address: '{server_ip}'"))?;
+            let family = if server_ip.is_ipv6() { "ip6" } else { "ip" };
+            script.push_str(&format!("\t\t{family} daddr {server_ip} accept;\n"));
             // Allow all traffic that the kernel's xfrm/IPsec policy will
             // encrypt and send through the tunnel.
             script.push_str("\t\trt ipsec exists accept;\n");
             // Allow extra IPs (e.g. local DNS servers not routed via IPsec).
             for ip in allowed_ips {
-                if ip.contains(':') {
-                    script.push_str(&format!("\t\tip6 daddr {ip} accept;\n"));
-                } else {
-                    script.push_str(&format!("\t\tip daddr {ip} accept;\n"));
-                }
+                let ip = ip
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| format!("invalid kill-switch allow-list IP '{ip}'"))?;
+                let family = if ip.is_ipv6() { "ip6" } else { "ip" };
+                script.push_str(&format!("\t\t{family} daddr {ip} accept;\n"));
             }
         }
     }
 
     script.push_str("\t}\n}\n");
+    Ok(script)
+}
+
+/// Install an nftables kill-switch that drops all non-VPN traffic.
+///
+/// All rules are applied atomically via a single `nft -f -` invocation so
+/// there is no window where the DROP policy is active but the allow rules
+/// are not yet installed. Success is reported only after nft confirms that
+/// the transaction was accepted.
+async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let script = render_kill_switch(mode)?;
+
+    // Best-effort removal of any stale table from a previous run. Suppress
+    // nft's expected "No such file or directory" diagnostic when absent.
+    let _ = tokio::process::Command::new("nft")
+        .args(["delete", "table", "inet", "supermgr_killswitch"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
     // Feed the script to nft as a single atomic transaction.
-    let spawn_result = tokio::process::Command::new("nft")
+    let mut child = tokio::process::Command::new("nft")
         .arg("-f")
         .arg("-")
         .stdin(std::process::Stdio::piped())
-        .spawn();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("could not start nft: {e}"))?;
 
-    let mut child = match spawn_result {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("kill-switch: nft -f - spawn failed: {e}");
-            return;
-        }
-    };
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "nft stdin was not available".to_owned())?;
+    if let Err(e) = stdin.write_all(script.as_bytes()).await {
+        let _ = child.kill().await;
+        return Err(format!("could not send rules to nft: {e}"));
+    }
+    drop(stdin);
 
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(script.as_bytes()).await {
-            warn!("kill-switch: nft stdin write failed: {e}");
-        }
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("could not wait for nft: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "nft rejected the kill-switch rules ({}): {}",
+            output.status,
+            stderr.trim()
+        ));
     }
 
-    match child.wait().await {
-        Ok(s) if s.success() => match mode {
-            KillSwitchMode::Interface { iface, allowed_ips } => {
-                info!(
-                    "kill-switch installed (iface={iface}, {} extra server IP(s))",
-                    allowed_ips.len()
-                );
-            }
-            KillSwitchMode::IPsec { server_ip, allowed_ips } => {
-                info!(
-                    "kill-switch installed (IPsec, server={server_ip}, {} extra DNS IP(s))",
-                    allowed_ips.len()
-                );
-            }
-        },
-        Ok(s) => warn!("kill-switch: nft -f - exited {s}; kill-switch may not be active"),
-        Err(e) => warn!("kill-switch: nft -f - wait error: {e}"),
+    match mode {
+        KillSwitchMode::Interface { iface, allowed_ips } => {
+            info!(
+                "kill-switch installed (iface={iface}, {} extra server IP(s))",
+                allowed_ips.len()
+            );
+        }
+        KillSwitchMode::IPsec { server_ip, allowed_ips } => {
+            info!(
+                "kill-switch installed (IPsec, server={server_ip}, {} extra DNS IP(s))",
+                allowed_ips.len()
+            );
+        }
     }
+    Ok(())
 }
 
 /// Remove the nftables kill-switch table (idempotent — ignores errors).
 pub(crate) async fn remove_kill_switch() {
     match tokio::process::Command::new("nft")
         .args(["delete", "table", "inet", "supermgr_killswitch"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .await
     {
@@ -5895,26 +6818,77 @@ pub async fn connect_profile(
 
         match result {
             Ok(()) => {
-                s.vpn_state = VpnState::Connected {
-                    profile_id: id,
-                    since: chrono::Utc::now(),
-                    interface: display_iface,
-                };
-                info!("=== [{}] connected ===", profile.name);
-                // Persist last_connected_at.
-                if let Some(p) = s.profiles.get_mut(&id) {
-                    p.last_connected_at = Some(chrono::Utc::now());
-                    let clone = p.clone();
-                    if let Err(e) = s.save_profile(&clone) {
-                        warn!("failed to persist last_connected_at for '{}': {e}", profile.name);
-                    }
-                }
-                // Feature 3: install kill switch if enabled.
-                if let Some(mode) = kill_mode {
-                    drop(s); // release the lock before the subprocess
-                    install_kill_switch(&mode).await;
+                // A requested kill switch is part of a successful connection,
+                // not a best-effort extra. Do not publish Connected until nft
+                // confirms that the rules are actually active.
+                let kill_result = if let Some(mode) = &kill_mode {
+                    drop(s);
+                    let result = install_kill_switch(mode).await;
                     s = state_arc.lock().await;
-                    s.active_kill_switch_mode = Some(mode);
+                    result
+                } else {
+                    Ok(())
+                };
+
+                // A Disconnect() may have completed while nft was running.
+                // Never resurrect that connection or leave a late table behind.
+                let still_connecting = matches!(
+                    &s.vpn_state,
+                    VpnState::Connecting { profile_id: pid, .. } if *pid == id
+                );
+                if !still_connecting {
+                    drop(s);
+                    if kill_mode.is_some() && kill_result.is_ok() {
+                        remove_kill_switch().await;
+                    }
+                    return;
+                }
+
+                match kill_result {
+                    Ok(()) => {
+                        s.active_kill_switch_mode = kill_mode;
+                        s.vpn_state = VpnState::Connected {
+                            profile_id: id,
+                            since: chrono::Utc::now(),
+                            interface: display_iface,
+                        };
+                        info!("=== [{}] connected ===", profile.name);
+                        // Persist last_connected_at only after every requested
+                        // connection guarantee is in place.
+                        if let Some(p) = s.profiles.get_mut(&id) {
+                            p.last_connected_at = Some(chrono::Utc::now());
+                            let clone = p.clone();
+                            if let Err(e) = s.save_profile(&clone) {
+                                warn!(
+                                    "failed to persist last_connected_at for '{}': {e}",
+                                    profile.name
+                                );
+                            }
+                        }
+                    }
+                    Err(kill_error) => {
+                        error!(
+                            "=== [{}] connected, but kill switch failed: {} ===",
+                            profile.name, kill_error
+                        );
+                        drop(s);
+                        if let Err(disconnect_error) = backend.disconnect().await {
+                            warn!(
+                                "cleanup after kill-switch failure for '{}': {disconnect_error}",
+                                profile.name
+                            );
+                        }
+                        s = state_arc.lock().await;
+                        s.vpn_state = VpnState::Error {
+                            profile_id: Some(id),
+                            code: supermgr_core::vpn::state::ErrorCode::Internal,
+                            message: format!(
+                                "VPN was disconnected because its kill switch could not be enabled: {kill_error}"
+                            ),
+                        };
+                        s.active_backend = None;
+                        s.active_kill_switch_mode = None;
+                    }
                 }
             }
             Err(e) => {
@@ -6502,22 +7476,12 @@ pub fn spawn_monitor_task(
                             }
                         }
 
-                        let profile_kill_switch = {
+                        let kill_switch_active = {
                             let s = state.lock().await;
-                            if let VpnState::Connected { profile_id, .. } = &current_state {
-                                s.profiles
-                                    .get(profile_id)
-                                    .is_some_and(|p| p.kill_switch)
-                            } else {
-                                false
-                            }
+                            s.active_kill_switch_mode.is_some()
                         };
 
-                        if profile_kill_switch {
-                            let _stored_mode = {
-                                let s = state.lock().await;
-                                s.active_kill_switch_mode.clone()
-                            };
+                        if kill_switch_active {
                             warn!(
                                 "VPN dropped unexpectedly — kill switch is active, \
                                  all traffic is blocked until reconnect or disconnect"
@@ -6526,7 +7490,7 @@ pub fn spawn_monitor_task(
                             remove_kill_switch().await;
                         }
 
-                        let error_state = if profile_kill_switch {
+                        let error_state = if kill_switch_active {
                             VpnState::Error {
                                 profile_id: current_state.profile_id(),
                                 code: supermgr_core::vpn::state::ErrorCode::Internal,
@@ -6550,7 +7514,7 @@ pub fn spawn_monitor_task(
                         // Auto-reconnect: if the profile has auto_connect and
                         // the kill switch is NOT active, attempt to reconnect
                         // after a short delay.
-                        let auto_reconnect_profile = if !profile_kill_switch {
+                        let auto_reconnect_profile = if !kill_switch_active {
                             let s = state.lock().await;
                             if let VpnState::Connected { profile_id, .. } = &current_state {
                                 s.profiles.get(profile_id)
@@ -6763,6 +7727,21 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
 mod tests {
     use super::*;
 
+    #[test]
+    fn duplicate_host_endpoint_is_case_and_trailing_dot_insensitive() {
+        let mut host: Host = serde_json::from_value(serde_json::json!({
+            "label": "Firewall",
+            "hostname": "FW.EXAMPLE.COM.",
+            "port": 22,
+            "username": "admin",
+            "auth_method": "key"
+        }))
+        .unwrap();
+        host.port = 22;
+        assert!(same_host_endpoint(&host, "fw.example.com", 22));
+        assert!(!same_host_endpoint(&host, "fw.example.com", 2222));
+    }
+
     // -----------------------------------------------------------------------
     // SSH known hosts
     // -----------------------------------------------------------------------
@@ -6875,6 +7854,228 @@ mod tests {
         assert!(parse_dns_server_list("").is_empty());
         assert!(parse_dns_server_list("   ").is_empty());
         assert!(parse_dns_server_list(",,,").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Backup import integrity
+    // -----------------------------------------------------------------------
+
+    mod backup_import {
+        use super::*;
+        use supermgr_core::vpn::profile::WireGuardConfig;
+
+        fn host(id: Uuid, label: &str) -> Host {
+            Host {
+                id,
+                label: label.into(),
+                hostname: format!("{label}.example.com"),
+                port: 22,
+                username: "admin".into(),
+                group: String::new(),
+                device_type: supermgr_core::DeviceType::default(),
+                auth_method: AuthMethod::Password,
+                auth_key_id: None,
+                auth_password_ref: None,
+                auth_cert_ref: None,
+                vpn_profile_id: None,
+                api_port: None,
+                api_token_ref: None,
+                api_verify_tls: true,
+                unifi_controller_url: None,
+                unifi_api_token_ref: None,
+                rdp_port: None,
+                vnc_port: None,
+                port_forwards: Vec::new(),
+                proxy_jump: None,
+                pinned: false,
+                customer: String::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }
+        }
+
+        fn coherent_backup() -> PortableBackup {
+            let profile_id = Uuid::new_v4();
+            let key_id = Uuid::new_v4();
+            let host_id = Uuid::new_v4();
+            let jump_id = Uuid::new_v4();
+            let external_host_id = Uuid::new_v4();
+
+            let private_label = format!("supermgr/wg/{}/privkey", profile_id.simple());
+            let key_label = format!("supermgr/ssh/{}/privkey", key_id.simple());
+            let password_label = format!("supermgr/ssh/host/{}/password", host_id.simple());
+            let azure_label = format!("supermgr/azure/{}/refresh_token", profile_id.simple());
+
+            let profile = Profile {
+                id: profile_id,
+                name: "VPN".into(),
+                auto_connect: false,
+                full_tunnel: true,
+                last_connected_at: None,
+                kill_switch: true,
+                push_dns: false,
+                customer: String::new(),
+                config: ProfileConfig::WireGuard(WireGuardConfig {
+                    private_key: SecretRef::new(&private_label),
+                    addresses: Vec::new(),
+                    dns: Vec::new(),
+                    dns_search: Vec::new(),
+                    mtu: None,
+                    listen_port: None,
+                    peers: Vec::new(),
+                    interface_name: None,
+                    split_routes: Vec::new(),
+                }),
+                updated_at: chrono::Utc::now(),
+            };
+            let key = SshKey {
+                id: key_id,
+                name: "key".into(),
+                description: String::new(),
+                key_type: SshKeyType::Ed25519,
+                public_key: "ssh-ed25519 AAAA".into(),
+                private_key_ref: SecretRef::new(&key_label),
+                fingerprint: "SHA256:test".into(),
+                tags: Vec::new(),
+                deployed_to: vec![host_id, external_host_id],
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            };
+            let jump = host(jump_id, "jump");
+            let mut target = host(host_id, "target");
+            target.auth_key_id = Some(key_id);
+            target.auth_password_ref = Some(SecretRef::new(&password_label));
+            target.vpn_profile_id = Some(profile_id);
+            target.proxy_jump = Some(jump_id);
+
+            let mut backup = PortableBackup::new();
+            backup.profiles.push(profile);
+            backup.ssh_keys.push(key);
+            backup.hosts.extend([target, jump]);
+            backup.config_backups.insert("firewall.conf".into(), "config".into());
+            backup.secrets = HashMap::from([
+                (private_label, "cHJpdmF0ZQ==".into()),
+                (key_label, "a2V5".into()),
+                (password_label, "cGFzc3dvcmQ=".into()),
+                (azure_label, "cmVmcmVzaA==".into()),
+                ("legacy/global/password".into(), "bGVnYWN5".into()),
+            ]);
+            backup
+        }
+
+        #[test]
+        fn import_reids_the_whole_graph_and_every_secret_label() {
+            let original = coherent_backup();
+            let old_profile_id = original.profiles[0].id;
+            let old_key_id = original.ssh_keys[0].id;
+            let old_target_id = original
+                .hosts
+                .iter()
+                .find(|host| host.label == "target")
+                .unwrap()
+                .id;
+            let imported = prepare_backup_import(original).unwrap();
+
+            let profile = &imported.profiles[0];
+            let key = &imported.ssh_keys[0];
+            let target = imported
+                .hosts
+                .iter()
+                .find(|host| host.label == "target")
+                .unwrap();
+            let jump = imported
+                .hosts
+                .iter()
+                .find(|host| host.label == "jump")
+                .unwrap();
+
+            assert_ne!(profile.id, old_profile_id);
+            assert_ne!(key.id, old_key_id);
+            assert_ne!(target.id, old_target_id);
+            assert_eq!(target.auth_key_id, Some(key.id));
+            assert_eq!(target.vpn_profile_id, Some(profile.id));
+            assert_eq!(target.proxy_jump, Some(jump.id));
+            assert_eq!(key.deployed_to, vec![target.id]);
+
+            let ProfileConfig::WireGuard(wg) = &profile.config else {
+                panic!("expected WireGuard profile");
+            };
+            assert!(wg.private_key.label().contains(&profile.id.simple().to_string()));
+            assert!(imported.secrets.contains_key(wg.private_key.label()));
+            assert!(imported
+                .secrets
+                .keys()
+                .any(|label| label == &format!(
+                    "supermgr/azure/{}/refresh_token",
+                    profile.id.simple()
+                )));
+
+            let imported_password = target.auth_password_ref.as_ref().unwrap().label();
+            assert!(imported_password.contains(&target.id.simple().to_string()));
+            assert!(imported.secrets.contains_key(imported_password));
+            assert!(imported
+                .secrets
+                .keys()
+                .any(|label| label.starts_with("supermgr/import/")
+                    && label.ends_with("/legacy/global/password")));
+        }
+
+        #[test]
+        fn repeated_imports_never_share_secret_labels() {
+            let original = coherent_backup();
+            let first = prepare_backup_import(original.clone()).unwrap();
+            let second = prepare_backup_import(original).unwrap();
+            let first_labels = first.secrets.keys().collect::<HashSet<_>>();
+            let second_labels = second.secrets.keys().collect::<HashSet<_>>();
+            assert!(first_labels.is_disjoint(&second_labels));
+        }
+
+        #[test]
+        fn traversal_and_duplicate_entity_ids_are_rejected_before_import() {
+            let mut traversal = coherent_backup();
+            traversal
+                .config_backups
+                .insert("../../outside.conf".into(), "bad".into());
+            assert!(prepare_backup_import(traversal)
+                .unwrap_err()
+                .contains("unsafe config-backup filename"));
+
+            let mut duplicate = coherent_backup();
+            duplicate.hosts[0].id = duplicate.profiles[0].id;
+            assert!(prepare_backup_import(duplicate)
+                .unwrap_err()
+                .contains("duplicate entity UUID"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Kill-switch rendering
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn kill_switch_renders_ipv4_and_ipv6_with_the_correct_nft_family() {
+        let script = render_kill_switch(&KillSwitchMode::IPsec {
+            server_ip: "2001:db8::10".into(),
+            allowed_ips: vec!["192.0.2.53".into(), "2001:db8::53".into()],
+        })
+        .unwrap();
+        assert!(script.contains("ip6 daddr 2001:db8::10 accept"));
+        assert!(script.contains("ip daddr 192.0.2.53 accept"));
+        assert!(script.contains("ip6 daddr 2001:db8::53 accept"));
+    }
+
+    #[test]
+    fn kill_switch_rejects_unresolved_addresses_and_unsafe_interfaces() {
+        assert!(render_kill_switch(&KillSwitchMode::IPsec {
+            server_ip: "vpn.example.com".into(),
+            allowed_ips: Vec::new(),
+        })
+        .is_err());
+        assert!(render_kill_switch(&KillSwitchMode::Interface {
+            iface: "wg0\"; policy accept; #".into(),
+            allowed_ips: Vec::new(),
+        })
+        .is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -7038,9 +8239,9 @@ mod tests {
             state.ssh_keys.insert(key_id, key);
             let svc = service(state);
 
-            svc.delete_profile(&profile_id.to_string()).await.unwrap();
-            svc.delete_host(&host_id.to_string()).await.unwrap();
-            svc.ssh_delete_key(&key_id.to_string()).await.unwrap();
+            svc.delete_profile_inner(&profile_id.to_string()).await.unwrap();
+            svc.delete_host_inner(&host_id.to_string()).await.unwrap();
+            svc.delete_ssh_key_inner(&key_id.to_string()).await.unwrap();
 
             let left = crate::secrets::read_all_secrets().await.unwrap();
             assert!(
@@ -7090,7 +8291,7 @@ mod tests {
             };
             let svc = service(state);
 
-            let err = svc.delete_profile(&profile_id.to_string()).await;
+            let err = svc.delete_profile_inner(&profile_id.to_string()).await;
             assert!(err.is_err(), "expected refusal while connected");
             assert_eq!(
                 crate::secrets::read_all_secrets().await.unwrap().len(),

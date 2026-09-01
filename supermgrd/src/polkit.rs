@@ -64,6 +64,22 @@ pub const ACTION_SECRETS: &str = "org.supermgr.daemon.secrets";
 /// once, and the prompt names what is being asked for.
 pub const ACTION_SSH_CONNECT: &str = "org.supermgr.daemon.ssh-connect";
 
+/// Change SuperManager's local configuration or machine state.
+///
+/// Profile/host/key CRUD, credential writes, VPN state changes, imports and
+/// local configuration changes belong here.  The shipped policy uses
+/// `auth_admin_keep`: the first change in an active desktop session prompts,
+/// subsequent changes in the same administration session do not.
+pub const ACTION_MANAGE: &str = "org.supermgr.daemon.manage";
+
+/// Perform an authenticated operation against a managed remote device.
+///
+/// This covers arbitrary SSH commands, key deployment, appliance API calls,
+/// compliance scans, backups and port forwards.  It is separate from
+/// [`ACTION_MANAGE`] so an administrator can tighten remote execution without
+/// making harmless local organisation equally cumbersome.
+pub const ACTION_EXECUTE: &str = "org.supermgr.daemon.execute";
+
 /// Selecting or clearing a Tailscale exit node.
 ///
 /// Gated, even though `connect` (bring up a VPN profile) is not, and the
@@ -146,6 +162,29 @@ pub async fn authorize(
         ));
     };
 
+    // Calls the daemon makes through its own proxy (scheduled backups are the
+    // important case) originate from uid 0.  Root already has every
+    // capability these actions protect, and requiring an active desktop
+    // authentication agent would make unattended maintenance fail.  Resolve
+    // the uid through the bus daemon rather than trusting caller input.
+    let dbus = fdo::DBusProxy::new(connection).await.map_err(|e| {
+        fdo::Error::AccessDenied(format!(
+            "cannot identify the caller of '{action}' through the bus daemon: {e}"
+        ))
+    })?;
+    let uid = dbus
+        .get_connection_unix_user(sender.to_owned().into())
+        .await
+        .map_err(|e| {
+            fdo::Error::AccessDenied(format!(
+                "cannot determine the caller of '{action}': {e}"
+            ))
+        })?;
+    if uid == 0 {
+        tracing::debug!(caller = %sender, action, "authorized root caller");
+        return Ok(());
+    }
+
     let authority = AuthorityProxy::new(connection).await.map_err(|e| {
         tracing::error!(error = %e, "polkit unreachable — denying");
         fdo::Error::AccessDenied(format!(
@@ -205,6 +244,8 @@ mod tests {
     const ALL_ACTIONS: &[&str] = &[
         ACTION_SECRETS,
         ACTION_SSH_CONNECT,
+        ACTION_MANAGE,
+        ACTION_EXECUTE,
         ACTION_TAILSCALE_EXIT_NODE,
         ACTION_TAILSCALE_REPAIR,
     ];
@@ -278,6 +319,17 @@ mod tests {
             defaults.contains("<allow_active>auth_admin_keep</allow_active>"),
             "expected auth_admin_keep for the ssh-connect action, got: {defaults}"
         );
+    }
+
+    #[test]
+    fn manage_and_execute_ask_once_per_active_session() {
+        for action in [ACTION_MANAGE, ACTION_EXECUTE] {
+            let defaults = defaults_block(POLICY, action);
+            assert!(
+                defaults.contains("<allow_active>auth_admin_keep</allow_active>"),
+                "expected auth_admin_keep for {action}, got: {defaults}"
+            );
+        }
     }
 
     #[test]
