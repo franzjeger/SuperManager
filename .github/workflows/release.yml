@@ -175,6 +175,26 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
 
+      # Stable builds poll the feed committed to main. Publishing only a
+      # release asset leaves every installed Mac on the previous version.
+      - name: Publish stable appcast to main
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          set -euo pipefail
+          cp dist/appcast.xml "$RUNNER_TEMP/appcast.xml"
+          git fetch origin main
+          git checkout --detach origin/main
+          cp "$RUNNER_TEMP/appcast.xml" appcast.xml
+          if git diff --quiet -- appcast.xml; then
+            echo "appcast.xml is already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcast.xml
+          git commit -m "chore(release): publish ${GITHUB_REF_NAME} appcast"
+          git push origin HEAD:main
+
       # Always clean up the temporary keychain so a failed run
       # doesn't leave the signing identity sitting on the runner
       # (GitHub-hosted runners are ephemeral but defence in depth).
