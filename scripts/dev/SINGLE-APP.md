@@ -54,3 +54,24 @@ Merge only after the remaining runtime/platform gates are addressed. The
 historical remediation document records what was tested at each stage; the
 consolidation document records the local installation rather than a public
 release certification.
+
+## Validation on 2026-09-09
+
+The complete builder succeeded from clean commit
+`b55e1e1ce48fc9446f7972886d932187c675efd1`, producing local build
+`2026090918` (`1.8.0-local.18`) and its provenance manifest. The GUI, freshly built
+engine and freshly built helper all contain ARM64 code; deep/strict signature
+verification passed. This artifact was not installed over the working `.16` app.
+
+The source snapshot passed 555 selected Rust tests (one subprocess helper is
+intentionally ignored by the runner and exercised by its parent), 18 isolated
+installer/runtime tests, 6 Dev preparation tests, and 14 isolated Swift
+resolver/deployment tests. Six additional existing Keychain-query/version tests
+passed in a disposable Swift package using the production Keychain sources and
+the unchanged pure version enum; they did not read or change real credentials.
+The generated installer contains both app executable names in its active-app
+check and passes shell syntax validation. Full build/test logs and binary
+artifacts remain local, outside the public repository.
+
+No system package upgrade, reboot, live VPN change, new update feed, or public
+release was performed during this source/build validation.
