@@ -9,3 +9,5 @@
 pub mod audit;
 pub mod connection;
 pub mod known_hosts;
+
+pub(crate) mod shell;

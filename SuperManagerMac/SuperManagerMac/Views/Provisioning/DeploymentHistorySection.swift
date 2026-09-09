@@ -9,11 +9,7 @@ import SwiftUI
 /// it back via SSH. We surface the backup path in the row so
 /// the user can copy / inspect it manually if they prefer.
 ///
-/// This pane closes the safe-deploy loop: render → diff →
-/// deploy → backup recorded → if anything went wrong, click
-/// "Restore" and SuperManager pushes the pre-deploy snapshot
-/// back. Critical for the "I'm comfortable letting SuperManager
-/// touch this firewall" trust story.
+/// Restore sends backup commands; it is not a verified replacement transaction.
 struct DeploymentHistorySection: View {
     @Environment(AppState.self) private var appState
 
@@ -76,7 +72,7 @@ struct DeploymentHistorySection: View {
             }
         } message: { deployment in
             let timestamp = deployment.startedAt.formatted(date: .abbreviated, time: .shortened)
-            Text("Pushes the pre-deploy backup from \(timestamp) back to \(hostLabel) over SSH. The current configuration will be replaced. A new deployment record will be created with status 'Rolled back'.")
+            Text("Pushes the pre-deploy backup from \(timestamp) back to \(hostLabel) over SSH. This sends the backup commands; it may leave newer settings in place. Verify the resulting configuration independently.")
         }
         .task(id: hostId) {
             await appState.loadDeploymentHistory(hostId: hostId)
@@ -118,14 +114,14 @@ struct DeploymentHistorySection: View {
         let isExpanded = expandedDeploymentId == deployment.id
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                statusIcon(deployment.status)
+                statusIcon(deployment)
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
                         Text(deployment.startedAt.formatted(date: .abbreviated, time: .shortened))
                             .font(.callout)
-                        statusBadge(deployment.status)
+                        statusBadge(deployment)
                     }
-                    Text("\(deployment.templateId) · \(deployment.linesPushed) line\(deployment.linesPushed == 1 ? "" : "s")")
+                    Text("\(deployment.templateId) · \(deployment.progressDescription)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -152,12 +148,12 @@ struct DeploymentHistorySection: View {
     }
 
     @ViewBuilder
-    private func statusIcon(_ status: DeploymentStatus) -> some View {
-        switch status {
+    private func statusIcon(_ deployment: Deployment) -> some View {
+        switch deployment.status {
         case .succeeded:
             Image(systemName: "checkmark.circle.fill")
                 .foregroundStyle(.green)
-                .accessibilityLabel("Succeeded")
+                .accessibilityLabel(deployment.outcomeDescription)
         case .failed:
             Image(systemName: "xmark.octagon.fill")
                 .foregroundStyle(.red)
@@ -165,18 +161,18 @@ struct DeploymentHistorySection: View {
         case .rolledBack:
             Image(systemName: "arrow.uturn.backward.circle.fill")
                 .foregroundStyle(.orange)
-                .accessibilityLabel("Rolled back")
+                .accessibilityLabel(deployment.outcomeDescription)
         case .running:
             ProgressView().controlSize(.small)
         }
     }
 
-    private func statusBadge(_ status: DeploymentStatus) -> some View {
+    private func statusBadge(_ deployment: Deployment) -> some View {
         let (text, color): (String, Color) = {
-            switch status {
-            case .succeeded: return ("Succeeded", .green)
+            switch deployment.status {
+            case .succeeded: return (deployment.outcomeDescription, .green)
             case .failed: return ("Failed", .red)
-            case .rolledBack: return ("Rolled back", .orange)
+            case .rolledBack: return (deployment.outcomeDescription, .orange)
             case .running: return ("Running", .blue)
             }
         }()
@@ -297,7 +293,7 @@ struct DeploymentHistorySection: View {
         )
         if let result {
             statusBanner = result.status == .rolledBack
-                ? "Restored backup successfully — \(result.linesPushed) line\(result.linesPushed == 1 ? "" : "s") pushed."
+                ? "\(result.outcomeDescription) — \(result.progressDescription). Verify the resulting device configuration."
                 : "Restore failed: \(result.error ?? "unknown error")"
         } else {
             statusBanner = "Restore failed."

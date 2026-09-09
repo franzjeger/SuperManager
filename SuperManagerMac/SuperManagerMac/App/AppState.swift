@@ -1227,6 +1227,10 @@ class AppState {
     }
 
     struct DiffPreviewResult: Codable {
+        let planId: String
+        enum CodingKeys: String, CodingKey {
+            case planId = "plan_id", rendered, sections, summary
+        }
         let rendered: String
         let sections: [SectionDiff]
         let summary: DiffSummary

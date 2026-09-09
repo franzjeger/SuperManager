@@ -31,10 +31,12 @@ final class HostIndexTests: XCTestCase {
     }
 
     private func host(id: String, ip: String, group: String) -> SshHostSummary {
-        SshHostSummary.previewFixture(
-            id: id, label: id, hostname: ip, username: "admin",
-            group: group, deviceType: .fortigate
-        )
+        let data = try! JSONSerialization.data(withJSONObject: [
+            "id": id, "label": id, "hostname": ip, "username": "admin",
+            "group": group, "device_type": "fortigate", "auth_method": "key",
+            "port": 22
+        ])
+        return try! JSONDecoder().decode(SshHostSummary.self, from: data)
     }
 
     /// Precedence (a): an exact `group == slug` resolves directly.
@@ -93,5 +95,60 @@ final class HostIndexTests: XCTestCase {
         let h = host(id: "h7", ip: "10.0.0.10", group: "Discovered")
         let idx = HostIndex(hosts: [h], customers: [customer(slug: "acme", siteId: "s1", hostIds: ["10.0.0.10"])])
         XCTAssertEqual(idx.recordIds(forCustomer: "acme"), ["h7"])
+    }
+
+    func testSharedAddressNeverChoosesLastCustomer() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let b = host(id: "b", ip: "10.0.0.1", group: "beta")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["10.0.0.1"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["10.0.0.1"])
+        for hosts in [[a, b], [b, a]] {
+            let idx = HostIndex(hosts: hosts, customers: [acme, beta])
+            XCTAssertNil(idx.host(forToken: "10.0.0.1"))
+            XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+            XCTAssertEqual(idx.recordIds(forCustomer: "acme"), ["a"])
+            XCTAssertEqual(idx.recordIds(forCustomer: "beta"), ["b"])
+        }
+    }
+
+    func testExplicitLinksDisambiguateSharedAddresses() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "")
+        let b = host(id: "b", ip: "10.0.0.1", group: "")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["a"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["b"])
+        let idx = HostIndex(hosts: [a,b], customers: [acme,beta])
+        XCTAssertEqual(idx.provisioningHost(customer: acme, site: acme.sites[0])?.id, "a")
+        XCTAssertEqual(idx.customerSlug(forHost: b), "beta")
+    }
+
+    func testConflictingCustomerLinksDisableDeployment() {
+        let h = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["a"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["a"])
+        let idx = HostIndex(hosts: [h], customers: [acme,beta])
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+        XCTAssertNil(idx.provisioningHost(customer: beta, site: beta.sites[0]))
+        XCTAssertEqual(idx.recordIds(forCustomer: "beta"), [])
+    }
+
+    func testNoOtherSiteFallbackOrArbitraryFirstFirewall() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let b = host(id: "b", ip: "10.0.0.2", group: "acme")
+        var acme = customer(slug: "acme", siteId: "hq", hostIds: ["a", "b"])
+        acme.sites.append(customer(slug: "acme", siteId: "branch", hostIds: []).sites[0])
+        let idx = HostIndex(hosts: [a,b], customers: [acme])
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[1]))
+    }
+
+    func testUuidSpellingsResolveButDuplicateIdsDoNot() {
+        let id = "12345678-1234-4234-8234-123456789ABC"
+        let compact = id.replacingOccurrences(of: "-", with: "").lowercased()
+        let h = host(id: id, ip: "10.0.0.1", group: "acme")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: [compact])
+        let index = HostIndex(hosts: [h], customers: [acme])
+        XCTAssertEqual(index.provisioningHost(customer: acme, site: acme.sites[0])?.id, id)
+        let duplicate = host(id: compact, ip: "10.0.0.2", group: "acme")
+        XCTAssertNil(HostIndex(hosts: [h,duplicate], customers: [acme]).host(forToken: id))
     }
 }

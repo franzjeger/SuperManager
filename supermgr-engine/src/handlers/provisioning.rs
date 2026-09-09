@@ -65,7 +65,7 @@ impl EngineServer {
             Ok(r) => r,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
-        match crate::provisioning::diff_preview(&self.state, &self.secrets, host_id, &req)
+        match crate::provisioning::diff_preview(&self.state, &self.secrets, &self.deployment_plans, host_id, &req)
             .await
         {
             Ok(result) => match serde_json::to_value(&result) {
@@ -97,26 +97,15 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
-            Ok(id) => id,
-            Err(r) => return r,
+        // Legacy render_request deployments are intentionally rejected: a fresh
+        // server-owned preview is required, including after an engine restart.
+        let plan_id = match params.get("plan_id").and_then(serde_json::Value::as_str)
+            .and_then(|s| uuid::Uuid::parse_str(s).ok()) {
+            Some(id) => id,
+            None => return Response::err(id, protocol::INVALID_PARAMS,
+                "A valid plan_id from a new deployment preview is required".to_owned()),
         };
-        let render_value = match params.get("render_request").cloned() {
-            Some(v) => v,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing render_request".to_owned(),
-                )
-            }
-        };
-        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value)
-        {
-            Ok(r) => r,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
-        };
-        match crate::provisioning::deploy(&self.state, &self.secrets, host_id, &req).await {
+        match crate::provisioning::deploy(&self.state, &self.secrets, &self.deployment_plans, plan_id).await {
             Ok(record) => match serde_json::to_value(&record) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),

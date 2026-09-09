@@ -74,28 +74,13 @@ impl DaemonState {
     ///
     /// On Linux: `/etc/supermgrd/` (root) or `$XDG_DATA_HOME/supermgrd/`.
     /// On macOS: `~/Library/Application Support/SuperManager/`.
-    #[must_use]
-    pub fn new(data_dir: PathBuf) -> Self {
-        // KnownHostsStore::open returns a Result for I/O errors. If it
-        // fails (corrupt JSON, unreadable file) we fall back to an empty
-        // in-memory store rather than crashing the whole daemon — better
-        // a TOFU re-prompt than no daemon at all. The error is logged.
-        let known_hosts = match KnownHostsStore::open(&data_dir) {
-            Ok(s) => Arc::new(s),
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "could not open known_hosts.json; starting with an empty in-memory store"
-                );
-                // Fall back to an empty store rooted at /tmp so writes don't
-                // pollute the real data dir if it's the path that's broken.
-                Arc::new(
-                    KnownHostsStore::open(std::path::Path::new("/tmp/supermgr-empty"))
-                        .expect("/tmp must be writable"),
-                )
-            }
-        };
-        Self {
+    pub fn new(
+        data_dir: PathBuf,
+    ) -> Result<Self, supermgr_core::ssh::known_hosts::KnownHostsError> {
+        // Losing trust state must stop startup, not silently re-enroll every
+        // host against an empty or shared temporary store.
+        let known_hosts = Arc::new(KnownHostsStore::open(&data_dir)?);
+        Ok(Self {
             profiles: HashMap::new(),
             vpn_state: VpnState::Disconnected,
             profile_dir: data_dir.join("profiles"),
@@ -113,7 +98,7 @@ impl DaemonState {
             webhook_on_host_down: true,
             webhook_on_vpn_disconnect: false,
             known_hosts,
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -208,8 +193,9 @@ impl DaemonState {
     // -----------------------------------------------------------------------
 
     pub fn load_unifi_controllers(&mut self) -> anyhow::Result<()> {
-        load_toml_dir(&self.unifi_controller_dir, |text, path| {
-            match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
+        load_toml_dir(
+            &self.unifi_controller_dir,
+            |text, path| match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
                 Ok(ctrl) => {
                     info!("loaded UniFi controller '{}' from {:?}", ctrl.label, path);
                     self.unifi_controllers.insert(ctrl.id, ctrl);
@@ -217,8 +203,8 @@ impl DaemonState {
                 Err(e) => {
                     warn!("skipping malformed UniFi controller {:?}: {}", path, e);
                 }
-            }
-        })
+            },
+        )
     }
 
     pub fn save_unifi_controller(
@@ -237,10 +223,7 @@ impl DaemonState {
 // TOML persistence helpers
 // ---------------------------------------------------------------------------
 
-fn load_toml_dir(
-    dir: &PathBuf,
-    mut on_entry: impl FnMut(String, PathBuf),
-) -> anyhow::Result<()> {
+fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         return Ok(());
@@ -296,4 +279,18 @@ fn delete_toml(dir: &PathBuf, name: &str) -> anyhow::Result<()> {
         std::fs::remove_file(path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod trust_startup_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_trust_store_blocks_engine_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts.json");
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(DaemonState::new(dir.path().to_owned()).is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid JSON");
+    }
 }

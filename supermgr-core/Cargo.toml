@@ -17,6 +17,8 @@ serde          = { workspace = true }
 serde_json     = { workspace = true }
 anyhow         = { workspace = true }
 toml           = { workspace = true }
+# Private atomic replacements for SSH trust records
+tempfile       = "3"
 # SHA-256 fingerprints for the SSH known-hosts store
 sha2           = { workspace = true }
 ssh-key        = { workspace = true }

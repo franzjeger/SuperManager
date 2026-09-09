@@ -197,7 +197,26 @@ pub fn list_all() -> Result<Vec<Customer>> {
     Ok(out)
 }
 
+/// Mutating workflows must not silently omit unreadable customer records.
+pub(crate) fn list_all_strict() -> Result<Vec<Customer>> {
+    let dir = customers_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut customers = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("toml") {
+            customers.push(load_path(&path)?);
+        }
+    }
+    Ok(customers)
+}
+
 pub fn load(slug: &str) -> Result<Customer> {
+    validate_slug(slug)?;
     let mut path = customers_dir();
     path.push(format!("{slug}.toml"));
     load_path(&path)

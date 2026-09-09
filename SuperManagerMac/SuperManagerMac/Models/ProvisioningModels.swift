@@ -134,6 +134,7 @@ struct Deployment: Codable, Identifiable {
     let backupPath: String?
     let renderedConfig: String
     let linesPushed: UInt64
+    let acknowledgmentChecked: Bool?
     let error: String?
     enum CodingKeys: String, CodingKey {
         case id, status, error
@@ -146,7 +147,25 @@ struct Deployment: Codable, Identifiable {
         case backupPath = "backup_path"
         case renderedConfig = "rendered_config"
         case linesPushed = "lines_pushed"
+        case acknowledgmentChecked = "acknowledgment_checked"
     }
+
+    var progressDescription: String {
+        "\(linesPushed) line\(linesPushed == 1 ? "" : "s") "
+            + (acknowledgmentChecked == true ? "acknowledged" : "reported by legacy engine")
+    }
+
+    var outcomeDescription: String {
+        switch status {
+        case .succeeded:
+            return acknowledgmentChecked == true ? "Commands acknowledged" : "Reported success (legacy)"
+        case .rolledBack:
+            return acknowledgmentChecked == true ? "Restore commands acknowledged" : "Reported restored (legacy)"
+        case .failed: return "Failed"
+        case .running: return "Running"
+        }
+    }
+
 }
 
 enum DeploymentStatus: String, Codable {

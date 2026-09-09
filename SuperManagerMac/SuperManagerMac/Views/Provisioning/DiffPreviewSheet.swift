@@ -6,10 +6,8 @@ import SwiftUI
 ///     unified diff (right pane)
 ///   - Bottom: Cancel + Deploy buttons
 ///
-/// Deploy here is the primary blue button — but we explicitly
-/// require user confirmation via an alert before pushing. The
-/// daemon takes a backup automatically before any line is sent,
-/// so even an aborted/wrong deploy can be rolled back.
+/// Confirmation consumes a server-owned preview plan. A backup is taken before
+/// pushing, but restoration after partial deployment is not guaranteed.
 struct DiffPreviewSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
@@ -26,11 +24,13 @@ struct DiffPreviewSheet: View {
     /// deploy a different one. Defaults to empty for callers with no extras.
     var extras: [String: String] = [:]
 
+    @State private var showFullConfiguration = false
     @State private var loading = true
     @State private var preview: AppState.DiffPreviewResult?
     @State private var loadError: String?
     @State private var selectedSectionPath: String?
     @State private var deploying = false
+    @State private var approvalConsumed = false
     @State private var deployResult: Deployment?
     @State private var showingDeployConfirm = false
     @State private var deployError: String?
@@ -47,11 +47,17 @@ struct DiffPreviewSheet: View {
                     deployResultPane(result: deployResult, preview: preview)
                 } else {
                     summaryBanner(summary: preview.summary)
+                    Toggle("Show full configuration to be sent", isOn: $showFullConfiguration)
+                        .padding(.horizontal, 14)
                     Divider()
-                    HStack(alignment: .top, spacing: 0) {
-                        sectionList(preview: preview)
-                        Divider()
-                        diffPane(preview: preview)
+                    if showFullConfiguration {
+                        ScrollView { codeBlock(text: preview.rendered, color: .secondary).padding(14) }
+                    } else {
+                        HStack(alignment: .top, spacing: 0) {
+                            sectionList(preview: preview)
+                            Divider()
+                            diffPane(preview: preview)
+                        }
                     }
                 }
             }
@@ -61,6 +67,7 @@ struct DiffPreviewSheet: View {
         .task {
             await load()
         }
+        .interactiveDismissDisabled(deploying)
     }
 
     private var header: some View {
@@ -70,7 +77,7 @@ struct DiffPreviewSheet: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text("Preview deployment")
                     .font(.title3.weight(.semibold))
-                Text("Target: \(hostLabel) · Template: \(templateId)")
+                Text("\(customerSlug) / \(siteId) · Target: \(hostLabel) · Template: \(templateId)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -337,11 +344,9 @@ struct DiffPreviewSheet: View {
                     .foregroundStyle(result.status == .succeeded ? .green : .red)
                     .font(.title)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(result.status == .succeeded
-                         ? "Deployment succeeded"
-                         : "Deployment failed")
+                    Text(result.outcomeDescription)
                         .font(.title3.weight(.semibold))
-                    Text("\(result.linesPushed) line\(result.linesPushed == 1 ? "" : "s") pushed")
+                    Text(result.progressDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -374,7 +379,7 @@ struct DiffPreviewSheet: View {
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             if result.status == .succeeded {
-                Text("A compliance scan was kicked off automatically. Check the Compliance section to see post-deploy posture.")
+                Text("Verify the resulting configuration on the device. Command acknowledgment does not verify the deployed state.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -396,7 +401,8 @@ struct DiffPreviewSheet: View {
             Spacer()
             Button(deployResult != nil ? "Close" : "Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
-            if deployResult == nil {
+                .disabled(deploying)
+            if deployResult == nil && (!approvalConsumed || deploying) {
                 Button {
                     showingDeployConfirm = true
                 } label: {
@@ -456,18 +462,16 @@ struct DiffPreviewSheet: View {
         deploying = true
         deployError = nil
         defer { deploying = false }
-        let result = await appState.deployTemplate(
-            hostId: hostId,
-            templateId: templateId,
-            customerSlug: customerSlug,
-            siteId: siteId,
-            extras: extras
-        )
+        guard !approvalConsumed, let approved = preview else { return }
+        // Consume this approval locally as well: after an uncertain RPC result,
+        // require history inspection and a fresh preview, not another push.
+        approvalConsumed = true
+        let result = await appState.deployTemplate(hostId: hostId, planId: approved.planId)
         if let result {
             deployResult = result
         } else {
             deployError = appState.errorMessage.isEmpty
-                ? "Deploy failed."
+                ? "Deployment outcome unavailable. Check deployment history before opening a new preview."
                 : appState.errorMessage
         }
     }

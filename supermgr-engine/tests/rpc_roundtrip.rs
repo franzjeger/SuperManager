@@ -38,7 +38,7 @@ async fn spawn_server() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("temp dir");
     let socket_path = dir.path().join("test.sock").to_string_lossy().into_owned();
 
-    let state = DaemonState::new(dir.path().to_path_buf());
+    let state = DaemonState::new(dir.path().to_path_buf()).unwrap();
     let secrets: Arc<dyn supermgr_core::keyring::SecretStore> = Arc::new(
         FileSecretStore::new(dir.path().join("secrets.json")),
     );
@@ -180,4 +180,19 @@ async fn invalid_id_zero_still_responds() {
     let (_dir, socket) = spawn_server().await;
     let resp = rpc_call(&socket, "api_version", json!({}), 0).await;
     assert_eq!(resp["id"], 0);
+}
+
+#[tokio::test]
+async fn deploy_requires_server_owned_approval_and_rejects_unknown_plan() {
+    let (_dir, socket) = spawn_server().await;
+    let legacy = rpc_call(&socket, "provisioning_deploy", json!({
+        "host_id": uuid::Uuid::new_v4(), "render_request": {
+            "template_id":"branch_office", "customer_slug":"acme", "site_id":"hq"
+        }
+    }), 87).await;
+    assert_eq!(legacy["id"], 87);
+    assert_eq!(legacy["error"]["code"], -32602);
+    let unknown = rpc_call(&socket, "provisioning_deploy", json!({"plan_id":uuid::Uuid::new_v4()}), 88).await;
+    assert_eq!(unknown["id"], 88);
+    assert!(unknown["error"]["message"].as_str().unwrap().contains("Preview unavailable"));
 }

@@ -144,24 +144,12 @@ extension AppState {
     @discardableResult
     func deployTemplate(
         hostId: String,
-        templateId: String,
-        customerSlug: String,
-        siteId: String,
-        extras: [String: String] = [:]
+        planId: String
     ) async -> Deployment? {
         do {
-            let renderRequest: [String: Any] = [
-                "template_id": templateId,
-                "customer_slug": customerSlug,
-                "site_id": siteId,
-                "extras": extras,
-            ]
             let result: Deployment = try await client.call(
                 "provisioning_deploy",
-                params: [
-                    "host_id": hostId,
-                    "render_request": renderRequest,
-                ]
+                params: ["plan_id": planId]
             )
             // Push to local cache so the History list updates
             // immediately without a separate fetch.
@@ -172,7 +160,7 @@ extension AppState {
             // immediate post-deploy feedback. Only when the
             // host has an API token; otherwise the scan would
             // error and we'd just confuse the user.
-            if let host = sshHosts.first(where: { $0.id == hostId }), host.hasApi {
+            if result.status == .succeeded, let host = sshHosts.first(where: { $0.id == hostId }), host.hasApi {
                 Task { @MainActor in
                     _ = await runCompliance(hostId: hostId)
                 }

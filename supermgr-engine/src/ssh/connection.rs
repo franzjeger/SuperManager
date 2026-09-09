@@ -50,7 +50,7 @@ impl client::Handler for SshClientHandler {
         let key_bytes = server_public_key.public_key_bytes();
         let fingerprint = KnownHostsStore::fingerprint(&key_bytes);
 
-        match self.known_hosts.check(&self.host, self.port, &fingerprint) {
+        match self.known_hosts.check_and_enroll(&self.host, self.port, &fingerprint)? {
             HostKeyCheck::Match => Ok(true),
             HostKeyCheck::NewHost => {
                 tracing::info!(
@@ -59,9 +59,6 @@ impl client::Handler for SshClientHandler {
                     fingerprint = %fingerprint,
                     "TOFU: recording new SSH host key"
                 );
-                if let Err(e) = self.known_hosts.record(&self.host, self.port, &fingerprint) {
-                    tracing::warn!(error = %e, "could not persist new host fingerprint");
-                }
                 Ok(true)
             }
             HostKeyCheck::Mismatch { stored, current } => {
@@ -359,109 +356,44 @@ impl SshSession {
         Ok((exit_status, stdout_str, stderr_str))
     }
 
-    /// Run an interactive shell session, sending lines sequentially.
-    ///
-    /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
-    /// line.  Used for commands that prompt for input (e.g. FortiGate
-    /// `generate-key` which asks for the admin password).
+    /// FortiOS configuration commands: password prompts are not acknowledgments.
+    pub(crate) async fn shell_config(
+        &self, lines: &[&str], timeout_secs: u64,
+    ) -> Result<super::shell::ShellOutput, super::shell::ShellFailure> {
+        self.run_shell(lines, None, timeout_secs).await
+    }
+
+    /// Interactive FortiOS API-token creation. The optional password is sent
+    /// only if the final command explicitly requests it.
     pub async fn shell_interact(
-        &self,
-        lines: &[&str],
-        _delay_ms: u64,
-        timeout_secs: u64,
+        &self, lines: &[&str], password: Option<&str>, timeout_secs: u64,
     ) -> Result<String, SshError> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("failed to open session channel: {e}"),
-            })?;
+        self.run_shell(lines, password, timeout_secs).await
+            .map(|result| result.transcript)
+            .map_err(|e| SshError::ConnectionFailed { host: String::new(), reason: e.to_string() })
+    }
 
-        // Request a PTY so FortiGate treats it as interactive.
-        channel
-            .request_pty(false, "xterm", 80, 24, 0, 0, &[])
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("request_pty failed: {e}"),
-            })?;
-
-        channel
-            .request_shell(true)
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("request_shell failed: {e}"),
-            })?;
-
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs);
-        let mut output = Vec::new();
-
-        // Macro-like helper: drain channel data until a keyword appears
-        // or a shell prompt is detected.
-        macro_rules! wait_for {
-            ($keywords:expr) => {
-                loop {
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() { break; }
-                    match tokio::time::timeout(remaining, channel.wait()).await {
-                        Ok(Some(russh::ChannelMsg::Data { data })) => {
-                            output.extend_from_slice(&data);
-                            let text = String::from_utf8_lossy(&output);
-                            let found = $keywords.iter().any(|kw: &&str| text.contains(kw));
-                            let trimmed = text.trim_end();
-                            if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
-                                break;
-                            }
-                        }
-                        Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                        Ok(None) => break,
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
-                }
-            };
-        }
-
-        // Wait for initial shell prompt.
-        wait_for!(&["#", "$"]);
-
-        // Send each line and wait for the next prompt or password request.
-        // Clear the output buffer before each send so we only match NEW output.
-        for line in lines {
-            let prev_len = output.len();
-            let data = format!("{line}\n");
-            let _ = channel.data(data.as_bytes()).await;
-
-            // Wait until new data arrives that contains a prompt or keyword.
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() { break; }
-                match tokio::time::timeout(remaining, channel.wait()).await {
-                    Ok(Some(russh::ChannelMsg::Data { data })) => {
-                        output.extend_from_slice(&data);
-                        // Only check NEW data (after prev_len).
-                        let new_text = String::from_utf8_lossy(&output[prev_len..]);
-                        let keywords = ["# ", "$ ", "password:", "Password:", "New API key:", "API key:"];
-                        let found = keywords.iter().any(|kw| new_text.contains(kw));
-                        let trimmed = new_text.trim_end();
-                        if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
-                            break;
-                        }
-                    }
-                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                    Ok(None) => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-
-        let _ = channel.close().await;
-        Ok(String::from_utf8_lossy(&output).into_owned())
+    async fn run_shell(
+        &self, lines: &[&str], password: Option<&str>, timeout_secs: u64,
+    ) -> Result<super::shell::ShellOutput, super::shell::ShellFailure> {
+        use super::shell::{self, ShellFailure};
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let setup = async {
+            let channel = self.handle.channel_open_session().await?;
+            channel.request_pty(true, "dumb", 80, 24, 0, 0, &[]).await?;
+            channel.request_shell(true).await?;
+            Ok::<_, russh::Error>(channel)
+        };
+        let mut channel = match tokio::time::timeout_at(deadline, setup).await {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(_)) => return Err(ShellFailure::setup("SSH shell setup failed")),
+            Err(_) => return Err(ShellFailure::setup("SSH shell setup timed out")),
+        };
+        let result = shell::run(&mut channel, lines, password,
+            deadline.saturating_duration_since(tokio::time::Instant::now())).await;
+        // Cleanup must not turn a bounded failure into an unbounded wait.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), channel.close()).await;
+        result
     }
 
     // -- SFTP ---------------------------------------------------------------
@@ -563,5 +495,22 @@ impl RemoteShell for SshSession {
 
     async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
         Ok(Box::new(SftpFiles(self.sftp().await?)))
+    }
+}
+
+#[async_trait::async_trait]
+impl super::shell::ShellIo for russh::Channel<client::Msg> {
+    async fn send(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        self.data(bytes).await.map_err(|_| ())
+    }
+    async fn recv(&mut self) -> super::shell::Event {
+        use super::shell::Event;
+        match self.wait().await {
+            Some(russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. }) => Event::Data(data.to_vec()),
+            Some(russh::ChannelMsg::Failure | russh::ChannelMsg::ExitSignal { .. }) => Event::Rejected,
+            Some(russh::ChannelMsg::ExitStatus { exit_status }) if exit_status != 0 => Event::Rejected,
+            Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close | russh::ChannelMsg::ExitStatus { .. }) | None => Event::Closed,
+            _ => Event::Other,
+        }
     }
 }

@@ -217,18 +217,10 @@ pub async fn generate_token(
         "end".into(),
         format!("execute api-user generate-key {api_user_owned}"),
     ];
-    let mut lines: Vec<String> = cmd_lines;
-    if let Some(ref pw) = admin_password {
-        // The `generate-key` command asks "Password: " — append the
-        // password line so shell_interact's send-and-wait loop fires
-        // it once the prompt arrives.
-        lines.push(pw.clone());
-    }
-
     let output = {
-        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let line_refs: Vec<&str> = cmd_lines.iter().map(String::as_str).collect();
         session
-            .shell_interact(&line_refs, /* delay_ms */ 0, /* timeout_secs */ 30)
+            .shell_interact(&line_refs, admin_password.as_deref(), 30)
             .await
             .context("FortiGate interactive shell failed")?
     };

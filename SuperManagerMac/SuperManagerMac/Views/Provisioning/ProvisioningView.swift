@@ -26,13 +26,22 @@ struct ProvisioningView: View {
     @State private var selectedTemplateId: String?
     @State private var extras: [ExtraField] = []
     @State private var rendering = false
+    @State private var renderGeneration = UUID()
     @State private var renderError: String?
     @State private var rendered: ProvisioningRenderResult?
     @State private var showingAddExtra = false
     @State private var newExtraKey = ""
     @State private var customerToEdit: Customer?
-    @State private var showingDiffPreview = false
-    @State private var diffPreviewHostId: String?
+    private struct PreviewSelection: Identifiable {
+        let id = UUID()
+        let hostId: String
+        let hostLabel: String
+        let templateId: String
+        let customerSlug: String
+        let siteId: String
+        let extras: [String: String]
+    }
+    @State private var previewSelection: PreviewSelection?
     @State private var showingExplain = false
     @State private var explainConfigText: String = ""
     @State private var showingReport = false
@@ -95,25 +104,12 @@ struct ProvisioningView: View {
                 )
             }
         }
-        .sheet(isPresented: $showingDiffPreview) {
-            if let hostId = diffPreviewHostId,
-               let customer,
-               let site,
-               let templateId = effectiveTemplateId(customer: customer),
-               let host = appState.sshHosts.first(where: { $0.id == hostId }) {
-                DiffPreviewSheet(
-                    hostId: hostId,
-                    hostLabel: host.label,
-                    templateId: templateId,
-                    customerSlug: customer.slug,
-                    siteId: site.id,
-                    // Carry the same one-off render variables the operator
-                    // entered on the form, so the diff + deploy use the exact
-                    // config they rendered and reviewed — not one rendered
-                    // with empty extras.
-                    extras: Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
-                )
-            }
+        .sheet(item: $previewSelection) { selection in
+            DiffPreviewSheet(
+                hostId: selection.hostId, hostLabel: selection.hostLabel,
+                templateId: selection.templateId, customerSlug: selection.customerSlug,
+                siteId: selection.siteId, extras: selection.extras
+            )
         }
         .task {
             // Hydrate templates on first appearance.
@@ -129,6 +125,8 @@ struct ProvisioningView: View {
         // A's config to site B. Clear the stale state on every switch.
         .onChange(of: appState.selectedSiteId) { _, _ in resetRenderState() }
         .onChange(of: appState.selectedCustomerSlug) { _, _ in resetRenderState() }
+        .onChange(of: selectedTemplateId) { _, _ in invalidateRender() }
+        .onChange(of: extras) { _, _ in invalidateRender() }
     }
 
     /// Wipe everything derived from the previously-selected site so a
@@ -136,6 +134,11 @@ struct ProvisioningView: View {
     private func resetRenderState() {
         selectedTemplateId = nil
         extras = []
+        invalidateRender()
+    }
+
+    private func invalidateRender() {
+        renderGeneration = UUID()
         rendered = nil
         renderError = nil
         rendering = false
@@ -396,9 +399,13 @@ struct ProvisioningView: View {
                 Spacer()
                 if let activeSite = site {
                     Button {
-                        diffPreviewHostId = pickFortigateHostId(customer: customer, site: activeSite)
-                        if diffPreviewHostId != nil {
-                            showingDiffPreview = true
+                        if let host = appState.hostIndex.provisioningHost(customer: customer, site: activeSite),
+                           let templateId = effectiveTemplateId(customer: customer) {
+                            previewSelection = PreviewSelection(
+                                hostId: host.id, hostLabel: host.label, templateId: templateId,
+                                customerSlug: customer.slug, siteId: activeSite.id,
+                                extras: Dictionary(extras.map { ($0.key, $0.value) }, uniquingKeysWith: { _, last in last })
+                            )
                         }
                     } label: {
                         Label("Preview diff…", systemImage: "arrow.triangle.branch")
@@ -406,6 +413,7 @@ struct ProvisioningView: View {
                     .controlSize(.large)
                     .disabled(rendering || effectiveTemplateId(customer: customer) == nil
                               || pickFortigateHostId(customer: customer, site: activeSite) == nil)
+                    .help("Requires exactly one FortiGate linked unambiguously to this site. Repair conflicting or shared-IP links using host record IDs.")
                 }
                 Button {
                     Task { await render() }
@@ -450,35 +458,8 @@ struct ProvisioningView: View {
             ?? appState.provisioningTemplates.first?.id
     }
 
-    /// Pick the first FortiGate host attached to the site, or
-    /// fall back to any FortiGate host owned by the customer.
-    /// Diff/deploy needs an actual device target — without one,
-    /// the buttons stay disabled.
     private func pickFortigateHostId(customer: Customer, site: Site) -> String? {
-        // Prefer site-attached hosts. Resolve each Site.hostIds token through
-        // the HostIndex: the token is usually an IP (what the discovery/
-        // autodetect writers store), not a record id, so a raw `$0.id ==
-        // hostId` match never resolved an auto-discovered FortiGate — which
-        // is what kept Preview-diff/deploy permanently disabled for them.
-        for token in site.hostIds {
-            if let host = appState.hostIndex.host(forToken: token),
-               host.deviceType == .fortigate {
-                return host.id
-            }
-        }
-        // Fall back to any FortiGate the customer's other sites
-        // have attached. Lets a user with a single FortiGate at
-        // multiple sites (uncommon but happens with shared HQ
-        // gateways) deploy without explicit attachment.
-        for s in customer.sites {
-            for token in s.hostIds {
-                if let host = appState.hostIndex.host(forToken: token),
-                   host.deviceType == .fortigate {
-                    return host.id
-                }
-            }
-        }
-        return nil
+        appState.hostIndex.provisioningHost(customer: customer, site: site)?.id
     }
 
 
@@ -580,17 +561,23 @@ struct ProvisioningView: View {
             ?? customer.defaultTemplate
             ?? appState.provisioningTemplates.first?.id
         guard let templateId else { return }
+        let generation = UUID()
+        renderGeneration = generation
         rendering = true
         renderError = nil
         rendered = nil
-        defer { rendering = false }
-        let extrasDict = Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
-        if let result = await appState.renderProvisioningTemplate(
+        defer { if renderGeneration == generation { rendering = false } }
+        let extrasDict = Dictionary(extras.map { ($0.key, $0.value) }, uniquingKeysWith: { _, last in last })
+        let result = await appState.renderProvisioningTemplate(
             templateId: templateId,
             customerSlug: customer.slug,
             siteId: site.id,
             extras: extrasDict
-        ) {
+        )
+        guard !Task.isCancelled, renderGeneration == generation,
+              appState.selectedCustomerSlug == customer.slug,
+              appState.selectedSiteId == site.id else { return }
+        if let result {
             rendered = result
         } else {
             renderError = appState.errorMessage.isEmpty
@@ -615,7 +602,7 @@ struct ProvisioningView: View {
     }
 }
 
-private struct ExtraField {
+private struct ExtraField: Equatable {
     var key: String
     var value: String
 }

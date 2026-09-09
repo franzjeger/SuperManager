@@ -26,6 +26,7 @@ use crate::state::DaemonState;
 pub struct EngineServer {
     pub state: Arc<Mutex<DaemonState>>,
     pub secrets: Arc<dyn SecretStore>,
+    pub(crate) deployment_plans: Arc<crate::provisioning::plans::PlanRegistry>,
     /// Process-wide registry of cancellable long-running operations.
     /// Handlers register here at the start of an active scan,
     /// compliance run, etc.; the UI lists + cancels via the
@@ -39,6 +40,7 @@ impl EngineServer {
         Self {
             state: Arc::new(Mutex::new(state)),
             secrets,
+            deployment_plans: Arc::new(Default::default()),
             operations: Arc::new(OperationRegistry::new()),
         }
     }
@@ -439,15 +441,19 @@ pub async fn connect_to_host_owned_typed(
     use crate::error::EngineError;
     
 
-    let (host, known_hosts) = {
-        let st = state.lock().await;
-        let host = st
-            .ssh_hosts
-            .get(&host_id)
-            .cloned()
-            .ok_or_else(|| EngineError::Other(anyhow::anyhow!("host not found: {host_id}")))?;
-        (host, Arc::clone(&st.known_hosts))
-    };
+    let host = state.lock().await.ssh_hosts.get(&host_id).cloned()
+        .ok_or_else(|| EngineError::Other(anyhow::anyhow!("host not found: {host_id}")))?;
+    connect_host_snapshot(state, secrets, host).await
+}
+
+/// Connect using the reviewed host snapshot; never re-resolve its mutable ID.
+pub(crate) async fn connect_host_snapshot(
+    state: &Arc<Mutex<DaemonState>>,
+    secrets: &Arc<dyn SecretStore>,
+    host: Host,
+) -> Result<(Host, SshSession), crate::error::EngineError> {
+    use crate::error::EngineError;
+    let known_hosts = Arc::clone(&state.lock().await.known_hosts);
 
     let session = match host.auth_method {
         AuthMethod::Password => {

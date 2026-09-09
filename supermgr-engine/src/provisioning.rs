@@ -23,24 +23,20 @@
 //!    consumed (so the GUI can render a "missing required field"
 //!    pre-flight) and the templates included.
 //!
-//! # Why pure rendering, not pushing
+//! # Deployment approval
 //!
-//! Render and Deploy are kept separate so the user always sees
-//! what would change before anything hits the device. Phase 6
-//! adds a `provisioning_diff_preview` RPC that pulls live config
-//! and renders unified-diff against the rendered template; phase
-//! 6 also adds `provisioning_safe_deploy` which uses FortiOS's
-//! `revert-on-no-confirm` to roll back automatically if the
-//! deploy breaks SSH/API connectivity.
+//! Diff preview validates customer/site membership and retains a single-use
+//! plan with rendered commands and a host snapshot. Deploy never re-renders;
+//! it checks for changed host/customer/live configuration before pushing.
+//! This is not a device transaction: automatic timed rollback and reliable
+//! per-command acknowledgment remain separate requirements.
 //!
-//! For now the GUI exposes "Render → Copy" so the user can paste
-//! into a FortiGate console session manually. That alone replaces
-//! the bulk of the Linux wizard's value while keeping the trust
-//! model conservative.
+
+pub(crate) mod plans;
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{bail, anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use tera::{Context as TeraContext, Tera};
 
@@ -629,9 +625,12 @@ pub struct Deployment {
     pub backup_path: Option<String>,
     /// The rendered template that we tried (or are about) to push.
     pub rendered_config: String,
-    /// Lines pushed successfully. On error, the abort line is
-    /// the next one in the rendered_config.
+    /// When acknowledgment_checked is true, commands followed by a valid prompt.
+    /// The next line after a failure may have applied without acknowledgment.
     pub lines_pushed: u64,
+    /// Distinguishes measured progress from older records' estimated counts.
+    #[serde(default)]
+    pub acknowledgment_checked: bool,
     /// Last device error message if status == Failed.
     pub error: Option<String>,
 }
@@ -717,18 +716,9 @@ pub async fn pre_deploy_backup(
     host_id: uuid::Uuid,
 ) -> Result<String> {
     let (_host, session) = open_session(state, secrets, host_id).await?;
-    let cfg = fetch_full_config(&session).await?;
+    let cfg = fetch_full_config(&session).await;
     let _ = session.disconnect().await;
-
-    let dir = backups_dir(&host_id.simple().to_string());
-    std::fs::create_dir_all(&dir).context("create backups dir")?;
-    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
-    let mut path = dir;
-    path.push(format!("backup-{timestamp}.conf"));
-    std::fs::write(&path, cfg.as_bytes()).with_context(|| format!("write {path:?}"))?;
-    let path_str = path.to_string_lossy().into_owned();
-    tracing::info!("pre_deploy_backup: saved {path_str} ({} bytes)", cfg.len());
-    Ok(path_str)
+    write_private_backup(&host_id.simple().to_string(), &cfg?)
 }
 
 /// Convenience: open SSH to the host, return the session +
@@ -745,40 +735,84 @@ async fn open_session(
         .map_err(|e| anyhow!("ssh connect: {e}"))
 }
 
+fn write_private_backup(host_id: &str, config: &str) -> Result<String> {
+    let dir = backups_dir(host_id);
+    write_private_backup_in(&dir, config)
+}
+
+fn write_private_backup_in(dir: &std::path::Path, config: &str) -> Result<String> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(format!("backup-{}.conf", uuid::Uuid::new_v4()));
+    let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+    file.write_all(config.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(&path)?;
+    #[cfg(unix)]
+    std::fs::File::open(&dir)?.sync_all()?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 async fn fetch_full_config(
     session: &crate::ssh::connection::SshSession,
 ) -> Result<String> {
-    let (_, stdout, _) = session
-        .exec("show full-configuration")
-        .await
-        .map_err(|e| anyhow!("show full-configuration: {e}"))?;
+    let (status, stdout, stderr) = tokio::time::timeout(
+        std::time::Duration::from_secs(60), session.exec("show full-configuration")
+    ).await.context("configuration read timed out")??;
+    validate_config_response(status, &stdout, &stderr)?;
     Ok(stdout)
 }
 
-/// Render → fetch live → diff. Returns a structured response
-/// the GUI can render as a per-section preview before the user
-/// commits to a deploy.
-pub async fn diff_preview(
+fn validate_config_response(status: u32, stdout: &str, stderr: &str) -> Result<()> {
+    if status != 0 || !stderr.trim().is_empty() || !stdout.lines().any(|l| l.trim_start().starts_with("config "))
+        || stdout.contains("Command fail") || stdout.contains("Command parse error") {
+        bail!("Device did not return a valid full configuration; preview/deploy aborted");
+    }
+    Ok(())
+}
+
+async fn target_snapshot(
+    state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
+    host_id: uuid::Uuid,
+    request: &RenderRequest,
+) -> Result<(supermgr_core::host::Host, Customer)> {
+    crate::customer::validate_slug(&request.customer_slug)?;
+    let customers = crate::customer::list_all_strict()?;
+    let hosts: Vec<_> = state.lock().await.ssh_hosts.values().cloned().collect();
+    let customer = plans::validate_target(&hosts, &customers, host_id, request)?.clone();
+    let host = hosts.into_iter().find(|h| h.id == host_id).ok_or_else(|| anyhow!("host not found"))?;
+    Ok((host, customer))
+}
+
+/// Build a bounded, single-use plan from one target/customer snapshot.
+/// Deployment uses these bytes, never a second rendering of mutable inputs.
+pub(crate) async fn diff_preview(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
+    registry: &plans::PlanRegistry,
     host_id: uuid::Uuid,
     request: &RenderRequest,
 ) -> Result<DiffPreviewResult> {
-    let render = render(request)?;
-    let (_host, session) = open_session(state, secrets, host_id).await?;
-    let live = fetch_full_config(&session).await?;
+    let (host, customer) = target_snapshot(state, host_id, request).await?;
+    let template = list_templates()?.into_iter().find(|t| t.id == request.template_id)
+        .ok_or_else(|| anyhow!("template not found"))?;
+    if template.vendor != "fortigate" { bail!("Only FortiGate templates can be deployed over this path"); }
+    let site = customer.sites.iter().find(|s| s.id == request.site_id).ok_or_else(|| anyhow!("site not found"))?;
+    let render = render_with_customer(&customer, site, &request.template_id, &request.extras)?;
+    let (_, session) = crate::server::connect_host_snapshot(state, secrets, host.clone()).await?;
+    let live_result = fetch_full_config(&session).await;
     let _ = session.disconnect().await;
+    let live = live_result?;
     let sections = diff_sections(&render.output, &live);
     let summary = summarise_sections(&sections);
-    Ok(DiffPreviewResult {
-        rendered: render.output,
-        sections,
-        summary,
-    })
+    let plan = plans::Plan::new(host, customer, request.clone(), render.output.clone(), &live)?;
+    let plan_id = registry.insert(plan)?.to_string();
+    Ok(DiffPreviewResult { plan_id, rendered: render.output, sections, summary })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffPreviewResult {
+    pub plan_id: String,
     /// The full rendered template — handed back so the GUI's
     /// "deploy this" call can reference what it preview'd
     /// (avoids a re-render race if the customer changes mid-
@@ -820,22 +854,20 @@ fn summarise_sections(sections: &[SectionDiff]) -> DiffSummary {
 // Deploy
 // ---------------------------------------------------------------------------
 
-/// Deploy a rendered template. The flow is:
-///   1. Snapshot pre-deploy config to disk (recoverable rollback).
-///   2. Push the rendered config via SSH using `shell_interact`
-///      so we can wait for the FortiOS prompt between blocks
-///      and abort on the first error.
-///   3. Persist a Deployment record either way.
-///
-/// Errors are surfaced with the line number of the failure so
-/// the user can find it in the rendered output.
-pub async fn deploy(
+/// Consume an approved preview and deploy its immutable bytes to its host snapshot.
+/// A failed attempt requires a fresh preview. The target lease prevents overlapping
+/// plan deployments, including requests on different RPC connections.
+pub(crate) async fn deploy(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
-    host_id: uuid::Uuid,
-    request: &RenderRequest,
+    registry: &std::sync::Arc<plans::PlanRegistry>,
+    plan_id: uuid::Uuid,
 ) -> Result<Deployment> {
-    let render = render(request)?;
+    let (plan, _lease) = registry.take(plan_id)?;
+    let host_id = plan.host.id;
+    let request = &plan.request;
+    let (host, customer) = target_snapshot(state, host_id, request).await?;
+    plan.validate_current(&host, &customer)?;
     let host_str = host_id.simple().to_string();
     let id = uuid::Uuid::new_v4().simple().to_string();
 
@@ -849,95 +881,80 @@ pub async fn deploy(
         finished_at: None,
         status: DeploymentStatus::Running,
         backup_path: None,
-        rendered_config: render.output.clone(),
+        rendered_config: plan.rendered.clone(),
         lines_pushed: 0,
+        acknowledgment_checked: false,
         error: None,
     };
     save_deployment(&record)?;
 
-    // Step 1: backup. Failures here abort the deploy — no point
-    // pushing if we can't recover.
-    let backup_path = match pre_deploy_backup(state, secrets, host_id).await {
-        Ok(p) => p,
-        Err(e) => {
-            record.status = DeploymentStatus::Failed;
-            record.error = Some(format!("backup failed: {e:#}"));
-            record.finished_at = Some(chrono::Utc::now());
-            save_deployment(&record)?;
-            return Err(anyhow!("backup failed: {e:#}"));
+    // One connection for live-state validation, backup and push. A host edit
+    // cannot redirect the second half of the operation to a different endpoint.
+    let prepare = async {
+        let (_, session) = crate::server::connect_host_snapshot(state, secrets, plan.host.clone()).await?;
+        let preparation = async {
+            let live = fetch_full_config(&session).await?;
+            plan.validate_live(&live)?;
+            let (host, customer) = target_snapshot(state, host_id, request).await?;
+            plan.validate_current(&host, &customer)?;
+            let backup_path = write_private_backup(&host_str, &live)?;
+            Ok::<_, anyhow::Error>(backup_path)
+        }.await;
+        match preparation {
+            Ok(path) => Ok((session, path)),
+            Err(e) => { let _ = session.disconnect().await; Err(e) }
         }
-    };
-    record.backup_path = Some(backup_path.clone());
-    save_deployment(&record)?;
-
-    // Step 2: push. Each line is sent separately via shell_interact
-    // so we get prompt-level error checking. Lines starting with
-    // `{#` (Tera comments left over) and blank lines are skipped.
-    let lines: Vec<String> = render
-        .output
-        .lines()
-        .filter(|l| !l.trim_start().starts_with("{#") && !l.trim().is_empty())
-        .map(str::to_owned)
-        .collect();
-
-    let (_host, session) = match open_session(state, secrets, host_id).await {
-        Ok(p) => p,
+    }.await;
+    let (session, backup_path) = match prepare {
+        Ok(value) => value,
         Err(e) => {
             record.status = DeploymentStatus::Failed;
-            record.error = Some(format!("ssh connect failed: {e:#}"));
+            record.error = Some(format!("pre-deploy validation/backup failed: {e:#}"));
             record.finished_at = Some(chrono::Utc::now());
             save_deployment(&record)?;
             return Err(e);
         }
     };
-
-    // Use shell_interact for the entire batch — pass all lines,
-    // 0ms inter-line delay, 120s timeout for the whole push.
-    // This is conservative; FortiOS ack on every line is
-    // typically <50ms.
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let result = session.shell_interact(&line_refs, 0, 120).await;
-    let _ = session.disconnect().await;
-
-    match result {
-        Ok(transcript) => {
-            // Detect FortiOS's common error markers in the
-            // transcript. Real FortiOS errors include
-            // "Command fail" or "Command parse error".
-            if transcript.contains("Command fail") || transcript.contains("Command parse error") {
-                record.status = DeploymentStatus::Failed;
-                record.error = Some(extract_first_error(&transcript));
-                record.lines_pushed = lines.len() as u64; // approx
-            } else {
-                record.status = DeploymentStatus::Succeeded;
-                record.lines_pushed = lines.len() as u64;
-            }
-        }
-        Err(e) => {
-            record.status = DeploymentStatus::Failed;
-            record.error = Some(e.to_string());
-        }
+    record.backup_path = Some(backup_path);
+    if let Err(e) = save_deployment(&record) {
+        let _ = session.disconnect().await;
+        return Err(e);
     }
-    record.finished_at = Some(chrono::Utc::now());
+    // Send every reviewed line in order; do not re-render or silently filter commands.
+    let lines: Vec<&str> = plan.rendered.lines().collect();
+
+    let result = session.shell_config(&lines, 120).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
+    apply_shell_result(&mut record, result, DeploymentStatus::Succeeded);
     save_deployment(&record)?;
     Ok(record)
 }
 
-/// Pull the first FortiOS error line out of a shell transcript
-/// for terse display in the GUI's deploy-result banner.
-fn extract_first_error(transcript: &str) -> String {
-    transcript
-        .lines()
-        .find(|l| {
-            l.contains("Command fail") || l.contains("Command parse error")
-        })
-        .unwrap_or("Unknown FortiOS error")
-        .trim()
-        .to_owned()
+/// `lines_pushed` is retained on the wire for compatibility, but now counts
+/// acknowledged lines, not attempted writes or an estimate of the entire input.
+fn apply_shell_result(
+    record: &mut Deployment,
+    result: std::result::Result<crate::ssh::shell::ShellOutput, crate::ssh::shell::ShellFailure>,
+    success_status: DeploymentStatus,
+) {
+    record.finished_at = Some(chrono::Utc::now());
+    record.acknowledgment_checked = true;
+    match result {
+        Ok(output) => {
+            record.status = success_status;
+            record.lines_pushed = output.acknowledged_lines as u64;
+            record.error = None;
+        }
+        Err(error) => {
+            record.status = DeploymentStatus::Failed;
+            record.lines_pushed = error.acknowledged_lines as u64;
+            record.error = Some(error.to_string());
+        }
+    }
 }
 
 /// Restore from a saved backup. Reads the backup .conf and
-/// pushes it via shell_interact — same path as a deploy but
+/// pushes it via the acknowledged shell driver — same path as a deploy but
 /// the source is an old config, not a fresh render. A new
 /// Deployment record with status=RolledBack is created so the
 /// rollback shows up in history.
@@ -964,30 +981,25 @@ pub async fn rollback(
         backup_path: Some(backup_path.to_owned()),
         rendered_config: backup_text.clone(),
         lines_pushed: 0,
+        acknowledgment_checked: false,
         error: None,
     };
     save_deployment(&record)?;
 
-    let (_host, session) = open_session(state, secrets, host_id).await?;
-    let lines: Vec<String> = backup_text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(str::to_owned)
-        .collect();
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let result = session.shell_interact(&line_refs, 0, 180).await;
-    let _ = session.disconnect().await;
-    record.finished_at = Some(chrono::Utc::now());
-    match result {
-        Ok(_) => {
-            record.status = DeploymentStatus::RolledBack;
-            record.lines_pushed = lines.len() as u64;
-        }
+    let session = match open_session(state, secrets, host_id).await {
+        Ok((_, session)) => session,
         Err(e) => {
             record.status = DeploymentStatus::Failed;
-            record.error = Some(e.to_string());
+            record.error = Some(format!("SSH connection failed before rollback: {e:#}"));
+            record.finished_at = Some(chrono::Utc::now());
+            save_deployment(&record)?;
+            return Err(e);
         }
-    }
+    };
+    let lines: Vec<&str> = backup_text.lines().collect();
+    let result = session.shell_config(&lines, 180).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
+    apply_shell_result(&mut record, result, DeploymentStatus::RolledBack);
     save_deployment(&record)?;
     Ok(record)
 }
@@ -1164,4 +1176,75 @@ fn register_filters(tera: &mut Tera) {
             )))
         },
     );
+}
+
+#[cfg(test)]
+mod approval_io_tests {
+    use super::*;
+    #[test]
+    fn failed_or_empty_config_reads_cannot_be_backups_or_previews() {
+        assert!(validate_config_response(0, "config system global\nend\n", "").is_ok());
+        for (code, out, err) in [(1, "config system global\nend", ""), (0, "", ""),
+            (0, "permission denied", ""), (0, "config x\nCommand fail", ""),
+            (0, "config x\nend", "permission denied")] {
+            assert!(validate_config_response(code, out, err).is_err());
+        }
+    }
+    #[test]
+    fn backups_are_unique_complete_and_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_private_backup_in(dir.path(), "secret config one").unwrap();
+        let second = write_private_backup_in(dir.path(), "secret config two").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "secret config one");
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "secret config two");
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(first).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_outcome_tests {
+    use super::*;
+    fn legacy_record() -> Deployment {
+        serde_json::from_value(serde_json::json!({
+            "id":"record", "host_id":"host", "customer_slug":"acme", "site_id":"hq",
+            "template_id":"test", "started_at":"2026-09-09T00:00:00Z", "status":"succeeded",
+            "rendered_config":"first\nsecond\nthird", "lines_pushed":3
+        })).unwrap()
+    }
+    #[test]
+    fn legacy_progress_is_not_reinterpreted_as_acknowledged() {
+        assert!(!legacy_record().acknowledgment_checked);
+    }
+    #[test]
+    fn partial_failure_is_failed_with_measured_progress_and_uncertain_line() {
+        let mut record = legacy_record();
+        apply_shell_result(&mut record, Err(crate::ssh::shell::ShellFailure {
+            acknowledged_lines:1, line:Some(2), reason:"SSH channel closed before acknowledgment"
+        }), DeploymentStatus::Succeeded);
+        assert!(matches!(record.status, DeploymentStatus::Failed));
+        assert!(record.acknowledgment_checked);
+        assert_eq!(record.lines_pushed, 1);
+        assert!(record.finished_at.is_some());
+        assert!(record.error.unwrap().contains("may have been applied"));
+    }
+    #[test]
+    fn restore_results_only_mark_success_after_all_acknowledgments() {
+        let mut record = legacy_record();
+        apply_shell_result(&mut record, Ok(crate::ssh::shell::ShellOutput {
+            transcript:String::new(), acknowledged_lines:3
+        }), DeploymentStatus::RolledBack);
+        assert!(matches!(record.status, DeploymentStatus::RolledBack));
+        assert!(record.acknowledgment_checked);
+        assert_eq!(record.lines_pushed, 3);
+        assert!(record.error.is_none());
+        apply_shell_result(&mut record, Err(crate::ssh::shell::ShellFailure {
+            acknowledged_lines:0, line:None, reason:"SSH shell setup failed"
+        }), DeploymentStatus::RolledBack);
+        assert!(matches!(record.status, DeploymentStatus::Failed));
+        assert_eq!(record.lines_pushed, 0);
+    }
 }

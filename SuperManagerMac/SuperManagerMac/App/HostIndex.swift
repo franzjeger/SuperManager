@@ -1,91 +1,81 @@
 import Foundation
 
-/// Unified Customer -> Site -> Host resolver.
-///
-/// SuperManager identifies the same host up to four incompatible ways:
-///   1. `SshHostSummary.group` — a free-text customer slug (but also holds
-///      `"Discovered"`, typos, or `""`).
-///   2. `Site.hostIds` — *intended* to hold host record ids, but every writer
-///      stores the host's IP instead (`DiscoveryPanel`, `CustomerEditSheet`).
-///   3. The IP-keyed security findings store (`HostRisk.hostIp`).
-///   4. The record-id-keyed compliance store (`complianceHistory`).
-///
-/// Nothing reconciled them, so a FortiGate sitting under a customer in
-/// Provisioning was invisible to Compliance ("No compliance-capable hosts"),
-/// Fleet was blind to compliance scores, and Provisioning diff/deploy was
-/// permanently disabled for auto-discovered hosts (an IP can never `==` a
-/// record id).
-///
-/// `HostIndex` is a pure, additive value type: it persists nothing and
-/// changes no wire shape. It is rebuilt from the two in-memory stores that
-/// already exist (`AppState.sshHosts` + `AppState.customers`) at the tail of
-/// `refreshHosts()` / `refreshCustomers()`, so it is always current with zero
-/// new call sites in the views. Cost is O(hosts + sites) over a handful of
-/// arrays.
-///
-/// The single object that knows all four keys is `SshHostSummary`: it carries
-/// the record id (`id`), the IP (`hostname` — both discovery writers store
-/// `hostname = host.ip`), and the customer string (`group`). The index folds
-/// in the only structural Customer→Site→host edge (`Site.hostIds`), tolerating
-/// a token that is EITHER a record id OR an IP.
+/// Reconciles legacy address links without treating an IP as a unique identity.
+/// Ambiguous addresses and conflicting customer links require explicit repair.
 struct HostIndex {
-    private let byId: [String: SshHostSummary]    // record id -> host
-    private let byIp: [String: SshHostSummary]    // host.hostname (IP/DNS) -> host
-    private let slugForRecordId: [String: String] // record id -> customer slug (via Site.hostIds)
-    private let recordIdsBySlug: [String: Set<String>]
+    private let byId: [String: SshHostSummary]
+    private let byAddress: [String: [SshHostSummary]]
+    private let owners: [String: Set<String>]
+    private let memberships: [String: Set<String>]
     private let knownSlugs: Set<String>
 
     init(hosts: [SshHostSummary], customers: [Customer]) {
-        var byId: [String: SshHostSummary] = [:]
-        var byIp: [String: SshHostSummary] = [:]
-        for h in hosts {
-            byId[h.id] = h
-            // hostname == IP for discovered hosts; this is the join that
-            // NetworkScanSheet already does ad-hoc, generalized.
-            if !h.hostname.isEmpty { byIp[h.hostname] = h }
-        }
-
-        var slugForRecordId: [String: String] = [:]
-        var recordIdsBySlug: [String: Set<String>] = [:]
-        for c in customers {
-            for site in c.sites {
+        byId = Dictionary(grouping: hosts, by: { Self.canonicalId($0.id) })
+            .compactMapValues { $0.count == 1 ? $0.first : nil }
+        byAddress = Dictionary(grouping: hosts.filter { !$0.hostname.isEmpty }, by: \.hostname)
+        knownSlugs = Set(customers.map(\.slug))
+        var links: [String: Set<String>] = [:]
+        var resolvedLinks: [String: Set<String>] = [:]
+        for customer in customers {
+            for site in customer.sites {
                 for token in site.hostIds {
-                    // A Site.hostIds token may be a record id (intended) or an
-                    // IP (what writers actually store). Resolve either way.
-                    if let h = byId[token] ?? byIp[token] {
-                        slugForRecordId[h.id] = c.slug
-                        recordIdsBySlug[c.slug, default: []].insert(h.id)
+                    // Preserve every claim, including ambiguous aliases. A later
+                    // mutation must never silently pick the last matching host.
+                    let matches = byId[Self.canonicalId(token)].map { [$0] } ?? byAddress[token] ?? []
+                    for host in matches { links[host.id, default: []].insert(customer.slug) }
+                    if matches.count == 1, let host = matches.first {
+                        resolvedLinks[host.id, default: []].insert(customer.slug)
                     }
                 }
             }
         }
-
-        self.byId = byId
-        self.byIp = byIp
-        self.slugForRecordId = slugForRecordId
-        self.recordIdsBySlug = recordIdsBySlug
-        self.knownSlugs = Set(customers.map(\.slug))
+        owners = links
+        memberships = resolvedLinks
     }
 
-    /// Resolve a `Site.hostIds` token (record id OR IP) to a real host.
-    /// The returned host's `id` is always a real record id, so downstream
-    /// daemon calls keep receiving an id even when the token was an IP.
+    private static func canonicalId(_ token: String) -> String {
+        if let uuid = UUID(uuidString: token) { return uuid.uuidString.lowercased() }
+        // Rust also writes the compact 32-hex spelling in persisted references.
+        if token.count == 32, token.utf8.allSatisfy({
+            (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+        }) {
+            let chars = Array(token)
+            let parts = [0..<8, 8..<12, 12..<16, 16..<20, 20..<32].map { String(chars[$0]) }
+            return parts.joined(separator: "-").lowercased()
+        }
+        return token
+    }
+
     func host(forToken token: String) -> SshHostSummary? {
-        byId[token] ?? byIp[token]
+        if let host = byId[Self.canonicalId(token)] { return host }
+        guard let matches = byAddress[token], matches.count == 1 else { return nil }
+        return matches[0]
     }
 
-    /// The customer slug a host belongs to, by precedence:
-    ///   (a) `group` is exactly a known customer slug, else
-    ///   (b) the host is reachable through some `Site.hostIds` (by id or IP).
-    /// Returns nil only when the host is genuinely ungrouped.
+    func host(forToken token: String, customerSlug: String) -> SshHostSummary? {
+        guard let host = host(forToken: token), knownSlugs.contains(customerSlug),
+              !knownSlugs.contains(host.group) || host.group == customerSlug,
+              owners[host.id] == Set([customerSlug]) else { return nil }
+        return host
+    }
+
+    /// No other-site fallback and no arbitrary first firewall when several exist.
+    func provisioningHost(customer: Customer, site: Site) -> SshHostSummary? {
+        guard customer.sites.filter({ $0.id == site.id }).count == 1 else { return nil }
+        let matches = site.hostIds.compactMap { host(forToken: $0, customerSlug: customer.slug) }
+            .filter { $0.deviceType == .fortigate }
+        let unique = Dictionary(matches.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return unique.count == 1 ? unique.values.first : nil
+    }
+
     func customerSlug(forHost host: SshHostSummary) -> String? {
         if knownSlugs.contains(host.group) { return host.group }
-        return slugForRecordId[host.id]
+        guard let slugs = memberships[host.id], slugs.count == 1,
+              owners[host.id] == slugs else { return nil }
+        return slugs.first
     }
 
-    /// Every host record id belonging to a customer — lets Fleet fold the
-    /// record-id-keyed compliance store into per-customer cards.
     func recordIds(forCustomer slug: String) -> Set<String> {
-        recordIdsBySlug[slug] ?? []
+        Set(byId.values.filter { customerSlug(forHost: $0) == slug }.map(\.id))
     }
 }

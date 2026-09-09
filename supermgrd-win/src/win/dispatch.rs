@@ -31,6 +31,7 @@ use supermgr_core::secret_lifecycle::SecretOwner;
 
 use super::daemon::DaemonState;
 use super::{appliance, ssh_exec};
+use crate::rpc_args::arg_id;
 
 /// Clear every credential an entity owned, after its record is gone.
 ///
@@ -715,7 +716,7 @@ async fn handle_ssh_list_keys(state: &Arc<DaemonState>) -> Result<Value, RpcErro
 }
 
 async fn handle_ssh_delete_key(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let key_id = arg_str(args, "key_id")?;
+    let key_id = arg_id(args, "key_id")?;
     let path = state.root.join("keys").join(format!("{key_id}.json"));
     if !path.exists() {
         return Err(RpcError::NotFound(format!("ssh key {key_id}")));
@@ -750,7 +751,7 @@ async fn handle_ssh_export_public_key(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let key_id = arg_str(args, "key_id")?;
+    let key_id = arg_id(args, "key_id")?;
     let path = state.root.join("keys").join(format!("{key_id}.json"));
     let bytes = std::fs::read(&path)
         .map_err(|_| RpcError::NotFound(format!("ssh key {key_id}")))?;
@@ -787,7 +788,7 @@ async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
 }
 
 async fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     let bytes = std::fs::read(&path)
         .map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
@@ -817,7 +818,7 @@ async fn handle_add_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value
 }
 
 async fn handle_delete_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     if !path.exists() {
         return Err(RpcError::NotFound(format!("host {host_id}")));
@@ -853,7 +854,7 @@ async fn handle_ssh_execute_command(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let command = arg_str(args, "command")?;
     let result = ssh_exec::execute(
         &state.root,
@@ -870,14 +871,14 @@ async fn handle_test_host_connection(
     _state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let _ = arg_str(args, "host_id")?;
+    let _ = arg_id(args, "host_id")?;
     Ok(Value::String(
         json!({ "reachable": false, "reason": "not implemented yet on Windows" }).to_string(),
     ))
 }
 
 async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     let bytes = std::fs::read(&path)
         .map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
@@ -901,7 +902,7 @@ async fn handle_ssh_set_password(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let password = arg_str(args, "password")?;
     let label = format!("supermgr/host/{host_id}/password");
     state
@@ -916,7 +917,7 @@ async fn handle_ssh_set_api_token(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let token = arg_str(args, "token")?;
     let port = arg_u64(args, "port")? as u16;
     let label = format!("supermgr/host/{host_id}/api-token");
@@ -948,7 +949,7 @@ async fn handle_ssh_set_api_token(
 // ---------------------------------------------------------------------------
 
 async fn handle_fortigate_api(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let method = arg_str(args, "method")?;
     let path = arg_str(args, "path")?;
     let body = args.get("body").and_then(Value::as_str).unwrap_or("");
@@ -968,8 +969,8 @@ async fn handle_fortigate_push_ssh_key(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
-    let key_id = arg_str(args, "key_id")?;
+    let host_id = arg_id(args, "host_id")?;
+    let key_id = arg_id(args, "key_id")?;
     let admin_user = arg_str(args, "admin_user")?;
     let resp = appliance::fortigate_push_ssh_key(
         &state.root,
@@ -986,7 +987,7 @@ async fn handle_fortigate_backup_config(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let filename = appliance::fortigate_backup_config(
         &state.root,
         state.secret_store.clone(),
@@ -997,7 +998,7 @@ async fn handle_fortigate_backup_config(
 }
 
 async fn handle_unifi_api(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let method = arg_str(args, "method")?;
     let path = arg_str(args, "path")?;
     let body = args.get("body").and_then(Value::as_str).unwrap_or("");
@@ -1017,7 +1018,7 @@ async fn handle_unifi_set_inform(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let inform_url = arg_str(args, "inform_url")?;
     let resp = appliance::unifi_set_inform(
         &state.root,
@@ -1031,7 +1032,7 @@ async fn handle_unifi_set_inform(
 }
 
 async fn handle_opnsense_api(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let method = arg_str(args, "method")?;
     let path = arg_str(args, "path")?;
     let body = args.get("body").and_then(Value::as_str).unwrap_or("");
@@ -1051,7 +1052,7 @@ async fn handle_opnsense_backup_config(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let filename = appliance::opnsense_backup_config(
         &state.root,
         state.secret_store.clone(),
@@ -1065,7 +1066,7 @@ async fn handle_sophos_xml_api(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let host_id = arg_str(args, "host_id")?;
+    let host_id = arg_id(args, "host_id")?;
     let inner_xml = arg_str(args, "inner_xml")?;
     let resp = appliance::sophos_xml_api(
         &state.root,

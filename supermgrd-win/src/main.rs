@@ -13,6 +13,9 @@
 #[cfg(target_os = "windows")]
 mod win;
 
+#[cfg(any(target_os = "windows", test))]
+mod rpc_args;
+
 fn main() {
     #[cfg(target_os = "windows")]
     {

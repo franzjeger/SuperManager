@@ -35,6 +35,7 @@
 //! is the documented behaviour.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -96,17 +97,13 @@ impl KnownHostsStore {
     /// Open (or create) the store at `<data_dir>/known_hosts.json`.
     pub fn open(data_dir: &Path) -> Result<Self> {
         let path = data_dir.join("known_hosts.json");
-        let cache = if path.exists() {
-            let text = std::fs::read_to_string(&path).map_err(|source| KnownHostsError::Io {
+        let cache = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&text).map_err(|source| KnownHostsError::Corrupt {
                 path: path.display().to_string(),
                 source,
-            })?;
-            serde_json::from_str(&text).map_err(|source| KnownHostsError::Corrupt {
-                path: path.display().to_string(),
-                source,
-            })?
-        } else {
-            HashMap::new()
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(io_error(&path, e)),
         };
         Ok(Self {
             path,
@@ -155,15 +152,44 @@ impl KnownHostsStore {
         }
     }
 
+    /// Verify an existing pin or persist the first pin before accepting it.
+    /// Concurrent handshakes share this transaction: a competing first-use
+    /// fingerprint must be rejected, never overwrite the winner. An I/O error
+    /// leaves the cache unchanged and must abort authentication.
+    pub fn check_and_enroll(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+    ) -> Result<HostKeyCheck> {
+        let key = format!("{host}:{port}");
+        let mut cache = self.lock();
+        match cache.get(&key) {
+            Some(stored) if stored == fingerprint => Ok(HostKeyCheck::Match),
+            Some(stored) => Ok(HostKeyCheck::Mismatch {
+                stored: stored.clone(),
+                current: fingerprint.to_owned(),
+            }),
+            None => {
+                let mut next = cache.clone();
+                next.insert(key, fingerprint.to_owned());
+                self.persist(&next)?;
+                *cache = next;
+                Ok(HostKeyCheck::NewHost)
+            }
+        }
+    }
+
     /// Persist a `(host, port, fingerprint)` entry. Replaces any existing
     /// entry for that `host:port`.
     pub fn record(&self, host: &str, port: u16, fingerprint: &str) -> Result<()> {
         let key = format!("{host}:{port}");
         let mut cache = self.lock();
-        cache.insert(key, fingerprint.to_owned());
-        let snapshot: HashMap<String, String> = cache.clone();
-        drop(cache);
-        self.persist(&snapshot)
+        let mut next = cache.clone();
+        next.insert(key, fingerprint.to_owned());
+        self.persist(&next)?;
+        *cache = next;
+        Ok(())
     }
 
     /// Forget a host, so the next connection to it is treated as first
@@ -180,11 +206,11 @@ impl KnownHostsStore {
     pub fn forget(&self, host: &str, port: u16) -> Result<bool> {
         let key = format!("{host}:{port}");
         let mut cache = self.lock();
-        let removed = cache.remove(&key).is_some();
-        let snapshot: HashMap<String, String> = cache.clone();
-        drop(cache);
+        let mut next = cache.clone();
+        let removed = next.remove(&key).is_some();
         if removed {
-            self.persist(&snapshot)?;
+            self.persist(&next)?;
+            *cache = next;
         }
         Ok(removed)
     }
@@ -221,23 +247,25 @@ impl KnownHostsStore {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
         }
-        let tmp = self.path.with_extension("json.tmp");
-        let text =
-            serde_json::to_string_pretty(snapshot).map_err(|source| KnownHostsError::Corrupt {
+        let dir = self.path.parent().expect("known-hosts path has a parent");
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_error(dir, e))?;
+        serde_json::to_writer_pretty(&mut tmp, snapshot).map_err(|source| {
+            KnownHostsError::Corrupt {
                 path: self.path.display().to_string(),
                 source,
-            })?;
-        // Write-then-rename so a crash mid-write can't leave a truncated
-        // file that fails to parse on the next open.
-        std::fs::write(&tmp, &text).map_err(|e| io_error(&tmp, e))?;
-        // 0600 — owner read/write only; same posture as secrets.json.
+            }
+        })?;
+        tmp.flush().map_err(|e| io_error(tmp.path(), e))?;
+        tmp.as_file()
+            .sync_all()
+            .map_err(|e| io_error(tmp.path(), e))?;
+        tmp.persist(&self.path)
+            .map_err(|e| io_error(&self.path, e.error))?;
+
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| io_error(&tmp, e))?;
-        }
-        std::fs::rename(&tmp, &self.path).map_err(|e| io_error(&self.path, e))?;
+        std::fs::File::open(dir)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| io_error(dir, e))?;
         Ok(())
     }
 }
@@ -266,7 +294,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = KnownHostsStore::open(dir.path()).unwrap();
         store.record("h", 22, "abc123").unwrap();
-        assert!(matches!(store.check("h", 22, "abc123"), HostKeyCheck::Match));
+        assert!(matches!(
+            store.check("h", 22, "abc123"),
+            HostKeyCheck::Match
+        ));
     }
 
     #[test]
@@ -336,7 +367,10 @@ mod tests {
             store.forget("h", 22).unwrap();
         }
         let store = KnownHostsStore::open(dir.path()).unwrap();
-        assert!(matches!(store.check("h", 22, "new-fp"), HostKeyCheck::NewHost));
+        assert!(matches!(
+            store.check("h", 22, "new-fp"),
+            HostKeyCheck::NewHost
+        ));
     }
 
     #[test]
@@ -346,7 +380,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = KnownHostsStore::open(dir.path()).unwrap();
         store.record("h", 22, "fp-22").unwrap();
-        assert!(matches!(store.check("h", 2222, "fp-22"), HostKeyCheck::NewHost));
+        assert!(matches!(
+            store.check("h", 2222, "fp-22"),
+            HostKeyCheck::NewHost
+        ));
     }
 
     #[test]
@@ -383,7 +420,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let store = KnownHostsStore::open(dir.path()).unwrap();
         store.record("h", 22, "fp").unwrap();
-        let mode = std::fs::metadata(store.path()).unwrap().permissions().mode();
+        let mode = std::fs::metadata(store.path())
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "known_hosts.json must be 0600");
     }
 
@@ -401,5 +441,70 @@ mod tests {
             fp,
             "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
         );
+    }
+    #[test]
+    fn concurrent_first_use_enrolls_only_one_fingerprint() {
+        let dir = TempDir::new().unwrap();
+        let store = std::sync::Arc::new(KnownHostsStore::open(dir.path()).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(16));
+        let mut threads = Vec::new();
+        for i in 0..16 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                let pin = format!("pin-{i}");
+                (
+                    pin.clone(),
+                    store.check_and_enroll("host", 22, &pin).unwrap(),
+                )
+            }));
+        }
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let winners: Vec<_> = results
+            .iter()
+            .filter(|(_, v)| matches!(v, HostKeyCheck::NewHost))
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, v)| matches!(v, HostKeyCheck::Mismatch { .. }))
+                .count(),
+            15
+        );
+        let reopened = KnownHostsStore::open(dir.path()).unwrap();
+        assert!(matches!(
+            reopened.check("host", 22, &winners[0].0),
+            HostKeyCheck::Match
+        ));
+    }
+
+    #[test]
+    fn failed_enrollment_does_not_trust_a_key_in_memory() {
+        let dir = TempDir::new().unwrap();
+        let store = KnownHostsStore::open(dir.path()).unwrap();
+        // A directory at the destination reliably fails replacement, even
+        // when the suite runs as root; no permission-dependent test skip.
+        std::fs::create_dir(store.path()).unwrap();
+        assert!(store.check_and_enroll("host", 22, "pin").is_err());
+        assert!(matches!(
+            store.check("host", 22, "pin"),
+            HostKeyCheck::NewHost
+        ));
+    }
+
+    #[test]
+    fn failed_forget_keeps_the_existing_pin() {
+        let dir = TempDir::new().unwrap();
+        let store = KnownHostsStore::open(dir.path()).unwrap();
+        store.record("host", 22, "pin").unwrap();
+        std::fs::remove_file(store.path()).unwrap();
+        std::fs::create_dir(store.path()).unwrap();
+        assert!(store.forget("host", 22).is_err());
+        assert!(matches!(
+            store.check("host", 22, "other"),
+            HostKeyCheck::Mismatch { .. }
+        ));
     }
 }
