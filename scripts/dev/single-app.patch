@@ -7,11 +7,11 @@
 -        NSApplication.shared.dockTile.badgeLabel = "DEV"
 +        NSApplication.shared.dockTile.badgeLabel = nil
      }
- 
+
      /// `isInserted` binding for the menu bar item.
 @@ -56,7 +56,7 @@
      }
- 
+
      var body: some Scene {
 -        WindowGroup("SuperManager Dev") {
 +        WindowGroup("SuperManager") {
