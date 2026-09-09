@@ -476,8 +476,7 @@ fn locate_wg_quick() -> anyhow::Result<PathBuf> {
         }
     }
     Err(anyhow!(
-        "wg-quick not found in /opt/homebrew/bin or /usr/local/bin. \
-         Install with `brew install wireguard-tools`."
+        "WireGuard is missing from the protected runtime. Install the matching signed SuperManager system package."
     ))
 }
 

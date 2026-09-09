@@ -277,8 +277,7 @@ impl Strongswan {
             }
         }
         Err(anyhow!(
-            "strongSwan not found. Install it with `brew install strongswan` \
-             (we probe /opt/homebrew and /usr/local)."
+            "strongSwan is missing from the protected runtime. Install the matching signed SuperManager system package."
         ))
     }
 

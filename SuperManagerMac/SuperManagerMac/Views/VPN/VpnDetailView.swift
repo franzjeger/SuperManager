@@ -62,9 +62,8 @@ struct VpnDetailView: View {
     /// error. Setting them inline and clearing by loose string match would
     /// silently drift apart.
     static let helperSocketPendingMessage =
-        "Helper installed but socket isn't up yet. " +
-        "Check System Settings → General → Login Items if a " +
-        "background-item approval prompt was shown."
+        "The system helper has not completed an authorized connection. " +
+        "Use the signed release app and matching SuperManager system package."
     static let helperNotRunningMessage =
         "Helper isn't running yet. Approve the " +
         "background daemon prompt in System Settings → " +
@@ -490,7 +489,7 @@ struct VpnDetailView: View {
                 switch profile.config {
                 case .ikev2:
                     if !helperReachable {
-                        Button("Install Helper…") {
+                        Button("System Component Setup…") {
                             Task { await installHelper() }
                         }
                         .buttonStyle(.borderedProminent)
@@ -517,7 +516,7 @@ struct VpnDetailView: View {
                     }
                 case .wireguard:
                     if !helperReachable {
-                        Button("Install Helper…") {
+                        Button("System Component Setup…") {
                             Task { await installHelper() }
                         }
                         .buttonStyle(.borderedProminent)
@@ -538,7 +537,7 @@ struct VpnDetailView: View {
                     }
                 case .openvpn(let cfg):
                     if !helperReachable {
-                        Button("Install Helper…") {
+                        Button("System Component Setup…") {
                             Task { await installHelper() }
                         }
                         .buttonStyle(.borderedProminent)
@@ -561,7 +560,7 @@ struct VpnDetailView: View {
                     }
                 case .azure(let az):
                     if !helperReachable {
-                        Button("Install Helper…") {
+                        Button("System Component Setup…") {
                             Task { await installHelper() }
                         }
                         .buttonStyle(.borderedProminent)

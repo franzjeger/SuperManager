@@ -207,25 +207,7 @@ class AppState {
         }
     }
 
-    /// Hot-swap the privileged helper at /Library/PrivilegedHelperTools/
-    /// for the freshly-built version embedded in this app bundle, if
-    /// the deployed one is missing any RPC the new code uses.
-    ///
-    /// Mechanism:
-    ///   1. Ask the deployed helper for its supported method list.
-    ///   2. Diff against the methods we know we need.
-    ///   3. If anything's missing AND the deployed helper has
-    ///      `deploy_self` (the dev-rpc feature), call it with the
-    ///      bundled helper's path.
-    ///   4. The deployed helper copies, exits, launchd respawns from
-    ///      the new binary.
-    ///   5. We poll the socket for ~3 seconds for the respawn to
-    ///      happen, then return.
-    ///
-    /// If the deployed helper has no `deploy_self` (production build,
-    /// or first-ever install before install_helper.sh), we surface a
-    /// gentle log message and let the user install via the normal
-    /// path. We don't block the rest of `connectToDaemon` on this.
+    /// Check capabilities and report when a matching signed system package is needed.
     private func ensureHelperUpToDate() async {
         guard await HelperClient.shared.isReachable() else {
             DebugLog.write("[helper] not reachable yet, skipping version check")
@@ -348,75 +330,9 @@ class AppState {
         return n
     }
 
-    /// Fire `deploy_self` against the deployed helper, pointing it
-    /// at the bundled helper inside our app's Contents/MacOS/.
-    /// Then poll for the daemon to respawn.
-    ///
-    /// - Parameter deployedBuildTimestamp: what the live helper reports,
-    ///   or nil when it could not be asked (unreachable, or too old to
-    ///   answer). Guards against pushing an *older* helper over a newer
-    ///   one — see the discussion below.
+    /// Report replacement requirements; never silently replace a root executable.
     private func redeployBundledHelper(deployedBuildTimestamp: Int? = nil) async {
-        // Bundled helper sits next to the GUI executable. We know
-        // the file name because the embed-rust phase pins it.
-        guard let exec = Bundle.main.executableURL else {
-            DebugLog.write("[helper] no Bundle.main.executableURL — can't redeploy")
-            return
-        }
-        let bundledHelper = exec
-            .deletingLastPathComponent()
-            .appendingPathComponent("com.sybr.supermanager.helper")
-        guard FileManager.default.isReadableFile(atPath: bundledHelper.path) else {
-            DebugLog.write("[helper] bundled helper not at \(bundledHelper.path)")
-            return
-        }
-
-        // Never deploy backwards.
-        //
-        // `deploy_self` copies whatever we point it at over the live
-        // helper, so this method is just as capable of a downgrade as an
-        // upgrade. That is not hypothetical: a helper deployed by hand
-        // from a fresh build is newer than the one embedded in an older
-        // installed app, and on the next launch the app would quietly
-        // undo it. The symptom is vicious — the file in
-        // /Library/PrivilegedHelperTools is correct, `strings` confirms
-        // the fix is in it, and the fix still isn't running, because the
-        // process launchd respawned came from the bundle.
-        //
-        // `build.rs` has documented this comparison as the intended
-        // behaviour since the timestamp was introduced; it just never
-        // had an implementation on this side.
-        //
-        // Unknowns deploy: a live helper too old to report a timestamp,
-        // or a bundled binary predating `--version`, are both cases
-        // where the deployed one is almost certainly the stale one.
-        let bundledTs = bundledHelperBuildTimestamp(at: bundledHelper)
-        guard Self.shouldRedeploy(bundled: bundledTs, deployed: deployedBuildTimestamp) else {
-            DebugLog.write(
-                "[helper] bundled helper (build \(bundledTs.map(String.init) ?? "?")) is not "
-                + "newer than deployed (build \(deployedBuildTimestamp.map(String.init) ?? "?")) "
-                + "— refusing to redeploy. The deployed helper is missing methods this app "
-                + "wants, so it was likely built from a different branch.")
-            return
-        }
-
-        do {
-            _ = try await HelperClient.shared.deploySelf(sourcePath: bundledHelper.path)
-            DebugLog.write("[helper] deploy_self issued, waiting for respawn")
-        } catch {
-            DebugLog.write("[helper] deploy_self failed: \(error)")
-            return
-        }
-        // Wait up to ~3s for launchd to respawn from the new binary.
-        // First poll: socket goes away briefly during exec.
-        for attempt in 1...12 {
-            try? await Task.sleep(for: .milliseconds(250))
-            if await HelperClient.shared.isReachable() {
-                DebugLog.write("[helper] respawned after \(attempt * 250)ms")
-                return
-            }
-        }
-        DebugLog.write("[helper] socket didn't come back after 3s — proceeding anyway")
+        DebugLog.write("[helper] Update required. Install the matching signed SuperManager system package; automatic binary replacement is disabled.")
     }
 
     /// Poll each known VPN profile's status from the helper, every

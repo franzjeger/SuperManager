@@ -453,6 +453,7 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
         "helper_version" => {
             let methods = vec![
                 "helper_version",
+                "vpn_runtime_status",
                 "restart",
                 #[cfg(feature = "dev-rpc")]
                 "tail_log",
@@ -492,6 +493,7 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
                 "version": env!("CARGO_PKG_VERSION"),
                 "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
                 "methods": methods,
+                "privileged_policy_version": 2,
                 "dev_rpc": cfg!(feature = "dev-rpc"),
             }))
         }
@@ -510,6 +512,22 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
 
         // Self-replacement must go through the authenticated installer even in
         // developer builds. Never execute a caller-selected helper payload.
+        "vpn_runtime_status" => {
+            let root = std::path::Path::new("/Library/PrivilegedHelperTools/SuperManagerVPN");
+            let status = secure_files::check_runtime_tree(root).and_then(|()| {
+                for component in ["bin/bash", "bin/wg", "bin/wg-quick", "bin/wireguard-go",
+                    "sbin/openvpn", "bin/swanctl", "libexec/ipsec/charon", "etc/strongswan.conf"] {
+                    anyhow::ensure!(root.join(component).is_file(), "Missing runtime component: {component}");
+                }
+                Ok(())
+            });
+            Response::ok(id, serde_json::json!({
+                "available": status.is_ok(),
+                "message": status.err().map(|error| format!("Install the matching signed SuperManager system package. {error}")),
+                "unsupported": ["OpenVPN3/Azure", "WireGuard shell hooks, DNS, Table and SaveConfig", "OpenVPN external credential files and scripts"]
+            }))
+        }
+
         "deploy_self" => Response::err(id, -32601, "Self-deployment is disabled; use the signed installer"),
 
         "vpn_connect" => {

@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "sources": {
+    "strongswan": {
+      "url": "https://download.strongswan.org/strongswan-6.0.7.tar.bz2",
+      "sha256": "e518e34e159514f4c6ba80d1f926cb151e0dd4e3a1d94213171234b8b9ae6f55",
+      "version": "6.0.7",
+      "license": "GPL-2.0-or-later"
+    },
+    "openvpn": {
+      "url": "https://swupdate.openvpn.net/community/releases/openvpn-2.7.6.tar.gz",
+      "sha256": "10e24a9385f23cc38cc5cf448f3ca0769f939bc4cbecc4f4647d7e006e52db74",
+      "version": "2.7.6",
+      "license": "GPL-2.0-only WITH openvpn-openssl-exception"
+    },
+    "wireguard-tools": {
+      "url": "https://git.zx2c4.com/wireguard-tools/snapshot/wireguard-tools-1.0.20260223.tar.xz",
+      "sha256": "af459827b80bfd31b83b08077f4b5843acb7d18ad9a33a2ef532d3090f291fbf",
+      "version": "1.0.20260223",
+      "license": "GPL-2.0-only"
+    },
+    "wireguard-go": {
+      "url": "https://git.zx2c4.com/wireguard-go/snapshot/wireguard-go-0.0.20250522.tar.xz",
+      "sha256": "c7eeffb13e5eb43b93e54a21d78dd71414771af9e07112da5275690493695c9c",
+      "version": "0.0.20250522",
+      "license": "MIT",
+      "previous_archive_sha256": "c698fb9fd09d48e8cf5c1eee3e5f0170f1916a7eed09ba025aa025cd5e721a20",
+      "verification": {
+        "method": "Every regular archive file matched the PGP-verified Git tag byte-for-byte; no missing or extra files.",
+        "tag": "0.0.20250522",
+        "tag_object": "90f39c9a9b1a63c360a5b7d69e26a5089fc4af1a",
+        "commit": "f333402bd9cbe0f3eeb02507bd14e23d7d639280",
+        "signer": "AB9942E6D4A4CFC3412620A749FC7012A5DE03AE",
+        "key_url": "https://www.zx2c4.com/keys/AB9942E6D4A4CFC3412620A749FC7012A5DE03AE.asc",
+        "verified": "2026-09-09"
+      }
+    },
+    "bash": {
+      "url": "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz",
+      "sha256": "0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba",
+      "version": "5.3.15",
+      "license": "GPL-3.0-or-later"
+    },
+    "openssl@3": {
+      "url": "https://github.com/openssl/openssl/releases/download/openssl-3.6.4/openssl-3.6.4.tar.gz",
+      "sha256": "9bffaa1ad1e07b354c21bd3324ec02fa15579f45a7d0494b3e74bc449b7333ef",
+      "version": "3.6.4",
+      "license": "Apache-2.0"
+    }
+  }
+}

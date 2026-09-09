@@ -31,8 +31,8 @@ final class HelperClient {
         var errorDescription: String? {
             switch self {
             case .notInstalled:
-                return "Helper isn't installed yet — call HelperInstaller.install() first"
-            case .ioFailure(let m): return "Helper IPC failed: \(m)"
+                return "The system helper is unavailable. Install the signed SuperManager system package and reopen the app."
+            case .ioFailure(let m): return "Cannot communicate with the system helper. Use the signed release app and matching system package. Details: \(m)"
             case .rpcFailure(_, let m): return m
             case .decodeFailure(let m): return "Helper response decode failed: \(m)"
             }
@@ -43,17 +43,17 @@ final class HelperClient {
 
     // MARK: - Reachability
 
-    /// True when the LaunchDaemon socket exists and we can `connect()` to it.
-    /// This is cheap (<1ms) so callers can poll it for UI state.
+    /// Success requires an authorized RPC response, not merely a listening socket.
     func isReachable() async -> Bool {
         guard FileManager.default.fileExists(atPath: Self.socketPath) else { return false }
         do {
-            let fd = try connectFD()
-            close(fd)
-            return true
-        } catch {
-            return false
-        }
+            let version = try await helperVersion()
+            return (version["privileged_policy_version"] as? Int ?? 0) >= 2
+        } catch { return false }
+    }
+
+    func runtimeStatus() async throws -> [String: Any] {
+        try await call("vpn_runtime_status", params: [:])
     }
 
     // MARK: - High-level RPCs

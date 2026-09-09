@@ -1,0 +1,69 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+[[ "${3:-}" == / && $EUID == 0 ]] || exit 1
+base='/Library/Application Support/SuperManagerSystem'
+payload="$base/releases/@BUILD@"
+helper='/Library/PrivilegedHelperTools/com.sybr.supermanager.helper'
+runtime='/Library/PrivilegedHelperTools/SuperManagerVPN'
+plist='/Library/LaunchDaemons/com.sybr.supermanager.helper.plist'
+label='com.sybr.supermanager.helper'
+backup="$base/backup-@BUILD@"
+# Payload is delivered only by the Developer-ID-signed package. Validate helper
+# again before any service change; every Mach-O runtime file was signed at build.
+requirement='anchor apple generic and certificate leaf[subject.OU] = "LY6LJ395B8" and identifier "com.sybr.supermanager.helper" and ! entitlement["com.apple.security.get-task-allow"] exists and ! entitlement["com.apple.security.cs.disable-library-validation"] exists and ! entitlement["com.apple.security.cs.allow-dyld-environment-variables"] exists'
+codesign --verify --strict --all-architectures -R "=$requirement" "$payload/helper"
+(cd "$payload" && shasum -a 256 -c payload.sha256)
+# Serialize publication and recheck the floor under the lock (preinstall can
+# precede another package's commit). A killed installer leaves recovery evidence.
+mkdir -m 0700 "$base/install.lock"
+trap 'rmdir "$base/install.lock" 2>/dev/null || true' EXIT
+if [[ -e "$base/build" ]]; then
+    previous=$(cat "$base/build")
+    [[ "$previous" =~ ^[0-9]{1,15}$ ]]
+    (( @BUILD@ > 10#$previous )) || { echo 'Downgrade or same-build replacement refused.' >&2; exit 1; }
+fi
+[[ ! -e "$base/pending" ]]
+# Preserve a complete prior pair before recording the transaction marker.
+mkdir -m 0700 "$backup"
+[[ ! -e "$helper" ]] || cp -p "$helper" "$backup/helper"
+[[ ! -e "$runtime" ]] || ditto "$runtime" "$backup/runtime"
+[[ ! -e "$plist" ]] || cp -p "$plist" "$backup/helper.plist"
+cp "$payload/recovery.sh" "$backup/recovery.sh"
+chmod 0700 "$backup/recovery.sh"
+printf '%s\n' "$backup" > "$base/pending.new"
+mv "$base/pending.new" "$base/pending"
+rollback() {
+    trap - ERR INT TERM
+    "$backup/recovery.sh" || echo "Recovery failed. Keep $backup and inspect launchd diagnostics." >&2
+    exit 1
+}
+trap rollback ERR INT TERM
+# No in-place overwrite of executable vnodes. Keep backup until a running
+# launchd process and socket are observed. Authenticated GUI testing is separate.
+launchctl bootout "system/$label" >/dev/null 2>&1 || true
+cp "$payload/helper" "$helper.new"
+chmod 0755 "$helper.new"
+mv -f "$helper.new" "$helper"
+[[ ! -e "$runtime" ]] || mv "$runtime" "$backup/retired-runtime"
+ditto "$payload/runtime" "$runtime"
+cp "$payload/helper.plist" "$plist.new"
+chmod 0644 "$plist.new"
+mv -f "$plist.new" "$plist"
+launchctl bootstrap system "$plist"
+healthy=false
+for attempt in {1..30}; do
+    state=$(launchctl print "system/$label" 2>/dev/null || true)
+    if [[ -S /var/run/com.sybr.supermanager.helper.sock && "$state" == *'state = running'* ]]; then
+        healthy=true; break
+    fi
+    sleep 1
+done
+[[ "$healthy" == true ]]
+printf '%s\n' '@BUILD@' > "$base/build.new"
+chmod 0600 "$base/build.new"
+mv "$base/build.new" "$base/build"
+rm "$base/pending"
+trap - ERR INT TERM
+# Backups intentionally remain for operator recovery; they can contain secrets.
+echo 'System components installed. Verify authorization and VPN lifecycle with the signed app.'

@@ -1,0 +1,43 @@
+#!/bin/bash
+set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+# Installation to another volume cannot safely operate this machine's launchd.
+[[ "${3:-}" == / && $EUID == 0 ]] || { echo 'Install on the running system volume only.' >&2; exit 1; }
+[[ "$(uname -m)" == "@ARCH@" ]] || { echo "Package architecture does not match this Mac." >&2; exit 1; }
+protected_directory() {
+    local p="$1"
+    [[ ! -L "$p" && -d "$p" && $(stat -f %u "$p") == 0 ]] || return 1
+    local mode; mode=$(stat -f %Lp "$p")
+    (( (8#$mode & 0022) == 0 ))
+}
+for path in / /Library /Library/PrivilegedHelperTools /Library/LaunchDaemons /Library/Application\ Support; do
+    if [[ ! -e "$path" && ! -L "$path" ]]; then mkdir -m 0755 "$path"; fi
+    protected_directory "$path" || { echo "Unsafe system directory: $path" >&2; exit 1; }
+done
+# Do not replace executables or configs underneath active network sessions.
+for process in SuperManagerMac openvpn charon wireguard-go; do
+    if pgrep -x "$process" >/dev/null; then
+        echo "Quit $process and disconnect VPNs before installation." >&2; exit 1
+    fi
+done
+base='/Library/Application Support/SuperManagerSystem'
+if [[ -e "$base" || -L "$base" ]]; then
+    protected_directory "$base" || exit 1
+else
+    mkdir -m 0755 "$base"
+fi
+if [[ -e "$base/pending" ]]; then
+    echo 'An interrupted installation needs recovery. Run the recorded recovery.sh as root before retrying.' >&2
+    exit 1
+fi
+# Receipt-independent root-owned monotonic counter. Unknown legacy state is not
+# silently adopted: migrate the older manual install explicitly on a test host.
+if [[ -e "$base/build" ]]; then
+    [[ ! -L "$base/build" && $(stat -f %u "$base/build") == 0 ]] || exit 1
+    previous=$(cat "$base/build")
+    [[ "$previous" =~ ^[0-9]{1,15}$ ]] || exit 1
+    (( @BUILD@ > 10#$previous )) || { echo 'Downgrade or same-build replacement refused.' >&2; exit 1; }
+elif [[ -e /Library/PrivilegedHelperTools/com.sybr.supermanager.helper || -e /Library/PrivilegedHelperTools/SuperManagerVPN ]]; then
+    echo 'Legacy installation has no trusted build counter; explicit migration is required.' >&2
+    exit 1
+fi

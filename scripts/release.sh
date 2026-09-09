@@ -30,11 +30,10 @@
 #   AC_API_KEY_ID           — the 10-char key ID
 #   AC_API_ISSUER_ID        — your Issuer ID (UUID)
 #
-# Optional environment variables:
-#   DEVELOPER_ID_INSTALLER  — e.g. "Developer ID Installer: Your Name (LY6LJ395B8)"
-#                             When set the .pkg is signed and notarised.
-#                             When absent the .pkg is built unsigned (suitable
-#                             for dev/test; Gatekeeper will warn on install).
+#   DEVELOPER_ID_INSTALLER — pinned Developer ID Installer identity (required)
+#   SM_VPN_RUNTIME         — source-built runtime directory
+#   SM_VPN_MANIFEST        — reviewed runtime SHA-256/provenance manifest
+#   SM_SYSTEM_BUILD        — monotonically increasing system-package integer
 #
 # Set these in your shell profile, ~/.zshenv, or pass on the command line.
 
@@ -46,6 +45,7 @@ if [ $# -lt 1 ]; then
     exit 2
 fi
 VERSION="$1"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]] || { echo 'Invalid release version' >&2; exit 2; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -57,18 +57,16 @@ mkdir -p "$RELEASE_DIR"
 echo "→ Pre-flight checks for v$VERSION"
 
 # Required env vars.
-for var in DEVELOPER_ID_APP AC_API_KEY_PATH AC_API_KEY_ID AC_API_ISSUER_ID; do
+for var in DEVELOPER_ID_APP DEVELOPER_ID_INSTALLER AC_API_KEY_PATH AC_API_KEY_ID AC_API_ISSUER_ID SM_VPN_RUNTIME SM_VPN_MANIFEST SM_SYSTEM_BUILD; do
     if [ -z "${!var:-}" ]; then
         echo "error: \$$var is not set. See script header." >&2
         exit 1
     fi
 done
 
-# Optional: Developer ID Installer cert for .pkg signing + notarisation.
-if [ -z "${DEVELOPER_ID_INSTALLER:-}" ]; then
-    echo "⚠️  DEVELOPER_ID_INSTALLER not set — .pkg will be unsigned."
-    echo "   Set it to enable .pkg signing and notarisation."
-fi
+# Fail before changing versions or building the app when the runtime is invalid.
+[[ "$SM_SYSTEM_BUILD" =~ ^[1-9][0-9]{0,14}$ ]] || { echo 'Invalid SM_SYSTEM_BUILD' >&2; exit 1; }
+python3 "$REPO_ROOT/installer/system/validate_runtime.py" "$SM_VPN_RUNTIME" "$SM_VPN_MANIFEST"
 
 # Tag must not already exist.
 if git -C "$REPO_ROOT" rev-parse "v$VERSION" >/dev/null 2>&1; then
@@ -131,7 +129,11 @@ xcodebuild \
     -destination 'platform=macOS' \
     -allowProvisioningUpdates \
     clean build \
-    2>&1 | grep -E '(error:|warning:|BUILD)' || true
+    > "$RELEASE_DIR/xcodebuild.log" 2>&1 || {
+        tail -n 80 "$RELEASE_DIR/xcodebuild.log" >&2
+        echo "Release build failed; no existing artifact will be reused." >&2
+        exit 1
+    }
 
 BUILD_DIR="$(xcodebuild -project SuperManager.xcodeproj -scheme SuperManagerMac \
     -configuration Release -showBuildSettings 2>/dev/null \
@@ -344,21 +346,17 @@ echo "  tailscale + tailscaled bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
-# The package installs:
-#   /Library/LaunchDaemons/no.sybr.supermanager.vpn-dns-cleanup.plist
-#   owner root:wheel, mode 644
-#
-# postinstall loads the daemon immediately (launchctl bootstrap system).
-# preinstall unloads any running instance first (idempotent on first install).
+# The package installs the helper and its matching protected VPN runtime as
+# one recoverable system transaction. The obsolete DNS-only package is not
+# a substitute: its helper path does not match the installed com.sybr helper.
 
 echo "→ Building .pkg installer"
-PKG_FILE="$RELEASE_DIR/SuperManager-vpn-dns-cleanup-$VERSION.pkg"
-if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
-    "$REPO_ROOT/installer/pkg/build-pkg.sh" "$VERSION" \
-        --sign "$DEVELOPER_ID_INSTALLER"
-else
-    "$REPO_ROOT/installer/pkg/build-pkg.sh" "$VERSION"
-fi
+PKG_FILE="$RELEASE_DIR/SuperManager-system-$VERSION.pkg"
+python3 "$REPO_ROOT/installer/system/build.py" \
+    --runtime "$SM_VPN_RUNTIME" --manifest "$SM_VPN_MANIFEST" \
+    --helper "$APP/Contents/MacOS/com.sybr.supermanager.helper" \
+    --build "$SM_SYSTEM_BUILD" --application-identity "$DEVELOPER_ID_APP" \
+    --installer-identity "$DEVELOPER_ID_INSTALLER" --output "$PKG_FILE"
 
 # ---- 5. Notarize -----------------------------------------------------------
 
