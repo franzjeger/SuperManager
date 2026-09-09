@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from copy_data import copy_data
-from prepare import transform, replace_once
+from prepare import transform, replace_once, tailscale_helper, tailscale_client
 
 
 class DevIsolationTests(unittest.TestCase):
@@ -21,6 +21,20 @@ class DevIsolationTests(unittest.TestCase):
                          'appendingPathComponent("SuperManager Dev", isDirectory: true)')
         self.assertEqual(transform('/var/run/charon.vici'),
                          '/Library/PrivilegedHelperTools/SuperManagerDevIPSecState/charon.vici')
+
+    def test_tailscale_dev_separates_service_state_and_network_ownership(self):
+        source = (Path(__file__).resolve().parents[2] / 'supermanager-helper/src/tailscale.rs').read_text()
+        generated = tailscale_helper(transform(source))
+        install = generated.split('pub fn install(', 1)[1].split('pub fn uninstall(', 1)[0]
+        self.assertNotIn('remove_exit_routes(', install)
+        self.assertIn('/private/var/lib/supermanager-dev-tailscale', install)
+        self.assertIn('--port=41642', generated)
+        self.assertIn('<key>TS_LOGS_DIR</key><string>{state}</string>', generated)
+        self.assertIn('com.sybr.supermanager.dev.tailscaled.plist', generated)
+        client = tailscale_client('process.arguments = args\n["up", "--force-reauth"]\n    private static func runSet(_ args: [String]) async throws {')
+        self.assertIn('--socket=/var/run/supermanager-dev-tailscaled.socket', client)
+        self.assertIn('--accept-dns=false', client)
+        self.assertIn('--hostname=supermanager-dev', client)
 
     def test_snapshot_is_private_independent_and_manual(self):
         with tempfile.TemporaryDirectory() as directory:

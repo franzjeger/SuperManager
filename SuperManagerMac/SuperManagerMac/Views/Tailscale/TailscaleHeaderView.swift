@@ -419,7 +419,7 @@ struct TailscaleHeaderView: View {
             }
         } label: {
             if on { Image(systemName: "checkmark") }
-            Text("Accept subnet routes")
+            Text("Access LANs through subnet routers")
         }
         .help("Accept subnet routes advertised by peers — reach LAN hosts behind a subnet router without an exit node.")
     }

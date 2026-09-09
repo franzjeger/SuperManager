@@ -164,7 +164,7 @@ struct TailscaleSettingsView: View {
             .help(!hasExitNode
                   ? "Only meaningful when an exit node is selected."
                   : "Reach printers / NAS on your local network even while exit-noding.")
-            Toggle("Accept routes advertised by other peers", isOn: Binding(
+            Toggle("Access LANs through subnet routers", isOn: Binding(
                 get: { appState.tailscalePrefs?.routeAll ?? false },
                 set: { newValue in
                     DebugLog.write("[ts/toggle] routeAll -> \(newValue)")
@@ -176,7 +176,10 @@ struct TailscaleSettingsView: View {
                     }
                 }
             ))
-            .help("Lets you reach subnets behind subnet routers in your tailnet.")
+            .help("Use LAN routes advertised and approved in your tailnet, for example 192.168.200.0/24.")
+            Text("Turn on to reach home or office LAN devices through a Tailscale subnet router. Turn off to connect only to Tailscale peers. This setting is preserved when reconnecting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

@@ -40,6 +40,32 @@ def transform(text):
     return re.sub('|'.join(re.escape(k) + (r'(?![A-Za-z])' if k.endswith('Application Support/SuperManager') else '') for k in mapping), lambda m: mapping[m[0]], text)
 
 
+def tailscale_helper(s):
+    # Installation must never remove routes belonging to another active VPN.
+    s = s.replace('    let _ = remove_exit_routes(ExitRoutesArgs::default());',
+                  '    // Dev: leave existing system/VPN routes untouched during installation.', 1)
+    s = s.replace('<key>TS_BIND_TO_INTERFACE_BY_ROUTE</key><string>1</string>',
+                  '<key>TS_BIND_TO_INTERFACE_BY_ROUTE</key><string>1</string>\n        <key>TS_LOGS_DIR</key><string>{state}</string>')
+    return s.replace('--port=41641', '--port=41642')
+
+
+def tailscale_client(s):
+    s = s.replace('process.arguments = args',
+                  'process.arguments = ["--socket=/var/run/supermanager-dev-tailscaled.socket"] + args')
+    s = s.replace('["up", "--force-reauth"]', '["up", "--force-reauth", "--accept-dns=false", "--accept-routes=false", "--hostname=supermanager-dev"]')
+    # Prevent an exit-node setting from succeeding before its blocked routing RPC.
+    marker = '    private static func runSet(_ args: [String]) async throws {'
+    s = replace_once(s, marker, marker + '\n        if args.contains(where: { $0.hasPrefix("--exit-node=") && $0 != "--exit-node=" || $0 == "--accept-dns=true" }) {\n            throw ClientError.daemonNotRunning("Exit nodes and system DNS changes are unavailable in Dev. Peer connections and subnet routes are supported.")\n        }')
+    return s
+
+
+def tailscale_header(s):
+    s = s.replace('            exitNodeSubmenu', '            Text("Exit nodes unavailable in Dev")')
+    s = s.replace('.help("Force-write the system resolver', '.disabled(true)\n            .help("Force-write the system resolver')
+    s = s.replace('.help("Clear exit-node + accept-routes', '.disabled(true)\n            .help("Clear exit-node + accept-routes')
+    return s
+
+
 def prepare(source, output):
     source, output = source.resolve(), output.resolve()
     if output.exists() or output.is_relative_to(source):
@@ -74,8 +100,11 @@ def prepare(source, output):
         'let publicKey = "" // Dev never consumes the production update feed').replace(
         'Auto-updates are not configured yet. Run scripts/sparkle-keygen.sh and paste the public key into SuperManagerMac/project.yml\'s SUPublicEDKey.',
         'Updates are disabled in SuperManager Dev. Rebuild the Dev app to update it.'))
-    edit('SuperManagerMac/SuperManagerMac/Services/TailscaleClient.swift', lambda s: s.replace(
-        'process.arguments = args', 'process.arguments = ["--socket=/var/run/supermanager-dev-tailscaled.socket"] + args'))
+    edit('SuperManagerMac/SuperManagerMac/Services/TailscaleClient.swift', tailscale_client)
+    edit('supermanager-helper/src/tailscale.rs', tailscale_helper)
+    edit('SuperManagerMac/SuperManagerMac/App/AppState+Tailscale.swift', lambda s: s.replace('        await ensureMagicDNSResolver()', '        // Dev: DNS remains under the existing VPN/system owner'))
+    edit('SuperManagerMac/SuperManagerMac/Views/Tailscale/TailscaleHeaderView.swift', tailscale_header)
+    edit('SuperManagerMac/SuperManagerMac/Views/Tailscale/TailscaleSettingsView.swift', lambda s: s.replace('                    dnsSection', '                    Text("Dev uses existing system DNS. Exit-node and global DNS recovery are unavailable.").font(.caption)'))
     def helper(s):
         begin = s.index('    // Sweep transient strongSwan configs')
         end = s.index('    let listener = UnixListener::bind', begin)
@@ -86,7 +115,8 @@ def prepare(source, output):
         guard = '''    // Dev is intentionally manual-only. Do not expose global recovery actions.
     let allowed = ["ping", "helper_version", "vpn_runtime_status", "vpn_status",
         "wg_status", "ovpn_status", "vpn_connect", "vpn_disconnect", "wg_connect",
-        "wg_disconnect", "ovpn_connect", "ovpn_disconnect", "auto_reconnect_list"];
+        "wg_disconnect", "ovpn_connect", "ovpn_disconnect", "auto_reconnect_list", "tailscaled_install",
+        "tailscaled_uninstall", "tailscaled_status"];
     if !allowed.contains(&req.method.as_str()) {
         return Response::err(id, -32601, "This automatic/global networking action is disabled in SuperManager Dev");
     }
@@ -125,7 +155,7 @@ base='/Library/Application Support/SuperManagerDevSystem' '''.rstrip()))
         'Auto-reconnect after sleep, kill-switch when enabled, and a connectivity watchdog that auto-recovers within 10 seconds if anything goes wrong.',
         'Profiles are copied, not synchronized. Automatic VPN recovery and scheduled jobs are disabled. Install the Dev system package and stop stable VPN services before manually testing a tunnel.').replace(
         'Install our bundled tailscaled as a system service — auto-starts at boot, auto-reconnects after sleep.',
-        'Tailscale daemon installation is disabled in this isolated Dev build. The existing system node is not shared.'))
+        'Install a separate Dev Tailscale node. Sign in separately; pause other Tailscale nodes before connecting. Dev keeps the current system DNS.'))
     # Disable stale production feed / URL handler in generated project.
     path = output / 'SuperManagerMac/project.yml'
     spec = path.read_text()

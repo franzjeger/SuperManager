@@ -169,7 +169,7 @@ enum TailscaleClient {
     /// opens it in the browser.
     static func up() async throws {
         guard let bin = locateBinary() else { throw ClientError.notInstalled }
-        _ = try await runTask(bin: bin, args: ["up", "--reset"])
+        _ = try await runTask(bin: bin, args: ["up"])
     }
 
     /// Bring the Tailscale tunnel down. Useful for the "vår WG

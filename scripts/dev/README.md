@@ -45,9 +45,12 @@ before Microsoft sign-in. Build the extension with `--dev` and package its
 returned runtime/manifest, not the base runtime. Existing stable/Dev networking
 exclusion still applies; this build does not disconnect existing customer VPNs.
 
-Tailscale's live machine identity/service is deliberately not shared;
-Tailscale install, recovery, exit routes, always-on and kill-switch RPCs are
-unavailable in this build. Existing signed-runtime restrictions on WireGuard
+Tailscale's machine identity and service are separate from stable. Manual install,
+start, uninstall, login, peer access and subnet-route acceptance are enabled.
+Exit-node routing and global DNS/recovery RPCs remain unavailable; Dev starts
+with accept-DNS and accept-routes disabled. Pause other Tailscale nodes before
+authenticating Dev to avoid competing routes. VPN always-on/kill-switch RPCs
+remain unavailable. Existing signed-runtime restrictions on WireGuard
 DNS/Table/hooks/SaveConfig and external OpenVPN files/scripts also apply. Do not
 interpret an imported profile as evidence that its connection is supported.
 
@@ -142,3 +145,34 @@ Fixed two independent packaging defects exposed by the FortiGate test:
 A clean native rebuild was required: changing configure compiler flags did not invalidate all existing VICI object files. Verified both installed executables contain the new socket path and no old Dev socket path. Do not reuse an incremental strongSwan build when changing its runtime path.
 
 Verified the user's FortiGate profile reaches ESTABLISHED IKEv2 and INSTALLED CHILD_SA, receives a virtual address, and installs the configured split routes. A two-packet ICMP check to the customer's gateway succeeded through the tunnel. Disconnect removed the SA and route; reconnect was exercised. The generic CHILD_SA failure message no longer falsely asserts that IKE authentication succeeded. Validation: 87 helper tests, 15 installer/runtime tests, 5 Dev tests.
+
+### Tailscale Dev support — 1.8.0-dev.14 (system package 2026090913)
+
+The signed helper installs independently signed Dev CLI/daemon binaries, the
+`com.sybr.supermanager.dev.tailscaled` LaunchDaemon, private 0700 state at
+`/private/var/lib/supermanager-dev-tailscale`, a separate local API socket, and
+UDP port 41642. Node credentials are never copied from the stable daemon.
+Installation omits the stable implementation's global exit-route cleanup.
+
+The launchd environment pins `TS_LOGS_DIR` to the Dev state directory. Tailscale
+otherwise chooses a shared default log-state directory independently of its
+`--statedir` setting ([upstream implementation](https://github.com/tailscale/tailscale/blob/main/logpolicy/logpolicy.go)).
+The first startup probe exposed that shared logging default; the final service
+was restarted and its independent log configuration verified.
+
+Verified through the signed GUI: installation succeeds, the local CLI reaches
+the Dev socket without elevation, the daemon reaches NeedsLogin with no node
+identity, and stopping/starting through the Start daemon flow succeeds. Stable
+Tailscale was left running because permission to pause it remained pending.
+The user then signed in through the app. Dev reached Running under its own
+`supermanager-dev` identity. A daemon-specific Tailscale ping reached the home
+subnet router via DERP. After enabling route acceptance, the OS installed the
+advertised home subnet and ordinary ICMP to its LAN gateway succeeded.
+Connect now preserves saved preferences instead of resetting route acceptance.
+The settings switch is labelled "Access LANs through subnet routers" with a
+plain-language explanation. Stable Tailscale remains a separate running node;
+permission to pause it was still pending at this point.
+Validation: macOS Release build, 87 helper tests, 6 Dev tests; signed app and
+system package installed. A launchd bootstrap race triggered installer rollback;
+the rollback backup was preserved, and installation succeeded after explicitly
+stopping the old helper. That installer timing issue remains follow-up work.
