@@ -117,3 +117,11 @@ Azure extension verification: four compiled credential-adapter tests passed
 and actual CLI configuration evaluation). The actual local Azure profile passed
 both the helper input validator and OpenVPN 3 evaluation. OpenVPN 3's crypto
 self-test passed. No live customer connection is claimed by these checks.
+
+### macOS live verification — 2026-09-09, Dev 1.8.0-dev.7
+
+With the user's authorization, stopped the stable Azure tunnel and helper before testing Dev. Removed the stable socket only after launchd reported no service and a socket connection was refused.
+
+Live testing exposed a PID persistence failure: `/var` is a symlink and `/private/var/run` is root:daemon 0775 on the test Mac. OpenVPN session files now use the protected `SuperManagerVPNState` directory beside the runtime (transformed to `SuperManagerDevVPNState` for Dev). The strict ancestor checks remain enabled; system directory permissions were not changed.
+
+Verified the signed Dev OpenVPN 3 executable connected to the existing Azure profile, created a utun interface, installed the gateway-pushed customer routes, and received a DNS response from the customer's internal DNS server. The GUI displayed the matching interface and connected status. Disconnect terminated the process, removed customer routes, and restored the original DNS servers. Reconnect was tested afterward. Helper tests: 87 passed. Other VPN profile types were not live-tested in this run.

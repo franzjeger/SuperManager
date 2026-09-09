@@ -5,7 +5,7 @@
 //! `brew install openvpn` puts the canonical OpenVPN 2.x CLI at
 //! `<brew>/sbin/openvpn`. We launch one OpenVPN process per active
 //! profile, supervised by this helper. The child writes its PID to
-//! `/var/run/supermgr-ovpn-<sanitized-id>.pid` (via the `--writepid`
+//! the protected session directory (`PID_DIR`) (via the `--writepid`
 //! flag), so disconnect / status look up the PID from there.
 //!
 //! ## What the GUI sends us
@@ -42,7 +42,9 @@ use tokio::process::Command;
 
 
 /// Where we keep per-profile PID files.
-const PID_DIR: &str = "/var/run";
+// /var is a symlink and /private/var/run is group-writable on macOS.
+// Keep mutable session state outside the validated immutable runtime tree.
+const PID_DIR: &str = "/Library/PrivilegedHelperTools/SuperManagerVPNState";
 /// Root-private logs; status RPCs expose bounded diagnostic output.
 const LOG_DIR: &str = "/private/var/log/supermanager";
 
@@ -237,6 +239,7 @@ impl OpenVpn {
 
         crate::vpn_input::profile_id(&args.profile_id)?;
         let safe = sanitize_id(&args.profile_id);
+        crate::secure_files::ensure_root_directory(Path::new(PID_DIR))?;
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
 
@@ -1046,7 +1049,7 @@ fn log_path_for(safe: &str) -> PathBuf {
     Path::new(LOG_DIR).join(format!("supermgr-ovpn-{safe}.log"))
 }
 
-/// Write user/password to a 0600 root:wheel file under `/var/run`.
+/// Write user/password to a 0600 root:wheel file in the protected session directory.
 /// Returns the path; caller deletes after openvpn has consumed it.
 fn write_auth_file(safe: &str, user: &str, password: &str) -> anyhow::Result<PathBuf> {
     use std::io::Write;
