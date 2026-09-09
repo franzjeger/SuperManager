@@ -1,0 +1,40 @@
+name: Consolidation checks
+
+on:
+  pull_request:
+    branches: [main, fix/audit-remediation-20260909]
+  push:
+    branches: [chore/single-app-consolidation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: consolidation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac-source-checks:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Installer and source-overlay tests
+        run: |
+          python3 -m unittest discover -s installer/system/tests -v
+          python3 -m unittest discover -s scripts/dev -p test_dev.py -v
+          python3 scripts/dev/prepare_single_app.py --source . --output "$RUNNER_TEMP/consolidated-source"
+          bash -n "$RUNNER_TEMP/consolidated-source/installer/system/scripts/preinstall"
+      - name: Isolated Swift model tests
+        run: bash scripts/test-host-index.sh
+      - name: Rust regression tests
+        run: |
+          cargo test --locked -p supermgr-core -p supermgr-engine -p supermgrd-mac -p supermgrd-win -p supermanager-helper --features supermanager-helper/dev-rpc
+      - name: Generated single-app helper tests
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          cargo test --locked --manifest-path "$RUNNER_TEMP/consolidated-source/Cargo.toml" -p supermanager-helper --features dev-rpc

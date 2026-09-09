@@ -66,7 +66,10 @@ struct TailscaleSettingsView: View {
                 }
             }
             // Pull a fresh snapshot so we're not editing stale state.
-            Task { await appState.refreshTailscale() }
+            Task {
+                await appState.refreshTailscale()
+                await appState.refreshTailscaleVersions()
+            }
         }
     }
 
@@ -336,7 +339,7 @@ struct TailscaleSettingsView: View {
         }
     }
 
-    /// Hostname override + auto-update.
+    /// Hostname override + SuperManager-managed daemon updates.
     private var advancedSection: some View {
         section(title: "Advanced") {
             VStack(alignment: .leading, spacing: 6) {
@@ -356,9 +359,49 @@ struct TailscaleSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Toggle("Auto-update Tailscale",
-                   isOn: bindAutoUpdate)
-            .help("Only takes effect on installs from the Tailscale installer — Homebrew / App Store builds ignore this and update via their own channel.")
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Tailscale version")
+                        Text(tailscaleVersionSummary)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(appState.tailscaleBundledUpdateAvailable ? Color.orange : Color.secondary)
+                    }
+                    Spacer()
+                    if appState.tailscaleUpdateInProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button(tailscaleUpdateButtonLabel) {
+                            Task { await appState.installTailscaled() }
+                        }
+                        .controlSize(.small)
+                        .disabled(appState.tailscaleBundledVersion == nil
+                                  || appState.tailscaleBundledVersionIsOlder)
+                    }
+                }
+
+                Toggle("Automatically install Tailscale updates",
+                       isOn: Binding(
+                        get: { appState.tailscaleAutoUpdateEnabled },
+                        set: { enabled in
+                            Task { await appState.setTailscaleAutoUpdateEnabled(enabled) }
+                        }
+                       ))
+                .help("When a SuperManager update includes a newer signed Tailscale daemon, install it automatically on next launch.")
+
+                Text("Tailscale updates are delivered with signed SuperManager updates. Updating briefly restarts the tunnel but preserves login and settings.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let message = appState.tailscaleUpdateMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                }
+            }
         }
     }
 
@@ -421,26 +464,19 @@ struct TailscaleSettingsView: View {
         )
     }
 
-    private var bindAutoUpdate: Binding<Bool> {
-        Binding(
-            get: { appState.tailscalePrefs?.autoUpdate?.apply ?? false },
-            set: { newValue in
-                DebugLog.write("[ts/binding] autoUpdate set \(newValue)")
-                Task {
-                    await appState.applyTailscalePref(
-                        optimistic: { p in
-                            // Mutate nested AutoUpdate; create one
-                            // if the daemon hadn't reported any.
-                            if var au = p.autoUpdate {
-                                au = .init(check: au.check, apply: newValue)
-                                p.autoUpdate = au
-                            }
-                        },
-                        cli: { try await TailscaleClient.setAutoUpdate(newValue) }
-                    )
-                }
-            }
-        )
+    private var tailscaleVersionSummary: String {
+        let installed = appState.tailscaleInstalledVersion ?? "unknown"
+        let bundled = appState.tailscaleBundledVersion ?? "unknown"
+        if appState.tailscaleBundledUpdateAvailable {
+            return "Installed \(installed)  →  available \(bundled)"
+        }
+        return "Installed \(installed)  ·  bundled \(bundled)"
+    }
+
+    private var tailscaleUpdateButtonLabel: String {
+        if appState.tailscaleBundledUpdateAvailable { return "Update now" }
+        if appState.tailscaleBundledVersionIsOlder { return "Newer installed" }
+        return appState.tailscaleInstalledVersion == nil ? "Install" : "Reinstall"
     }
 
     // MARK: - Actions

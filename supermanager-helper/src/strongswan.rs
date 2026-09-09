@@ -87,6 +87,9 @@ pub async fn sweep_stale_configs() {
 ///   `<prefix>/etc/swanctl/`     — per-connection conf.d / swanctl.d files
 const RUNTIME_PATHS: &[&str] = &["/Library/PrivilegedHelperTools/SuperManagerVPN"];
 
+/// Default VICI endpoint used by Homebrew strongSwan on macOS.
+const VICI_SOCKET_PATH: &str = "/var/run/charon.vici";
+
 #[derive(Debug, Deserialize)]
 pub struct ConnectArgs {
     /// Stable profile identifier — used as the swanctl `connections.<id>`
@@ -317,11 +320,45 @@ impl Strongswan {
             .with_context(|| format!("spawn {}", charon.display()))?;
         self.charon_child = Some(child);
 
-        // charon needs a moment to bind its vici socket. swanctl will spin
-        // briefly and reconnect if it fails, but giving it ~500ms here makes
-        // the first --load-all reliable.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        Ok(())
+        // Do not guess how long charon needs. On a cold start (and especially
+        // immediately after replacing the helper) 500 ms was sometimes too
+        // short: --load-all raced the VICI plugin and failed with
+        // "No such file or directory", even though the socket appeared a
+        // fraction of a second later. Wait until the endpoint accepts a
+        // connection, while also failing immediately if charon exits.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let child = self.charon_child.as_mut().expect("charon was just spawned");
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    self.charon_child = None;
+                    return Err(anyhow!(
+                        "charon exited before its VICI socket became ready: {status}"
+                    ));
+                }
+                Err(error) => {
+                    self.charon_child = None;
+                    return Err(error).context("check charon readiness");
+                }
+                Ok(None) => {}
+            }
+
+            match tokio::net::UnixStream::connect(VICI_SOCKET_PATH).await {
+                Ok(stream) => {
+                    drop(stream);
+                    tracing::debug!(socket = VICI_SOCKET_PATH, "charon VICI socket ready");
+                    return Ok(());
+                }
+                Err(error) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(anyhow!(
+                            "charon did not make {VICI_SOCKET_PATH} ready within 10 seconds: {error}"
+                        ));
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {

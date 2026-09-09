@@ -732,7 +732,7 @@ extension AppState {
 
     /// Bring up an OpenVPN tunnel. The .ovpn lives at the path
     /// stored on the profile (`OpenVpnConfig.config_file`). If the
-    /// profile has stored credentials in DPK
+    /// profile has stored credentials in the macOS login Keychain
     /// (`vpn/<id>/ovpn-username` + `vpn/<id>/ovpn-password`), we
     /// fetch them and pass to the helper for the
     /// `--auth-user-pass`-driven login. Profiles without stored

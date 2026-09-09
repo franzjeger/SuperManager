@@ -193,12 +193,11 @@ fi
 #   keychain-access-groups     -> does not launch
 #   keychain-access-groups + embedded profile -> does not launch
 #
-# So distribution builds ship WITHOUT it. VPNKeychain never sets
-# kSecAttrAccessGroup explicitly, so items land in the app's default
-# data-protection group, derived from the signature — which works for a
-# stable Developer ID identity. The cost is one-time: credentials stored
-# by a locally-signed dev build are not visible to a released build, and
-# must be re-entered once.
+# So distribution builds ship WITHOUT it. VPNKeychain and MasterPassword
+# use the regular login Keychain in production; that backend is encrypted
+# and access-controlled but does not require a keychain access-group.
+# They also contain a best-effort migration path for values written to DPK
+# by older entitlement-equipped development builds.
 #
 # Doing this properly instead would mean a Developer ID provisioning
 # profile with keychain sharing from the Apple Developer portal, then

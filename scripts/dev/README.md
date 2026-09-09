@@ -1,5 +1,8 @@
 # SuperManager Dev (macOS, local test build)
 
+For the consolidated single-app installation, use [SINGLE-APP.md](SINGLE-APP.md).
+The instructions below document the earlier side-by-side test channel.
+
 This is a separate, manually operated test application. It is **not a network
 sandbox** and does not establish full feature parity with the installed app.
 The scripts generate a disposable source overlay; they never rewrite the input

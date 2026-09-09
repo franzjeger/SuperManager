@@ -37,10 +37,8 @@ import Foundation
 /// file as being exactly as sensitive as the directory.
 ///
 /// What's *not* in the archive — everything the GUI routes through
-/// `VPNKeychain`/`MasterPassword` into the macOS Data Protection
-/// Keychain, which is scoped to this Mac's hardware and so can't be
-/// exported without breaking the security model (it would refuse to
-/// import on another Mac anyway):
+/// `VPNKeychain`/`MasterPassword` into the user's macOS login Keychain
+/// and therefore live outside the daemon data directory:
 ///   • **IKEv2 credentials** — EAP passwords and PSKs.
 ///   • **OpenVPN and Azure VPN credentials** — `vpn/<id>/ovpn-username`
 ///     and `vpn/<id>/ovpn-password`, read back at connect time in

@@ -113,6 +113,23 @@ class AppState {
     /// down.
     var tailscalePrefs: TailscalePrefs?
 
+    /// Version bookkeeping for the SuperManager-managed tailscaled binary.
+    /// The bundled CLI is replaced with the app by Sparkle; the privileged
+    /// daemon is a separate copy and therefore needs an explicit reconcile.
+    var tailscaleBundledVersion: String?
+    var tailscaleInstalledVersion: String?
+    var tailscaleUpdateInProgress = false
+    var tailscaleUpdateMessage: String?
+
+    /// Unlike tailscaled's `AutoUpdate` preference (unsupported by our
+    /// open-source macOS daemon), this setting has real SuperManager semantics:
+    /// after an app update, install its newer bundled daemon on next launch.
+    var tailscaleAutoUpdateEnabled: Bool = {
+        let key = "tailscale.autoUpdateBundledDaemon"
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: key) == nil ? true : defaults.bool(forKey: key)
+    }()
+
     // UI
     var daemonAvailable = false
     /// True when the alert is currently visible. Bound to via
@@ -164,6 +181,10 @@ class AppState {
         // This step is best-effort: if it fails, we continue and let
         // individual call sites handle missing RPCs gracefully.
         await ensureHelperUpToDate()
+        // The CLI lives inside the app bundle and is refreshed by every
+        // SuperManager update. tailscaled runs from a separate root-owned copy,
+        // so reconcile it once on launch or the two silently drift apart.
+        await reconcileBundledTailscaledUpdate()
         do {
             try await client.connect()
             DebugLog.write("[AppState] connectToDaemon: socket connected")
@@ -209,6 +230,14 @@ class AppState {
 
     /// Check capabilities and report when a matching signed system package is needed.
     private func ensureHelperUpToDate() async {
+        // Unit tests run inside an app host whose bundled helper is a fresh
+        // Debug build. Never let that host replace the user's live system
+        // helper merely because the test binary has a newer timestamp.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            DebugLog.write("[helper] XCTest host detected, skipping helper version check")
+            return
+        }
+
         guard await HelperClient.shared.isReachable() else {
             DebugLog.write("[helper] not reachable yet, skipping version check")
             return
@@ -237,8 +266,10 @@ class AppState {
         ]
         let methods = (deployed["methods"] as? [String]) ?? []
         let missing = requiredMethods.filter { !methods.contains($0) }
+        let deployedTs = (deployed["build_timestamp"] as? String).flatMap(Int.init)
         if missing.isEmpty {
-            DebugLog.write("[helper] up to date (\(methods.count) methods, build=\(deployed["build_timestamp"] ?? "?"))")
+            DebugLog.write("[helper] capabilities current (\(methods.count) methods, build=\(deployed["build_timestamp"] ?? "?")); checking build timestamp")
+            await redeployBundledHelper(deployedBuildTimestamp: deployedTs)
             return
         }
         DebugLog.write("[helper] missing methods: \(missing) — redeploying")
@@ -246,7 +277,6 @@ class AppState {
         // to go backwards. A string here: the RPC returns the timestamp
         // as text (it is an env! at compile time), so parse rather than
         // assume a number and silently get nil.
-        let deployedTs = (deployed["build_timestamp"] as? String).flatMap(Int.init)
         await redeployBundledHelper(deployedBuildTimestamp: deployedTs)
     }
 
@@ -1187,6 +1217,14 @@ class AppState {
     /// in the header.
     var tailscaledRunning: Bool?
     var tailscaledInstalled: Bool?
+
+    var tailscaleBundledUpdateAvailable: Bool {
+        TailscaleVersion.isNewer(tailscaleBundledVersion, than: tailscaleInstalledVersion)
+    }
+
+    var tailscaleBundledVersionIsOlder: Bool {
+        TailscaleVersion.isNewer(tailscaleInstalledVersion, than: tailscaleBundledVersion)
+    }
     /// Per-profile-id auto-reconnect-enabled flag. Refreshed
     /// from helper's `auto_reconnect_list` RPC. Drives the
     /// "Always on" toggle in the VPN detail view.

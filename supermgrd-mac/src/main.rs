@@ -66,7 +66,8 @@ async fn main() -> anyhow::Result<()> {
     // it).
     //
     // The architecturally correct fix is to have the GUI own all
-    // user-facing secrets in DPK and ship them down to the daemon
+    // user-facing secrets in the login Keychain and ship them down to
+    // the daemon
     // over RPC on demand — that's the macOS-canonical "GUI owns
     // user data, headless helpers are stateless" pattern. We're
     // not there yet for SSH passwords (VPN already works that way),

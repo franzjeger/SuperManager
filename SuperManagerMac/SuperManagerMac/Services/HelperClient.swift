@@ -181,7 +181,8 @@ final class HelperClient {
     /// Hand the deployed helper an absolute path to a *new* binary
     /// and have it copy itself, then exit so launchd respawns from
     /// the new code. Only works when the deployed helper was built
-    /// with `--features dev-rpc` (which our Xcode build does).
+    /// with `--features dev-rpc` (installed locally by
+    /// `Signing/install_helper.sh`).
     ///
     /// Production hardening: replace this with a notarised installer
     /// + admin auth prompt before shipping. Documented at the

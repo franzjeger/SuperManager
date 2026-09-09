@@ -310,11 +310,15 @@ extension AppState {
     /// them visible without a modal alert.
     func installTailscaled() async {
         tailscaleActionError = nil
+        tailscaleUpdateMessage = nil
         guard let daemonPath = TailscaleClient.bundledDaemonPath else {
             tailscaleActionError = "Tailscale daemon binary isn't bundled in this build."
             DebugLog.write("[ts] installTailscaled: bundled daemon path missing")
             return
         }
+        guard !tailscaleUpdateInProgress else { return }
+        tailscaleUpdateInProgress = true
+        defer { tailscaleUpdateInProgress = false }
         DebugLog.write("[ts] installTailscaled: starting, daemon=\(daemonPath)")
         do {
             let result = try await HelperClient.shared.tailscaledInstall(
@@ -337,10 +341,59 @@ extension AppState {
                 }
             }
             await refreshTailscaledDaemon()
+            await refreshTailscaleVersions()
+            if success {
+                let version = tailscaleInstalledVersion.map { " \($0)" } ?? ""
+                tailscaleUpdateMessage = "Tailscale\(version) installed successfully."
+            }
             DebugLog.write("[ts] installTailscaled: done. running=\(tailscaledRunning?.description ?? "nil") backend=\(tailscaleStatus?.backendState ?? "nil")")
         } catch {
             tailscaleActionError = error.localizedDescription
             DebugLog.write("[ts] installTailscaled: error: \(error)")
+        }
+    }
+
+    /// Refresh both sides of the update comparison without depending on the
+    /// local API socket. This continues to work when tailscaled is installed
+    /// but stopped, which is precisely when a manual reinstall is useful.
+    func refreshTailscaleVersions() async {
+        async let bundled = TailscaleClient.bundledDaemonVersion()
+        async let installed = TailscaleClient.installedDaemonVersion()
+        tailscaleBundledVersion = await bundled
+        tailscaleInstalledVersion = await installed
+        DebugLog.write(
+            "[ts/update] versions bundled=\(tailscaleBundledVersion ?? "missing") "
+            + "installed=\(tailscaleInstalledVersion ?? "missing")"
+        )
+    }
+
+    /// Launch-time self-heal for the version split created by app updates.
+    /// Never installs Tailscale for a user who has not installed it already,
+    /// and never downgrades a daemon newer than the current app bundle.
+    func reconcileBundledTailscaledUpdate() async {
+        // XCTest launches the host app to load the test bundle. It must never
+        // turn a compile/test run into a mutation of the developer's live,
+        // root-owned Tailscale installation.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else {
+            DebugLog.write("[ts/update] skipped automatic update under XCTest")
+            return
+        }
+        await refreshTailscaleVersions()
+        guard tailscaleAutoUpdateEnabled,
+              tailscaleInstalledVersion != nil,
+              tailscaleBundledUpdateAvailable
+        else { return }
+
+        DebugLog.write("[ts/update] newer bundled daemon found; installing automatically")
+        await installTailscaled()
+    }
+
+    func setTailscaleAutoUpdateEnabled(_ enabled: Bool) async {
+        tailscaleAutoUpdateEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "tailscale.autoUpdateBundledDaemon")
+        DebugLog.write("[ts/update] automatic bundled-daemon updates -> \(enabled)")
+        if enabled {
+            await reconcileBundledTailscaledUpdate()
         }
     }
 

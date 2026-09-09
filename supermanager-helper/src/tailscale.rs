@@ -144,12 +144,20 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
         .args(["root:wheel", STATE_DIR])
         .status();
 
+    // A selected exit node is enforced by SuperManager-owned /1 routes. Drop
+    // those before stopping tailscaled, otherwise they keep pointing at its
+    // dead utun during the update and black-hole the Mac. This does NOT clear
+    // the persisted exit-node intent; the reconciler restores the routes once
+    // the new daemon is online and the peer passes its reachability gate.
+    let _ = remove_exit_routes(ExitRoutesArgs::default());
+
     // 2. Bootout any prior incarnation of the daemon. Failures are
     // expected on first install (job doesn't exist) — ignored.
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
         .status();
 
+    // Atomic rename preserves a fresh vnode for macOS code-signing cache.
     // Publish only after verification; the containing directory is not writable
     // by admin users, unlike a typical Homebrew /usr/local/sbin directory.
     use std::os::unix::fs::PermissionsExt;

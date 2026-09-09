@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 ///     stashes the raw file under `<data_dir>/ovpn/<id>.ovpn` and
 ///     records minimal metadata. If the .ovpn declares
 ///     `auth-user-pass`, we collect username + password here and
-///     stash them in the Data Protection Keychain so connect can
+///     stash them in the macOS login Keychain so connect can
 ///     send them to the privileged helper.
 ///
 /// We don't try to auto-detect the format from file content. The
@@ -244,7 +244,7 @@ struct ImportVpnSheet: View {
             imported = await appState.importWireguard(name: trimmedName, content: content)
         case .openvpn:
             imported = await appState.importOpenVPN(name: trimmedName, content: content)
-            // If the user supplied creds, store them in DPK against
+            // If the user supplied creds, store them in the Keychain against
             // the new profile id. Same account-name format as the
             // helper uses to look them up at connect time.
             if let id = imported, ovpnRequiresAuth,
