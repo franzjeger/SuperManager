@@ -131,3 +131,14 @@ Verified the signed Dev OpenVPN 3 executable connected to the existing Azure pro
 User reports WireGuard works in Dev. FortiGate/IKEv2 connection failed before reaching the helper because referenced credentials were absent from the accessible login Keychain. An attributes-only inventory found no VPN-service items in either stable or Dev, with 32 non-empty profile password/PSK references unmatched. This does not establish whether the values remain in the older entitlement-protected Data Protection Keychain. No secret values were exported.
 
 Missing-item errors now explain credential re-entry and IKEv2 connection errors provide an Edit credentials action. Other Keychain failures retain their distinct error status. The editor clarifies that a blank field cannot recover a missing secret. FortiGate end-to-end validation remains blocked until credentials are supplied through the application.
+
+### IKEv2 live verification — Dev 1.8.0-dev.11
+
+Fixed two independent packaging defects exposed by the FortiGate test:
+
+- Dev charon PID/VICI state now lives in `/Library/PrivilegedHelperTools/SuperManagerDevIPSecState`. The helper and strongSwan build agree on this path, outside the immutable runtime and outside group-writable `/private/var/run`.
+- The curated strongSwan build explicitly enables IKEv2. `--disable-defaults` had disabled the protocol itself even though the daemon and authentication plugins were present. The build checks generated `config.h` for `USE_IKEV2`.
+
+A clean native rebuild was required: changing configure compiler flags did not invalidate all existing VICI object files. Verified both installed executables contain the new socket path and no old Dev socket path. Do not reuse an incremental strongSwan build when changing its runtime path.
+
+Verified the user's FortiGate profile reaches ESTABLISHED IKEv2 and INSTALLED CHILD_SA, receives a virtual address, and installs the configured split routes. A two-packet ICMP check to the customer's gateway succeeded through the tunnel. Disconnect removed the SA and route; reconnect was exercised. The generic CHILD_SA failure message no longer falsely asserts that IKE authentication succeeded. Validation: 87 helper tests, 15 installer/runtime tests, 5 Dev tests.

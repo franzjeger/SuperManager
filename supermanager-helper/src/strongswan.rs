@@ -910,8 +910,8 @@ fn diagnose_strongswan_failure(log: &str) -> Option<String> {
     // CHILD_SA. Common when the EAP phase was never reached.
     if l.contains("establishing child_sa") && l.contains("failed") {
         return Some(
-            "IKE_AUTH completed but CHILD_SA setup failed — usually \
-             a phase-2 proposal mismatch or traffic-selector issue."
+            "The VPN tunnel could not be established. This message alone does not \
+             identify whether protocol startup, authentication, or CHILD_SA negotiation failed."
                 .to_owned(),
         );
     }

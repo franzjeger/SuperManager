@@ -20,7 +20,7 @@ class DevIsolationTests(unittest.TestCase):
         self.assertEqual(transform('appendingPathComponent("SuperManager", isDirectory: true)'),
                          'appendingPathComponent("SuperManager Dev", isDirectory: true)')
         self.assertEqual(transform('/var/run/charon.vici'),
-                         '/private/var/run/supermanager-dev-ipsec/charon.vici')
+                         '/Library/PrivilegedHelperTools/SuperManagerDevIPSecState/charon.vici')
 
     def test_snapshot_is_private_independent_and_manual(self):
         with tempfile.TemporaryDirectory() as directory:

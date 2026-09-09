@@ -22,7 +22,7 @@ REPLACEMENTS = [
     ('"supermgr"', '"supermgr-dev"'),
     ('/private/etc/wireguard', '/private/etc/supermanager-dev-wireguard'),
     ('/var/log/supermanager"', '/var/log/supermanager-dev"'),
-    ('/var/run/charon.vici', '/private/var/run/supermanager-dev-ipsec/charon.vici'),
+    ('/var/run/charon.vici', '/Library/PrivilegedHelperTools/SuperManagerDevIPSecState/charon.vici'),
     ('/var/lib/tailscale', '/var/lib/supermanager-dev-tailscale'),
     ('/var/run/tailscaled.socket', '/var/run/supermanager-dev-tailscaled.socket'),
 ]
@@ -103,12 +103,12 @@ def prepare(source, output):
     edit('supermanager-helper/src/main.rs', helper)
     edit('supermanager-helper/src/strongswan.rs', lambda s: replace_once(s,
         '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {',
-        '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {\n        crate::secure_files::ensure_root_directory(Path::new("/private/var/run/supermanager-dev-ipsec"))?;'))
+        '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {\n        crate::secure_files::ensure_root_directory(Path::new("/Library/PrivilegedHelperTools/SuperManagerDevIPSecState"))?;'))
 
     edit('supermanager-helper/src/wireguard.rs', lambda s: s.replace('smwg', 'sdwg'))
     edit('installer/system/build_runtime.py', lambda s: replace_once(s,
         "configure('strongswan', ['--disable-defaults',",
-        "configure('strongswan', ['--with-piddir=/private/var/run/supermanager-dev-ipsec', '--disable-defaults',").replace(
+        "configure('strongswan', ['--with-piddir=/Library/PrivilegedHelperTools/SuperManagerDevIPSecState', '--disable-defaults',").replace(
         "    (runtime / 'lib/ipsec/plugins').mkdir(parents=True)",
         "    (runtime / 'var/run').mkdir(parents=True)\n    (runtime / 'lib/ipsec/plugins').mkdir(parents=True)"))
     edit('installer/system/scripts/preinstall', lambda s: s.replace(

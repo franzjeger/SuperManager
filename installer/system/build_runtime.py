@@ -104,10 +104,12 @@ def build(args):
                          '--disable-dco', '--disable-plugin-auth-pam', '--with-crypto-library=openssl'])
     make('openvpn', []); make('openvpn', ['install', 'DESTDIR=' + str(dest)])
     configure('strongswan', ['--disable-defaults', '--enable-static', '--disable-shared', '--enable-monolithic',
-        '--enable-charon', '--enable-swanctl', '--enable-vici', '--enable-openssl', '--enable-random',
+        '--enable-ikev2', '--enable-charon', '--enable-swanctl', '--enable-vici', '--enable-openssl', '--enable-random',
         '--enable-nonce', '--enable-x509', '--enable-pubkey', '--enable-pem', '--enable-pkcs1',
         '--enable-kernel-pfroute', '--enable-kernel-pfkey', '--enable-socket-default',
         '--enable-eap-identity', '--enable-eap-mschapv2', '--enable-md4', '--enable-des', '--enable-resolve', '--enable-updown'])
+    if '#define USE_IKEV2' not in (sources['strongswan'] / 'config.h').read_text():
+        raise ValueError('strongSwan must include IKEv2 protocol support')
     make('strongswan', []); make('strongswan', ['install', 'DESTDIR=' + str(dest)])
     run(['/usr/bin/make', '-C', 'src', '-j' + jobs, 'WITH_WGQUICK=yes', 'WITH_BASHCOMPLETION=no'], sources['wireguard-tools'], env)
     run(['/usr/bin/make', '-C', 'src', 'install', 'PREFIX=' + PREFIX, 'DESTDIR=' + str(dest),
