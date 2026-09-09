@@ -106,3 +106,31 @@ the new boot time, build counter, one enabled helper, signed GUI authorization,
 Tailscale identity and VPN connect/disconnect/route/DNS behavior. Installer
 rollback backups remain under the system package state directory, and the
 private user rollback snapshot is in `SuperManager Archives.noindex`.
+
+## Reboot finding and ServiceManagement retirement
+
+The 16:42:33 reboot exposed a migration defect: ServiceManagement restarted the
+old regular helper from its archived app and reset its launchd enablement.
+`launchctl disable` alone was not a durable removal of that SMAppService.
+The new helper and app started, but their intended exclusion gate correctly
+blocked VPN operations while the regular helper existed.
+
+The regular service was then unregistered using the signed app-identity-bound
+`SMAppService.daemon(plistName:).unregister()` API. Status changed from enabled
+(`1`) to notRegistered (`0`); BTM records the daemon as disabled, and launchd no
+longer has that service. The separate legacy `/Library/LaunchDaemons` plist was
+moved into the private rollback archive too. Only after a connection to the old
+socket was refused was that stale socket moved out of the active path.
+Azure connected from the installed GUI after this correction.
+
+For this migration, build `scripts/dev/build_retirement_tool.py` with `--old-app`
+pointing at the preserved regular app and `--output` a new local `.app` path.
+It constructs/signs the fixed-service tool but does not execute it. Disconnect
+all regular-channel VPNs before running the printed executable. Confirm status
+`0`, no regular launchd job, and no old process before retiring any stale socket
+or legacy plist. Do not reset the machine-wide BTM database or disable other
+developers' background items. Keep profiles and Keychain entries intact.
+
+A further full reboot after this ServiceManagement correction has not yet been
+verified; the earlier successful sleep test does not cover this registration
+issue. The live post-correction VPN test is separate from reboot persistence.
