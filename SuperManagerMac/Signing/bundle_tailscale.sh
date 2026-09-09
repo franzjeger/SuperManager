@@ -73,18 +73,11 @@ if [[ ! -x "${SRC_TS}" || ! -x "${SRC_TSD}" ]]; then
     exit 0
 fi
 
-# 2. Skip the copy if the cached version stamp matches — keeps clean
-# builds fast and avoids unnecessary code-sign churn on the Resources
-# directory.
+# 2. Record the bundled version for diagnostics. Signing is never cached.
 TS_VERSION="$("${SRC_TS}" version --short 2>/dev/null || echo unknown)"
 STAMP_FILE="${DEST_DIR}/.version"
-if [[ -f "${STAMP_FILE}" ]] \
-   && [[ "$(cat "${STAMP_FILE}")" == "${TS_VERSION}" ]] \
-   && [[ -x "${DEST_DIR}/tailscale" ]] \
-   && [[ -x "${DEST_DIR}/tailscaled" ]]; then
-    echo "Tailscale ${TS_VERSION} already bundled, skipping."
-    exit 0
-fi
+# Never skip the signing step based on a version stamp: an earlier unsigned
+# build may have populated the same cache. Recopy and re-sign on this build.
 
 # 3. Copy the binaries. We follow symlinks (Homebrew sometimes uses
 # `bin/tailscale → ../Cellar/tailscale/<v>/bin/tailscale`) so the

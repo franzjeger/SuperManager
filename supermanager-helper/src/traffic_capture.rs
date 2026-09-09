@@ -90,7 +90,7 @@ pub async fn run(raw_params: serde_json::Value, peer_uid: libc::uid_t) -> Result
     // `-q` keeps the parsed-protocol stdout quiet; we only care
     // about the binary pcap on disk.
     let bpf_filter = p.bpf_filter.clone();
-    let mut child = tokio::process::Command::new("tcpdump")
+    let mut child = tokio::process::Command::new("/usr/sbin/tcpdump")
         .args([
             "-i",
             &p.interface,

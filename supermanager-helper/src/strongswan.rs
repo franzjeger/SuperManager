@@ -51,7 +51,8 @@ pub async fn sweep_stale_configs() {
         tracing::info!("sweep_stale_configs: live strongSwan SA present — skipping sweep to avoid racing auto_reconnect");
         return;
     }
-    for prefix in BREW_PATHS {
+    for prefix in RUNTIME_PATHS {
+        if crate::secure_files::check_runtime_tree(std::path::Path::new(prefix)).is_err() { continue; }
         for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
             let dir = std::path::Path::new(prefix).join(subdir);
             let Ok(mut entries) = tokio::fs::read_dir(&dir).await else { continue };
@@ -84,7 +85,7 @@ pub async fn sweep_stale_configs() {
 ///   `<prefix>/libexec/ipsec/charon` — the actual IKE daemon we supervise
 ///   `<prefix>/etc/strongswan.conf` — main config (we override via env)
 ///   `<prefix>/etc/swanctl/`     — per-connection conf.d / swanctl.d files
-const BREW_PATHS: &[&str] = &["/opt/homebrew", "/usr/local"];
+const RUNTIME_PATHS: &[&str] = &["/Library/PrivilegedHelperTools/SuperManagerVPN"];
 
 #[derive(Debug, Deserialize)]
 pub struct ConnectArgs {
@@ -240,10 +241,11 @@ impl Strongswan {
     /// path which IS the canonical brew "give me the current version of
     /// this formula" location.
     fn resolve(&mut self) -> anyhow::Result<()> {
+        crate::secure_files::check_runtime_tree(Path::new(RUNTIME_PATHS[0]))?;
         if self.swanctl.is_some() {
             return Ok(());
         }
-        for prefix in BREW_PATHS {
+        for prefix in RUNTIME_PATHS {
             let swanctl = Path::new(prefix).join("bin/swanctl");
             // Try the canonical brew path first; fall back to a generic
             // libexec path for non-brew installs (e.g. strongSwan compiled
@@ -324,6 +326,17 @@ impl Strongswan {
     }
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
+        if [&args.username, &args.password, &args.shared_secret, &args.local_id].iter().any(|value| value.chars().any(char::is_control)) { anyhow::bail!("Control characters are not allowed in IKE credentials or identity"); }
+        if args.host.is_empty() || !args.host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b)) {
+            anyhow::bail!("Invalid IKE gateway");
+        }
+        for route in &args.routes {
+            let Some((ip, prefix)) = route.split_once('/') else { anyhow::bail!("Invalid route CIDR"); };
+            let address: std::net::IpAddr = ip.parse()?;
+            let bits: u8 = prefix.parse()?;
+            if bits > if address.is_ipv4() { 32 } else { 128 } { anyhow::bail!("Invalid route prefix"); }
+        }
         self.resolve()?;
         // The display name only ever travelled the wire to be ignored. Log
         // it: /var/log/supermanager-helper.log is where a failed connect
@@ -408,6 +421,7 @@ impl Strongswan {
     }
 
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
         self.resolve()?;
         let swanctl = self.swanctl.as_ref().unwrap();
         // best-effort: terminate the IKE SA. Even if it fails, also remove
@@ -461,6 +475,7 @@ impl Strongswan {
     }
 
     pub async fn status(&mut self, args: &StatusArgs) -> anyhow::Result<StatusResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
         // Run path resolution lazily so the GUI's first poll-tick after
         // helper install still reports the right state. resolve() is cheap
         // and idempotent.
@@ -1000,7 +1015,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         dpd_delay = 10s
         local {{
             auth = eap-mschapv2
-            eap_id = {username}{local_id_line}
+            eap_id = "{username}"{local_id_line}
         }}
         remote {{
             auth = psk
@@ -1020,7 +1035,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
 "#,
         id = id,
         host = args.host,
-        username = args.username,
+        username = escape_swanctl(&args.username),
         local_id_line = local_id_line,
         local_ts = local_ts,
         remote_ts = remote_ts,
@@ -1067,11 +1082,11 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     if !args.password.is_empty() {
         s.push_str(&format!(
             "    eap-{id} {{\n\
-             \x20       id = {username}\n\
+             \x20       id = \"{username}\"\n\
              \x20       secret = \"{secret}\"\n\
              \x20   }}\n",
             id = id,
-            username = args.username,
+            username = escape_swanctl(&args.username),
             secret = escape_swanctl(&args.password),
         ));
     }
@@ -1223,7 +1238,8 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
 /// cleanly with none, `None` = the probe could not complete (missing binary,
 /// spawn error, or a wedged charon that timed out).
 fn swanctl_list_sas_established() -> Option<bool> {
-    let swanctl = BREW_PATHS
+    crate::secure_files::check_runtime_tree(std::path::Path::new(RUNTIME_PATHS[0])).ok()?;
+    let swanctl = RUNTIME_PATHS
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))
         .find(|p| p.exists())?;
@@ -1380,7 +1396,8 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     // WireGuard: `wg show interfaces` prints a space-separated list of the
     // utun devices wireguard-go currently owns.
-    for prefix in BREW_PATHS {
+    for prefix in RUNTIME_PATHS {
+        if crate::secure_files::check_runtime_tree(std::path::Path::new(prefix)).is_err() { continue; }
         let wg = std::path::Path::new(prefix).join("bin/wg");
         if !wg.exists() {
             continue;
@@ -1479,9 +1496,10 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
 ///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
 ///   3. Run `swanctl --load-all` so charon sees the empty namespace.
 pub async fn terminate_and_sweep() {
+    if crate::secure_files::check_runtime_tree(std::path::Path::new(RUNTIME_PATHS[0])).is_err() { return; }
     // Find the first working swanctl binary. Return early if strongSwan
     // isn't installed — nothing to clean up.
-    let swanctl_path = BREW_PATHS
+    let swanctl_path = RUNTIME_PATHS
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))
         .find(|p| p.exists());
@@ -1490,7 +1508,8 @@ pub async fn terminate_and_sweep() {
         return;
     };
 
-    for prefix in BREW_PATHS {
+    for prefix in RUNTIME_PATHS {
+        if crate::secure_files::check_runtime_tree(std::path::Path::new(prefix)).is_err() { continue; }
         let conf_dir = std::path::Path::new(prefix).join("etc/swanctl/conf.d");
         let Ok(mut entries) = tokio::fs::read_dir(&conf_dir).await else {
             continue;
@@ -1797,7 +1816,7 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
 
         let blank = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
         assert!(
-            !blank.contains("id = \""),
+            !blank.contains("\n            id = \""),
             "blank Local ID must emit no quoted local.id line:\n{blank}"
         );
     }
@@ -1841,7 +1860,7 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(s.contains("id-2 = %any"));
         assert!(s.contains(r#"secret = "psk-secret""#));
         // EAP secret entry binds to the username
-        assert!(s.contains("id = alice"));
+        assert!(s.contains("id = \"alice\""));
         assert!(s.contains(r#"secret = "pw""#));
     }
 

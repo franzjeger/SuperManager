@@ -31,12 +31,14 @@
 //! ## Trust boundary
 //!
 //! The socket lives at `/var/run/com.sybr.supermanager.helper.sock`,
-//! mode 0660, group `admin`. Any admin-group user on the machine can
-//! send commands. We do NOT pass arbitrary shell strings into strongSwan
-//! — every user-supplied value lands as a typed field in the swanctl
-//! config we generate, and we use `tokio::process::Command` with explicit
-//! argv (no shell). The credential bytes are written to a 0600 file under
-//! `/etc/swanctl/secrets.d/` owned by root.
+//! mode 0660, group `admin`. Socket access alone grants no authority: every
+//! request requires the running GUI's kernel audit token, pinned signing team
+//! and bundle ID, hardened runtime and no debugging/injection entitlements.
+//! Install payloads are copied into root-private staging before signature
+//! validation. VPN runtimes must be separately installed in a root-protected
+//! tree; user-writable Homebrew executables and raw execution directives are
+//! not accepted. There is no unsigned development bypass.
+
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+mod authorization;
+mod secure_files;
+mod vpn_input;
 mod auto_reconnect;
 mod connectivity_watchdog;
 mod dns;
@@ -309,11 +314,14 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn auto-reconnect watchdog: {e:#}");
     }
 
+    let connections = Arc::new(tokio::sync::Semaphore::new(64));
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else { continue; };
                 let ctrls = controllers.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(e) = handle_connection(stream, ctrls).await {
                         warn!("client error: {e:#}");
                     }
@@ -340,11 +348,7 @@ async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// `chown :admin` and `chmod 0660` on the socket so admin-group users can
-/// connect but everyone else cannot. We deliberately leave it owned by
-/// root:admin rather than something narrower because every admin user on
-/// the Mac is already trusted to install software (which is what installing
-/// SuperManager is).
+/// Coarse socket admission; authorization.rs separately validates the client code.
 fn set_socket_permissions(path: &PathBuf) -> anyhow::Result<()> {
     use std::ffi::CString;
 
@@ -371,11 +375,12 @@ async fn handle_connection(
     controllers: Controllers,
 ) -> anyhow::Result<()> {
     let peer_uid = peer_effective_uid(&stream).context("reading socket peer credentials")?;
-    debug!(peer_uid, "client connected");
+    authorization::authorize(&stream)?;
+    debug!(peer_uid, "authorized client connected");
 
     loop {
         let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), stream.read_exact(&mut len_buf)).await.context("request header timeout")? {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 debug!("client disconnected");
@@ -390,8 +395,9 @@ async fn handle_connection(
         }
 
         let mut buf = vec![0u8; msg_len];
-        stream.read_exact(&mut buf).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), stream.read_exact(&mut buf)).await.context("request body timeout")??;
 
+        authorization::authorize(&stream)?;
         let response = match serde_json::from_slice::<Request>(&buf) {
             Ok(req) => dispatch(req, &controllers, peer_uid).await,
             Err(e) => Response::err(0, -32700, format!("parse error: {e}")),
@@ -399,8 +405,10 @@ async fn handle_connection(
 
         let resp_bytes = serde_json::to_vec(&response)?;
         let len = (resp_bytes.len() as u32).to_be_bytes();
-        stream.write_all(&len).await?;
-        stream.write_all(&resp_bytes).await?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            stream.write_all(&len).await?;
+            stream.write_all(&resp_bytes).await
+        }).await.context("response write timeout")??;
     }
 }
 
@@ -435,7 +443,7 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
         // Version + capability probe. Always available regardless
         // of feature flags — the GUI uses this to detect a stale
         // deployed helper (one missing RPCs the new code expects)
-        // and auto-redeploy via `deploy_self` before any other
+        // and request signed installer replacement before any other
         // call site fails with "unknown method."
         //
         // `methods` is the canonical list this binary knows about.
@@ -447,7 +455,6 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
                 "helper_version",
                 "restart",
                 #[cfg(feature = "dev-rpc")]
-                "deploy_self",
                 "tail_log",
                 "vpn_connect",
                 "vpn_disconnect",
@@ -501,91 +508,9 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
             Response::ok(id, serde_json::json!({"restarting": true}))
         }
 
-        // Self-update: copy a user-supplied binary into our system install
-        // path and then exit non-zero so launchd's KeepAlive(Crashed=true)
-        // respawns from the new binary. The helper runs as root, so the
-        // copy works without an extra admin prompt.
-        //
-        // SECURITY: This is a privilege-escalation vector — any admin-group
-        // process (not just SuperManager) that can connect to the socket
-        // can swap the root-owned helper binary. We compile it in only
-        // when the `dev-rpc` cargo feature is active. Production releases
-        // build *without* the feature, so this method returns "unknown
-        // method" and admin auth is required to swap the helper. Dev
-        // iteration: `cargo build --release -p supermanager-helper --features dev-rpc`.
-        #[cfg(feature = "dev-rpc")]
-        "deploy_self" => {
-            let src = match req.params.get("source").and_then(|v| v.as_str()) {
-                Some(s) => s.to_owned(),
-                None => return Response::err(id, -32602, "missing param: source"),
-            };
-            let target = "/Library/PrivilegedHelperTools/com.sybr.supermanager.helper";
-            // Quick sanity: the source must exist and be a regular file
-            // owned by the calling user (rough check — we trust the
-            // socket-level gating above).
-            let src_size = match std::fs::metadata(&src) {
-                Ok(m) if m.is_file() => m.len(),
-                Ok(_) => return Response::err(id, -32602, "source is not a regular file"),
-                Err(e) => return Response::err(id, -32602, format!("source missing: {e}")),
-            };
-            if src_size == 0 {
-                return Response::err(id, -32602, "source binary is 0 bytes — refusing");
-            }
-            // Atomic-rename pattern. The previous code did
-            // `fs::copy(src, target)` directly, which opens
-            // `target` with O_TRUNC and THEN copies bytes. If the
-            // helper exited or crashed during the copy (which is
-            // actually likely because we're overwriting the very
-            // binary we're running from), the file was left at 0
-            // bytes and launchd refused to spawn it (EX_CONFIG=78),
-            // killing the entire helper subsystem.
-            //
-            // Fix: copy to a temp file in the same directory first,
-            // verify size, then rename atomically. `rename(2)` is
-            // atomic on the same filesystem — the target is either
-            // the old binary or the new binary, never half-written.
-            let tmp_target = format!("{target}.tmp-{}", std::process::id());
-            if let Err(e) = std::fs::copy(&src, &tmp_target) {
-                let _ = std::fs::remove_file(&tmp_target);
-                return Response::err(id, -32000, format!("copy {src} -> {tmp_target}: {e}"));
-            }
-            // Sanity-check: the temp file should match src size.
-            // Catches partial copies, full disk, etc. before we
-            // commit to the rename.
-            match std::fs::metadata(&tmp_target) {
-                Ok(m) if m.len() == src_size => {}
-                Ok(m) => {
-                    let _ = std::fs::remove_file(&tmp_target);
-                    return Response::err(id, -32000, format!(
-                        "size mismatch after copy: src={src_size} tmp={}", m.len()));
-                }
-                Err(e) => {
-                    return Response::err(id, -32000, format!("stat tmp: {e}"));
-                }
-            }
-            // chmod 755 + chown root:wheel on the temp file BEFORE
-            // the rename so the active binary always has correct
-            // permissions.
-            let _ = std::process::Command::new("/bin/chmod")
-                .args(["755", &tmp_target])
-                .status();
-            let _ = std::process::Command::new("/usr/sbin/chown")
-                .args(["root:wheel", &tmp_target])
-                .status();
-            // Atomic rename. If this fails, the existing target is
-            // untouched.
-            if let Err(e) = std::fs::rename(&tmp_target, target) {
-                let _ = std::fs::remove_file(&tmp_target);
-                return Response::err(id, -32000, format!("rename to {target}: {e}"));
-            }
-            tracing::info!("deploy_self: replaced {target} with {src_size} bytes from {src}");
-            tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                tracing::info!("deploy_self complete — exiting so launchd respawns from new binary");
-                std::process::exit(1);
-            });
-            Response::ok(id, serde_json::json!({"deployed": true, "size": src_size}))
-        }
+        // Self-replacement must go through the authenticated installer even in
+        // developer builds. Never execute a caller-selected helper payload.
+        "deploy_self" => Response::err(id, -32601, "Self-deployment is disabled; use the signed installer"),
 
         "vpn_connect" => {
             // Capture the raw JSON before consuming `params` so we
@@ -1090,5 +1015,36 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
         }
 
         other => Response::err(id, -32601, format!("unknown method: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+
+    fn controllers() -> Controllers {
+        Controllers {
+            strongswan: Arc::new(Mutex::new(strongswan::Strongswan::new())),
+            wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new())),
+            openvpn: Arc::new(Mutex::new(openvpn::OpenVpn::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn self_deployment_is_disabled_even_in_development_builds() {
+        let response = dispatch(Request {
+            jsonrpc: "2.0".into(), method: "deploy_self".into(),
+            params: serde_json::json!({"source_path": "/tmp/untrusted-helper"}), id: 7,
+        }, &controllers(), 0).await;
+        assert!(response.result.is_none());
+        assert_eq!(response.error.unwrap().code, -32601);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_connection_is_rejected_before_waiting_for_a_request() {
+        let (server, _client) = UnixStream::pair().unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            handle_connection(server, controllers())).await;
+        assert!(result.expect("authorization must precede frame reads").is_err());
     }
 }

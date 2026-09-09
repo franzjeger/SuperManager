@@ -143,3 +143,33 @@ Logs: `/tmp/supermanager-fourth-tests-final.log`, `/tmp/supermanager-fourth-swif
 ### Remaining limits
 
 This is reviewed backup **command replay**, not a complete replacement transaction. New settings may remain, and readback verification, confirmed timed rollback, crash/cancellation reconciliation and firmware-specific multiline handling still need implementation and live-device tests. Older backups require manual inspection/recovery because their historical target cannot be established safely. Host records are not cryptographic device/customer identities. Administrative helper/service authorization and other audit P0 issues remain open.
+
+## Batch 5 — macOS helper admission and privileged executable inputs
+
+### Changes
+
+- The helper obtains the connecting process's kernel audit token and validates its dynamic code identity before reading requests and again before each dispatch. It admits only `com.sybr.supermanager`, Apple-anchored and signed by team `LY6LJ395B8`, with hardened runtime, valid dynamic signing state and no debug/injection entitlements. Root UID and `dev-rpc` provide no bypass. Socket group permissions remain a coarse admission filter. Connections are capped at 64 with bounded frame reads and response writes.
+- `deploy_self` is always rejected, including development builds. Replacing the helper requires the signed installation path. Existing GUI auto-redeployment attempts will receive an error; they do not install this remediation into an already-running older helper.
+- Tailscale daemon and CLI are copied into private staging files in a protected root-owned directory. Both staged copies must pass Security.framework signature verification with their respective pinned SuperManager identifiers before the existing service is stopped. Root execution uses fixed installed paths under `/Library/PrivilegedHelperTools`; user-selected live files and Homebrew CLI fallback are removed. The bundle script re-signs on every build instead of trusting a version stamp.
+- VPN executables are resolved only under `/Library/PrivilegedHelperTools/SuperManagerVPN`. Ancestors and the bounded runtime tree must be root-owned, non-writable by group/others, and contain no symlinks or special files. Background strongSwan/WireGuard probes follow the same restriction. This does not authenticate transitive libraries or scripts outside that tree; a managed installer must supply a self-contained runtime with protected dependencies.
+- Privileged WireGuard input rejects hooks, unsupported directives and shell metacharacters. OpenVPN accepts an explicit directive allowlist, inline certificates/keys and no executable plugins, config includes, external credential paths or caller-selected output files. Accepted OpenVPN text is copied into a root-private snapshot before execution. Profile IDs are validated as UUIDs. IKEv2 fields reject control characters, validate address/route grammar and quote credential identities. Packet capture uses the absolute system tcpdump path.
+- Sensitive OpenVPN logs and config snapshots use private atomic writes in protected directories. Explicit disconnect removes its snapshot. Private snapshots can remain after failures/crashes; no crash janitor is claimed.
+
+### Compatibility and rollout — required reading
+
+**This is fail-closed hardening, not a production VPN runtime release.** Homebrew-based WireGuard/OpenVPN/strongSwan installations no longer satisfy privileged execution requirements. No managed runtime package is provided in this batch. Do not fix errors by recursively chowning Homebrew, copying binaries with unresolved Homebrew library dependencies, or weakening the checks. A separately built and tested protected runtime is required before these VPN workflows can be released again.
+
+Unsigned/ad-hoc/debug GUI builds cannot use the root helper. Release signing and a real signed GUI/helper integration test are prerequisites for rollout. A compromised already-authorized GUI session is still powerful; this change is not per-operation user consent or customer authorization. Existing helper installation/update trust and the Linux/Windows service boundaries remain separate audit work.
+
+WireGuard DNS/Table/SaveConfig and hook directives are currently rejected. OpenVPN quoted/continued directives, non-inline key material, unsupported options and OpenVPN3/Azure are unavailable through this helper. Root-private log files are not directly readable by the GUI's old file-opening flow; helper status diagnostics remain available. These restrictions need explicit product/UI treatment before shipping, not a claim of feature parity.
+
+Existing Tailscale service installations require reinstallation with signed artifacts to move to the new paths. Both signatures are checked before stopping the old service, but publishing two binaries plus a plist is not a multi-file transaction; launch failure rollback, legacy artifact cleanup, downgrade protection and upstream artifact provenance remain open. Pinning the SuperManager signer does not establish independent upstream Tailscale provenance.
+
+### Validation
+
+- Selected full Rust suite: **551 passed, 1 ignored** (83 helper, 198 core, 259 engine, 9 RPC integration, 2 portable Windows argument tests). Linux/Windows native UI and live service behavior are not validated by this macOS run.
+- Helper tests: **83 passed** with `dev-rpc`, including unsigned/unrelated signer rejection, rejection before reading a frame, disabled self-deployment, immutable bounded staging, symlink/non-regular-file rejection, UUID validation and malicious VPN directive rejection.
+- Native macOS Security.framework requirement parsing and negative signature checks are exercised. A positive Developer-ID-signed GUI-to-installed-root-helper scenario was **not run**. No service was installed or started and no live VPN/network state was changed for validation.
+- Helper Clippy runs with `--all-targets --features dev-rpc -- -D warnings -A clippy::pedantic -A clippy::style -A clippy::complexity`; this retains the existing selected lint policy rather than claiming strict pedantic cleanliness.
+- New Rust modules are rustfmt-formatted; shell syntax and patch whitespace are checked. Full-workspace formatting remains outside this focused change because pre-existing files do not uniformly conform.
+- Logs: `/tmp/supermanager-fifth-tests-final.log`, `/tmp/supermanager-fifth-helper-dev-tests.log`, `/tmp/supermanager-fifth-helper-clippy.log`.

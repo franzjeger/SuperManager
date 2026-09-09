@@ -40,18 +40,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 
 /// Where we keep per-profile PID files.
 const PID_DIR: &str = "/var/run";
-/// Where we keep per-profile log files. `/tmp` instead of
-/// `/var/log` so that the GUI process (running as the user, not
-/// root) can read what openvpn actually said. The log file is
-/// the only way to diagnose mid-handshake failures (AUTH_FAILED,
-/// "Cannot resolve host", TLS errors) — without world-readable
-/// logs, "openvpn started but the tunnel never reached
-/// connected" is a complete black box for the user.
-const LOG_DIR: &str = "/tmp";
+/// Root-private logs; status RPCs expose bounded diagnostic output.
+const LOG_DIR: &str = "/private/var/log/supermanager";
 
 #[derive(Default)]
 pub struct OpenVpn {}
@@ -167,7 +160,21 @@ impl OpenVpn {
     /// its own and writes its PID to the file we pass via
     /// `--writepid`.
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
+        let content = crate::secure_files::read_config(Path::new(&args.config_file), 1024 * 1024)?;
+        crate::vpn_input::openvpn(&content)?;
+        for credential in [&args.username, &args.password].into_iter().flatten() {
+            anyhow::ensure!(!credential.chars().any(char::is_control), "Credential contains control characters");
+        }
         let openvpn = locate_openvpn()?;
+        // Run only the validated snapshot from a root-private directory.
+        let directory = Path::new("/Library/PrivilegedHelperTools/SuperManagerVPNConfigs");
+        crate::secure_files::ensure_root_directory(directory)?;
+        let snapshot = directory.join(format!("{}.ovpn", uuid::Uuid::parse_str(&args.profile_id)?.simple()));
+        crate::secure_files::write_private(&snapshot, content.as_bytes())?;
+        let args = OvpnConnectArgs { profile_id: args.profile_id.clone(),
+            config_file: snapshot.to_string_lossy().into_owned(),
+            username: args.username.clone(), password: args.password.clone() };
         tracing::info!(
             "ovpn_connect: profile={} config={} openvpn={}",
             args.profile_id,
@@ -214,6 +221,7 @@ impl OpenVpn {
             );
         }
 
+        crate::vpn_input::profile_id(&args.profile_id)?;
         let safe = sanitize_id(&args.profile_id);
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
@@ -225,16 +233,7 @@ impl OpenVpn {
         // `--daemon` retry loop keeps appending its own failures
         // to the same path. Fresh log per spawn = unambiguous
         // diagnostics.
-        let _ = std::fs::write(&log_path, "");
-        // Make the log world-readable so the GUI (running as the
-        // user, not root) can `cat` it for the "View log" affordance
-        // and for failure summaries. Without this the log is mode
-        // 0600 root-owned and post-mortem debugging is impossible
-        // without sudo, which the user has explicitly forbidden.
-        let _ = std::fs::set_permissions(
-            &log_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o644),
-        );
+        crate::secure_files::write_private(&log_path, b"")?;
         // Same for the PID file — a stale PID from a previous
         // attempt causes the post-spawn `kill(pid, 0)` aliveness
         // check to spuriously claim a different process is "the
@@ -537,6 +536,7 @@ impl OpenVpn {
         &mut self,
         args: &OvpnDisconnectArgs,
     ) -> anyhow::Result<OvpnDisconnectResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
         let safe = sanitize_id(&args.profile_id);
         let pid_path = pid_path_for(&safe);
         let mut killed: Vec<u32> = Vec::new();
@@ -564,6 +564,9 @@ impl OpenVpn {
         // (next connect's read says "tunnel already up").
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(log_path_for(&safe));
+        let snapshot = Path::new("/Library/PrivilegedHelperTools/SuperManagerVPNConfigs")
+            .join(format!("{}.ovpn", uuid::Uuid::parse_str(&args.profile_id)?.simple()));
+        let _ = std::fs::remove_file(snapshot);
 
         // Restore DNS. Both openvpn 2.x (via --up/--down scripts that
         // call networksetup) and ovpncli (via its platform DNS abstraction)
@@ -605,6 +608,7 @@ impl OpenVpn {
     /// the connect path waits for the same marker before declaring
     /// the tunnel up.
     pub async fn status(&mut self, args: &OvpnStatusArgs) -> anyhow::Result<OvpnStatusResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
         let safe = sanitize_id(&args.profile_id);
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
@@ -967,46 +971,13 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// OpenVPN servers don't care about 2.x vs 3.x) but should not
 /// be relied on for Azure VPN.
 fn locate_openvpn() -> anyhow::Result<PathBuf> {
-    // OpenVPN 3 first. Required for Azure VPN with Entra ID.
-    const OVPN3_PATHS: &[&str] = &[
-        "/opt/homebrew/bin/openvpn3",
-        "/usr/local/bin/openvpn3",
-        "/opt/local/bin/openvpn3",
-    ];
-    for path in OVPN3_PATHS {
-        if Path::new(path).exists() {
-            return Ok(PathBuf::from(path));
-        }
+    let root = Path::new("/Library/PrivilegedHelperTools/SuperManagerVPN");
+    crate::secure_files::check_runtime_tree(root)?;
+    for name in ["bin/openvpn", "sbin/openvpn"] {
+        let path = root.join(name);
+        if path.is_file() { return Ok(path); }
     }
-    // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
-    // Useful for non-Azure profiles where 2.x works fine — kept
-    // for backwards compatibility but won't help with Azure VPN.
-    const PATCHED_PATHS: &[&str] = &[
-        "/opt/homebrew/bin/openvpn-patched",
-        "/usr/local/bin/openvpn-patched",
-    ];
-    for path in PATCHED_PATHS {
-        if Path::new(path).exists() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-    for prefix in BREW_PREFIXES {
-        let candidate = Path::new(prefix).join("sbin/openvpn");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        let alt = Path::new(prefix).join("bin/openvpn");
-        if alt.exists() {
-            return Ok(alt);
-        }
-    }
-    Err(anyhow!(
-        "openvpn not found. For Azure VPN profiles install \
-         OpenVPN 3 by running `contrib/build-openvpn3-mac.sh` \
-         (Microsoft's gateway rejects 2.x clients in the Entra \
-         ID auth flow). For other profiles `brew install openvpn` \
-         is sufficient."
-    ))
+    Err(anyhow!("A managed root-owned OpenVPN runtime is required; user-writable Homebrew executables are not permitted"))
 }
 
 /// True when the located binary is OpenVPN 3.x. Used to switch

@@ -5,15 +5,15 @@
 //! requires root because it manages the kernel TUN device, the
 //! routing table, and DNS resolver overrides. The unprivileged GUI
 //! has no business doing any of that — it hands the bundled binary
-//! path over to us, we copy it to a stable system location, write a
+//! path over to us; we stage both binaries privately, verify their signatures, write a
 //! launchd plist, and bootstrap the daemon.
 //!
 //! Lifecycle:
-//!   • install: copy `tailscaled` to /usr/local/sbin/, write
+//!   • install: verify and publish binaries under /Library/PrivilegedHelperTools, write
 //!     /Library/LaunchDaemons/com.sybr.tailscaled.plist, bootstrap.
 //!   • status:  read-only check that the launchd job is bootstrapped
 //!     and reports a process running.
-//!   • uninstall: bootout, remove plist + binary + state.
+//!   • uninstall: bootout, remove plist and binaries; preserve state.
 //!
 //! State directory: `/var/lib/tailscale` — same path the official
 //! Tailscale.app uses, so users who later reinstall the App Store
@@ -31,7 +31,8 @@ use std::process::Command;
 /// from inside the .app bundle because that location moves whenever
 /// the user moves SuperManager.app, drags it into Trash, etc., and
 /// the LaunchDaemon plist would then point at a missing binary.
-const DAEMON_INSTALL_PATH: &str = "/usr/local/sbin/supermanager-tailscaled";
+const CLI_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscale";
+const DAEMON_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscaled";
 
 /// Where launchd looks for system daemons. Anything in this directory
 /// owned by root with the right permissions is auto-bootstrapped at
@@ -122,18 +123,19 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 /// daemon re-copies the binary (in case the version bundled with
 /// SuperManager has changed) and re-bootstraps.
 pub fn install(args: InstallArgs) -> Result<InstallResult> {
-    let src = Path::new(&args.bundled_daemon_path);
-    if !src.exists() {
-        bail!("bundled daemon not found at {}", args.bundled_daemon_path);
-    }
-    if !src.is_file() {
-        bail!("bundled daemon path is not a regular file");
-    }
+    let destination = Path::new(DAEMON_INSTALL_PATH);
+    let parent = destination.parent().context("missing install directory")?;
+    crate::secure_files::ensure_root_directory(parent)?;
+    // Copy once into a root-only staging file. Validate THESE bytes, then
+    // rename that same inode; never verify and re-open the user's live path.
+    let staged = crate::secure_files::stage_file(Path::new(&args.bundled_daemon_path), parent, 256 * 1024 * 1024)?;
+    crate::authorization::verify_tailscaled(staged.path())?;
+    let cli_source = Path::new(&args.bundled_daemon_path).parent().context("missing bundle directory")?.join("tailscale");
+    let staged_cli = crate::secure_files::stage_file(&cli_source, parent, 256 * 1024 * 1024)?;
+    crate::authorization::verify_tailscale_cli(staged_cli.path())?;
 
-    // 1. Make sure the install directory + state directory exist.
-    fs::create_dir_all(Path::new(DAEMON_INSTALL_PATH).parent().unwrap())
-        .context("creating /usr/local/sbin")?;
-    fs::create_dir_all(STATE_DIR).context("creating tailscale state dir")?;
+    crate::secure_files::ensure_root_directory(Path::new("/private/var/lib/tailscale"))?;
+    crate::secure_files::ensure_root_directory(Path::new("/Library/LaunchDaemons"))?;
     // tailscaled writes secrets to its state dir; lock it down to root.
     let _ = Command::new("/bin/chmod")
         .args(["0700", STATE_DIR])
@@ -148,17 +150,16 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
         .status();
 
-    // 3. Copy the bundled binary to its stable location. We copy
-    // (not symlink) so the daemon keeps working after the user
-    // moves SuperManager.app or trashes it temporarily.
-    fs::copy(src, DAEMON_INSTALL_PATH)
-        .with_context(|| format!("copying daemon to {DAEMON_INSTALL_PATH}"))?;
-    let _ = Command::new("/bin/chmod")
-        .args(["0755", DAEMON_INSTALL_PATH])
-        .status();
-    let _ = Command::new("/usr/sbin/chown")
-        .args(["root:wheel", DAEMON_INSTALL_PATH])
-        .status();
+    // Publish only after verification; the containing directory is not writable
+    // by admin users, unlike a typical Homebrew /usr/local/sbin directory.
+    use std::os::unix::fs::PermissionsExt;
+    staged.as_file().set_permissions(fs::Permissions::from_mode(0o755))?;
+    staged.as_file().sync_all()?;
+    staged_cli.as_file().set_permissions(fs::Permissions::from_mode(0o755))?;
+    staged_cli.as_file().sync_all()?;
+    staged_cli.persist(CLI_INSTALL_PATH).context("publishing verified tailscale CLI")?;
+    staged.persist(destination).context("publishing verified tailscaled")?;
+    fs::File::open(parent)?.sync_all()?;
 
     // 4. Write the LaunchDaemon plist. Pinning state-dir + socket
     // path matches Tailscale.app's defaults so the CLI we bundle
@@ -209,6 +210,7 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     if Path::new(DAEMON_INSTALL_PATH).exists() {
         let _ = fs::remove_file(DAEMON_INSTALL_PATH);
     }
+    let _ = fs::remove_file(CLI_INSTALL_PATH);
     Ok(InstallResult {
         success: true,
         message: "tailscaled uninstalled. State directory preserved.".to_string(),
@@ -1375,12 +1377,12 @@ pub struct PanicResetArgs {
 /// Locate the bundled/installed tailscale CLI (same candidates the panic path
 /// uses). Returns the first existing path.
 fn tailscale_cli() -> Option<&'static str> {
-    const CANDIDATES: [&str; 3] = [
-        "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/usr/local/bin/tailscale",
-    ];
-    CANDIDATES.into_iter().find(|p| Path::new(p).exists())
+    use std::os::unix::fs::MetadataExt;
+    let path = Path::new(CLI_INSTALL_PATH);
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 { return None; }
+    crate::secure_files::check_root_ancestors(path.parent()?).ok()?;
+    Some(CLI_INSTALL_PATH)
 }
 
 /// Read the currently-selected exit node `(id, ip)` from tailscaled's prefs.

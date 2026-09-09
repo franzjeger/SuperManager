@@ -2,8 +2,8 @@
 //
 // The GUI uses this to detect a stale deployed helper: if the
 // timestamp the deployed helper reports is older than the bundled
-// helper's, hot-swap via `deploy_self`. Avoids the "unknown method"
-// surprise after every Cargo iteration.
+// helper's, the signed installer must replace it. The self-deploy RPC
+// is deliberately disabled, including in development builds.
 //
 // `cargo:rerun-if-changed=build.rs` keeps the timestamp fresh on
 // every rebuild — without it the env var would be cached forever

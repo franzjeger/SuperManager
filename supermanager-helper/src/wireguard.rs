@@ -32,9 +32,8 @@
 //!
 //! ## Why no `--script` etc
 //!
-//! `wg-quick` already runs `PostUp` / `PreDown` shell snippets defined
-//! in the `.conf`. We don't add our own — the user's own configuration
-//! is the single source of truth for what should happen at tunnel-up.
+//! Caller-provided shell hooks and unsupported directives are rejected
+//! before passing configuration to the privileged wg-quick process.
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -42,7 +41,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// Brew prefixes to probe for `wg-quick`. Apple Silicon vs Intel.
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
+const BREW_PREFIXES: &[&str] = &["/Library/PrivilegedHelperTools/SuperManagerVPN"];
 
 /// Configs we write live here. Created lazily with mode 0700 so a
 /// non-root local user can't peek at the directory listing.
@@ -54,7 +53,7 @@ const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 /// baked in, and `wg-quick down <name>` looks there first. Different
 /// dirs for up vs. down is a way to never tear the tunnel back down.
 /// Absolute paths sidestep the resolver entirely.
-const WG_CONF_DIR: &str = "/etc/wireguard";
+const WG_CONF_DIR: &str = "/private/etc/wireguard";
 
 /// Lifetime-of-process WireGuard controller. Not much state here yet
 /// — `wg-quick` itself is what tracks active interfaces — but
@@ -155,9 +154,12 @@ impl WireGuard {
     ///   4. Inspect `/var/run/wireguard/<name>.name` to determine
     ///      which `utunN` `wireguard-go` actually picked.
     pub async fn connect(&mut self, args: &WgConnectArgs) -> anyhow::Result<WgConnectResult> {
+        crate::vpn_input::profile_id(&args.profile_id)?;
+        crate::vpn_input::wireguard(&args.conf_content)?;
         let wg_quick = locate_wg_quick()?;
         let name = interface_name(&args.profile_id);
         let conf_path = conf_path_for(&name);
+        crate::secure_files::ensure_root_directory(std::path::Path::new(WG_CONF_DIR))?;
 
         // Step 1: pre-emptive cleanup of any leftover tunnel with the
         // same name. We can't trust the GUI's "Disconnected" state
@@ -166,6 +168,7 @@ impl WireGuard {
         // says it's down. Tear it down silently rather than greet
         // the user with "already exists."
         if read_name_mapping(&name).is_some() {
+            crate::vpn_input::wireguard(&crate::secure_files::read_config(&conf_path, 1024 * 1024)?)?;
             let _ = Command::new(&wg_quick)
                 .arg("down")
                 .arg(&conf_path)
@@ -185,23 +188,7 @@ impl WireGuard {
             }
         }
 
-        // Make sure the parent dir exists with restrictive mode.
-        std::fs::create_dir_all(WG_CONF_DIR)
-            .with_context(|| format!("create {WG_CONF_DIR}"))?;
-        std::fs::set_permissions(
-            WG_CONF_DIR,
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )
-        .with_context(|| format!("chmod 700 {WG_CONF_DIR}"))?;
-
-        // Write the conf with mode 0600 + root:wheel ownership.
-        std::fs::write(&conf_path, &args.conf_content)
-            .with_context(|| format!("write {}", conf_path.display()))?;
-        std::fs::set_permissions(
-            &conf_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .with_context(|| format!("chmod 600 {}", conf_path.display()))?;
+        crate::secure_files::write_private(&conf_path, args.conf_content.as_bytes())?;
 
         // Run `wg-quick up /etc/wireguard/<name>.conf` — absolute path,
         // not `wg-quick up <name>`. wg-quick on Mac (brew build) has
@@ -266,6 +253,8 @@ impl WireGuard {
         //    same reason as in `connect` — bypass wg-quick's
         //    brew-baked-in CONFIG_PATH.
         let conf_path = conf_path_for(&name);
+        crate::secure_files::ensure_root_directory(std::path::Path::new(WG_CONF_DIR))?;
+        crate::vpn_input::wireguard(&crate::secure_files::read_config(&conf_path, 1024 * 1024)?)?;
         let output = Command::new(&wg_quick)
             .arg("down")
             .arg(&conf_path)
@@ -482,6 +471,7 @@ fn locate_wg_quick() -> anyhow::Result<PathBuf> {
     for prefix in BREW_PREFIXES {
         let candidate = Path::new(prefix).join("bin/wg-quick");
         if candidate.exists() {
+            crate::secure_files::check_runtime_tree(Path::new(prefix))?;
             return Ok(candidate);
         }
     }
@@ -511,7 +501,7 @@ fn wg_binary_from(wg_quick: &Path) -> anyhow::Result<PathBuf> {
 /// neither of which launchd hands us by default.
 fn path_for_wg_quick(wg_quick: &Path) -> String {
     let bin = wg_quick.parent().map(|p| p.display().to_string()).unwrap_or_default();
-    format!("{bin}:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin")
+    format!("{bin}:/usr/sbin:/sbin:/usr/bin:/bin")
 }
 
 /// Sanitize a UUID-shaped profile id into a name that's both
@@ -597,7 +587,7 @@ mod tests {
     #[test]
     fn conf_path_is_under_wg_dir() {
         let p = conf_path_for("smwg12345678");
-        assert!(p.starts_with("/etc/wireguard"));
+        assert!(p.starts_with("/private/etc/wireguard"));
         assert!(p.to_string_lossy().ends_with(".conf"));
     }
 }
