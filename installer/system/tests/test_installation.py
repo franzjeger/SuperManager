@@ -28,15 +28,30 @@ class InstallationTests(unittest.TestCase):
         self.write(self.payload / 'runtime/bin/wg', 'new runtime')
         self.write(self.payload / 'helper.plist', 'new plist')
         self.write(self.mock / 'codesign', '#!/bin/bash\nexit 0\n', 0o755)
+        self.write(self.mock / 'sleep', '#!/bin/bash\nexit 0\n', 0o755)
         self.write(self.mock / 'launchctl', f'''#!/bin/bash
-if [[ "$1" == bootstrap && -e '{self.root}/fail-once' ]]; then
-    rm '{self.root}/fail-once'; exit 1
+root='{self.root}'
+if [[ "$1" == bootout ]]; then
+    [[ ! -e "$root/never-stop" ]] || exit 0
+    if [[ -e "$root/kill-once" ]]; then rm "$root/kill-once"; kill -KILL "$PPID"; exit 0; fi
+    if [[ -e "$root/delay-stop" ]]; then echo 3 > "$root/draining"; else rm -f "$root/loaded"; fi
+    exit 0
 fi
-if [[ "$1" == bootout && -e '{self.root}/kill-once' ]]; then
-    rm '{self.root}/kill-once'; kill -KILL "$PPID"; exit 0
+if [[ "$1" == print ]]; then
+    if [[ -e "$root/draining" ]]; then
+        n=$(cat "$root/draining"); n=$((n-1))
+        if (( n == 0 )); then rm -f "$root/draining" "$root/loaded"; else echo "$n" > "$root/draining"; fi
+    fi
+    [[ -e "$root/loaded" ]] || exit 1
+    echo 'state = running'; exit 0
 fi
-[[ "$1" != print ]] || echo 'state = running'
-exit 0
+if [[ "$1" == bootstrap ]]; then
+    [[ ! -e "$root/loaded" ]] || {{ echo 'still loaded' >&2; exit 5; }}
+    if [[ -e "$root/fail-once" ]]; then rm "$root/fail-once"; exit 5; fi
+    if [[ -e "$root/fail-new" ]] && /usr/bin/grep -q 'new plist' "$3"; then exit 5; fi
+    touch "$root/loaded"; exit 0
+fi
+exit 1
 ''', 0o755)
         self.socket_path = self.root / 'helper.sock'
         self.sock = socket.socket(socket.AF_UNIX); self.sock.bind(str(self.socket_path))
@@ -66,6 +81,7 @@ exit 0
         self.write(self.runtime / 'bin/wg', 'old runtime')
         self.write(self.plist, 'old plist')
         self.write(self.base / 'build', '10\n')
+        self.write(self.root / 'loaded', '')
 
     def run_post(self):
         return subprocess.run(['/bin/bash', str(self.post), 'package', '/', '/'], capture_output=True, text=True, timeout=10)
@@ -85,7 +101,7 @@ exit 0
         self.assertFalse((self.base / 'pending').exists())
 
     def test_activation_failure_restores_previous_pair(self):
-        self.old_installation(); self.write(self.root / 'fail-once', '')
+        self.old_installation(); self.write(self.root / 'fail-new', '')
         self.assertNotEqual(self.run_post().returncode, 0)
         self.assert_old()
 
@@ -93,10 +109,36 @@ exit 0
         self.old_installation(); self.write(self.root / 'kill-once', '')
         self.assertNotEqual(self.run_post().returncode, 0)
         self.assertTrue((self.base / 'pending').is_file())
-        recovery = self.base / 'backup-20/recovery.sh'
+        recovery = Path((self.base / 'pending').read_text().strip()) / 'recovery.sh'
         result = subprocess.run(['/bin/bash', str(recovery)], capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_old()
+
+    def test_delayed_bootout_and_transient_bootstrap_are_retried(self):
+        self.old_installation()
+        self.write(self.root / 'delay-stop', '')
+        self.write(self.root / 'fail-once', '')
+        result = self.run_post()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.helper.read_text(), 'new helper')
+
+    def test_retry_same_package_after_completed_rollback_preserves_backups(self):
+        self.old_installation(); self.write(self.root / 'fail-new', '')
+        self.assertNotEqual(self.run_post().returncode, 0)
+        self.assert_old()
+        first = set(self.base.glob('backup-20.*'))
+        (self.root / 'fail-new').unlink()
+        result = self.run_post()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(first < set(self.base.glob('backup-20.*')))
+
+    def test_stuck_service_does_not_replace_live_executables(self):
+        self.old_installation(); self.write(self.root / 'never-stop', '')
+        result = self.run_post()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.helper.read_text(), 'old helper')
+        self.assertEqual((self.runtime / 'bin/wg').read_text(), 'old runtime')
+        self.assertTrue((self.base / 'pending').exists())
 
     def test_signature_failure_changes_no_installed_files(self):
         self.old_installation(); self.write(self.mock / 'codesign', '#!/bin/bash\nexit 1\n', 0o755)

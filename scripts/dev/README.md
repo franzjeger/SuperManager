@@ -48,8 +48,10 @@ exclusion still applies; this build does not disconnect existing customer VPNs.
 Tailscale's machine identity and service are separate from stable. Manual install,
 start, uninstall, login, peer access and subnet-route acceptance are enabled.
 Exit-node routing and global DNS/recovery RPCs remain unavailable; Dev starts
-with accept-DNS and accept-routes disabled. Pause other Tailscale nodes before
-authenticating Dev to avoid competing routes. VPN always-on/kill-switch RPCs
+with accept-DNS and accept-routes disabled. Use Tailscale Settings → Use Dev
+Tailscale to pause the regular node before connecting or authenticating Dev.
+The signed helper switches the fixed services while preserving their identities.
+VPN always-on/kill-switch RPCs
 remain unavailable. Existing signed-runtime restrictions on WireGuard
 DNS/Table/hooks/SaveConfig and external OpenVPN files/scripts also apply. Do not
 interpret an imported profile as evidence that its connection is supported.
@@ -175,4 +177,42 @@ permission to pause it was still pending at this point.
 Validation: macOS Release build, 87 helper tests, 6 Dev tests; signed app and
 system package installed. A launchd bootstrap race triggered installer rollback;
 the rollback backup was preserved, and installation succeeded after explicitly
-stopping the old helper. That installer timing issue remains follow-up work.
+stopping the old helper. The service handoff and installer fixes below supersede
+these pending items.
+
+
+### Exclusive Tailscale switching and installer recovery — 1.8.0-dev.15
+
+Installed locally with signed system package `2026090915`. Tailscale Settings
+now offers **Use Dev Tailscale** and **Use regular Tailscale**, with live service
+status and a confirmation explaining the brief connection interruption. Only
+Tailscale is switched; other VPN tunnels are not part of this handoff.
+
+The signed Dev helper accepts an enum, not arbitrary service names or paths.
+It validates protected plists and pinned signed executables, serializes switching
+with install/uninstall, disables and stops the previous service, waits for the
+managed process to exit, then enables and starts the selected service. Failed
+switches attempt to restore the prior state and report incomplete recovery.
+Dev connect/login refuses to proceed while the regular node is running.
+
+Live tests through the signed GUI exercised both directions, including starting
+each service from a stopped state. Both nodes retained their separate identities.
+The final state is Dev running and regular Tailscale stopped/launchd-disabled.
+Dev retained subnet-route acceptance. Ordinary ICMP to the home LAN gateway
+succeeded after switching; Azure was reconnected and its internal DNS answered
+while the home LAN remained reachable. Persistent enablement was checked with
+launchd; a full Mac reboot and interruption midway through a handoff were not
+performed. There is no persistent handoff journal.
+
+The system installer and rollback script now wait for launchd registration and
+the old helper process to disappear before replacing files. They retry transient
+bootstrap failure only while the job is absent. Each attempt receives a unique
+backup directory, allowing the same package to be retried after rollback without
+overwriting its earlier backup. A live package upgrade succeeded with the old
+helper initially running, without manually stopping it beforehand.
+
+Validation: 18 installer tests (including delayed stop, transient bootstrap
+failure, stuck service and retry after rollback), 88 Dev helper tests, 6 Dev
+preparation tests, native Rust release build, macOS SwiftUI Release build and
+signed installed app verification. Mocked installer failure tests are not a
+substitute for power-loss testing on a Mac.

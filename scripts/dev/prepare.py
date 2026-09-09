@@ -53,6 +53,11 @@ def tailscale_client(s):
     s = s.replace('process.arguments = args',
                   'process.arguments = ["--socket=/var/run/supermanager-dev-tailscaled.socket"] + args')
     s = s.replace('["up", "--force-reauth"]', '["up", "--force-reauth", "--accept-dns=false", "--accept-routes=false", "--hostname=supermanager-dev"]')
+    check = '\n        let ownership = try await HelperClient.shared.devTailscaleServiceStatus()\n        if ownership["stable_running"] as? Bool == true {\n            throw ClientError.daemonNotRunning("Regular Tailscale is running. Open Tailscale Settings and choose Use Dev Tailscale before connecting.")\n        }'
+    for signature in ['    static func up() async throws {',
+                      '    static func login(onAuthURL: @escaping @Sendable (URL) -> Void) async throws {',
+                      '    static func addAccount(onAuthURL: @escaping @Sendable (URL) -> Void) async throws {']:
+        s = s.replace(signature, signature + check)
     # Prevent an exit-node setting from succeeding before its blocked routing RPC.
     marker = '    private static func runSet(_ args: [String]) async throws {'
     s = replace_once(s, marker, marker + '\n        if args.contains(where: { $0.hasPrefix("--exit-node=") && $0 != "--exit-node=" || $0 == "--accept-dns=true" }) {\n            throw ClientError.daemonNotRunning("Exit nodes and system DNS changes are unavailable in Dev. Peer connections and subnet routes are supported.")\n        }')
@@ -64,6 +69,40 @@ def tailscale_header(s):
     s = s.replace('.help("Force-write the system resolver', '.disabled(true)\n            .help("Force-write the system resolver')
     s = s.replace('.help("Clear exit-node + accept-routes', '.disabled(true)\n            .help("Clear exit-node + accept-routes')
     return s
+
+
+def service_switch_main(s):
+    s = s.replace('mod tailscale;', 'mod network_switch;\nmod tailscale;')
+    marker = '    match req.method.as_str() {'
+    addition = '''    let _switch_lock = if ["dev_tailscale_switch", "tailscaled_install", "tailscaled_uninstall"].contains(&req.method.as_str()) {
+        Some(network_switch::LOCK.lock().await)
+    } else { None };
+    match req.method.as_str() {
+        "dev_tailscale_status" => match network_switch::status().await {
+            Ok(state) => Response::ok(id, serde_json::to_value(state).unwrap()),
+            Err(error) => Response::err(id, -32000, format!("Service status failed: {error:#}")),
+        },
+        "dev_tailscale_switch" => match serde_json::from_value::<network_switch::SwitchArgs>(req.params) {
+            Ok(args) => match network_switch::switch(args).await {
+                Ok(state) => Response::ok(id, serde_json::to_value(state).unwrap()),
+                Err(error) => Response::err(id, -32000, format!("Service switch failed: {error:#}")),
+            },
+            Err(error) => Response::err(id, -32602, error.to_string()),
+        },'''
+    return replace_once(s, marker, addition)
+
+
+def service_switch_client(s):
+    marker = '    private static var nextId: UInt64 = 0'
+    methods = '''    func devTailscaleServiceStatus() async throws -> [String: Any] {
+        try await callOnce(method: "dev_tailscale_status", params: [:], timeoutSeconds: 20)
+    }
+    func devTailscaleSwitch(_ target: String) async throws -> [String: Any] {
+        // A mutation is never automatically retried after a lost response.
+        try await callOnce(method: "dev_tailscale_switch", params: ["target": target], timeoutSeconds: 90)
+    }
+'''
+    return replace_once(s, marker, methods + marker)
 
 
 def prepare(source, output):
@@ -116,7 +155,7 @@ def prepare(source, output):
     let allowed = ["ping", "helper_version", "vpn_runtime_status", "vpn_status",
         "wg_status", "ovpn_status", "vpn_connect", "vpn_disconnect", "wg_connect",
         "wg_disconnect", "ovpn_connect", "ovpn_disconnect", "auto_reconnect_list", "tailscaled_install",
-        "tailscaled_uninstall", "tailscaled_status"];
+        "tailscaled_uninstall", "tailscaled_status", "dev_tailscale_status", "dev_tailscale_switch"];
     if !allowed.contains(&req.method.as_str()) {
         return Response::err(id, -32601, "This automatic/global networking action is disabled in SuperManager Dev");
     }
@@ -131,6 +170,14 @@ def prepare(source, output):
 '''
         return replace_once(s, '    debug!(method = %req.method, "dispatch");', guard + '    debug!(method = %req.method, "dispatch");')
     edit('supermanager-helper/src/main.rs', helper)
+    edit('supermanager-helper/src/main.rs', service_switch_main)
+    (output / 'supermanager-helper/src/network_switch.rs').write_text(
+        (Path(__file__).parent / 'network_switch.rs').read_text())
+    edit('SuperManagerMac/SuperManagerMac/Services/HelperClient.swift', service_switch_client)
+    edit('SuperManagerMac/SuperManagerMac/Views/Tailscale/TailscaleSettingsView.swift', lambda s:
+        s.replace('                    accountSection', '                    TailscaleServiceSwitch()\n                    accountSection')
+        + '\n' + (Path(__file__).parent / 'TailscaleServiceSwitch.swift').read_text())
+
     edit('supermanager-helper/src/strongswan.rs', lambda s: replace_once(s,
         '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {',
         '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {\n        crate::secure_files::ensure_root_directory(Path::new("/Library/PrivilegedHelperTools/SuperManagerDevIPSecState"))?;'))

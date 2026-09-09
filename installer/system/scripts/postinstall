@@ -8,7 +8,32 @@ helper='/Library/PrivilegedHelperTools/com.sybr.supermanager.helper'
 runtime='/Library/PrivilegedHelperTools/SuperManagerVPN'
 plist='/Library/LaunchDaemons/com.sybr.supermanager.helper.plist'
 label='com.sybr.supermanager.helper'
-backup="$base/backup-@BUILD@"
+
+# launchd bootout can return before its job and child processes are gone.
+stop_service() {
+    local previous pid=''
+    previous=$(launchctl print "system/$label" 2>/dev/null || true)
+    if [[ "$previous" =~ pid[[:space:]]*=[[:space:]]*([0-9]+) ]]; then pid=${BASH_REMATCH[1]}; fi
+    launchctl bootout "system/$label" >/dev/null 2>&1 || true
+    for attempt in {1..30}; do
+        if ! launchctl print "system/$label" >/dev/null 2>&1; then
+            if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for $label to unload; installed files left intact." >&2
+    return 1
+}
+start_service() {
+    for attempt in {1..10}; do
+        if launchctl bootstrap system "$plist"; then return 0; fi
+        # A failed bootstrap must not trigger another start over a loaded job.
+        if launchctl print "system/$label" >/dev/null 2>&1; then return 1; fi
+        sleep 1
+    done
+    return 1
+}
+
 # Payload is delivered only by the Developer-ID-signed package. Validate helper
 # again before any service change; every Mach-O runtime file was signed at build.
 requirement='anchor apple generic and certificate leaf[subject.OU] = "LY6LJ395B8" and identifier "com.sybr.supermanager.helper" and ! entitlement["com.apple.security.get-task-allow"] exists and ! entitlement["com.apple.security.cs.disable-library-validation"] exists and ! entitlement["com.apple.security.cs.allow-dyld-environment-variables"] exists'
@@ -25,7 +50,7 @@ if [[ -e "$base/build" ]]; then
 fi
 [[ ! -e "$base/pending" ]]
 # Preserve a complete prior pair before recording the transaction marker.
-mkdir -m 0700 "$backup"
+backup=$(mktemp -d "$base/backup-@BUILD@.XXXXXX")
 [[ ! -e "$helper" ]] || cp -p "$helper" "$backup/helper"
 [[ ! -e "$runtime" ]] || ditto "$runtime" "$backup/runtime"
 [[ ! -e "$plist" ]] || cp -p "$plist" "$backup/helper.plist"
@@ -41,7 +66,7 @@ rollback() {
 trap rollback ERR INT TERM
 # No in-place overwrite of executable vnodes. Keep backup until a running
 # launchd process and socket are observed. Authenticated GUI testing is separate.
-launchctl bootout "system/$label" >/dev/null 2>&1 || true
+stop_service
 cp "$payload/helper" "$helper.new"
 chmod 0755 "$helper.new"
 mv -f "$helper.new" "$helper"
@@ -50,7 +75,7 @@ ditto "$payload/runtime" "$runtime"
 cp "$payload/helper.plist" "$plist.new"
 chmod 0644 "$plist.new"
 mv -f "$plist.new" "$plist"
-launchctl bootstrap system "$plist"
+start_service
 healthy=false
 for attempt in {1..30}; do
     state=$(launchctl print "system/$label" 2>/dev/null || true)

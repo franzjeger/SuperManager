@@ -56,7 +56,7 @@ pub fn verify_tailscaled(path: &Path) -> Result<()> {
 pub fn verify_tailscale_cli(path: &Path) -> Result<()> {
     verify_component(path, CLI_ID)
 }
-fn verify_component(path: &Path, identifier: &str) -> Result<()> {
+pub(crate) fn verify_component(path: &Path, identifier: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         use core_foundation::url::CFURL;
