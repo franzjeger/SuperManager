@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 from assemble_single_app import assemble
@@ -62,7 +63,8 @@ def build(source, destination, tailscale, build_number, version, cargo_target=No
              '-configuration', 'Release', '-derivedDataPath', str(derived)]
     subprocess.run(xcode + ['-resolvePackageDependencies', '-onlyUsePackageVersionsFromResolvedFile'],
                    cwd=project, check=True)
-    subprocess.run(xcode + ['-disableAutomaticPackageResolution', 'CODE_SIGNING_ALLOWED=NO', 'build'],
+    subprocess.run(xcode + ['-disableAutomaticPackageResolution', 'CODE_SIGNING_ALLOWED=NO',
+                           'ARCHS=' + platform.machine(), 'ONLY_ACTIVE_ARCH=YES', 'build'],
                    cwd=project, check=True)
     for name, expected in dependency_hashes.items():
         if sha256(tailscale / name) != expected:
@@ -73,6 +75,7 @@ def build(source, destination, tailscale, build_number, version, cargo_target=No
     record = {
         'source_commit': commit, 'version': version, 'build': str(build_number),
         'bundle_id': 'com.sybr.supermanager.dev', 'channel': 'local-single-app',
+        'architecture': platform.machine(),
         'cargo_lock_sha256': sha256(snapshot / 'Cargo.lock'),
         'swift_pins': json.loads(resolved.read_text())['pins'],
         'tailscale_input_sha256': dependency_hashes,
