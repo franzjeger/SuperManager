@@ -75,3 +75,34 @@ artifacts remain local, outside the public repository.
 
 No system package upgrade, reboot, live VPN change, new update feed, or public
 release was performed during this source/build validation.
+
+## Local upgrade and sleep validation — 2026-09-09
+
+With the user's authorization, installed app `1.8.0-local.18` and signed system
+package `2026090918` on the existing ARM64 Mac. The runtime was reused from
+installed package `2026090915` after all 24 runtime files matched that release's
+final payload hashes. Its source metadata was retained, with explicit repackaging
+provenance; this was not a new runtime source build. The validator accepted all
+seven Mach-O components. The new helper came from the clean-commit app build.
+
+Azure was disconnected through the authorized helper before the app/engine were
+stopped. Data, preferences and the previous app were privately backed up. macOS
+Installer completed an actual upgrade with the old helper initially running.
+The root-owned build counter is `2026090918`, no pending transaction remains,
+and the signed client successfully queried the replacement helper. The upgraded
+GUI connected Azure, displayed its interface/routes, and internal DNS answered.
+Tailscale retained its existing online identity. The old regular helper remains
+disabled, and Spotlight still finds only `/Applications/SuperManager.app`.
+
+The first sleep request did not reach full system sleep and is not counted as a
+passing test. A second attempt reached kernel system sleep at 16:37:02 CEST and
+woke at 16:37:35, confirmed by `kern.sleeptime`/`kern.waketime`. Azure status and
+an internal DNS query succeeded after waking; Tailscale remained Running/online.
+This verifies one short sleep/wake cycle, not prolonged hibernation or every VPN.
+
+Full reboot validation remains pending until the user logs back in. Before
+reboot, the baseline boot time was 2026-09-09 13:08:30 CEST. After login, verify
+the new boot time, build counter, one enabled helper, signed GUI authorization,
+Tailscale identity and VPN connect/disconnect/route/DNS behavior. Installer
+rollback backups remain under the system package state directory, and the
+private user rollback snapshot is in `SuperManager Archives.noindex`.
