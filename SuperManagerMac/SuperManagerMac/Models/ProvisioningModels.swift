@@ -135,6 +135,7 @@ struct Deployment: Codable, Identifiable {
     let renderedConfig: String
     let linesPushed: UInt64
     let acknowledgmentChecked: Bool?
+    let backupSha256: String?
     let error: String?
     enum CodingKeys: String, CodingKey {
         case id, status, error
@@ -148,6 +149,7 @@ struct Deployment: Codable, Identifiable {
         case renderedConfig = "rendered_config"
         case linesPushed = "lines_pushed"
         case acknowledgmentChecked = "acknowledgment_checked"
+        case backupSha256 = "backup_sha256"
     }
 
     var progressDescription: String {

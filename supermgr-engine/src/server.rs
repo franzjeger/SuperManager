@@ -249,6 +249,9 @@ impl EngineServer {
             "provisioning_list_deployments" => {
                 self.handle_provisioning_list_deployments(id, req.params).await
             }
+            "provisioning_restore_preview" => {
+                self.handle_provisioning_restore_preview(id, req.params).await
+            }
             "provisioning_rollback" => {
                 self.handle_provisioning_rollback(id, req.params).await
             }

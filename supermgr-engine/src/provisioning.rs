@@ -631,6 +631,13 @@ pub struct Deployment {
     /// Distinguishes measured progress from older records' estimated counts.
     #[serde(default)]
     pub acknowledgment_checked: bool,
+    /// Captured target and backup digest are required for automated restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_snapshot: Option<supermgr_core::host::Host>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_from_deployment_id: Option<String>,
     /// Last device error message if status == Failed.
     pub error: Option<String>,
 }
@@ -655,15 +662,25 @@ fn deployments_dir(host_id: &str) -> PathBuf {
 fn save_deployment(record: &Deployment) -> Result<()> {
     let dir = deployments_dir(&record.host_id);
     std::fs::create_dir_all(&dir).context("create deployments dir")?;
-    let mut path = dir;
-    path.push(format!("{}.json", record.id));
-    let bytes = serde_json::to_vec_pretty(record)?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    write_deployment_in(&dir, record)
+}
+
+fn write_deployment_in(dir: &std::path::Path, record: &Deployment) -> Result<()> {
+    use std::io::Write;
+    let id = uuid::Uuid::parse_str(&record.id).context("invalid deployment ID")?;
+    let path = dir.join(format!("{}.json", id.simple()));
+    let mut file = tempfile::NamedTempFile::new_in(dir)?;
+    file.write_all(&serde_json::to_vec_pretty(record)?)?;
+    file.as_file().sync_all()?;
+    file.persist(&path)?;
+    #[cfg(unix)]
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 
 pub fn list_deployments(host_id: &str, limit: usize) -> Result<Vec<Deployment>> {
-    let dir = deployments_dir(host_id);
+    let expected_host = uuid::Uuid::parse_str(host_id).context("invalid host ID")?;
+    let dir = deployments_dir(&expected_host.simple().to_string());
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -675,7 +692,9 @@ pub fn list_deployments(host_id: &str, limit: usize) -> Result<Vec<Deployment>> 
         }
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(d) = serde_json::from_slice::<Deployment>(&bytes) {
-                out.push(d);
+                if uuid::Uuid::parse_str(&d.host_id).ok() == Some(expected_host) {
+                    out.push(d);
+                }
             }
         }
     }
@@ -717,7 +736,7 @@ pub async fn pre_deploy_backup(
 ) -> Result<String> {
     let (_host, session) = open_session(state, secrets, host_id).await?;
     let cfg = fetch_full_config(&session).await;
-    let _ = session.disconnect().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
     write_private_backup(&host_id.simple().to_string(), &cfg?)
 }
 
@@ -801,7 +820,7 @@ pub(crate) async fn diff_preview(
     let render = render_with_customer(&customer, site, &request.template_id, &request.extras)?;
     let (_, session) = crate::server::connect_host_snapshot(state, secrets, host.clone()).await?;
     let live_result = fetch_full_config(&session).await;
-    let _ = session.disconnect().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
     let live = live_result?;
     let sections = diff_sections(&render.output, &live);
     let summary = summarise_sections(&sections);
@@ -884,6 +903,12 @@ pub(crate) async fn deploy(
         rendered_config: plan.rendered.clone(),
         lines_pushed: 0,
         acknowledgment_checked: false,
+        target_snapshot: Some(plan.host.clone()),
+        backup_sha256: None,
+        restored_from_deployment_id: match &plan.operation {
+            plans::PlanOperation::DeployTemplate => None,
+            plans::PlanOperation::RestoreBackup { source_deployment_id } => Some(source_deployment_id.clone()),
+        },
         error: None,
     };
     save_deployment(&record)?;
@@ -898,14 +923,14 @@ pub(crate) async fn deploy(
             let (host, customer) = target_snapshot(state, host_id, request).await?;
             plan.validate_current(&host, &customer)?;
             let backup_path = write_private_backup(&host_str, &live)?;
-            Ok::<_, anyhow::Error>(backup_path)
+            Ok::<_, anyhow::Error>((backup_path, config_digest(&live)))
         }.await;
         match preparation {
-            Ok(path) => Ok((session, path)),
-            Err(e) => { let _ = session.disconnect().await; Err(e) }
+            Ok((path, digest)) => Ok((session, path, digest)),
+            Err(e) => { let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await; Err(e) }
         }
     }.await;
-    let (session, backup_path) = match prepare {
+    let (session, backup_path, backup_digest) = match prepare {
         Ok(value) => value,
         Err(e) => {
             record.status = DeploymentStatus::Failed;
@@ -916,8 +941,9 @@ pub(crate) async fn deploy(
         }
     };
     record.backup_path = Some(backup_path);
+    record.backup_sha256 = Some(backup_digest);
     if let Err(e) = save_deployment(&record) {
-        let _ = session.disconnect().await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
         return Err(e);
     }
     // Send every reviewed line in order; do not re-render or silently filter commands.
@@ -925,7 +951,11 @@ pub(crate) async fn deploy(
 
     let result = session.shell_config(&lines, 120).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
-    apply_shell_result(&mut record, result, DeploymentStatus::Succeeded);
+    let status = match plan.operation {
+        plans::PlanOperation::DeployTemplate => DeploymentStatus::Succeeded,
+        plans::PlanOperation::RestoreBackup { .. } => DeploymentStatus::RolledBack,
+    };
+    apply_shell_result(&mut record, result, status);
     save_deployment(&record)?;
     Ok(record)
 }
@@ -953,55 +983,81 @@ fn apply_shell_result(
     }
 }
 
-/// Restore from a saved backup. Reads the backup .conf and
-/// pushes it via the acknowledged shell driver — same path as a deploy but
-/// the source is an old config, not a fresh render. A new
-/// Deployment record with status=RolledBack is created so the
-/// rollback shows up in history.
-pub async fn rollback(
+fn config_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Open once without following the final symlink. O_NONBLOCK prevents a
+/// replaced FIFO from hanging the daemon before we can check the file type.
+fn read_restore_file(path: &std::path::Path, limit: u64) -> Result<String> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)] {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).context("open restore source")?;
+    if !file.metadata()?.is_file() { bail!("Restore source must be a regular file"); }
+    let mut text = String::new();
+    file.take(limit + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > limit { bail!("Restore source exceeds size limit"); }
+    Ok(text)
+}
+
+fn verified_backup(
+    record: &Deployment,
+    host: &supermgr_core::host::Host,
+    request: &RenderRequest,
+    expected_dir: &std::path::Path,
+) -> Result<String> {
+    if uuid::Uuid::parse_str(&record.host_id)? != host.id
+        || record.customer_slug != request.customer_slug || record.site_id != request.site_id {
+        bail!("Backup belongs to a different host, customer or site");
+    }
+    let captured = record.target_snapshot.as_ref().ok_or_else(|| anyhow!("Legacy backup has no captured target; automated restore is unavailable"))?;
+    if serde_json::to_value(captured)? != serde_json::to_value(host)? {
+        bail!("Host changed since backup; automated restore is unavailable");
+    }
+    let digest = record.backup_sha256.as_ref().ok_or_else(|| anyhow!("Legacy backup has no integrity digest; automated restore is unavailable"))?;
+    let path = std::path::Path::new(record.backup_path.as_deref().ok_or_else(|| anyhow!("Deployment has no backup"))?);
+    if path.parent() != Some(expected_dir) || path.file_name().is_none() {
+        bail!("Backup path is outside this host's backup directory");
+    }
+    let text = read_restore_file(path, 2 * 1024 * 1024)?;
+    if config_digest(&text) != *digest { bail!("Backup changed or is corrupt; restore aborted"); }
+    validate_config_response(0, &text, "")?;
+    Ok(text)
+}
+
+/// Restore is a previewed command replay, not a FortiOS replacement transaction.
+/// Input is a deployment ID and explicit scope, never an arbitrary file path.
+pub(crate) async fn restore_preview(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
+    registry: &plans::PlanRegistry,
     host_id: uuid::Uuid,
-    backup_path: &str,
-) -> Result<Deployment> {
-    let host_str = host_id.simple().to_string();
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let backup_text = std::fs::read_to_string(backup_path)
-        .with_context(|| format!("read {backup_path}"))?;
-
-    let mut record = Deployment {
-        id: id.clone(),
-        host_id: host_str.clone(),
-        customer_slug: "rollback".into(),
-        site_id: "rollback".into(),
-        template_id: "rollback".into(),
-        started_at: chrono::Utc::now(),
-        finished_at: None,
-        status: DeploymentStatus::Running,
-        backup_path: Some(backup_path.to_owned()),
-        rendered_config: backup_text.clone(),
-        lines_pushed: 0,
-        acknowledgment_checked: false,
-        error: None,
-    };
-    save_deployment(&record)?;
-
-    let session = match open_session(state, secrets, host_id).await {
-        Ok((_, session)) => session,
-        Err(e) => {
-            record.status = DeploymentStatus::Failed;
-            record.error = Some(format!("SSH connection failed before rollback: {e:#}"));
-            record.finished_at = Some(chrono::Utc::now());
-            save_deployment(&record)?;
-            return Err(e);
-        }
-    };
-    let lines: Vec<&str> = backup_text.lines().collect();
-    let result = session.shell_config(&lines, 180).await;
+    deployment_id: uuid::Uuid,
+    customer_slug: String,
+    site_id: String,
+) -> Result<DiffPreviewResult> {
+    let record_path = deployments_dir(&host_id.simple().to_string()).join(format!("{}.json", deployment_id.simple()));
+    let record: Deployment = serde_json::from_str(&read_restore_file(&record_path, 4 * 1024 * 1024)?)?;
+    if uuid::Uuid::parse_str(&record.id)? != deployment_id { bail!("Deployment record ID mismatch"); }
+    let request = RenderRequest { template_id: record.template_id.clone(), customer_slug, site_id, extras: Default::default() };
+    let (host, customer) = target_snapshot(state, host_id, &request).await?;
+    let rendered = verified_backup(&record, &host, &request, &backups_dir(&host_id.simple().to_string()))?;
+    let (_, session) = crate::server::connect_host_snapshot(state, secrets, host.clone()).await?;
+    let live = fetch_full_config(&session).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), session.disconnect()).await;
-    apply_shell_result(&mut record, result, DeploymentStatus::RolledBack);
-    save_deployment(&record)?;
-    Ok(record)
+    let live = live?;
+    let sections = diff_sections(&rendered, &live);
+    let summary = summarise_sections(&sections);
+    let mut plan = plans::Plan::new(host, customer, request, rendered.clone(), &live)?;
+    plan.operation = plans::PlanOperation::RestoreBackup { source_deployment_id: deployment_id.simple().to_string() };
+    let plan_id = registry.insert(plan)?.to_string();
+    Ok(DiffPreviewResult { plan_id, rendered, sections, summary })
 }
 
 /// Register filters that templates rely on. We keep these tightly
@@ -1247,4 +1303,102 @@ mod shell_outcome_tests {
         assert!(matches!(record.status, DeploymentStatus::Failed));
         assert_eq!(record.lines_pushed, 0);
     }
+}
+
+#[cfg(test)]
+mod restore_safety_tests {
+    use super::*;
+    fn fixture(dir: &std::path::Path) -> (Deployment, supermgr_core::host::Host, RenderRequest) {
+        let host: supermgr_core::host::Host = serde_json::from_value(serde_json::json!({
+            "id":uuid::Uuid::new_v4(), "label":"FW", "hostname":"10.0.0.1", "username":"admin", "auth_method":"password"
+        })).unwrap();
+        let text = "config system global\nset hostname reviewed\nend\n";
+        let path = dir.join("backup.conf"); std::fs::write(&path, text).unwrap();
+        let record: Deployment = serde_json::from_value(serde_json::json!({
+            "id":uuid::Uuid::new_v4(), "host_id":host.id, "customer_slug":"acme", "site_id":"hq",
+            "template_id":"test", "started_at":"2026-09-09T00:00:00Z", "status":"failed",
+            "rendered_config":"", "lines_pushed":0, "backup_path":path,
+            "target_snapshot":host, "backup_sha256":config_digest(text)
+        })).unwrap();
+        let request = RenderRequest {template_id:"test".into(), customer_slug:"acme".into(), site_id:"hq".into(), extras:Default::default()};
+        (record, host, request)
+    }
+    #[test]
+    fn restore_requires_exact_host_scope_and_captured_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let (record, host, request) = fixture(dir.path());
+        assert!(verified_backup(&record, &host, &request, dir.path()).is_ok());
+        let mut wrong = request.clone(); wrong.customer_slug = "other".into();
+        assert!(verified_backup(&record, &host, &wrong, dir.path()).is_err());
+        wrong = request.clone(); wrong.site_id = "other".into();
+        assert!(verified_backup(&record, &host, &wrong, dir.path()).is_err());
+        let mut moved = host.clone(); moved.hostname = "wrong-device".into();
+        assert!(verified_backup(&record, &moved, &request, dir.path()).is_err());
+        moved = host.clone(); moved.id = uuid::Uuid::new_v4();
+        assert!(verified_backup(&record, &moved, &request, dir.path()).is_err());
+    }
+    #[test]
+    fn changed_legacy_and_other_host_backups_fail_closed() {
+        let dir = tempfile::tempdir().unwrap(); let other = tempfile::tempdir().unwrap();
+        let (record, host, request) = fixture(dir.path());
+        assert!(verified_backup(&record, &host, &request, other.path()).is_err());
+        let mut legacy = record.clone(); legacy.target_snapshot = None;
+        assert!(verified_backup(&legacy, &host, &request, dir.path()).is_err());
+        legacy = record.clone(); legacy.backup_sha256 = None;
+        assert!(verified_backup(&legacy, &host, &request, dir.path()).is_err());
+        std::fs::write(record.backup_path.as_ref().unwrap(), "config changed\nend").unwrap();
+        assert!(verified_backup(&record, &host, &request, dir.path()).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_and_non_regular_files_are_not_restore_sources() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let (record, host, request) = fixture(dir.path());
+        let path = std::path::Path::new(record.backup_path.as_ref().unwrap());
+        let moved = dir.path().join("actual.conf"); std::fs::rename(path, &moved).unwrap();
+        symlink(&moved, path).unwrap();
+        assert!(verified_backup(&record, &host, &request, dir.path()).is_err());
+        assert!(read_restore_file(dir.path(), 1024).is_err());
+        use std::os::unix::ffi::OsStrExt;
+        let fifo_path = dir.path().join("pipe.conf");
+        let fifo_name = std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the C string is NUL terminated and alive for this syscall.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        assert!(read_restore_file(&fifo_path, 1024).is_err());
+    }
+    #[test]
+    fn restore_files_are_bounded_and_record_updates_are_private_atomic_replacements() {
+        let dir = tempfile::tempdir().unwrap(); let (mut record, _, _) = fixture(dir.path());
+        assert!(read_restore_file(std::path::Path::new(record.backup_path.as_ref().unwrap()), 2).is_err());
+        write_deployment_in(dir.path(), &record).unwrap();
+        let path = dir.path().join(format!("{}.json", uuid::Uuid::parse_str(&record.id).unwrap().simple()));
+        record.status = DeploymentStatus::Succeeded;
+        write_deployment_in(dir.path(), &record).unwrap();
+        let saved: Deployment = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(matches!(saved.status, DeploymentStatus::Succeeded));
+        assert_eq!(saved.backup_sha256, record.backup_sha256);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+    #[test]
+    fn restore_approval_keeps_reviewed_bytes_when_source_file_changes() {
+        let dir = tempfile::tempdir().unwrap(); let (record, host, request) = fixture(dir.path());
+        let reviewed = verified_backup(&record, &host, &request, dir.path()).unwrap();
+        let customer: Customer = serde_json::from_value(serde_json::json!({
+            "slug":"acme", "display_name":"Acme", "sites":[{"id":"hq", "display_name":"HQ"}]
+        })).unwrap();
+        let mut plan = plans::Plan::new(host, customer, request, reviewed.clone(), "live").unwrap();
+        plan.operation = plans::PlanOperation::RestoreBackup { source_deployment_id:record.id.clone() };
+        let registry = std::sync::Arc::new(plans::PlanRegistry::default());
+        let id = registry.insert(plan).unwrap();
+        std::fs::write(record.backup_path.unwrap(), "changed after approval").unwrap();
+        let (approved, _lease) = registry.take(id).unwrap();
+        assert_eq!(approved.rendered, reviewed);
+        assert!(matches!(approved.operation, plans::PlanOperation::RestoreBackup { source_deployment_id } if source_deployment_id == record.id));
+        assert!(registry.take(id).is_err());
+    }
+
 }

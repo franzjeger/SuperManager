@@ -184,15 +184,12 @@ extension AppState {
         }
     }
 
-    @discardableResult
-    func rollbackDeployment(hostId: String, backupPath: String) async -> Deployment? {
+    func restorePreview(hostId: String, deploymentId: String, customerSlug: String, siteId: String) async -> DiffPreviewResult? {
         do {
-            let result: Deployment = try await client.call(
-                "provisioning_rollback",
-                params: ["host_id": hostId, "backup_path": backupPath]
-            )
-            await loadDeploymentHistory(hostId: hostId)
-            return result
+            return try await client.call("provisioning_restore_preview", params: [
+                "host_id": hostId, "deployment_id": deploymentId,
+                "customer_slug": customerSlug, "site_id": siteId
+            ])
         } catch {
             handleError(error)
             return nil

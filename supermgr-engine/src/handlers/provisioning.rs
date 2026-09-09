@@ -144,25 +144,22 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
-            Ok(id) => id,
-            Err(r) => return r,
-        };
-        let backup_path = match params.get("backup_path").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing backup_path".to_owned(),
-                )
-            }
-        };
-        match crate::provisioning::rollback(&self.state, &self.secrets, host_id, &backup_path)
-            .await
-        {
-            Ok(record) => match serde_json::to_value(&record) {
-                Ok(v) => Response::ok(id, v),
+        let _ = params;
+        Response::err(id, protocol::INVALID_PARAMS,
+            "Direct rollback is disabled. Use provisioning_restore_preview and deploy its plan_id.".to_owned())
+    }
+
+    pub(crate) async fn handle_provisioning_restore_preview(&self, id: u64, params: serde_json::Value) -> Response {
+        let parse_id = |key| params.get(key).and_then(serde_json::Value::as_str).and_then(|s| uuid::Uuid::parse_str(s).ok());
+        let (Some(host_id), Some(deployment_id), Some(customer), Some(site)) = (
+            parse_id("host_id"), parse_id("deployment_id"),
+            params.get("customer_slug").and_then(serde_json::Value::as_str),
+            params.get("site_id").and_then(serde_json::Value::as_str),
+        ) else { return Response::err(id, protocol::INVALID_PARAMS, "host_id, deployment_id, customer_slug and site_id are required".to_owned()); };
+        match crate::provisioning::restore_preview(&self.state, &self.secrets, &self.deployment_plans,
+            host_id, deployment_id, customer.to_owned(), site.to_owned()).await {
+            Ok(result) => match serde_json::to_value(result) {
+                Ok(value) => Response::ok(id, value),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),

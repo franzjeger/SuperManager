@@ -15,7 +15,13 @@ const TTL: Duration = Duration::from_secs(600);
 const MAX_PLANS: usize = 32;
 const MAX_CONFIG_BYTES: usize = 2 * 1024 * 1024;
 
+pub(crate) enum PlanOperation {
+    DeployTemplate,
+    RestoreBackup { source_deployment_id: String },
+}
+
 pub(crate) struct Plan {
+    pub operation: PlanOperation,
     pub host: Host,
     pub customer: Customer,
     pub request: RenderRequest,
@@ -31,10 +37,14 @@ impl Plan {
         rendered: String,
         live: &str,
     ) -> Result<Self> {
+        if !crate::ssh::shell::supported_commands(&rendered.lines().collect::<Vec<_>>()) {
+            bail!("Configuration contains unsupported multiline quoted commands or control characters");
+        }
         if rendered.len() > MAX_CONFIG_BYTES {
             bail!("configuration exceeds preview size limit");
         }
         Ok(Self {
+            operation: PlanOperation::DeployTemplate,
             host,
             customer,
             request,

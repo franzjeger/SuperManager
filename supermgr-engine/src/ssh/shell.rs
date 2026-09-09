@@ -114,6 +114,33 @@ fn valid_line(line: &str) -> bool {
     !line.chars().any(|c| c.is_control() && c != '\t')
 }
 
+/// The prompt-per-line driver cannot safely send multiline quoted values.
+/// Reject the whole batch up front, before even its first command is written.
+pub(crate) fn supported_commands(lines: &[&str]) -> bool {
+    lines.iter().all(|line| {
+        if !valid_line(line) {
+            return false;
+        }
+        if line.trim_start().starts_with('#') {
+            return true;
+        }
+        let mut quoted = false;
+        let mut escaped = false;
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = !quoted;
+            }
+        }
+        !quoted && !escaped
+    })
+}
+
 struct Driver<'a, T> {
     io: &'a mut T,
     deadline: Instant,
@@ -201,9 +228,9 @@ pub(super) async fn run<T: ShellIo>(
     password: Option<&str>,
     duration: Duration,
 ) -> Result<ShellOutput, ShellFailure> {
-    if lines.iter().any(|line| !valid_line(line)) || password.is_some_and(|p| !valid_line(p)) {
+    if !supported_commands(lines) || password.is_some_and(|p| !valid_line(p)) {
         return Err(ShellFailure::setup(
-            "Control characters are not allowed in shell input",
+            "Unsupported control characters or multiline quoted commands in shell input",
         ));
     }
     let mut driver = Driver {
@@ -474,5 +501,27 @@ mod tests {
             .await
             .is_err());
         assert!(io.writes.is_empty());
+    }
+    #[tokio::test]
+    async fn multiline_values_are_rejected_before_any_command_is_sent() {
+        let mut io = Scripted::new(vec![data("FGT # ")]);
+        assert!(run(
+            &mut io,
+            &[
+                "config certificate",
+                "set certificate \"BEGIN",
+                "END\"",
+                "end"
+            ],
+            None,
+            DEADLINE
+        )
+        .await
+        .is_err());
+        assert!(io.writes.is_empty());
+        assert!(supported_commands(&[
+            "set comments \"a \\\"quoted\\\" value\"",
+            "# comment with an unmatched \"quote"
+        ]));
     }
 }

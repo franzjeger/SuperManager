@@ -17,6 +17,7 @@ struct DiffPreviewSheet: View {
     let templateId: String
     let customerSlug: String
     let siteId: String
+    var restoreDeploymentId: String? = nil
     /// One-off render variables (PPPoE creds, S2S peer IP, etc.) the
     /// operator filled in on the Provisioning form. These MUST flow
     /// into both the diff and the deploy — otherwise we'd preview and
@@ -75,7 +76,7 @@ struct DiffPreviewSheet: View {
             Image(systemName: "arrow.triangle.branch")
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 0) {
-                Text("Preview deployment")
+                Text(restoreDeploymentId == nil ? "Preview deployment" : "Preview backup commands")
                     .font(.title3.weight(.semibold))
                 Text("\(customerSlug) / \(siteId) · Target: \(hostLabel) · Template: \(templateId)")
                     .font(.caption)
@@ -338,10 +339,10 @@ struct DiffPreviewSheet: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 10) {
-                Image(systemName: result.status == .succeeded
+                Image(systemName: (result.status == .succeeded || result.status == .rolledBack)
                       ? "checkmark.seal.fill"
                       : "exclamationmark.triangle.fill")
-                    .foregroundStyle(result.status == .succeeded ? .green : .red)
+                    .foregroundStyle((result.status == .succeeded || result.status == .rolledBack) ? .green : .red)
                     .font(.title)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(result.outcomeDescription)
@@ -378,7 +379,7 @@ struct DiffPreviewSheet: View {
                 .background(.background.tertiary)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            if result.status == .succeeded {
+            if (result.status == .succeeded || result.status == .rolledBack) {
                 Text("Verify the resulting configuration on the device. Command acknowledgment does not verify the deployed state.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -419,7 +420,7 @@ struct DiffPreviewSheet: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(deploying || preview == nil || (preview?.summary.modified == 0 && preview?.summary.added == 0))
                 .alert(
-                    "Deploy to \(hostLabel)?",
+                    "Send reviewed commands to \(hostLabel)?",
                     isPresented: $showingDeployConfirm
                 ) {
                     Button("Deploy", role: .destructive) {
@@ -428,7 +429,7 @@ struct DiffPreviewSheet: View {
                     Button("Cancel", role: .cancel) {}
                 } message: {
                     let summary = preview?.summary
-                    Text("\(summary?.added ?? 0) section(s) will be created and \(summary?.modified ?? 0) modified. A backup of the current config is taken automatically before pushing.")
+                    Text("\(summary?.added ?? 0) section(s) to add and \(summary?.modified ?? 0) to modify. Current configuration is backed up before sending. Backup replay may leave newer settings in place; verify the device afterward.")
                 }
             }
         }
@@ -442,13 +443,14 @@ struct DiffPreviewSheet: View {
         loading = true
         loadError = nil
         defer { loading = false }
-        let result = await appState.diffPreview(
-            hostId: hostId,
-            templateId: templateId,
-            customerSlug: customerSlug,
-            siteId: siteId,
-            extras: extras
-        )
+        let result: AppState.DiffPreviewResult?
+        if let deploymentId = restoreDeploymentId {
+            result = await appState.restorePreview(hostId: hostId, deploymentId: deploymentId,
+                customerSlug: customerSlug, siteId: siteId)
+        } else {
+            result = await appState.diffPreview(hostId: hostId, templateId: templateId,
+                customerSlug: customerSlug, siteId: siteId, extras: extras)
+        }
         if let result {
             preview = result
         } else {

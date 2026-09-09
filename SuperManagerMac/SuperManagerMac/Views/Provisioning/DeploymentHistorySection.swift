@@ -21,8 +21,6 @@ struct DeploymentHistorySection: View {
 
     @State private var expandedDeploymentId: String?
     @State private var pendingRollback: Deployment?
-    @State private var rollingBack = false
-    @State private var statusBanner: String?
 
     private var deployments: [Deployment] {
         appState.deploymentHistory[hostId] ?? []
@@ -31,14 +29,6 @@ struct DeploymentHistorySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
-            if let banner = statusBanner {
-                Text(banner)
-                    .font(.callout)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.tint.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
             if deployments.isEmpty {
                 emptyState
             } else {
@@ -56,23 +46,10 @@ struct DeploymentHistorySection: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(.separator, lineWidth: 0.5)
         )
-        .alert(
-            "Restore previous configuration?",
-            isPresented: Binding(
-                get: { pendingRollback != nil },
-                set: { if !$0 { pendingRollback = nil } }
-            ),
-            presenting: pendingRollback
-        ) { deployment in
-            Button("Restore", role: .destructive) {
-                Task { await performRollback(deployment) }
-            }
-            Button("Cancel", role: .cancel) {
-                pendingRollback = nil
-            }
-        } message: { deployment in
-            let timestamp = deployment.startedAt.formatted(date: .abbreviated, time: .shortened)
-            Text("Pushes the pre-deploy backup from \(timestamp) back to \(hostLabel) over SSH. This sends the backup commands; it may leave newer settings in place. Verify the resulting configuration independently.")
+        .sheet(item: $pendingRollback) { deployment in
+            DiffPreviewSheet(hostId: hostId, hostLabel: hostLabel,
+                templateId: deployment.templateId, customerSlug: deployment.customerSlug,
+                siteId: deployment.siteId, restoreDeploymentId: deployment.id)
         }
         .task(id: hostId) {
             await appState.loadDeploymentHistory(hostId: hostId)
@@ -257,19 +234,17 @@ struct DeploymentHistorySection: View {
                     Button(role: .destructive) {
                         pendingRollback = deployment
                     } label: {
-                        if rollingBack {
-                            HStack(spacing: 4) {
-                                ProgressView().controlSize(.small)
-                                Text("Restoring…")
-                            }
-                        } else {
-                            Label("Restore from backup", systemImage: "arrow.uturn.backward")
-                        }
+                        Label("Preview backup restore", systemImage: "arrow.uturn.backward")
                     }
                     .controlSize(.small)
-                    .disabled(rollingBack)
+                    .disabled(deployment.backupSha256 == nil)
+                    .help("Requires a backup with a captured target and integrity digest.")
                 }
                 .padding(.top, 4)
+                if deployment.backupSha256 == nil {
+                    Text("Legacy backup: target and integrity were not recorded. Automated restore is unavailable.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -282,25 +257,4 @@ struct DeploymentHistorySection: View {
         return "\(m)m \(s)s"
     }
 
-    private func performRollback(_ deployment: Deployment) async {
-        pendingRollback = nil
-        guard let backupPath = deployment.backupPath else { return }
-        rollingBack = true
-        defer { rollingBack = false }
-        let result = await appState.rollbackDeployment(
-            hostId: deployment.hostId,
-            backupPath: backupPath
-        )
-        if let result {
-            statusBanner = result.status == .rolledBack
-                ? "\(result.outcomeDescription) — \(result.progressDescription). Verify the resulting device configuration."
-                : "Restore failed: \(result.error ?? "unknown error")"
-        } else {
-            statusBanner = "Restore failed."
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(10))
-            statusBanner = nil
-        }
-    }
 }

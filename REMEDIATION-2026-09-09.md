@@ -82,7 +82,7 @@ This batch makes the reviewed-plan path substantially safer, but is not producti
 
 ## Third batch — bounded SSH command acknowledgment and honest outcomes
 
-**Git status:** work remains local and uncommitted; nothing from these remediation batches has been pushed to `origin`.
+**Git status at completion of this batch:** work was local and uncommitted. See the fourth batch below for publication.
 
 ### Changes
 
@@ -112,3 +112,34 @@ Logs: `/tmp/supermanager-third-tests-final.log`, `/tmp/supermanager-third-shell-
 SM-06 is **partially remediated**, not closed in full. Tests use an injected transport to exercise the production driver; no live FortiGate/firmware matrix or local SSH-server integration was run. Prompt acknowledgment cannot prove device state, defeat a lying device, or make command replay transactional. Unrecognized firmware/prompt formats may now abort and require explicit support.
 
 Independent readback, confirmed timed rollback, safe backup-source/target binding, durable progress during crashes, cancellation cleanup and reconciliation of interrupted operations remain open. The existing rollback RPC still needs the same reviewed-plan/scope protections as deployment. Linux's separate SSH implementation is unchanged. Privileged helper/service authorization and the other P0 security issues remain production blockers.
+
+## Fourth batch — reviewed, target-bound backup replay
+
+### Publication
+
+Batches 1–3 were committed as `d1f2109` and pushed to `origin/fix/audit-remediation-20260909`. This fourth batch is prepared on the same remediation branch. `main` and the existing feature branch are not overwritten. A separate worktree excludes the user's pre-remediation local edits; those remain in the original workspace. The audit report/raw evidence remain local and are not part of these code-fix commits.
+
+### Changes
+
+- Disabled direct `provisioning_rollback {host_id, backup_path}` execution. It now returns `INVALID_PARAMS` and requires a reviewed restore plan.
+- Added `provisioning_restore_preview {host_id, deployment_id, customer_slug, site_id}`. It loads a registered deployment, checks its record ID and host/customer/site, validates current membership, and requires the host to match the target snapshot captured with the backup.
+- New deployment records retain a host snapshot, the pre-operation backup's SHA-256 and, for restores, the source deployment ID. Backup contents must match the stored digest. This detects changed/corrupted backups; it is not a signature against an attacker able to rewrite both the backup and its private metadata.
+- Restore sources must be regular files in the selected host's backup directory. Reads are size-bounded; Unix opens use `O_NOFOLLOW | O_NONBLOCK`, rejecting final symlinks and avoiding FIFO hangs. Metadata is checked before reading contents. Added direct `libc` dependency for these platform flags; Cargo.lock adds only the existing libc dependency edge, without a version upgrade.
+- Restore preview captures the verified backup text in the same bounded, expiring, single-use plan registry as deployment. Editing the source file after preview cannot change the commands deployed. Execution rechecks host/customer/live state, shares the endpoint lease, takes a fresh backup on the same connection, and uses the acknowledged shell driver. Successful command replay records `rolled_back` plus source provenance; it does not claim verified restoration.
+- Deployment history files now use private temporary files, sync and atomic replacement. Newly created/replaced records are mode 0600 on Unix. History loading filters records whose host ID contradicts the requested directory.
+- macOS Restore opens the shared diff/full-command preview instead of executing from a file path. Legacy backups without target/digest metadata are disabled with an explanation. Any host-record change since backup also blocks automated restore; no unsafe override or automatic rebinding is introduced.
+- The prompt-per-line driver cannot handle multiline quoted certificate/key values. It now preflights all command lines and rejects these unsupported forms before the first command is sent; preview plans also reject them. Remaining disconnect waits in provisioning are bounded.
+
+### Validation
+
+- Selected full Rust suite: **468 passed** (198 core, 259 engine, 9 RPC integration, 2 portable Windows argument tests), plus the subprocess helper exercised by its parent test.
+- New tests cover wrong host/customer/site, changed endpoint, missing legacy metadata, other-host backup directories, changed contents, symlinks/FIFOs/non-regular files, bounded reads, private atomic record replacement, immutable restore approval after file edits, and rejection of direct rollback/path-traversal RPC inputs.
+- Multiline quoted commands are rejected before any write. Existing scope, replay, acknowledgment, secret-store and host-trust tests continue to pass.
+- **14 isolated Swift tests passed**; macOS app/test-bundle compilation passed in an isolated unsigned project. Rust bundling scripts were omitted for that Swift compilation; this does not validate an installer or live device interaction.
+- Clippy uses the same selected packages/all-targets/lint policy as preceding batches. `git diff --check` passes. The original pre-remediation user diff still reverse-applies in check-only mode.
+
+Logs: `/tmp/supermanager-fourth-tests-final.log`, `/tmp/supermanager-fourth-swift-tests.log`, `/tmp/supermanager-fourth-clippy.log`, `/tmp/supermanager-fourth-xcode.log`. Publication-worktree verification is logged separately under `/tmp/supermanager-publish-fourth-*`.
+
+### Remaining limits
+
+This is reviewed backup **command replay**, not a complete replacement transaction. New settings may remain, and readback verification, confirmed timed rollback, crash/cancellation reconciliation and firmware-specific multiline handling still need implementation and live-device tests. Older backups require manual inspection/recovery because their historical target cannot be established safely. Host records are not cryptographic device/customer identities. Administrative helper/service authorization and other audit P0 issues remain open.

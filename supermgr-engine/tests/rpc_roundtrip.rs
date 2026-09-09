@@ -196,3 +196,19 @@ async fn deploy_requires_server_owned_approval_and_rejects_unknown_plan() {
     assert_eq!(unknown["id"], 88);
     assert!(unknown["error"]["message"].as_str().unwrap().contains("Preview unavailable"));
 }
+
+#[tokio::test]
+async fn legacy_rollback_and_malformed_restore_previews_cannot_execute() {
+    let (_dir, socket) = spawn_server().await;
+    let old = rpc_call(&socket, "provisioning_rollback", json!({
+        "host_id":uuid::Uuid::new_v4(), "backup_path":"/tmp/arbitrary-commands.conf"
+    }), 91).await;
+    assert_eq!(old["id"], 91);
+    assert_eq!(old["error"]["code"], -32602);
+    assert!(old["error"]["message"].as_str().unwrap().contains("Direct rollback is disabled"));
+    let bad = rpc_call(&socket, "provisioning_restore_preview", json!({
+        "host_id":uuid::Uuid::new_v4(), "deployment_id":"../../outside", "customer_slug":"acme", "site_id":"hq"
+    }), 92).await;
+    assert_eq!(bad["id"], 92);
+    assert_eq!(bad["error"]["code"], -32602);
+}
