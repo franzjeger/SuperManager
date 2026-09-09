@@ -74,7 +74,13 @@ if [[ ! -x "${SRC_TS}" || ! -x "${SRC_TSD}" ]]; then
 fi
 
 # 2. Record the bundled version for diagnostics. Signing is never cached.
-TS_VERSION="$("${SRC_TS}" version --short 2>/dev/null || echo unknown)"
+# `version --short` was removed in newer clients. The first line of the
+# stable human-readable output is the semantic version on all supported
+# releases (for example `1.102.3`).
+TS_VERSION="$("${SRC_TS}" version 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+if [[ -z "${TS_VERSION}" ]]; then
+    TS_VERSION="unknown"
+fi
 STAMP_FILE="${DEST_DIR}/.version"
 # Never skip the signing step based on a version stamp: an earlier unsigned
 # build may have populated the same cache. Recopy and re-sign on this build.
@@ -86,6 +92,7 @@ STAMP_FILE="${DEST_DIR}/.version"
 cp -L "${SRC_TS}"  "${DEST_DIR}/tailscale"
 cp -L "${SRC_TSD}" "${DEST_DIR}/tailscaled"
 chmod 0755 "${DEST_DIR}/tailscale" "${DEST_DIR}/tailscaled"
+echo "${TS_VERSION}" > "${STAMP_FILE}"
 
 # 4. Strip macOS quarantine, just in case Homebrew's bottle was
 # downloaded with curl(1) and inherited the attribute.
@@ -127,5 +134,4 @@ codesign --force \
     --identifier "com.sybr.supermanager.tailscaled" \
     "${DEST_DIR}/tailscaled"
 
-echo "${TS_VERSION}" > "${STAMP_FILE}"
 echo "Bundled Tailscale ${TS_VERSION} into $(basename "${APP}")."

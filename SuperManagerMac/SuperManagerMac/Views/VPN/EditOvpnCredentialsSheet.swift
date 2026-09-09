@@ -26,7 +26,7 @@ struct EditOvpnCredentialsSheet: View {
             Text("OpenVPN credentials")
                 .font(.headline)
 
-            Text("Stored in the macOS Keychain (Data Protection Keychain). Sent to the privileged helper at connect time only.")
+            Text("Stored in the macOS login Keychain. Sent to the privileged helper at connect time only.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -67,7 +67,7 @@ struct EditOvpnCredentialsSheet: View {
     }
 
     private func load() {
-        // Pre-fill with whatever's already in DPK so the user knows
+        // Pre-fill with whatever is already in the Keychain so the user knows
         // what's stored. Missing values just leave the field empty.
         username = (try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username")) ?? ""
         password = (try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")) ?? ""

@@ -8,7 +8,7 @@ import Security
 /// ## Storage
 ///
 /// We store a PBKDF2-SHA256 *hash* of the password — never the plaintext
-/// — in the Data Protection Keychain under
+/// — in the user's macOS login Keychain under
 /// `com.sybr.supermanager.masterpassword` with account `default`. The
 /// hash record is:
 ///
@@ -72,10 +72,20 @@ enum MasterPassword {
     /// Whether a master password has ever been set on this device.
     /// Cheap (one `SecItemCopyMatching` with `kSecMatchLimitOne`).
     static var isSet: Bool {
-        var q = baseQuery()
+        var q = loginKeychainQuery()
         q[kSecReturnAttributes as String] = false
         q[kSecMatchLimit as String] = kSecMatchLimitOne
-        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+        if SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess {
+            return true
+        }
+
+        // Preserve development installs that stored the record in DPK
+        // before release builds switched to the entitlement-free backend.
+        guard canAccessOldDataProtectionKeychain else { return false }
+        var old = oldDataProtectionQuery()
+        old[kSecReturnAttributes as String] = false
+        old[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(old as CFDictionary, nil) == errSecSuccess
     }
 
     /// Set or replace the master password. The plaintext is consumed
@@ -99,31 +109,44 @@ enum MasterPassword {
     /// Remove the master password entirely. Caller is responsible for
     /// clearing `requireMasterPassword` in `AppSettings` afterwards.
     static func remove() throws {
-        let q = baseQuery()
-        let status = SecItemDelete(q as CFDictionary)
+        let status = SecItemDelete(loginKeychainQuery() as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw Error.keychain(status, "delete")
+        }
+        // Best-effort cleanup of records written by old development builds.
+        if canAccessOldDataProtectionKeychain {
+            SecItemDelete(oldDataProtectionQuery() as CFDictionary)
         }
     }
 
     // MARK: - Keychain plumbing
 
-    private static func baseQuery() -> [String: Any] {
+    /// The notarised app has no `keychain-access-groups` entitlement, so
+    /// its primary backend must be the regular login Keychain. Internal so
+    /// a regression test can keep the release query entitlement-free.
+    static func loginKeychainQuery() -> [String: Any] {
         [
             kSecClass as String:                kSecClassGenericPassword,
             kSecAttrService as String:          service,
             kSecAttrAccount as String:          account,
-            // Same DPK opt-in as VPNKeychain — without it we'd land in
-            // the legacy keychain whose ACL is cdhash-pinned and
-            // re-prompts on every rebuild.
-            kSecUseDataProtectionKeychain as String: true,
-            kSecAttrAccessible as String:       kSecAttrAccessibleWhenUnlocked,
         ]
+    }
+
+    private static func oldDataProtectionQuery() -> [String: Any] {
+        var query = loginKeychainQuery()
+        query[kSecUseDataProtectionKeychain as String] = true
+        return query
+    }
+
+    private static var canAccessOldDataProtectionKeychain: Bool {
+        guard let task = SecTaskCreateFromSelf(nil) else { return false }
+        return SecTaskCopyValueForEntitlement(
+            task, "keychain-access-groups" as CFString, nil) != nil
     }
 
     private static func store(record: Data) throws {
         // Try update first; fall back to add. Same pattern as VPNKeychain.set.
-        let query = baseQuery()
+        let query = loginKeychainQuery()
         let update: [String: Any] = [kSecValueData as String: record]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecSuccess { return }
@@ -138,13 +161,33 @@ enum MasterPassword {
     }
 
     private static func fetchRecord() throws -> Data {
-        var q = baseQuery()
+        var q = loginKeychainQuery()
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: AnyObject?
         let status = SecItemCopyMatching(q as CFDictionary, &out)
-        guard status == errSecSuccess, let data = out as? Data else {
+        if status == errSecSuccess, let data = out as? Data {
+            return data
+        }
+        guard status == errSecItemNotFound else {
             throw Error.keychain(status, "fetch")
+        }
+        guard canAccessOldDataProtectionKeychain else {
+            throw Error.keychain(status, "fetch")
+        }
+
+        var old = oldDataProtectionQuery()
+        old[kSecReturnData as String] = true
+        old[kSecMatchLimit as String] = kSecMatchLimitOne
+        var oldOut: AnyObject?
+        let oldStatus = SecItemCopyMatching(old as CFDictionary, &oldOut)
+        guard oldStatus == errSecSuccess, let data = oldOut as? Data else {
+            throw Error.keychain(status, "fetch")
+        }
+
+        // Return the record even if its one-time move cannot be completed.
+        if (try? store(record: data)) != nil {
+            SecItemDelete(oldDataProtectionQuery() as CFDictionary)
         }
         return data
     }

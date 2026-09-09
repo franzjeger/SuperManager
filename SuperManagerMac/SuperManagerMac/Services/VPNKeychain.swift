@@ -1,46 +1,22 @@
 import Foundation
 import Security
 
-/// Stores VPN credentials in the macOS **Data Protection Keychain**.
+/// Stores VPN credentials in the user's macOS login Keychain.
 ///
-/// ## Why DPK
+/// ## Why the login Keychain
 ///
-/// macOS exposes two keychains. The **legacy file-based keychain** pins
-/// every item to the calling app's *cdhash*; every ad-hoc rebuild gives
-/// you a fresh cdhash, the OS treats it as a different process, and the
-/// user gets the "Type your login password to allow access" prompt on
-/// every read. Unworkable for development.
+/// Data Protection Keychain requires `keychain-access-groups`. The
+/// notarised Developer ID build deliberately ships without that restricted
+/// entitlement because it has no matching distribution provisioning
+/// profile. Passing `kSecUseDataProtectionKeychain: true` from that build
+/// therefore fails every write with `errSecMissingEntitlement` (-34018).
 ///
-/// The **Data Protection Keychain** (the one iOS has always used,
-/// ported to macOS in 10.15) replaces cdhash pinning with **access
-/// groups** keyed on the bundle id, which is stable across rebuilds.
-/// Items are file-system-encrypted on disk and only readable while the
-/// user's session is unlocked.
-///
-/// To opt into DPK we need two things:
-///
-/// 1. `kSecUseDataProtectionKeychain: true` on every SecItem call.
-/// 2. A `keychain-access-groups` entitlement on the signed bundle.
-///    Without it, every SecItem call returns
-///    `errSecMissingEntitlement` (-34018).
-///
-/// The entitlement is gated on the binary being signed with an explicit
-/// **App ID**. Per Apple DTS Quinn: *"To use the data protection
-/// keychain your app must be signed with an App ID."* Two ways to get
-/// one:
-///
-/// - **Paid Apple Developer Program** — issues full Developer ID + App
-///   IDs at will. We have one pending KYC verification (pass + Sybr AS
-///   firmaattest still under Apple's review).
-/// - **Free Apple ID via Xcode "Personal Team"** — Xcode synthesises
-///   an App ID for the project, but only when the project carries a
-///   capability that triggers it. Quinn explicitly cites Maps:
-///   adding it to Signing & Capabilities forces App ID creation.
-///   That entitles `keychain-access-groups`, which is what we need.
-///
-/// We're using the second path while the paid enrollment processes.
-/// Once Developer ID lands, the entitlement is the same — just signed
-/// with a stronger identity. No code changes.
+/// The regular login Keychain does not require that entitlement. It is
+/// still encrypted and access-controlled by macOS, and a stable Developer
+/// ID signature keeps access intact across application updates. Older
+/// development builds wrote to Data Protection Keychain, so reads include
+/// a one-time best-effort migration from that store when the entitlement is
+/// available.
 enum VPNKeychain {
     /// Keychain `service` string. Combined with `account` it forms the
     /// unique key for each item.
@@ -63,30 +39,38 @@ enum VPNKeychain {
         }
     }
 
-    /// Common attributes for every Data-Protection-Keychain query we issue.
-    /// Centralised so changing accessibility (e.g. raising it to
-    /// `WhenUnlockedThisDeviceOnly`) only happens in one place.
-    private static func baseQuery(account: String) -> [String: Any] {
+    /// Common attributes for the production-safe login Keychain.
+    /// Internal so tests can assert that the release path never silently
+    /// opts back into Data Protection Keychain.
+    static func loginKeychainQuery(account: String) -> [String: Any] {
         [
             kSecClass as String:                kSecClassGenericPassword,
             kSecAttrService as String:          service,
             kSecAttrAccount as String:          account,
-            // The fix: items live in the modern data-protection keychain.
-            // Without this flag SecItem* drops into the legacy file-based
-            // keychain (cdhash-pinned ACLs, prompt on every rebuild).
-            kSecUseDataProtectionKeychain as String: true,
-            // Items are readable while the user is logged in. We don't
-            // need them to migrate to a different Mac via backup-restore,
-            // so plain `WhenUnlocked` is the right knob (not the
-            // ThisDeviceOnly variant — for VPN passwords roaming via
-            // iCloud Keychain is actually a feature, not a hazard).
-            kSecAttrAccessible as String:       kSecAttrAccessibleWhenUnlocked,
         ]
+    }
+
+    /// Query used only to recover values written by entitlement-equipped
+    /// development builds before the production backend was corrected.
+    private static func oldDataProtectionQuery(account: String) -> [String: Any] {
+        var query = loginKeychainQuery(account: account)
+        query[kSecUseDataProtectionKeychain as String] = true
+        return query
+    }
+
+    /// Avoid even querying DPK from the production build. Besides being
+    /// pointless, doing so produces the same -34018 we are protecting the
+    /// user from. Development builds signed with the access group return a
+    /// non-nil entitlement value and may perform the legacy migration.
+    private static var canAccessOldDataProtectionKeychain: Bool {
+        guard let task = SecTaskCreateFromSelf(nil) else { return false }
+        return SecTaskCopyValueForEntitlement(
+            task, "keychain-access-groups" as CFString, nil) != nil
     }
 
     /// Store or replace a generic-password item keyed by `account`.
     static func set(_ data: Data, account: String) throws {
-        let query = baseQuery(account: account)
+        let query = loginKeychainQuery(account: account)
         let update: [String: Any] = [kSecValueData as String: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecSuccess { return }
@@ -104,16 +88,37 @@ enum VPNKeychain {
 
     /// Fetch the raw value data for an item.
     static func getData(account: String) throws -> Data {
-        var query = baseQuery(account: account)
+        var query = loginKeychainQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess else {
+        if status == errSecSuccess, let data = result as? Data {
+            return data
+        }
+        guard status == errSecItemNotFound else {
             throw KeychainError.osStatus(status, "copy")
         }
-        guard let data = result as? Data else {
-            throw KeychainError.missingReference
+        guard canAccessOldDataProtectionKeychain else {
+            throw KeychainError.osStatus(status, "copy")
+        }
+
+        // One-time migration for credentials created by an older
+        // development build.
+        var oldQuery = oldDataProtectionQuery(account: account)
+        oldQuery[kSecReturnData as String] = true
+        oldQuery[kSecMatchLimit as String] = kSecMatchLimitOne
+        var oldResult: AnyObject?
+        let oldStatus = SecItemCopyMatching(oldQuery as CFDictionary, &oldResult)
+        guard oldStatus == errSecSuccess else {
+            throw KeychainError.osStatus(status, "copy")
+        }
+        guard let data = oldResult as? Data else { throw KeychainError.missingReference }
+
+        // Return the recovered value even if migration itself cannot be
+        // completed. Never trade access to a credential for cleanup.
+        if (try? set(data, account: account)) != nil {
+            SecItemDelete(oldDataProtectionQuery(account: account) as CFDictionary)
         }
         return data
     }
@@ -130,8 +135,12 @@ enum VPNKeychain {
 
     /// Delete an item. Missing items are ignored.
     static func delete(account: String) {
-        let query = baseQuery(account: account)
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(loginKeychainQuery(account: account) as CFDictionary)
+        // Best-effort cleanup of the pre-fix development store. Production
+        // builds never query the entitlement-protected backend.
+        if canAccessOldDataProtectionKeychain {
+            SecItemDelete(oldDataProtectionQuery(account: account) as CFDictionary)
+        }
     }
 
     /// Every account name this app stores for one profile.

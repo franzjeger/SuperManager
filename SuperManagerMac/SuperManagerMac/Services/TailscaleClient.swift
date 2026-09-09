@@ -135,6 +135,32 @@ enum TailscaleClient {
         )?.path
     }
 
+    /// Version of the daemon shipped inside this SuperManager build.
+    /// The CLI and daemon are copied from the same Homebrew formula, but we
+    /// interrogate the daemon itself so a stale/missing build stamp can never
+    /// make the updater report the wrong version.
+    static func bundledDaemonVersion() async -> String? {
+        guard let path = bundledDaemonPath else { return nil }
+        return await executableVersion(at: path)
+    }
+
+    /// Version currently installed as SuperManager's root LaunchDaemon.
+    /// Reading `--version` is intentionally independent of the daemon socket,
+    /// so the settings UI can still offer Repair/Reinstall when launchd has
+    /// stopped the service.
+    static func installedDaemonVersion() async -> String? {
+        await executableVersion(at: "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscaled")
+    }
+
+    private static func executableVersion(at path: String) async -> String? {
+        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        let url = URL(fileURLWithPath: path)
+        guard let output = try? await runTask(bin: url, args: ["--version"]) else {
+            return nil
+        }
+        return TailscaleVersion.normalized(output)
+    }
+
     /// Whether Tailscale is even installed. UI uses this to decide
     /// between rendering the peer list vs. an "Install Tailscale"
     /// empty state.
@@ -419,15 +445,6 @@ enum TailscaleClient {
         try await runSet(["--hostname=\(hostname)"])
     }
 
-    /// Toggle the daemon's auto-update behaviour. Tailscale's
-    /// auto-update only works for installs from the Tailscale
-    /// installer — Homebrew + App Store builds ignore this flag and
-    /// the daemon will print a hint. We expose the toggle anyway so
-    /// users on the official installer have somewhere to set it.
-    static func setAutoUpdate(_ on: Bool) async throws {
-        try await runSet(["--auto-update=\(on)"])
-    }
-
     /// Round-trip latency to a peer (in milliseconds, parsed from
     /// `tailscale ping <ip> --c=1`). Returns nil on timeout.
     /// Useful for "is this peer actually reachable" diagnostics in
@@ -492,5 +509,50 @@ enum TailscaleClient {
             }
             return outString
         }.value
+    }
+}
+
+/// Comparison helpers for Tailscale's `1.102.3-t<commit>` version strings.
+/// Kept pure so update decisions are unit-testable without a live daemon.
+enum TailscaleVersion {
+    static func normalized(_ raw: String) -> String? {
+        guard let token = raw
+            .split(whereSeparator: { $0.isWhitespace })
+            .first
+            .map(String.init)
+        else { return nil }
+
+        let withoutPrefix = token.hasPrefix("v") ? String(token.dropFirst()) : token
+        let stablePart = withoutPrefix.split(separator: "-", maxSplits: 1).first.map(String.init)
+            ?? withoutPrefix
+        return components(stablePart) == nil ? nil : stablePart
+    }
+
+    static func isNewer(_ candidate: String?, than installed: String?) -> Bool {
+        guard let candidate,
+              let installed,
+              let lhs = components(candidate),
+              let rhs = components(installed)
+        else { return false }
+
+        let width = max(lhs.count, rhs.count)
+        for index in 0..<width {
+            let left = index < lhs.count ? lhs[index] : 0
+            let right = index < rhs.count ? rhs[index] : 0
+            if left != right { return left > right }
+        }
+        return false
+    }
+
+    private static func components(_ version: String) -> [Int]? {
+        let stablePart = version
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "-", maxSplits: 1)
+            .first
+            .map(String.init) ?? version
+        let pieces = stablePart.split(separator: ".", omittingEmptySubsequences: false)
+        guard !pieces.isEmpty else { return nil }
+        let numbers = pieces.compactMap { Int($0) }
+        return numbers.count == pieces.count ? numbers : nil
     }
 }
