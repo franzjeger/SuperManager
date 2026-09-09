@@ -100,6 +100,16 @@ struct AzureSignInSheet: View {
     /// falls back to the full PKCE browser flow if no fresh
     /// refresh-token is cached.
     private func begin() async {
+        do {
+            let runtime = try await HelperClient.shared.runtimeStatus()
+            guard runtime["openvpn3_available"] as? Bool == true else {
+                phase = .error("Install the current signed VPN system package with OpenVPN 3 before signing in to Azure.")
+                return
+            }
+        } catch {
+            phase = .error("VPN system components are unavailable: \(error.localizedDescription)")
+            return
+        }
         DebugLog.write("[AzureSignIn] BEGIN profileId=\(profileId) tenant=\(summary.tenantId.prefix(8))… audience=\(summary.clientId.prefix(8))…")
         phase = .awaitingBrowser
         task?.cancel()
@@ -178,32 +188,22 @@ struct AzureSignInSheet: View {
             return
         }
 
-        // /tmp instead of ~/Library/Caches: the privileged
-        // helper runs as root, but macOS TCC can block root
-        // processes from traversing user-Library paths
-        // (especially under privacy-protected directories), and
-        // the resulting `EPERM` when openvpn tries to read the
-        // config surfaces as a generic "openvpn refused to
-        // start" with an empty stderr — exactly what we just
-        // saw. /tmp is mode-1777 world-readable; both Mac (as
-        // user) and helper (as root) can read it without TCC
-        // friction. Same pattern production SuperManager Linux
-        // uses with /run/supermgrd/azure-<uuid>/.
-        let ovpnPath = URL(fileURLWithPath: "/tmp/supermgr-azure-\(profileId).ovpn")
+        // A random private directory avoids predictable filenames and leaves no
+        // staged configuration behind after success, failure or cancellation.
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("supermgr-azure-" + UUID().uuidString, isDirectory: true)
+        let ovpnPath = staging.appendingPathComponent("profile.ovpn")
         do {
-            try render.ovpnBody.write(to: ovpnPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: ovpnPath.path)
-            DebugLog.write("[AzureSignIn] wrote .ovpn to \(ovpnPath.path) (mode 0644)")
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false,
+                                                   attributes: [.posixPermissions: 0o700])
+            try Data(render.ovpnBody.utf8).write(to: ovpnPath, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: ovpnPath.path)
         } catch {
-            DebugLog.write("[AzureSignIn] failed to write \(ovpnPath.path): \(error)")
-            ActivityLog.shared.record(
-                profileId: profileId,
-                kind: .connectFailed,
-                message: "Azure VPN: stage .ovpn failed — \(error.localizedDescription)"
-            )
-            phase = .error("Couldn't stage the OpenVPN config on disk: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: staging)
+            phase = .error("Couldn't stage the OpenVPN config: \(error.localizedDescription)")
             return
         }
+        defer { try? FileManager.default.removeItem(at: staging) }
 
         let reachable = await HelperClient.shared.isReachable()
         guard reachable else {
@@ -230,7 +230,8 @@ struct AzureSignInSheet: View {
                 profileId: profileId,
                 configFile: ovpnPath.path,
                 username: token.username,
-                password: token.accessToken
+                password: token.accessToken,
+                engine: .openvpn3
             )
             DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?"), log_path=\(connectResult["log_path"] ?? "?")")
         } catch {

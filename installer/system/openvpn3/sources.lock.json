@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "sources": {
+    "asio": {
+      "url": "https://downloads.sourceforge.net/project/asio/asio/1.38.2%20%28Stable%29/asio-1.38.2.tar.bz2",
+      "sha256": "c04e0e66ac29741faad763a56f3c50196421d4b968009fc237c53314769bf8ad",
+      "version": "1.38.2",
+      "license": "BSL-1.0"
+    },
+    "fmt": {
+      "url": "https://codeload.github.com/fmtlib/fmt/tar.gz/refs/tags/12.2.0",
+      "sha256": "8b852bb5aa6e7d8564f9e81394055395dd1d1936d38dfd3a17792a02bebd7af0",
+      "version": "12.2.0",
+      "license": "MIT",
+      "verification": "All compiled include/ headers match the independently pinned 12.2.0 release ZIP"
+    },
+    "lz4": {
+      "url": "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+      "sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b",
+      "version": "1.10.0",
+      "license": "BSD-2-Clause"
+    },
+    "openvpn3": {
+      "url": "https://codeload.github.com/OpenVPN/openvpn3/tar.gz/87fd40bb583cc89787c0bf4da79744f0e6d02ac3",
+      "sha256": "0421965c14cbca109964e232e42717a3cb4b3e9183e7a9ecd4fd87b81e81bf02",
+      "version": "87fd40bb583cc89787c0bf4da79744f0e6d02ac3",
+      "license": "MPL-2.0 OR AGPL-3.0-only WITH openvpn3-openssl-exception"
+    }
+  }
+}

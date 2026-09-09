@@ -15,7 +15,7 @@ for path in / /Library /Library/PrivilegedHelperTools /Library/LaunchDaemons /Li
     protected_directory "$path" || { echo "Unsafe system directory: $path" >&2; exit 1; }
 done
 # Do not replace executables or configs underneath active network sessions.
-for process in SuperManagerMac openvpn charon wireguard-go; do
+for process in SuperManagerMac openvpn openvpn3 charon wireguard-go; do
     if pgrep -x "$process" >/dev/null; then
         echo "Quit $process and disconnect VPNs before installation." >&2; exit 1
     fi

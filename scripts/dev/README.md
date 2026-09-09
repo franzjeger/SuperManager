@@ -37,9 +37,15 @@ tunnels and arrange an explicit test window before stopping that service. Dev
 and stable share OS routing, DNS and IKE ports. This gate does not isolate them
 from unrelated VPN applications or a stable service restarted during a test.
 
-Azure profiles are copied, but **Azure VPN is unavailable**: the signed runtime
-does not yet package OpenVPN 3. Dev explains this before starting Microsoft
-sign-in. Tailscale's live machine identity/service is deliberately not shared;
+Azure VPN now uses the pinned, statically linked OpenVPN 3 runtime extension in
+`installer/system/openvpn3/`. The helper selects this engine explicitly for
+Azure; regular OpenVPN continues to use OpenVPN 2. Tokens cross a private stdin
+pipe, never argv or an authentication file. The UI checks runtime capability
+before Microsoft sign-in. Build the extension with `--dev` and package its
+returned runtime/manifest, not the base runtime. Existing stable/Dev networking
+exclusion still applies; this build does not disconnect existing customer VPNs.
+
+Tailscale's live machine identity/service is deliberately not shared;
 Tailscale install, recovery, exit routes, always-on and kill-switch RPCs are
 unavailable in this build. Existing signed-runtime restrictions on WireGuard
 DNS/Table/hooks/SaveConfig and external OpenVPN files/scripts also apply. Do not
@@ -96,7 +102,7 @@ plaintext credential export. Preferences start with the Dev bundle's defaults.
 
 ## Validation on 2026-09-09
 
-Native release Swift and Rust builds and all 83 helper tests passed. Five Python tests cover namespace
+Native release Swift and Rust builds and all 87 helper tests passed. Five Python tests cover namespace
 replacement, independent/private snapshots, no-overwrite, symlink rejection and
 source-layout drift. Installed the signed Dev package; verified the running
 separate launchd service, code signatures and GUI/engine connection. The GUI
@@ -105,3 +111,9 @@ login-Keychain copy completed without errors.
 No customer VPN connection was established as part of validation. Stable app
 and helper binaries were left untouched. These are local test artifacts, not a
 notarized public release.
+
+Azure extension verification: four compiled credential-adapter tests passed
+(size boundaries, control characters, stalled pipe timeout, argument rejection,
+and actual CLI configuration evaluation). The actual local Azure profile passed
+both the helper input validator and OpenVPN 3 evaluation. OpenVPN 3's crypto
+self-test passed. No live customer connection is claimed by these checks.

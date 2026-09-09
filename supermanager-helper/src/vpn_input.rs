@@ -101,6 +101,7 @@ pub fn openvpn(config: &str) -> Result<()> {
             "cipher",
             "data-ciphers",
             "data-ciphers-fallback",
+            "disable-dco",
             "auth-nocache",
             "auth-retry",
             "connect-retry",
@@ -132,6 +133,9 @@ pub fn openvpn(config: &str) -> Result<()> {
             bail!("Unsupported OpenVPN directive: {key}");
         }
         let rest: Vec<_> = fields.collect();
+        if key == "disable-dco" && !rest.is_empty() {
+            bail!("disable-dco does not accept arguments");
+        }
         if key == "auth-user-pass" && !rest.is_empty() {
             bail!("External OpenVPN credential files are forbidden");
         }

@@ -129,16 +129,20 @@ final class HelperClient {
     /// the daemon stored at `vpn_import_openvpn` time
     /// (`<data_dir>/ovpn/<id>.ovpn`). Username + password are passed
     /// only when the .ovpn declares `auth-user-pass`; otherwise omit.
+    enum OpenVPNEngine: String { case openvpn2, openvpn3 }
+
     @discardableResult
     func ovpnConnect(
         profileId: String,
         configFile: String,
         username: String? = nil,
-        password: String? = nil
+        password: String? = nil,
+        engine: OpenVPNEngine = .openvpn2
     ) async throws -> [String: Any] {
         var params: [String: Any] = [
             "profile_id": profileId,
             "config_file": configFile,
+            "engine": engine.rawValue,
         ]
         if let u = username { params["username"] = u }
         if let p = password { params["password"] = p }

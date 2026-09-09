@@ -49,8 +49,18 @@ const LOG_DIR: &str = "/private/var/log/supermanager";
 #[derive(Default)]
 pub struct OpenVpn {}
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OpenVpnEngine {
+    #[default]
+    Openvpn2,
+    Openvpn3,
+}
+
+#[derive(Deserialize)]
 pub struct OvpnConnectArgs {
+    #[serde(default)]
+    pub engine: OpenVpnEngine,
     pub profile_id: String,
     pub config_file: String,
     /// Optional credentials for `--auth-user-pass` profiles.
@@ -166,7 +176,11 @@ impl OpenVpn {
         for credential in [&args.username, &args.password].into_iter().flatten() {
             anyhow::ensure!(!credential.chars().any(char::is_control), "Credential contains control characters");
         }
-        let openvpn = locate_openvpn()?;
+        let openvpn = locate_openvpn(args.engine)?;
+        let is_v3 = args.engine == OpenVpnEngine::Openvpn3;
+        if is_v3 {
+            anyhow::ensure!(args.password.as_ref().is_some_and(|p| !p.is_empty() && p.len() <= 65536), "OpenVPN 3 requires a nonempty credential of at most 65536 bytes");
+        }
         // Run only the validated snapshot from a root-private directory.
         let directory = Path::new("/Library/PrivilegedHelperTools/SuperManagerVPNConfigs");
         crate::secure_files::ensure_root_directory(directory)?;
@@ -174,7 +188,7 @@ impl OpenVpn {
         crate::secure_files::write_private(&snapshot, content.as_bytes())?;
         let args = OvpnConnectArgs { profile_id: args.profile_id.clone(),
             config_file: snapshot.to_string_lossy().into_owned(),
-            username: args.username.clone(), password: args.password.clone() };
+            username: args.username.clone(), password: args.password.clone(), engine: args.engine };
         tracing::info!(
             "ovpn_connect: profile={} config={} openvpn={}",
             args.profile_id,
@@ -226,6 +240,8 @@ impl OpenVpn {
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
 
+        anyhow::ensure!(find_openvpn_pid_for(&safe).await.is_none(), "This OpenVPN profile is already running");
+
         // Truncate the log before spawn. Otherwise our post-spawn
         // diagnostic check (`FATAL.iter().find(|m| log_body.contains(m))`)
         // sees stale errors from previous failed attempts that
@@ -240,7 +256,7 @@ impl OpenVpn {
         // daemon."
         let _ = std::fs::remove_file(&pid_path);
 
-        let auth_path = if args.username.is_some() && args.password.is_some() {
+        let auth_path = if !is_v3 && args.username.is_some() && args.password.is_some() {
             let u = args.username.as_deref().unwrap();
             let p = args.password.as_deref().unwrap();
             tracing::info!(
@@ -254,98 +270,30 @@ impl OpenVpn {
             None
         };
 
-        // Build the argv. We dispatch on which binary we located:
-        //
-        //   2.x: `openvpn --config FILE --daemon NAME --writepid …`
-        //        (forks itself; we wait for the parent's exit code
-        //        and then poll the log for "Initialization Sequence
-        //        Completed".)
-        //
-        //   3.x: `openvpn3 --username U --password P CONFIG`
-        //        (the upstream `ovpncli` test client; runs in
-        //        FOREGROUND, no `--daemon` mode. We spawn it,
-        //        write our own PID file from the child's PID,
-        //        redirect its stdout/stderr to our log file, and
-        //        let it run as a child of this helper. On
-        //        disconnect we SIGTERM the PID like 2.x.)
-        let is_v3 = is_openvpn3(&openvpn);
-        tracing::info!("ovpn_connect: spawning {} (v3={})", openvpn.display(), is_v3);
+        // OpenVPN 3 reads its token from a bounded private stdin pipe. The
+        // signed adapter refuses --password arguments; no token file is created.
         let output = if is_v3 {
-            use std::os::unix::process::CommandExt as _;
-            // Open the log file for stdout+stderr redirection.
-            // ovpncli writes status to stderr; we merge both into
-            // one log so the GUI can `cat` it for diagnostics.
+            use tokio::io::AsyncWriteExt;
             let log_for_stdout = std::fs::OpenOptions::new()
-                .create(true).truncate(true).write(true)
-                .mode(0o644)
-                .open(&log_path)
-                .with_context(|| format!("open log {}", log_path.display()))?;
-            let log_for_stderr = log_for_stdout
-                .try_clone()
-                .context("dup log fd")?;
-
-            let user = args.username.as_deref().unwrap_or("AzureAD");
-            let pass = args.password.as_deref().unwrap_or("");
-
-            // KNOWN LIMITATION: the JWT shows up in `ps aux` /
-            // `/proc/<pid>/cmdline` because ovpncli only takes
-            // the password via `--password ARG`. We tried piping
-            // it through a PTY (ovpncli's `get_password()` uses
-            // `getpass(/dev/tty)`) but couldn't get the bytes
-            // delivered reliably — the write to master succeeded
-            // and `getpass()` returned an empty string. The
-            // upstream-clean fix is `--password-fd N` in ovpncli
-            // (see openvpn3 issue tracker); until then, the only
-            // mitigations are (a) keep tokens short-lived (Azure
-            // gives us 1h) and (b) trust the operator's machine.
-            let mut cmd = Command::new(&openvpn);
-            cmd.arg("--no-cert")           // Azure VPN auths via JWT in
-                                            // auth-user-pass — no client
-                                            // cert. Without this flag
-                                            // ovpncli aborts with
-                                            // `Missing External PKI alias`.
-                .arg("--username").arg(user)
-                .arg("--password").arg(pass)
-                .arg(&args.config_file)
-                .stdin(std::process::Stdio::null())
-                .stdout(log_for_stdout)
-                .stderr(log_for_stderr);
-            unsafe {
-                cmd.as_std_mut().pre_exec(|| {
-                    // New session — child won't get SIGHUP if the
-                    // helper restarts via deploy_self.
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-            let child = cmd.spawn().with_context(|| {
-                format!("spawn {} (ovpncli)", openvpn.display())
-            })?;
-            let pid = child.id().ok_or_else(|| anyhow!("ovpncli spawn returned no pid"))?;
-            tracing::info!(
-                "ovpn_connect: ovpncli spawned pid={} log={}",
-                pid,
-                log_path.display()
-            );
-            let _ = std::fs::write(&pid_path, format!("{pid}\n"));
-            // Reap the child asynchronously so it doesn't become
-            // a zombie if the user never disconnects.
-            tokio::spawn(async move {
-                let mut child = child;
-                let _ = child.wait().await;
-            });
-            // Auth file (if we created one) is unused by ovpncli
-            // — wipe it.
-            if let Some(ref auth) = auth_path {
-                let _ = std::fs::remove_file(auth);
-            }
-            // Synthesize a "spawn succeeded" Output so the
-            // post-spawn diagnostic path below (5s settle, fatal
-            // marker scan) covers the v3 case too.
+                .write(true).truncate(true).custom_flags(libc::O_NOFOLLOW)
+                .open(&log_path).context("open private OpenVPN log")?;
+            let log_for_stderr = log_for_stdout.try_clone().context("dup log fd")?;
+            let mut cmd = openvpn3_command(&openvpn, &args);
+            cmd.stdout(log_for_stdout).stderr(log_for_stderr).kill_on_drop(true);
+            let mut child = cmd.spawn().context("spawn managed OpenVPN 3")?;
+            let pid = child.id().ok_or_else(|| anyhow!("OpenVPN 3 spawn returned no pid"))?;
+            let mut input = child.stdin.take().context("OpenVPN 3 credential pipe missing")?;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                input.write_all(args.password.as_deref().unwrap_or("").as_bytes()).await?;
+                input.shutdown().await
+            }).await.context("OpenVPN 3 credential delivery timed out")?
+                .context("OpenVPN 3 credential delivery failed")?;
+            drop(input);
+            crate::secure_files::write_private(&pid_path, format!("{pid}\n").as_bytes())?;
+            tokio::spawn(async move { let _ = child.wait().await; });
             std::process::Output {
                 status: std::process::ExitStatus::from_raw(0),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+                stdout: Vec::new(), stderr: Vec::new(),
             }
         } else {
             let mut argv: Vec<String> = vec![
@@ -541,17 +489,8 @@ impl OpenVpn {
         let pid_path = pid_path_for(&safe);
         let mut killed: Vec<u32> = Vec::new();
 
-        if let Some(pid) = read_pid_file(&pid_path) {
-            // SIGTERM lets openvpn flush its log + run its
-            // `down` script, which is what we want.
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
-            killed.push(pid);
-        }
-
-        // Belt-and-braces: scan ps for any openvpn process whose
-        // argv carries this profile's daemon-name fingerprint and
-        // SIGTERM each. Idempotent — sending SIGTERM to a process
-        // that already exited (or doesn't exist) is a no-op for us.
+        // A PID file alone is insufficient: the PID may now belong to another
+        // process or another profile. Resolve ownership before sending a signal.
         let stragglers = collect_openvpn_pids_for(&safe).await;
         for pid in stragglers {
             if killed.contains(&pid) { continue; }
@@ -613,17 +552,8 @@ impl OpenVpn {
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
 
-        let live_pid: Option<u32> = match read_pid_file(&pid_path) {
-            Some(pid) if unsafe { libc::kill(pid as i32, 0) } == 0 => Some(pid),
-            Some(_) => {
-                // Stale file — clean up so subsequent polls don't
-                // keep finding it.
-                let _ = std::fs::remove_file(&pid_path);
-                None
-            }
-            None => None,
-        }
-        .or(find_openvpn_pid_for(&safe).await);
+        let live_pid = find_openvpn_pid_for(&safe).await;
+        if live_pid.is_none() { let _ = std::fs::remove_file(&pid_path); }
 
         let Some(pid) = live_pid else {
             return Ok(OvpnStatusResult {
@@ -970,21 +900,29 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// 2.x fallback paths exist for non-Azure profiles (regular
 /// OpenVPN servers don't care about 2.x vs 3.x) but should not
 /// be relied on for Azure VPN.
-fn locate_openvpn() -> anyhow::Result<PathBuf> {
+fn locate_openvpn(engine: OpenVpnEngine) -> anyhow::Result<PathBuf> {
     let root = Path::new("/Library/PrivilegedHelperTools/SuperManagerVPN");
     crate::secure_files::check_runtime_tree(root)?;
-    for name in ["bin/openvpn", "sbin/openvpn"] {
+    let names: &[&str] = match engine {
+        OpenVpnEngine::Openvpn2 => &["sbin/openvpn"],
+        OpenVpnEngine::Openvpn3 => &["bin/openvpn3"],
+    };
+    for name in names {
         let path = root.join(name);
         if path.is_file() { return Ok(path); }
     }
     Err(anyhow!("A managed root-owned OpenVPN runtime is required; user-writable Homebrew executables are not permitted"))
 }
 
-/// True when the located binary is OpenVPN 3.x. Used to switch
-/// to 3.x's session-start sub-command syntax when it's the only
-/// thing installed; 2.x is the default and validated path.
-fn is_openvpn3(bin: &Path) -> bool {
-    bin.file_name().and_then(|s| s.to_str()) == Some("openvpn3")
+/// Construct the sensitive process boundary separately so tests can inspect argv.
+fn openvpn3_command(binary: &Path, args: &OvpnConnectArgs) -> Command {
+    let mut command = Command::new(binary);
+    command.arg("--no-cert")
+        .arg("--username").arg(args.username.as_deref().unwrap_or("AzureAD"))
+        .arg("--password-stdin")
+        .arg(&args.config_file)
+        .stdin(std::process::Stdio::piped());
+    command
 }
 
 /// Sanitize a UUID into a filesystem-safe + length-bounded id that
@@ -1138,81 +1076,99 @@ fn read_pid_file(path: &Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// `ps` scan for ALL `openvpn` processes whose argv contains our
-/// per-profile daemon name. Used by disconnect to catch
-/// stragglers; status takes the first.
-async fn collect_openvpn_pids_for(safe: &str) -> Vec<u32> {
-    // Match on the bare profile id rather than the
-    // `supermgr-ovpn-` daemon-name prefix — that prefix only
-    // appears for openvpn 2.x in `--daemon` mode. ovpncli has
-    // no daemon-name argv, but the config-file path DOES carry
-    // the profile id (`/tmp/supermgr-azure-<id>.ovpn`), so a
-    // bare-id match catches both backends.
-    let needle = safe.to_string();
-    let mut out: Vec<u32> = Vec::new();
-    let output = match tokio::process::Command::new("/bin/ps")
-        .args(["-Ao", "pid,command"])
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return out,
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines().skip(1) {
-        if !line.contains(&needle) { continue; }
-        let mut parts = line.split_whitespace();
-        if let Some(pid_str) = parts.next() {
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                out.push(pid);
-            }
-        }
+/// Require both the managed executable and the exact session argument. A bare
+/// UUID can occur in another client's argv and is never process ownership.
+fn matches_openvpn_command(command: &str, safe: &str) -> bool {
+    let words: Vec<_> = command.split_whitespace().collect();
+    let Some(executable) = words.first().copied() else { return false; };
+    if executable == "/Library/PrivilegedHelperTools/SuperManagerVPN/sbin/openvpn" {
+        let name = format!("supermgr-ovpn-{safe}");
+        return words.windows(2).any(|pair| pair == ["--daemon", name.as_str()]);
     }
-    out
+    if executable == "/Library/PrivilegedHelperTools/SuperManagerVPN/bin/openvpn3" {
+        let Ok(uuid) = uuid::Uuid::parse_str(safe) else { return false; };
+        let config = format!("/Library/PrivilegedHelperTools/SuperManagerVPNConfigs/{}.ovpn", uuid.simple());
+        return words.contains(&config.as_str());
+    }
+    false
 }
 
-/// `ps` scan for an `openvpn` process whose argv contains our
-/// per-profile daemon name (`supermgr-ovpn-<safe>`). Returns the
-/// PID of the first match; None if no live process matches.
-///
-/// We look at argv rather than process name because openvpn calls
-/// itself "openvpn" regardless of which profile it's running. The
-/// daemon-name string is the per-profile fingerprint we wrote into
-/// the `--daemon` flag in `connect`.
+fn has_managed_executable(pid: u32) -> bool {
+    let mut path = [0u8; 4096];
+    let length = unsafe { libc::proc_pidpath(pid as i32, path.as_mut_ptr().cast(), path.len() as u32) };
+    if length <= 0 { return false; }
+    let end = path.iter().position(|b| *b == 0).unwrap_or(path.len());
+    matches!(std::str::from_utf8(&path[..end]),
+        Ok("/Library/PrivilegedHelperTools/SuperManagerVPN/sbin/openvpn") |
+        Ok("/Library/PrivilegedHelperTools/SuperManagerVPN/bin/openvpn3"))
+}
+
+async fn collect_openvpn_pids_for(safe: &str) -> Vec<u32> {
+    let Ok(Ok(output)) = tokio::time::timeout(std::time::Duration::from_secs(3),
+        Command::new("/bin/ps").args(["-Ao", "pid,command"]).output()).await
+    else { return Vec::new(); };
+    if !output.status.success() { return Vec::new(); }
+    String::from_utf8_lossy(&output.stdout).lines().skip(1).filter_map(|line| {
+        let line = line.trim_start();
+        let boundary = line.find(char::is_whitespace)?;
+        let pid: u32 = line[..boundary].parse().ok()?;
+        (matches_openvpn_command(line[boundary..].trim_start(), safe) && has_managed_executable(pid)).then_some(pid)
+    }).collect()
+}
+
 async fn find_openvpn_pid_for(safe: &str) -> Option<u32> {
-    // Match on the bare profile id rather than the
-    // `supermgr-ovpn-` daemon-name prefix — that prefix only
-    // appears for openvpn 2.x in `--daemon` mode. ovpncli has
-    // no daemon-name argv, but the config-file path DOES carry
-    // the profile id (`/tmp/supermgr-azure-<id>.ovpn`), so a
-    // bare-id match catches both backends.
-    let needle = safe.to_string();
-    let output = tokio::process::Command::new("/bin/ps")
-        .args(["-Ao", "pid,command"])
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines().skip(1) {
-        if !line.contains(&needle) {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        if let Some(pid_str) = parts.next() {
-            if let Ok(pid) = pid_str.parse::<u32>() {
-                return Some(pid);
-            }
-        }
-    }
-    None
+    collect_openvpn_pids_for(safe).await.into_iter().next()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn openvpn3_credentials_never_enter_process_arguments() {
+        let args = OvpnConnectArgs {
+            profile_id: "26b4fcc6-097a-41e7-932e-9a6d2a4663e5".into(),
+            config_file: "/managed/profile.ovpn".into(),
+            username: Some("test-user".into()), password: Some("DO-NOT-LEAK-TOKEN".into()),
+            engine: OpenVpnEngine::Openvpn3,
+        };
+        let cmd = openvpn3_command(Path::new("/managed/openvpn3"), &args);
+        let argv: Vec<_> = cmd.as_std().get_args().collect();
+        assert!(argv.contains(&std::ffi::OsStr::new("--password-stdin")));
+        assert!(!argv.contains(&std::ffi::OsStr::new("--password")));
+        assert!(argv.iter().all(|v| !v.to_string_lossy().contains("DO-NOT-LEAK-TOKEN")));
+        assert_eq!(cmd.as_std().get_envs().count(), 0);
+    }
+
+    #[test]
+    fn azure_rendered_directives_pass_the_privilege_boundary() {
+        let config = "client\ndev tun\nproto tcp\nremote vpn.example.test 443\ndisable-dco\nauth SHA256\ncipher AES-256-GCM\ndata-ciphers AES-256-GCM\nauth-user-pass\nremote-cert-tls server\n<ca>\ntest-certificate\n</ca>\n<tls-auth>\ntest-key\n</tls-auth>\nkey-direction 1\n";
+        assert!(crate::vpn_input::openvpn(config).is_ok());
+        assert!(crate::vpn_input::openvpn("disable-dco /tmp/untrusted").is_err());
+    }
+
+    #[test]
+    fn engine_selection_is_explicit_and_validated() {
+        let mut request = serde_json::json!({"profile_id":"id", "config_file":"path"});
+        assert_eq!(serde_json::from_value::<OvpnConnectArgs>(request.clone()).unwrap().engine, OpenVpnEngine::Openvpn2);
+        request["engine"] = "openvpn3".into();
+        assert_eq!(serde_json::from_value::<OvpnConnectArgs>(request.clone()).unwrap().engine, OpenVpnEngine::Openvpn3);
+        request["engine"] = "/tmp/untrusted-executable".into();
+        assert!(serde_json::from_value::<OvpnConnectArgs>(request).is_err());
+    }
+
+    #[test]
+    fn process_identity_requires_binary_and_exact_profile() {
+        let id = "26b4fcc6-097a-41e7-932e-9a6d2a4663e5";
+        let v2 = format!("/Library/PrivilegedHelperTools/SuperManagerVPN/sbin/openvpn --daemon supermgr-ovpn-{id}");
+        let v3 = "/Library/PrivilegedHelperTools/SuperManagerVPN/bin/openvpn3 --password-stdin /Library/PrivilegedHelperTools/SuperManagerVPNConfigs/26b4fcc6097a41e7932e9a6d2a4663e5.ovpn";
+        assert!(matches_openvpn_command(&v2, id));
+        assert!(matches_openvpn_command(v3, id));
+        assert!(!matches_openvpn_command(&format!("/usr/bin/echo {id}"), id));
+        assert!(!matches_openvpn_command(&format!("{v2}-another-profile"), id));
+        assert!(!matches_openvpn_command(&v2, "36b4fcc6-097a-41e7-932e-9a6d2a4663e5"));
+        assert!(!matches_openvpn_command(v3, "36b4fcc6-097a-41e7-932e-9a6d2a4663e5"));
+    }
 
     #[test]
     fn sanitize_strips_unsafe_chars() {

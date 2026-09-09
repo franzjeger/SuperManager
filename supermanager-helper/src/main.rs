@@ -521,10 +521,12 @@ async fn dispatch(req: Request, controllers: &Controllers, peer_uid: libc::uid_t
                 }
                 Ok(())
             });
+            let openvpn3_available = status.is_ok() && root.join("bin/openvpn3").is_file();
             Response::ok(id, serde_json::json!({
                 "available": status.is_ok(),
                 "message": status.err().map(|error| format!("Install the matching signed SuperManager system package. {error}")),
-                "unsupported": ["OpenVPN3/Azure", "WireGuard shell hooks, DNS, Table and SaveConfig", "OpenVPN external credential files and scripts"]
+                "openvpn3_available": openvpn3_available,
+                "unsupported": ["WireGuard shell hooks, DNS, Table and SaveConfig", "OpenVPN external credential files and scripts"]
             }))
         }
 

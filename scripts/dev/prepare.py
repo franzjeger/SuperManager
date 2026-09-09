@@ -106,25 +106,16 @@ def prepare(source, output):
         '    async fn ensure_charon(&mut self) -> anyhow::Result<()> {\n        crate::secure_files::ensure_root_directory(Path::new("/private/var/run/supermanager-dev-ipsec"))?;'))
 
     edit('supermanager-helper/src/wireguard.rs', lambda s: s.replace('smwg', 'sdwg'))
-    def openvpn(s):
-        if s.count('let needle = safe.to_string();') != 2:
-            raise ValueError('OpenVPN process discovery changed; review isolation')
-        s = s.replace('let needle = safe.to_string();', 'let needle = format!("supermgr-dev-ovpn-{safe}");')
-        s = s.replace('for line in text.lines().skip(1) {',
-            'for line in text.lines().skip(1) {\n        if line.split_whitespace().nth(1) != Some("/Library/PrivilegedHelperTools/SuperManagerDevVPN/sbin/openvpn") { continue; }')
-        return s
-    edit('supermanager-helper/src/openvpn.rs', openvpn)
-
     edit('installer/system/build_runtime.py', lambda s: replace_once(s,
         "configure('strongswan', ['--disable-defaults',",
         "configure('strongswan', ['--with-piddir=/private/var/run/supermanager-dev-ipsec', '--disable-defaults',").replace(
         "    (runtime / 'lib/ipsec/plugins').mkdir(parents=True)",
         "    (runtime / 'var/run').mkdir(parents=True)\n    (runtime / 'lib/ipsec/plugins').mkdir(parents=True)"))
     edit('installer/system/scripts/preinstall', lambda s: s.replace(
-        'for process in SuperManagerMac openvpn charon wireguard-go; do',
+        'for process in SuperManagerMac openvpn openvpn3 charon wireguard-go; do',
         'for process in SuperManagerDev; do').replace(
         "base='/Library/Application Support/SuperManagerDevSystem'",
-        '''if pgrep -f '^/Library/PrivilegedHelperTools/SuperManagerDevVPN/(sbin/openvpn|libexec/ipsec/charon|bin/wireguard-go)( |$)' >/dev/null; then
+        '''if pgrep -f '^/Library/PrivilegedHelperTools/SuperManagerDevVPN/(sbin/openvpn|bin/openvpn3|libexec/ipsec/charon|bin/wireguard-go)( |$)' >/dev/null; then
     echo 'Disconnect Dev VPNs and stop the Dev VPN processes before updating.' >&2; exit 1
 fi
 base='/Library/Application Support/SuperManagerDevSystem' '''.rstrip()))
@@ -135,9 +126,6 @@ base='/Library/Application Support/SuperManagerDevSystem' '''.rstrip()))
         'Profiles are copied, not synchronized. Automatic VPN recovery and scheduled jobs are disabled. Install the Dev system package and stop stable VPN services before manually testing a tunnel.').replace(
         'Install our bundled tailscaled as a system service — auto-starts at boot, auto-reconnects after sleep.',
         'Tailscale daemon installation is disabled in this isolated Dev build. The existing system node is not shared.'))
-    edit('SuperManagerMac/SuperManagerMac/Views/VPN/VpnDetailView.swift', lambda s: replace_once(s,
-        '                            azureSummaryForSignIn = az\n                            showingAzureSignIn = true',
-        '                            actionError = "Azure VPN is unavailable in this Dev build: the signed runtime does not yet include OpenVPN 3. Microsoft sign-in will not resolve this. Use the regular app for Azure VPN."'))
     # Disable stale production feed / URL handler in generated project.
     path = output / 'SuperManagerMac/project.yml'
     spec = path.read_text()
