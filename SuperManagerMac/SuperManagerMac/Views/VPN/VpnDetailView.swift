@@ -675,6 +675,11 @@ struct VpnDetailView: View {
                     // log lines a few KB above. Surface a one-click jump
                     // into them so users don't have to open Console.app
                     // and chase root permission.
+                    if case .ikev2 = profile.config {
+                        Button("Edit credentials…") { editingProfile = true }
+                            .controlSize(.small)
+                            .buttonStyle(.bordered)
+                    }
                     if helperReachable {
                         HStack(spacing: 8) {
                             Button("View Helper Log…") {

@@ -228,7 +228,7 @@ struct EditVpnProfileSheet: View {
                     TextField("Username", text: $username)
                     SecureField("New password (EAP)", text: $password)
                     SecureField("New shared secret (PSK)", text: $sharedSecret)
-                    Text("Passwords change only if you type a new value. Blank leaves the stored secret untouched.")
+                    Text("Enter any missing EAP password and shared secret (PSK) here. Blank preserves an existing secret; it cannot restore a missing one. Credentials are saved only in this app’s Keychain.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

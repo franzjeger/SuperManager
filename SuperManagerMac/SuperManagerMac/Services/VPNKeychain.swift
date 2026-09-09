@@ -53,6 +53,9 @@ enum VPNKeychain {
         var errorDescription: String? {
             switch self {
             case .osStatus(let s, let op):
+                if s == errSecItemNotFound {
+                    return "VPN credentials are missing from this app's Keychain. Edit credentials and enter the EAP password and, if configured, the shared secret (PSK). Copying a profile does not guarantee its credentials are available."
+                }
                 return "Keychain \(op) failed (\(s))"
             case .missingReference:
                 return "Keychain item has no value"

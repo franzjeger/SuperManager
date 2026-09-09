@@ -125,3 +125,9 @@ With the user's authorization, stopped the stable Azure tunnel and helper before
 Live testing exposed a PID persistence failure: `/var` is a symlink and `/private/var/run` is root:daemon 0775 on the test Mac. OpenVPN session files now use the protected `SuperManagerVPNState` directory beside the runtime (transformed to `SuperManagerDevVPNState` for Dev). The strict ancestor checks remain enabled; system directory permissions were not changed.
 
 Verified the signed Dev OpenVPN 3 executable connected to the existing Azure profile, created a utun interface, installed the gateway-pushed customer routes, and received a DNS response from the customer's internal DNS server. The GUI displayed the matching interface and connected status. Disconnect terminated the process, removed customer routes, and restored the original DNS servers. Reconnect was tested afterward. Helper tests: 87 passed. Other VPN profile types were not live-tested in this run.
+
+### Credential recovery and WireGuard follow-up
+
+User reports WireGuard works in Dev. FortiGate/IKEv2 connection failed before reaching the helper because referenced credentials were absent from the accessible login Keychain. An attributes-only inventory found no VPN-service items in either stable or Dev, with 32 non-empty profile password/PSK references unmatched. This does not establish whether the values remain in the older entitlement-protected Data Protection Keychain. No secret values were exported.
+
+Missing-item errors now explain credential re-entry and IKEv2 connection errors provide an Edit credentials action. Other Keychain failures retain their distinct error status. The editor clarifies that a blank field cannot recover a missing secret. FortiGate end-to-end validation remains blocked until credentials are supplied through the application.
