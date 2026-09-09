@@ -28,7 +28,9 @@ def build(old_app, output):
         'CFBundleName': 'SuperManager Service Retirement',
         'CFBundleVersion': '1', 'CFBundlePackageType': 'APPL',
     }))
-    subprocess.run(['xcrun', 'swiftc', str(Path(__file__).with_name('retire_regular_helper.swift')),
+    sdk = subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip()
+    subprocess.run(['xcrun', '--sdk', 'macosx', 'swiftc', '-sdk', sdk,
+                    str(Path(__file__).with_name('retire_regular_helper.swift')),
                     '-o', str(contents / 'MacOS/retire')], check=True)
     sign(output, identifier)
     subprocess.run(['codesign', '--verify', '--deep', '--strict', str(output)], check=True)
