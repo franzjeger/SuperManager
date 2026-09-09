@@ -1,0 +1,67 @@
+--- a/SuperManagerMac/SuperManagerMac/App/SuperManagerApp.swift
++++ b/SuperManagerMac/SuperManagerMac/App/SuperManagerApp.swift
+@@ -43,7 +43,7 @@
+         // `~/Library/Application Support/SuperManager Dev/crashes/`
+         // where the Support Bundle picks it up.
+         CrashReporting.start()
+-        NSApplication.shared.dockTile.badgeLabel = "DEV"
++        NSApplication.shared.dockTile.badgeLabel = nil
+     }
+ 
+     /// `isInserted` binding for the menu bar item.
+@@ -56,7 +56,7 @@
+     }
+ 
+     var body: some Scene {
+-        WindowGroup("SuperManager Dev") {
++        WindowGroup("SuperManager") {
+             // Lock-aware root. When `LockState.isLocked` is true the
+             // window contains *only* `LockScreenView` — no
+             // `ContentView`, no toolbar, no search field. That's the
+--- a/SuperManagerMac/SuperManagerMac/Views/Tailscale/TailscaleSettingsView.swift
++++ b/SuperManagerMac/SuperManagerMac/Views/Tailscale/TailscaleSettingsView.swift
+@@ -33,10 +33,9 @@
+             Divider()
+             ScrollView {
+                 VStack(alignment: .leading, spacing: 16) {
+-                    TailscaleServiceSwitch()
+                     accountSection
+                     routingSection
+-                    Text("Dev uses existing system DNS. Exit-node and global DNS recovery are unavailable.").font(.caption)
++                    Text("Uses existing system DNS. Exit-node and global DNS recovery are unavailable in this build.").font(.caption)
+                     incomingSection
+                     subnetRouterSection
+                     advancedSection
+--- a/SuperManagerMac/SuperManagerMac/Views/WelcomeView.swift
++++ b/SuperManagerMac/SuperManagerMac/Views/WelcomeView.swift
+@@ -42,7 +42,7 @@
+             Image(systemName: "shield.checkered")
+                 .font(.system(size: 64))
+                 .foregroundStyle(.tint)
+-            Text("Welcome to SuperManager Dev")
++            Text("Welcome to SuperManager")
+                 .font(.system(size: 28, weight: .semibold))
+             Text("MSP toolbox: scan customer networks, track findings over time, manage SSH + VPN, deploy FortiGate configs — all from one Mac app.")
+                 .font(.callout)
+@@ -125,10 +125,10 @@
+             Image(systemName: "lightbulb.fill")
+                 .foregroundStyle(.yellow)
+             VStack(alignment: .leading, spacing: 4) {
+-                Text("DEV — independent data, real network actions")
++                Text("Manual connections")
+                     .font(.subheadline)
+                     .fontWeight(.medium)
+-                Text("Profiles are copied, not synchronized. Automatic VPN recovery and scheduled jobs are disabled. Install the Dev system package and stop stable VPN services before manually testing a tunnel.")
++                Text("Your profiles and credentials are preserved. Automatic VPN recovery and scheduled jobs are disabled in this build.")
+                     .font(.caption)
+                     .foregroundStyle(.secondary)
+                     .fixedSize(horizontal: false, vertical: true)
+@@ -151,7 +151,7 @@
+             return "Your daemon is installed and ready. Click Tailscale in the sidebar to authenticate."
+         }
+         if appState.tailscaleIsBundled {
+-            return "Install a separate Dev Tailscale node. Sign in separately; pause other Tailscale nodes before connecting. Dev keeps the current system DNS."
++            return "Connect using your existing Tailscale identity. System DNS is preserved."
+         }
+         return "Tailscale binaries aren't bundled in this build."
+     }
