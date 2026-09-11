@@ -1,5 +1,6 @@
 //! Explicit, bounded private-network reconnaissance page.
 
+use std::cell::RefCell;
 use std::{
     rc::Rc,
     sync::{mpsc, Arc, Mutex},
@@ -22,6 +23,7 @@ pub struct ReconView {
     /// Top-level page.
     pub widget: gtk4::Widget,
     body: gtk4::Box,
+    previous: RefCell<Option<ReconScanResult>>,
     scan_button: gtk4::Button,
     target: adw::EntryRow,
     ports: adw::EntryRow,
@@ -38,39 +40,10 @@ pub fn build_recon_page(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) -> Rc<ReconView> {
-    let page = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    let header = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(2)
-        .margin_top(18)
-        .margin_bottom(12)
-        .margin_start(24)
-        .margin_end(24)
-        .build();
-    header.append(
-        &gtk4::Label::builder()
-            .label("Recon")
-            .xalign(0.0)
-            .css_classes(["title-1"])
-            .build(),
+    let (page, body) = design::workspace_body(
+        "Recon",
+        "Find services, match inventory and compare changes on your private network.",
     );
-    header.append(
-        &gtk4::Label::builder()
-            .label("Discover unmanaged services on an explicitly selected private IPv4 range")
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["dim-label"])
-            .build(),
-    );
-    page.append(&header);
-
-    let body = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .spacing(18)
-        .margin_start(24)
-        .margin_end(24)
-        .margin_bottom(32)
-        .build();
     let scope = adw::PreferencesGroup::builder()
         .title("Scan scope")
         .description("Only private/link-local IPv4 ranges of /24 or smaller are accepted")
@@ -98,16 +71,10 @@ pub fn build_recon_page(
         "No scan run yet",
         "Choose a private subnet and start a bounded TCP discovery scan.",
     ));
-    let scroll = gtk4::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk4::PolicyType::Never)
-        .vexpand(true)
-        .child(&body)
-        .build();
-    page.append(&scroll);
-
     let view = Rc::new(ReconView {
         widget: page.upcast(),
         body,
+        previous: RefCell::new(None),
         scan_button,
         target,
         ports,
@@ -159,16 +126,52 @@ impl ReconView {
         let elapsed = (result.finished_at - result.started_at)
             .num_milliseconds()
             .max(0);
-        let summary = adw::PreferencesGroup::builder()
-            .title("Results")
-            .description(format!(
-                "{} responding host{} in {} ms · {}",
-                result.hosts.len(),
-                if result.hosts.len() == 1 { "" } else { "s" },
-                elapsed,
-                result.target
-            ))
+        let responding = result
+            .hosts
+            .iter()
+            .filter(|h| !h.open_ports.is_empty())
+            .count();
+        let managed = result
+            .hosts
+            .iter()
+            .filter(|h| h.managed_host_id.is_some())
+            .count();
+        let services = result
+            .hosts
+            .iter()
+            .map(|h| h.open_ports.len())
+            .sum::<usize>();
+        let summary = adw::PreferencesGroup::builder().title("Discovered services")
+            .description(format!("{responding} responding · {managed} matched to inventory · {services} open ports · {elapsed} ms\n{} · {}", result.target, result.finished_at.format("%Y-%m-%d %H:%M UTC")))
             .build();
+        if let Some(previous) = self.previous.borrow().as_ref() {
+            if let Some((added, missing)) = supermgr_core::recon::service_changes(previous, result)
+            {
+                let changes = gtk4::Label::builder().label(format!("Since the previous scan: {added} newly responding services · {missing} no longer responding"))
+                    .xalign(0.0).wrap(true).css_classes(["supermgr-notice"]).build();
+                self.body.append(&changes);
+            }
+        }
+        *self.previous.borrow_mut() = Some(result.clone());
+        let export = gtk4::Button::with_label("Export JSON");
+        export.set_valign(gtk4::Align::Center);
+        let data = serde_json::to_value(result).unwrap_or_default();
+        let window = self.window.clone();
+        let tx = self.tx.clone();
+        export.connect_clicked(move |_| {
+            design::export_json(Some(window.upcast_ref()), "recon-scan.json", &data, &tx)
+        });
+        summary.set_header_suffix(Some(&export));
+        for warning in &result.warnings {
+            self.body.append(
+                &gtk4::Label::builder()
+                    .label(warning)
+                    .xalign(0.0)
+                    .wrap(true)
+                    .css_classes(["warning"])
+                    .build(),
+            );
+        }
         if result.hosts.is_empty() {
             summary.add(
                 &adw::ActionRow::builder()
@@ -182,7 +185,8 @@ impl ReconView {
                 "Known inventory host; no selected port answered".to_owned()
             } else {
                 format!(
-                    "Open TCP: {}",
+                    "{} · TCP {}",
+                    host.ip,
                     host.open_ports
                         .iter()
                         .map(u16::to_string)
@@ -198,6 +202,26 @@ impl ReconView {
                     ports
                 })
                 .build();
+            row.set_subtitle_lines(2);
+            if !host.services.is_empty() {
+                let hints = host
+                    .services
+                    .iter()
+                    .map(|s| match &s.banner {
+                        Some(banner) => format!("{}: {banner} (observed)", s.port),
+                        None => format!("{}: {} (port-based hint)", s.port, s.name),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                row.set_tooltip_text(Some(&hints));
+                let services = host
+                    .services
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                row.add_suffix(&design::badge(&services));
+            }
             if host.managed_host_id.is_some() {
                 row.add_suffix(&design::badge("Managed"));
             } else {
@@ -206,11 +230,8 @@ impl ReconView {
                     .valign(gtk4::Align::Center)
                     .build();
                 let ip = host.ip.clone();
-                let port = if host.open_ports.contains(&22) {
-                    22
-                } else {
-                    host.open_ports.first().copied().unwrap_or(22)
-                };
+                // An HTTP port is not an SSH connection port.
+                let port = 22;
                 let app_state = Arc::clone(&self.app_state);
                 let window = self.window.clone();
                 let rt = self.rt.clone();
