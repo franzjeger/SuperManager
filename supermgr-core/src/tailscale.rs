@@ -8,6 +8,43 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Progress of an operator-owned browser sign-in. URLs are never in management snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TailscaleLoginAttempt {
+    /// Unguessable attempt identifier, also bound to the caller UID.
+    pub id: String,
+    /// waiting, complete, cancelled or failed.
+    pub state: String,
+    /// HTTPS browser URL while waiting; cleared when the attempt ends.
+    pub auth_url: String,
+    /// Current progress or recovery result.
+    pub message: String,
+}
+
+/// One observation from an explicit diagnostic run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TailscaleDiagnosticCheck {
+    /// Human-readable check label.
+    pub name: String,
+    /// pass, fail, warning or unknown.
+    pub status: String,
+    /// Evidence or a specific next step.
+    pub detail: String,
+}
+
+/// DNS observations from one account at a recorded time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TailscaleDnsReport {
+    /// UTC RFC 3339 completion timestamp.
+    pub checked_at: String,
+    /// Account inspected, without authentication material.
+    pub profile_id: String,
+    /// Resolver comparison and account consistency checks.
+    pub checks: Vec<TailscaleDiagnosticCheck>,
+    /// Bounded DNS configuration text, excluding raw preferences and secrets.
+    pub details: String,
+}
+
 /// One node in the tailnet, normalized for GUI consumption.
 ///
 /// A curated subset of what `tailscale status --json` reports — the fields a
@@ -53,6 +90,95 @@ pub struct TailscaleNode {
     pub rx_bytes: u64,
     /// Bytes sent to this peer since tailscaled started.
     pub tx_bytes: u64,
+    /// Direct endpoint observed by tailscaled; empty when no direct path is known.
+    #[serde(default)]
+    pub current_address: String,
+    /// DERP region, when reported. This alone does not prove current relay use.
+    #[serde(default)]
+    pub relay: String,
+}
+
+/// A saved, already authenticated account; contains no authentication material.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TailscaleProfile {
+    /// Stable saved-account identifier.
+    pub id: String,
+    /// Optional account nickname.
+    pub nickname: String,
+    /// Tailnet display name.
+    pub tailnet: String,
+    /// Account login label.
+    pub account: String,
+    /// Whether this account is active.
+    pub selected: bool,
+}
+
+/// Only the preferences exposed by this application, never raw debug prefs.
+/// Missing values remain unknown instead of becoming invented defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TailscalePreferences {
+    /// Account to which these preferences belong.
+    pub profile_id: Option<String>,
+    /// Whether Tailscale is enabled.
+    pub want_running: Option<bool>,
+    /// Use tailnet DNS settings.
+    pub accept_dns: Option<bool>,
+    /// Accept advertised subnet routes.
+    pub accept_routes: Option<bool>,
+    /// Block incoming tailnet connections.
+    pub shields_up: Option<bool>,
+    /// Run the Tailscale SSH server.
+    pub run_ssh: Option<bool>,
+    /// Keep LAN access while using an exit node.
+    pub exit_node_allow_lan: Option<bool>,
+    /// Offer this machine as an exit node.
+    pub advertise_exit_node: Option<bool>,
+    /// Advertised subnet CIDRs, excluding default exit-node routes.
+    pub advertise_routes: Option<Vec<String>>,
+    /// Hostname override; empty uses the OS hostname.
+    pub hostname: Option<String>,
+    /// Apply Tailscale updates automatically.
+    pub auto_update: Option<bool>,
+}
+
+/// Partial update: omitted fields are never sent to `tailscale set`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TailscalePreferencesPatch {
+    /// Account to which these preferences belong.
+    pub profile_id: String,
+    /// Use tailnet DNS settings.
+    pub accept_dns: Option<bool>,
+    /// Accept advertised subnet routes.
+    pub accept_routes: Option<bool>,
+    /// Block incoming tailnet connections.
+    pub shields_up: Option<bool>,
+    /// Run the Tailscale SSH server.
+    pub run_ssh: Option<bool>,
+    /// Keep LAN access while using an exit node.
+    pub exit_node_allow_lan: Option<bool>,
+    /// Offer this machine as an exit node.
+    pub advertise_exit_node: Option<bool>,
+    /// Advertised subnet CIDRs, excluding default exit-node routes.
+    pub advertise_routes: Option<Vec<String>>,
+    /// Hostname override; empty uses the OS hostname.
+    pub hostname: Option<String>,
+    /// Apply Tailscale updates automatically.
+    pub auto_update: Option<bool>,
+}
+
+/// Independent settings/account reads, retaining successful results on partial failure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TailscaleManagement {
+    /// Projected preferences, if available.
+    pub preferences: Option<TailscalePreferences>,
+    /// Saved accounts reported by the local daemon.
+    pub profiles: Vec<TailscaleProfile>,
+    /// Read failures that leave part of the snapshot unavailable.
+    pub warnings: Vec<String>,
 }
 
 impl TailscaleNode {
@@ -154,6 +280,8 @@ mod tests {
             last_seen: String::new(),
             rx_bytes: 0,
             tx_bytes: 0,
+            current_address: String::new(),
+            relay: String::new(),
         }
     }
 
@@ -177,8 +305,14 @@ mod tests {
 
     #[test]
     fn display_name_prefers_hostname_then_dns_label_then_id() {
-        assert_eq!(node(&[], "shortname", "long.ts.net").display_name(), "shortname");
-        assert_eq!(node(&[], "", "fromdns.tailnet.ts.net").display_name(), "fromdns");
+        assert_eq!(
+            node(&[], "shortname", "long.ts.net").display_name(),
+            "shortname"
+        );
+        assert_eq!(
+            node(&[], "", "fromdns.tailnet.ts.net").display_name(),
+            "fromdns"
+        );
         // A node with neither still labels its row rather than rendering blank.
         assert_eq!(node(&[], "", "").display_name(), "nStableID");
     }

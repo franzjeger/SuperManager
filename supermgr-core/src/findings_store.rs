@@ -88,7 +88,9 @@ pub struct PersistedFinding {
     pub note: String,
 }
 
-fn one() -> u32 { 1 }
+fn one() -> u32 {
+    1
+}
 
 /// Workflow state of a finding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,12 +214,51 @@ fn store_file(customer_slug: &str) -> PathBuf {
     p
 }
 
+/// Keep legacy valid customer scopes; invalid labels fall back to a stable host ID.
+pub fn scope_for_customer(customer: &str, host_id: &uuid::Uuid) -> String {
+    let customer = customer.trim();
+    if crate::findings::validate_slug(customer).is_ok() {
+        customer.to_owned()
+    } else {
+        host_id.simple().to_string()
+    }
+}
+
+/// Persisted scopes remain discoverable even after a host is deleted or retagged.
+pub fn list_scopes() -> Result<Vec<String>> {
+    list_scopes_at(&crate::paths::default_data_dir().join("findings_store"))
+}
+
+fn list_scopes_at(root: &std::path::Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.into()),
+    };
+    let mut scopes = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type()?.is_dir()
+            && crate::findings::validate_slug(&name).is_ok()
+            && std::fs::symlink_metadata(entry.path().join("findings.json"))
+                .is_ok_and(|meta| meta.file_type().is_file())
+        {
+            scopes.push(name);
+        }
+    }
+    scopes.sort();
+    Ok(scopes)
+}
+
 /// Load the persisted findings store for a customer scope.
 /// Returns structured `EngineError` so callers can distinguish:
 ///   - `InvalidScope` — bad slug (UI shows validation message)
 ///   - `FindingsIo` — disk read failed (UI suggests retry)
 ///   - `FindingsParse` — JSON corrupt (UI suggests restoring from backup)
-pub fn load_store(customer_slug: &str) -> std::result::Result<FindingsStore, crate::error::FindingsError> {
+pub fn load_store(
+    customer_slug: &str,
+) -> std::result::Result<FindingsStore, crate::error::FindingsError> {
     use crate::error::FindingsError;
     crate::findings::validate_slug(customer_slug)
         .map_err(|reason| FindingsError::InvalidScope { reason })?;
@@ -225,14 +266,12 @@ pub fn load_store(customer_slug: &str) -> std::result::Result<FindingsStore, cra
     if !path.exists() {
         return Ok(FindingsStore::default());
     }
-    let bytes = std::fs::read(&path)
-        .map_err(|e| FindingsError::Io {
-            reason: format!("read {}: {e}", path.display()),
-        })?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| FindingsError::Parse {
-            reason: format!("{}: {e}", path.display()),
-        })
+    let bytes = std::fs::read(&path).map_err(|e| FindingsError::Io {
+        reason: format!("read {}: {e}", path.display()),
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| FindingsError::Parse {
+        reason: format!("{}: {e}", path.display()),
+    })
 }
 
 /// Persist the findings store. Errors split into IO and InvalidScope
@@ -245,24 +284,20 @@ pub fn save_store(
     crate::findings::validate_slug(customer_slug)
         .map_err(|reason| FindingsError::InvalidScope { reason })?;
     let dir = store_dir(customer_slug);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| FindingsError::Io {
-            reason: format!("create dir {}: {e}", dir.display()),
-        })?;
+    std::fs::create_dir_all(&dir).map_err(|e| FindingsError::Io {
+        reason: format!("create dir {}: {e}", dir.display()),
+    })?;
     let path = store_file(customer_slug);
     let tmp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(store)
-        .map_err(|e| FindingsError::Io {
-            reason: format!("serialize: {e}"),
-        })?;
-    std::fs::write(&tmp, bytes)
-        .map_err(|e| FindingsError::Io {
-            reason: format!("write tmp {}: {e}", tmp.display()),
-        })?;
-    std::fs::rename(&tmp, &path)
-        .map_err(|e| FindingsError::Io {
-            reason: format!("rename to {}: {e}", path.display()),
-        })
+    let bytes = serde_json::to_vec_pretty(store).map_err(|e| FindingsError::Io {
+        reason: format!("serialize: {e}"),
+    })?;
+    std::fs::write(&tmp, bytes).map_err(|e| FindingsError::Io {
+        reason: format!("write tmp {}: {e}", tmp.display()),
+    })?;
+    std::fs::rename(&tmp, &path).map_err(|e| FindingsError::Io {
+        reason: format!("rename to {}: {e}", path.display()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +321,37 @@ pub fn save_store(
 ///       - Open → flipped to Fixed{auto:true}, surfaced as auto_resolved.
 ///       - Other states → unchanged (we don't auto-update terminal states).
 pub fn reconcile(customer_slug: &str, fresh: &[Finding]) -> Result<ScanDiff> {
+    reconcile_with_resolution(customer_slug, fresh, |_| true)
+}
+
+/// Reconcile one baseline run. Only an observed PASS can close an old finding;
+/// checks that errored/skipped and findings on other hosts stay untouched.
+pub fn reconcile_compliance(
+    customer_slug: &str,
+    run: &crate::compliance::ComplianceRun,
+    library: &[crate::compliance::CheckDefinition],
+) -> Result<ScanDiff> {
+    let fresh = crate::compliance::failures_as_findings(run, library);
+    let host = run.hostname.as_deref().unwrap_or(&run.host_id);
+    let passed: HashSet<&str> = run
+        .checks
+        .iter()
+        .filter(|c| matches!(c.status, crate::compliance::Status::Pass))
+        .map(|c| c.check_id.as_str())
+        .collect();
+    reconcile_with_resolution(customer_slug, &fresh, |finding| {
+        finding.host_ip == host
+            && finding.port.is_none()
+            && finding.service.is_none()
+            && passed.contains(finding.id.as_str())
+    })
+}
+
+fn reconcile_with_resolution(
+    customer_slug: &str,
+    fresh: &[Finding],
+    can_resolve: impl Fn(&Finding) -> bool,
+) -> Result<ScanDiff> {
     // Acquire the per-customer reconcile lock for the entire
     // load→merge→save cycle. Two concurrent callers (manual scan
     // + scheduler) for the same customer will serialize here;
@@ -368,18 +434,20 @@ pub fn reconcile(customer_slug: &str, fresh: &[Finding]) -> Result<ScanDiff> {
     // Auto-resolve: anything Open in store but not in fresh scan.
     for existing in store.findings.values_mut() {
         if !fresh_keys.contains(&existing.key)
-            && matches!(existing.disposition, Disposition::Open) {
-                let prev = existing.disposition.clone();
-                existing.disposition = Disposition::Fixed { auto: true };
-                existing.history.push(DispositionChange {
-                    at: now,
-                    by: "system".into(),
-                    from: prev,
-                    to: existing.disposition.clone(),
-                    note: "auto-resolved: not present in latest scan".into(),
-                });
-                diff.auto_resolved.push(existing.clone());
-            }
+            && can_resolve(&existing.finding)
+            && matches!(existing.disposition, Disposition::Open)
+        {
+            let prev = existing.disposition.clone();
+            existing.disposition = Disposition::Fixed { auto: true };
+            existing.history.push(DispositionChange {
+                at: now,
+                by: "system".into(),
+                from: prev,
+                to: existing.disposition.clone(),
+                note: "auto-resolved: not present in latest scan".into(),
+            });
+            diff.auto_resolved.push(existing.clone());
+        }
     }
 
     store.last_scan_at = Some(now);
@@ -531,6 +599,99 @@ mod tests {
     use crate::findings::Finding;
     use crate::severity::Severity;
 
+    #[test]
+    fn only_passed_controls_on_the_scanned_host_are_resolved() {
+        use crate::compliance::{BaselineKind, CheckResult, ComplianceRun, Status, TriggerKind};
+        let scope = unique_scope("partial");
+        let fresh: Vec<_> = [
+            ("check-a", "host-a"),
+            ("check-b", "host-a"),
+            ("check-a", "host-b"),
+        ]
+        .into_iter()
+        .map(|(id, host)| {
+            let mut f = fake_finding(id, host, Severity::High);
+            f.port = None;
+            f.service = None;
+            f
+        })
+        .collect();
+        reconcile(&scope, &fresh).unwrap();
+        let run = ComplianceRun {
+            id: "partial-run".into(),
+            host_id: "id-a".into(),
+            hostname: Some("host-a".into()),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            firmware: None,
+            model: None,
+            triggered_by: TriggerKind::Manual,
+            baseline_kind: BaselineKind::Linux,
+            score: 100,
+            passed: 1,
+            failed: 0,
+            errored: 1,
+            skipped: 0,
+            checks: [("check-a", Status::Pass), ("check-b", Status::Error)]
+                .into_iter()
+                .map(|(id, status)| CheckResult {
+                    check_id: id.into(),
+                    status,
+                    detail: String::new(),
+                    raw_value: None,
+                    severity: crate::compliance::Severity::High,
+                    title: id.into(),
+                    category: "SSH".into(),
+                })
+                .collect(),
+        };
+        let diff = reconcile_compliance(&scope, &run, &[]).unwrap();
+        assert_eq!(diff.auto_resolved.len(), 1);
+        let stored = load_store(&scope).unwrap();
+        assert!(matches!(
+            stored.findings[&finding_key(&fresh[0])].disposition,
+            Disposition::Fixed { auto: true }
+        ));
+        for f in &fresh[1..] {
+            let kept = &stored.findings[&finding_key(f)];
+            assert!(matches!(kept.disposition, Disposition::Open));
+            assert_eq!(
+                kept.scan_count, 1,
+                "unobserved findings must not look rescanned"
+            );
+        }
+        cleanup(&scope);
+    }
+
+    #[test]
+    fn scope_discovery_keeps_archived_data_and_ignores_invalid_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "archived-customer",
+            "host-without-inventory",
+            "not a scope",
+            "empty",
+        ] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+            if name != "empty" {
+                std::fs::write(dir.path().join(name).join("findings.json"), "{}").unwrap();
+            }
+        }
+        assert_eq!(
+            list_scopes_at(dir.path()).unwrap(),
+            ["archived-customer", "host-without-inventory"]
+        );
+        let id = uuid::Uuid::new_v4();
+        assert_eq!(
+            scope_for_customer("Customer with spaces", &id),
+            id.simple().to_string()
+        );
+        assert_eq!(
+            scope_for_customer(" valid-customer ", &id),
+            "valid-customer"
+        );
+    }
+
     fn fake_finding(id: &str, host: &str, sev: Severity) -> Finding {
         Finding {
             id: id.to_owned(),
@@ -558,7 +719,6 @@ mod tests {
         let dir = store_dir(scope);
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 
     // -- compliance run -> findings -> store, end to end -----------------
     //
@@ -634,14 +794,21 @@ mod tests {
         // nothing.
         let fixed = run(vec![check("linux.ssh.root-login-disabled", Status::Pass)]);
         let diff = reconcile(&scope, &failures_as_findings(&fixed, &[])).expect("reconcile");
-        assert_eq!(diff.auto_resolved.len(), 1, "a passing control closes its finding");
+        assert_eq!(
+            diff.auto_resolved.len(),
+            1,
+            "a passing control closes its finding"
+        );
         assert_eq!(diff.still_open.len(), 0);
 
         // And the history is there to read afterwards.
         let stored = list_findings(&scope).expect("list");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].disposition.label(), "fixed");
-        assert_eq!(stored[0].scan_count, 2, "the passing scan does not count as an observation");
+        assert_eq!(
+            stored[0].scan_count, 2,
+            "the passing scan does not count as an observation"
+        );
 
         cleanup(&scope);
     }
@@ -664,7 +831,11 @@ mod tests {
     #[test]
     fn second_scan_marks_existing_as_still_open() {
         let scope = unique_scope("still");
-        let fresh = vec![fake_finding("cve.cve-2023-38408", "10.0.0.1", Severity::High)];
+        let fresh = vec![fake_finding(
+            "cve.cve-2023-38408",
+            "10.0.0.1",
+            Severity::High,
+        )];
         reconcile(&scope, &fresh).unwrap();
         let diff = reconcile(&scope, &fresh).expect("reconcile ok");
         assert_eq!(diff.new_findings.len(), 0);
@@ -716,7 +887,10 @@ mod tests {
         set_disposition(
             &scope,
             &key,
-            Disposition::AcceptedRisk { reason: "intentional".into(), until: None },
+            Disposition::AcceptedRisk {
+                reason: "intentional".into(),
+                until: None,
+            },
             "test",
             "",
         )
@@ -793,7 +967,11 @@ mod tests {
         // auto-fixed + currently-open. What matters is total
         // findings_count == 10 (a-0..4 + b-0..4 all recorded).
         let store = load_store(&scope).unwrap();
-        assert_eq!(store.findings.len(), 10, "all 10 distinct findings should be persisted");
+        assert_eq!(
+            store.findings.len(),
+            10,
+            "all 10 distinct findings should be persisted"
+        );
         cleanup(&scope);
     }
 }

@@ -80,6 +80,13 @@ pub struct SshKeySummary {
     /// Number of hosts this key is deployed to.
     pub deployed_count: usize,
 
+    /// Hosts configured to use this key for SSH authentication.
+    #[serde(default)]
+    pub assigned_host_ids: Vec<Uuid>,
+    /// Recorded public-key deployments; not a live authorized_keys audit.
+    #[serde(default)]
+    pub deployed_host_ids: Vec<Uuid>,
+
     /// When this key was created.
     pub created_at: DateTime<Utc>,
 }
@@ -93,6 +100,8 @@ impl From<&SshKey> for SshKeySummary {
             fingerprint: key.fingerprint.clone(),
             tags: key.tags.clone(),
             deployed_count: key.deployed_to.len(),
+            assigned_host_ids: Vec::new(),
+            deployed_host_ids: key.deployed_to.clone(),
             created_at: key.created_at,
         }
     }

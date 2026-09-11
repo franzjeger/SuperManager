@@ -51,13 +51,13 @@
 //!   - journald running (audit trail exists)
 //!   - Host firewall active
 //!
-//! That is the whole set — seven, matching `LINUX_CHECKS`. This list previously
+//! The set now also checks ASLR, kernel log/pointer exposure and protected hard links.
+//! The original seven checks matched `LINUX_CHECKS`. This list previously
 //! also named world-writable files, listening services and rsyslog, none of
 //! which were ever implemented; a coverage list that overstates coverage is the
 //! same kind of false claim as a wrong benchmark reference.
 //!
-//! Future: kernel hardening sysctls, AIDE/auditd presence, world-writable file
-//! sweep. Each new check is ~10 lines.
+//! Further coverage could include AIDE/auditd and world-writable files.
 
 use chrono::Utc;
 
@@ -258,6 +258,46 @@ struct LinuxCheck {
 }
 
 const LINUX_CHECKS: &[LinuxCheck] = &[
+    LinuxCheck {
+        id: "linux.kernel.aslr-full",
+        title: "Full address-space randomization",
+        command: "v=$(cat /proc/sys/kernel/randomize_va_space) || exit 3\nprintf \"value=%s\\n\" \"$v\"\ncase \"$v\" in 2) printf \"aslr=full\\n\" ;; *) printf \"control=disabled\\n\" ;; esac\n",
+        expect: Expect::LineIs("aslr=full"),
+        severity: Severity::Medium, cvss: 0.0,
+        detail_on_fail: "Full ASLR is not enabled (randomize_va_space must be 2).",
+        refine_detail: None,
+        recommendation: "Enable kernel.randomize_va_space=2 after checking application compatibility.",
+    },
+    LinuxCheck {
+        id: "linux.kernel.dmesg-restricted",
+        title: "Kernel log restricted to privileged users",
+        command: "v=$(cat /proc/sys/kernel/dmesg_restrict) || exit 3\nprintf \"value=%s\\n\" \"$v\"\ncase \"$v\" in 1) printf \"dmesg=restricted\\n\" ;; *) printf \"control=disabled\\n\" ;; esac\n",
+        expect: Expect::LineIs("dmesg=restricted"),
+        severity: Severity::Medium, cvss: 0.0,
+        detail_on_fail: "Unprivileged users can read the kernel log.",
+        refine_detail: None,
+        recommendation: "Review diagnostic requirements, then configure kernel.dmesg_restrict=1.",
+    },
+    LinuxCheck {
+        id: "linux.kernel.pointers-restricted",
+        title: "Kernel pointer exposure restricted",
+        command: "v=$(cat /proc/sys/kernel/kptr_restrict) || exit 3\nprintf \"value=%s\\n\" \"$v\"\ncase \"$v\" in 1|2) printf \"pointers=restricted\\n\" ;; *) printf \"control=disabled\\n\" ;; esac\n",
+        expect: Expect::LineIs("pointers=restricted"),
+        severity: Severity::Medium, cvss: 0.0,
+        detail_on_fail: "Kernel pointers are not restricted by kptr_restrict.",
+        refine_detail: None,
+        recommendation: "Configure kernel.kptr_restrict=1 or 2 after reviewing monitoring requirements.",
+    },
+    LinuxCheck {
+        id: "linux.kernel.hardlinks-protected",
+        title: "Protected hard links enabled",
+        command: "v=$(cat /proc/sys/fs/protected_hardlinks) || exit 3\nprintf \"value=%s\\n\" \"$v\"\ncase \"$v\" in 1) printf \"hardlinks=protected\\n\" ;; *) printf \"control=disabled\\n\" ;; esac\n",
+        expect: Expect::LineIs("hardlinks=protected"),
+        severity: Severity::Medium, cvss: 0.0,
+        detail_on_fail: "Protected hard links are disabled.",
+        refine_detail: None,
+        recommendation: "Configure fs.protected_hardlinks=1 after reviewing compatibility.",
+    },
     LinuxCheck {
         id: "linux.ssh.password-auth-disabled",
         title: "sshd PasswordAuthentication disabled",
@@ -512,11 +552,9 @@ where
         };
 
         let (status, detail, raw) = match reading {
-            Reading::Inconclusive { reason, raw } => (
-                Status::Error,
-                format!("Not determined: {reason}"),
-                raw,
-            ),
+            Reading::Inconclusive { reason, raw } => {
+                (Status::Error, format!("Not determined: {reason}"), raw)
+            }
             Reading::Answered(raw) if check.expect.satisfied_by(&raw) => (
                 Status::Pass,
                 "Configuration matches baseline.".to_owned(),
@@ -705,7 +743,7 @@ pub const LINUX_FRAMEWORK: &str = "CIS Distribution Independent Linux v2.0.0";
 
 /// The benchmark section a check corresponds to, where one genuinely does.
 ///
-/// **Two of seven.** This was checked against the control list rather than
+/// **Two explicitly mapped controls.** This was checked against the control list rather than
 /// filled in by pattern, and most of the baseline turns out to have no
 /// counterpart in the distribution-independent benchmark:
 ///
@@ -754,6 +792,10 @@ fn cis_reference(check_id: &str) -> Option<&'static str> {
 /// the threat / control rationale, not the remediation.
 fn linux_description(check_id: &str) -> &'static str {
     match check_id {
+        "linux.kernel.hardlinks-protected" => "Checks kernel protection against hard links to files the caller does not own.",
+        "linux.kernel.pointers-restricted" => "Accepts kernel.kptr_restrict values 1 or 2; reports the observed value.",
+        "linux.kernel.dmesg-restricted" => "Checks whether unprivileged reads of the kernel log are restricted.",
+        "linux.kernel.aslr-full" => "Checks the running kernel ASLR setting, including heap randomization.",
         "linux.ssh.password-auth-disabled" => "Enforces key-only SSH authentication on the host. Password authentication is the dominant attack vector for credential-stuffing and brute-force campaigns against internet-exposed sshd; disabling it removes that surface entirely. Verifies the effective sshd config via `sshd -T`, which reflects what the daemon actually does after parsing Match blocks.",
         "linux.ssh.root-login-disabled" => "Requires interactive admin sessions to log in as a regular user, then escalate via sudo. The audit trail of which user invoked which command vanishes when admins share a root login — and a stolen root key compromises the host directly with no second factor. Aligns with CIS guidance against direct privileged accounts.",
         "linux.ssh.protocol-v2-only" => "Confirms the host runs a modern OpenSSH release where SSHv1 has been fully removed. SSHv1 has known cryptographic weaknesses (downgrade attacks, session-key recovery); modern sshd (≥7.0) doesn't compile Protocol 1 support at all. This check inspects the daemon version rather than the config — if sshd doesn't speak v1, the config setting is moot.",
@@ -770,7 +812,7 @@ fn linux_description(check_id: &str) -> &'static str {
 }
 
 /// Static count of checks the baseline currently covers — handy
-/// for the UI's "Linux baseline (7 checks)" subtitle without
+/// for the UI's baseline coverage subtitle without
 /// needing to call `run_baseline` first.
 pub fn check_count() -> usize {
     LINUX_CHECKS.len()
@@ -786,6 +828,39 @@ pub fn check_titles() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_scripts_distinguish_observed_values_from_read_failures() {
+        for (id, accepted) in [
+            ("linux.kernel.aslr-full", vec!["2"]),
+            ("linux.kernel.dmesg-restricted", vec!["1"]),
+            ("linux.kernel.pointers-restricted", vec!["1", "2"]),
+            ("linux.kernel.hardlinks-protected", vec!["1"]),
+        ] {
+            let check = LINUX_CHECKS.iter().find(|check| check.id == id).unwrap();
+            for value in ["0", "1", "2", "unexpected", "unreadable"] {
+                // Substitute only cat; the real check script and shell run unchanged.
+                let script = format!("cat() {{ [ \"$FIXTURE_VALUE\" != unreadable ] || return 1; printf '%s\\n' \"$FIXTURE_VALUE\"; }}\n{}", check.command);
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-c", &script])
+                    .env("FIXTURE_VALUE", value)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    output.status.code(),
+                    Some(if value == "unreadable" { 3 } else { 0 }),
+                    "{id}: {value}"
+                );
+                assert_eq!(
+                    check
+                        .expect
+                        .satisfied_by(&String::from_utf8_lossy(&output.stdout)),
+                    accepted.contains(&value),
+                    "{id}: {value}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_the_two_checks_with_a_real_cis_control_carry_a_reference() {
@@ -985,7 +1060,9 @@ mod tests {
         // What the check does now: the script classifies, and only its verdict
         // is matched. A pipe to an unrecognised program fails.
         let check = find("linux.kernel.core-pattern-safe");
-        assert!(check.expect.satisfied_by("value=core.%p\nhandler=file\ncore-pattern=safe\n"));
+        assert!(check
+            .expect
+            .satisfied_by("value=core.%p\nhandler=file\ncore-pattern=safe\n"));
         assert!(
             !check
                 .expect
@@ -1011,7 +1088,11 @@ mod tests {
         })
         .await;
 
-        assert_eq!(run.errored, check_count() as u32, "every check is inconclusive");
+        assert_eq!(
+            run.errored,
+            check_count() as u32,
+            "every check is inconclusive"
+        );
         assert_eq!(run.failed, 0, "a permission error is not a finding");
         assert_eq!(run.passed, 0);
         for c in &run.checks {
@@ -1173,10 +1254,7 @@ mod tests {
             authored.push((check.id, check.recommendation));
             authored.push((check.id, linux_description(check.id)));
             if let Some(refine) = check.refine_detail {
-                for probe in [
-                    "permitrootlogin prohibit-password",
-                    "permitrootlogin yes",
-                ] {
+                for probe in ["permitrootlogin prohibit-password", "permitrootlogin yes"] {
                     if let Some(msg) = refine(probe) {
                         authored.push((check.id, msg));
                     }
@@ -1194,7 +1272,11 @@ mod tests {
                 !s.contains('\n') && !s.contains('\t'),
                 "{id}: authored text has a hard line break: {s:?}"
             );
-            assert_eq!(s.trim(), s, "{id}: authored text has edge whitespace: {s:?}");
+            assert_eq!(
+                s.trim(),
+                s,
+                "{id}: authored text has edge whitespace: {s:?}"
+            );
         }
     }
 
@@ -1244,7 +1326,10 @@ mod tests {
         ] {
             let cmd = find(id).command;
             assert!(cmd.contains("sudo -n sshd -T"), "{id}: no sudo fallback");
-            assert!(cmd.contains("/etc/ssh/sshd_config.d"), "{id}: no drop-in dir");
+            assert!(
+                cmd.contains("/etc/ssh/sshd_config.d"),
+                "{id}: no drop-in dir"
+            );
             assert!(cmd.contains("s=openssh-default"), "{id}: no default branch");
             assert!(cmd.contains("exit 3"), "{id}: must be able to give up");
         }
@@ -1291,16 +1376,26 @@ mod tests {
         ids.sort();
         let original_len = ids.len();
         ids.dedup();
-        assert_eq!(ids.len(), original_len, "duplicate check IDs would corrupt findings_store keys");
+        assert_eq!(
+            ids.len(),
+            original_len,
+            "duplicate check IDs would corrupt findings_store keys"
+        );
     }
 
     #[test]
     fn every_check_has_recommendation() {
         for check in LINUX_CHECKS {
-            assert!(!check.recommendation.is_empty(),
-                "check {} missing recommendation", check.id);
-            assert!(!check.detail_on_fail.is_empty(),
-                "check {} missing detail_on_fail", check.id);
+            assert!(
+                !check.recommendation.is_empty(),
+                "check {} missing recommendation",
+                check.id
+            );
+            assert!(
+                !check.detail_on_fail.is_empty(),
+                "check {} missing detail_on_fail",
+                check.id
+            );
         }
     }
 
@@ -1320,7 +1415,11 @@ mod tests {
                             core-pattern=safe\n\
                             auto-updates=active\n\
                             journald=active\n\
-                            firewall=active\n";
+                            firewall=active\n\
+                            aslr=full\n\
+                            dmesg=restricted\n\
+                            pointers=restricted\n\
+                            hardlinks=protected\n";
 
     #[tokio::test]
     async fn run_baseline_pass_path_produces_all_pass_checks() {
@@ -1331,11 +1430,14 @@ mod tests {
             |cmd| async move {
                 let _ = cmd;
                 Ok(CmdOutput::ok(ALL_PASS))
-            }
-        ).await;
+            },
+        )
+        .await;
         assert_eq!(run.checks.len(), check_count());
-        assert!(run.checks.iter().all(|c| matches!(c.status, Status::Pass)),
-            "all should be Pass");
+        assert!(
+            run.checks.iter().all(|c| matches!(c.status, Status::Pass)),
+            "all should be Pass"
+        );
         assert_eq!(run.passed, check_count() as u32);
         assert_eq!(run.failed, 0);
         assert_eq!(run.errored, 0);
@@ -1347,18 +1449,16 @@ mod tests {
     #[tokio::test]
     async fn run_baseline_fail_path_produces_all_fail_checks() {
         // Mock that returns something that won't match anything.
-        let run = run_baseline(
-            "host-id-2",
-            None,
-            TriggerKind::Manual,
-            |cmd| async move {
-                let _ = cmd;
-                Ok(CmdOutput::ok("nothing matches"))
-            }
-        ).await;
+        let run = run_baseline("host-id-2", None, TriggerKind::Manual, |cmd| async move {
+            let _ = cmd;
+            Ok(CmdOutput::ok("nothing matches"))
+        })
+        .await;
         assert_eq!(run.checks.len(), check_count());
-        assert!(run.checks.iter().all(|c| matches!(c.status, Status::Fail)),
-            "all should be Fail with non-matching output");
+        assert!(
+            run.checks.iter().all(|c| matches!(c.status, Status::Fail)),
+            "all should be Fail with non-matching output"
+        );
         assert_eq!(run.failed, check_count() as u32);
         assert_eq!(run.passed, 0);
         assert_eq!(run.errored, 0);
@@ -1372,19 +1472,19 @@ mod tests {
         // check should map to Status::Error — distinct from Fail.
         // Fail = "we asked and got the wrong answer"; Error = "we
         // couldn't ask." Operators triage those differently.
-        let run = run_baseline(
-            "host-id-3",
-            None,
-            TriggerKind::Manual,
-            |_cmd| async {
-                Err(anyhow::anyhow!("simulated ssh disconnect"))
-            }
-        ).await;
+        let run = run_baseline("host-id-3", None, TriggerKind::Manual, |_cmd| async {
+            Err(anyhow::anyhow!("simulated ssh disconnect"))
+        })
+        .await;
         assert_eq!(run.checks.len(), check_count());
         for c in &run.checks {
-            assert!(matches!(c.status, Status::Error),
-                "ssh errors must produce Error, not Fail");
-            assert!(c.raw_value.as_deref()
+            assert!(
+                matches!(c.status, Status::Error),
+                "ssh errors must produce Error, not Fail"
+            );
+            assert!(c
+                .raw_value
+                .as_deref()
                 .map(|s| s.contains("simulated ssh disconnect"))
                 .unwrap_or(false));
         }
@@ -1414,27 +1514,44 @@ mod tests {
                 // Contains exactly the substring needed by the
                 // password-auth-disabled check; other checks miss.
                 Ok(CmdOutput::ok("passwordauthentication no"))
-            }
-        ).await;
+            },
+        )
+        .await;
 
         // Recount independently — the tally must match exactly.
-        let manual_passed = run.checks.iter()
-            .filter(|c| matches!(c.status, Status::Pass)).count() as u32;
-        let manual_failed = run.checks.iter()
-            .filter(|c| matches!(c.status, Status::Fail)).count() as u32;
-        let manual_errored = run.checks.iter()
-            .filter(|c| matches!(c.status, Status::Error)).count() as u32;
-        let manual_skipped = run.checks.iter()
-            .filter(|c| matches!(c.status, Status::Skip)).count() as u32;
+        let manual_passed = run
+            .checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Pass))
+            .count() as u32;
+        let manual_failed = run
+            .checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Fail))
+            .count() as u32;
+        let manual_errored = run
+            .checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Error))
+            .count() as u32;
+        let manual_skipped = run
+            .checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Skip))
+            .count() as u32;
 
-        assert_eq!(run.passed, manual_passed,
-            "passed tally must match check vector — drift/history trust this");
+        assert_eq!(
+            run.passed, manual_passed,
+            "passed tally must match check vector — drift/history trust this"
+        );
         assert_eq!(run.failed, manual_failed, "failed tally");
         assert_eq!(run.errored, manual_errored, "errored tally");
         assert_eq!(run.skipped, manual_skipped, "skipped tally");
-        assert_eq!(run.passed + run.failed + run.errored + run.skipped,
+        assert_eq!(
+            run.passed + run.failed + run.errored + run.skipped,
             run.checks.len() as u32,
-            "tallies must sum to total check count");
+            "tallies must sum to total check count"
+        );
 
         // Score must reflect failures present (start 100 minus
         // severity-weighted penalties). With ≥1 High-severity fail,
@@ -1442,15 +1559,20 @@ mod tests {
         // it's strictly above 0.
         assert!(manual_passed >= 1, "this mock should produce ≥1 Pass");
         assert!(manual_failed >= 1, "this mock should produce ≥1 Fail");
-        assert!(run.score < 100,
-            "≥1 failure must drop the score below 100; got {}", run.score);
+        assert!(
+            run.score < 100,
+            "≥1 failure must drop the score below 100; got {}",
+            run.score
+        );
 
         // BaselineKind must round-trip through the assembly.
         assert_eq!(run.baseline_kind, BaselineKind::Linux);
         // Category derivation: at least one check has a non-default
         // category so the GUI doesn't render "Linux baseline" everywhere.
-        assert!(run.checks.iter().any(|c| c.category == "SSH"),
-            "category derivation must map linux.ssh.* → SSH");
+        assert!(
+            run.checks.iter().any(|c| c.category == "SSH"),
+            "category derivation must map linux.ssh.* → SSH"
+        );
     }
 
     #[tokio::test]
@@ -1466,16 +1588,20 @@ mod tests {
             |cmd| async move {
                 let _ = cmd;
                 Ok(CmdOutput::ok("passwordauthentication no"))
-            }
-        ).await;
+            },
+        )
+        .await;
         let run_id = run.id.clone();
 
         compliance::persist_run(&run).expect("persist must succeed");
         let loaded = compliance::load_run("host-id-roundtrip", &run_id)
             .expect("load_run must find the just-written file");
 
-        assert_eq!(loaded.baseline_kind, BaselineKind::Linux,
-            "Linux runs must persist their kind, not silently coerce to Fortigate");
+        assert_eq!(
+            loaded.baseline_kind,
+            BaselineKind::Linux,
+            "Linux runs must persist their kind, not silently coerce to Fortigate"
+        );
         assert_eq!(loaded.id, run.id);
         assert_eq!(loaded.score, run.score);
         assert_eq!(loaded.passed, run.passed);

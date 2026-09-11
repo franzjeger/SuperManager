@@ -461,6 +461,21 @@ pub trait Daemon {
     /// tailscale CLI isn't installed or tailscaled isn't running.
     async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
 
+    /// Normalized settings and saved accounts; no raw preferences or keys.
+    async fn tailscale_management(&self) -> fdo::Result<String>;
+    /// Apply only explicitly changed settings to the expected account.
+    async fn tailscale_apply_preferences(&self, patch_json: &str) -> fdo::Result<String>;
+    async fn tailscale_set_running(&self, profile_id: &str, running: bool) -> fdo::Result<String>;
+    async fn tailscale_switch_profile(&self, profile_id: &str) -> fdo::Result<String>;
+    async fn tailscale_logout(&self, profile_id: &str) -> fdo::Result<String>;
+    /// Bounded diagnostic ping to a peer still present in the active tailnet.
+    async fn tailscale_ping(&self, node_id: &str) -> fdo::Result<String>;
+    async fn tailscale_begin_login(&self, profile_id: &str) -> fdo::Result<String>;
+    async fn tailscale_login_status(&self, attempt_id: &str) -> fdo::Result<String>;
+    async fn tailscale_cancel_login(&self, attempt_id: &str) -> fdo::Result<()>;
+    async fn tailscale_dns_diagnostics(&self, profile_id: &str) -> fdo::Result<String>;
+    async fn tailscale_change_exit_node(&self, profile_id: &str, node_id: &str) -> fdo::Result<String>;
+
     /// Route this machine's traffic through `value`, or clear the selection
     /// when `value` is empty.
     ///
@@ -976,6 +991,9 @@ pub trait Daemon {
     // its own compliance runs, which is what lets a Security page exist here
     // without the port scanner.
     // =======================================================================
+
+    /// List persisted scope identifiers, including scopes no longer in inventory.
+    async fn findings_scopes(&self) -> fdo::Result<Vec<String>>;
 
     /// Every stored `PersistedFinding` for a scope, as JSON.
     ///
