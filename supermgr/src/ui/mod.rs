@@ -3306,7 +3306,12 @@ pub fn build_ui(
                         rx_compliance_view.show_run(&host_id, run, &library, &history);
                     }
                 }
+                AppMsg::FindingsScopesLoaded(result) => match result {
+                    Ok(scopes) => rx_security_view.set_saved_scopes(scopes),
+                    Err(e) => { error!("load archived scopes: {e}"); }
+                },
                 AppMsg::FindingsLoaded { scope, result } => {
+                    if !rx_security_view.accepts_result(&scope) { continue; }
                     match result {
                         Ok((summary, findings)) => {
                             rx_security_view.show_findings(&scope, &summary, &findings);

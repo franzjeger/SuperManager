@@ -240,6 +240,7 @@ pub enum AppMsg {
     /// Both in one message rather than two: painting the counts before the rows
     /// would look like a stall, and a scope where the summary succeeded but the
     /// list failed is not a state worth rendering.
+    FindingsScopesLoaded(Result<Vec<String>, String>),
     FindingsLoaded {
         /// Scope they belong to.
         scope: String,

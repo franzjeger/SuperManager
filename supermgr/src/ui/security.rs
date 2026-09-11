@@ -16,11 +16,9 @@
 //!
 //! # Scope
 //!
-//! The store is per-scope, and the daemon files under the host's customer tag,
-//! falling back to the host id when that is empty. So the picker is built from
-//! the host list rather than from a list of scopes the daemon could enumerate —
-//! there is no such call, and inventing one to populate a combo box would be
-//! more machinery than reading the field the daemon already keys on.
+//! Inventory labels are merged with persisted scopes reported by the daemon.
+//! Archived findings remain accessible after a host is removed or retagged.
+//! Both writer and picker use the shared scope resolver.
 //!
 //! # Order
 //!
@@ -29,7 +27,8 @@
 //! forty. Same reasoning as the Compliance page putting failures above passes.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::mpsc;
 
 use gtk4::prelude::*;
@@ -48,7 +47,10 @@ pub struct SecurityView {
     /// Root widget, handed to the view stack.
     pub widget: gtk4::Widget,
     /// Scope picker. Rebuilt when the host list changes.
-    scope_list: gtk4::Box,
+    scope_picker: adw::ComboRow,
+    scopes: Rc<RefCell<Vec<(String, String)>>>,
+    inventory_scopes: RefCell<Vec<(String, String)>>,
+    saved_scopes: RefCell<Vec<String>>,
     /// Summary + findings for the selected scope.
     body: gtk4::Box,
     /// Swaps between the body and a full-page status.
@@ -57,6 +59,7 @@ pub struct SecurityView {
     status_slot: adw::Bin,
     /// Scope currently shown, so a disposition change can reload it.
     current_scope: RefCell<Option<String>>,
+    requested_scope: Rc<RefCell<Option<String>>>,
     /// Runtime the D-Bus calls are spawned on.
     rt: tokio::runtime::Handle,
     /// Where those calls report back to.
@@ -65,14 +68,40 @@ pub struct SecurityView {
 
 /// Build the page. Starts asking the operator to pick a scope.
 #[must_use]
-pub fn build_security_page(
-    rt: &tokio::runtime::Handle,
-    tx: &mpsc::Sender<AppMsg>,
-) -> SecurityView {
-    let (scroller, content) = design::detail_body();
-
-    let scope_list = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    content.append(&scope_list);
+pub fn build_security_page(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>) -> SecurityView {
+    let (scroller, content) = design::workspace_body(
+        "Security",
+        "Investigate findings, track decisions and keep customer history accessible.",
+    );
+    let scopes: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(vec![]));
+    let requested_scope = Rc::new(RefCell::new(None));
+    let scope_picker = adw::ComboRow::builder()
+        .title("Customer or host")
+        .subtitle("Includes archived scopes with saved findings")
+        .model(&gtk4::StringList::new(&[]))
+        .build();
+    let open = gtk4::Button::builder()
+        .label("Open findings")
+        .valign(gtk4::Align::Center)
+        .css_classes(["suggested-action"])
+        .build();
+    scope_picker.add_suffix(&open);
+    let scope_group = design::card("");
+    scope_group.add(&scope_picker);
+    content.append(&scope_group);
+    {
+        let scopes = Rc::clone(&scopes);
+        let picker = scope_picker.clone();
+        let tx = tx.clone();
+        let rt = rt.clone();
+        let requested = Rc::clone(&requested_scope);
+        open.connect_clicked(move |_| {
+            if let Some((scope, _)) = scopes.borrow().get(picker.selected() as usize) {
+                *requested.borrow_mut() = Some(scope.clone());
+                load_scope(&rt, &tx, scope.clone());
+            }
+        });
+    }
 
     let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
 
@@ -92,107 +121,85 @@ pub fn build_security_page(
 
     SecurityView {
         widget: scroller.upcast(),
-        scope_list,
+        scope_picker,
+        scopes,
+        inventory_scopes: RefCell::new(vec![]),
+        saved_scopes: RefCell::new(vec![]),
         body,
         stack,
         status_slot,
         current_scope: RefCell::new(None),
+        requested_scope,
         rt: rt.clone(),
         tx: tx.clone(),
     }
 }
 
 impl SecurityView {
-    /// Rebuild the scope picker from the current host list.
-    pub fn set_hosts(&self, hosts: &[HostSummary]) {
-        while let Some(c) = self.scope_list.first_child() {
-            self.scope_list.remove(&c);
-        }
-
-        if hosts.is_empty() {
-            let group = design::card("Scopes");
-            let row = adw::ActionRow::new();
-            row.set_title("No SSH hosts");
-            row.set_subtitle(
-                "Findings come from compliance scans, which run over SSH. Add a host first.",
-            );
-            group.add(&row);
-            self.scope_list.append(&group);
-            return;
-        }
-
-        // Customers first: a customer scope aggregates every host tagged with
-        // it, which is the level an MSP actually reports at. `BTreeSet` so the
-        // order is stable between refreshes rather than following host order.
-        let customers: BTreeSet<&str> = hosts
-            .iter()
-            .map(|h| h.customer.trim())
-            .filter(|c| !c.is_empty())
-            .collect();
-
-        if !customers.is_empty() {
-            let group = design::card("Customers");
-            group.set_description(Some(
-                "Findings for every host tagged with this customer.",
-            ));
-            for c in &customers {
-                group.add(&self.scope_row(c, c, "customer"));
-            }
-            self.scope_list.append(&group);
-        }
-
-        // Hosts with no customer tag are filed under their id, so they need
-        // their own rows or their findings would be unreachable from here.
-        let untagged: Vec<&HostSummary> = hosts
-            .iter()
-            .filter(|h| h.customer.trim().is_empty())
-            .collect();
-        if !untagged.is_empty() {
-            let group = design::card("Untagged hosts");
-            group.set_description(Some(
-                "No customer tag, so the daemon files these under the host id. \
-                 Set a customer in the SSH section to group them.",
-            ));
-            for h in untagged {
-                group.add(&self.scope_row(
-                    &h.id.simple().to_string(),
-                    &h.label,
-                    &format!("{}@{}", h.username, h.hostname),
-                ));
-            }
-            self.scope_list.append(&group);
-        }
+    pub fn accepts_result(&self, scope: &str) -> bool {
+        self.requested_scope
+            .borrow()
+            .as_deref()
+            .is_none_or(|expected| expected == scope)
     }
 
-    /// One scope row with a button that loads it.
-    fn scope_row(&self, scope: &str, title: &str, subtitle: &str) -> adw::ActionRow {
-        let row = adw::ActionRow::new();
-        row.set_title(title);
-        row.set_subtitle(subtitle);
-
-        let btn = gtk4::Button::with_label("Open");
-        btn.set_valign(gtk4::Align::Center);
-        let rt = self.rt.clone();
+    /// Refresh inventory labels and independently discover persisted scopes.
+    pub fn set_hosts(&self, hosts: &[HostSummary]) {
+        *self.inventory_scopes.borrow_mut() = hosts
+            .iter()
+            .map(|host| {
+                let scope =
+                    supermgr_core::findings_store::scope_for_customer(&host.customer, &host.id);
+                let label = if scope == host.customer.trim() {
+                    host.customer.clone()
+                } else {
+                    host.label.clone()
+                };
+                (scope, label)
+            })
+            .collect();
+        self.update_scope_picker();
         let tx = self.tx.clone();
-        let scope = scope.to_owned();
-        btn.connect_clicked(move |_| {
-            let tx = tx.clone();
-            let scope = scope.clone();
-            rt.spawn(async move {
-                // Summary and list in one message: two separate loads would
-                // paint the counts before the rows and look like a stall.
-                let result = async {
-                    let summary = crate::dbus_client::dbus_findings_summary(&scope).await?;
-                    let findings = crate::dbus_client::dbus_findings_list(&scope).await?;
-                    Ok::<_, anyhow::Error>((summary, findings))
-                }
-                .await
-                .map_err(|e| format!("{e:#}"));
-                tx.send(AppMsg::FindingsLoaded { scope, result }).ok();
-            });
+        self.rt.spawn(async move {
+            tx.send(AppMsg::FindingsScopesLoaded(
+                crate::dbus_client::dbus_findings_scopes()
+                    .await
+                    .map_err(|e| e.to_string()),
+            ))
+            .ok();
         });
-        row.add_suffix(&btn);
-        row
+    }
+
+    pub fn set_saved_scopes(&self, scopes: Vec<String>) {
+        *self.saved_scopes.borrow_mut() = scopes;
+        self.update_scope_picker();
+    }
+
+    fn update_scope_picker(&self) {
+        let selected = self
+            .scopes
+            .borrow()
+            .get(self.scope_picker.selected() as usize)
+            .map(|s| s.0.clone());
+        let mut options: BTreeMap<String, String> = self
+            .saved_scopes
+            .borrow()
+            .iter()
+            .map(|scope| (scope.clone(), format!("{scope} · archived")))
+            .collect();
+        options.extend(self.inventory_scopes.borrow().iter().cloned());
+        let mut options: Vec<_> = options.into_iter().collect();
+        options.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+        let model =
+            gtk4::StringList::new(&options.iter().map(|x| x.1.as_str()).collect::<Vec<_>>());
+        let index = options
+            .iter()
+            .position(|x| Some(&x.0) == selected.as_ref())
+            .unwrap_or(0);
+        *self.scopes.borrow_mut() = options;
+        self.scope_picker.set_model(Some(&model));
+        self.scope_picker.set_selected(index as u32);
+        self.scope_picker.set_sensitive(model.n_items() > 0);
     }
 
     /// Render a loaded scope.
@@ -276,8 +283,10 @@ impl SecurityView {
             (PillStatus::Error, format!("{} high", s.high))
         } else if s.open > 0 {
             (PillStatus::Degraded, format!("{} open", s.open))
+        } else if s.last_scan_at.is_none() {
+            (PillStatus::Unknown, "not scanned".to_owned())
         } else {
-            (PillStatus::Connected, "clear".to_owned())
+            (PillStatus::Disconnected, "no open findings".to_owned())
         };
         open_row.add_suffix(&design::status_pill(status, &label));
         group.add(&open_row);
@@ -316,25 +325,75 @@ impl SecurityView {
             )
         });
 
-        for f in sorted {
-            group.add(&self.finding_row(scope, f));
+        let rows: Rc<Vec<_>> = Rc::new(
+            sorted
+                .into_iter()
+                .map(|f| {
+                    let row = self.finding_row(scope, f);
+                    group.add(&row);
+                    (row, f.clone())
+                })
+                .collect(),
+        );
+        let search = gtk4::SearchEntry::builder()
+            .placeholder_text("Search findings or hosts")
+            .hexpand(true)
+            .build();
+        let filter = gtk4::DropDown::from_strings(&[
+            "All findings",
+            "Open",
+            "High / critical",
+            "Accepted risk",
+            "Fixed",
+        ]);
+        let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        controls.append(&search);
+        controls.append(&filter);
+        let apply = {
+            let rows = Rc::clone(&rows);
+            let search = search.clone();
+            let filter = filter.clone();
+            Rc::new(move || {
+                for (row, finding) in rows.iter() {
+                    row.set_visible(matches_finding(finding, &search.text(), filter.selected()));
+                }
+            })
+        };
+        {
+            let apply = Rc::clone(&apply);
+            search.connect_search_changed(move |_| apply());
         }
+        filter.connect_selected_notify(move |_| apply());
+        self.body.append(&controls);
+        let export = gtk4::Button::with_label("Export JSON");
+        let data =
+            serde_json::json!({"scope":scope,"exported_at":chrono::Utc::now(),"findings":findings});
+        let tx = self.tx.clone();
+        let widget = self.widget.clone();
+        export.connect_clicked(move |_| {
+            let parent = widget.root().and_downcast::<gtk4::Window>();
+            design::export_json(parent.as_ref(), "security-findings.json", &data, &tx);
+        });
+        group.set_header_suffix(Some(&export));
         group
     }
 
     /// One finding: what it is, since when, and what an operator can do about it.
     fn finding_row(&self, scope: &str, f: &PersistedFinding) -> adw::ExpanderRow {
         let row = adw::ExpanderRow::new();
-        row.set_title(&gtk4::glib::markup_escape_text(&f.finding.title));
-        row.set_subtitle(&gtk4::glib::markup_escape_text(&format!(
+        row.set_title(&f.finding.title);
+        row.set_subtitle(&format!(
             "{} · seen {}× since {}",
             f.finding.host_ip,
             f.scan_count,
             f.first_seen.format("%Y-%m-%d")
-        )));
+        ));
 
         let (pill, label) = match &f.disposition {
-            Disposition::Open => (severity_pill(f.finding.severity), severity_label(f.finding.severity)),
+            Disposition::Open => (
+                severity_pill(f.finding.severity),
+                severity_label(f.finding.severity),
+            ),
             // Accepted risk stays amber: it is a live problem someone chose to
             // live with, not a solved one, and colouring it green would lose
             // that distinction on the only screen that shows it.
@@ -350,13 +409,13 @@ impl SecurityView {
         // what makes the finding actionable without re-running the scan.
         let detail = adw::ActionRow::new();
         detail.set_title("Detail");
-        detail.set_subtitle(&gtk4::glib::markup_escape_text(&f.finding.detail));
+        detail.set_subtitle(&f.finding.detail);
         detail.set_subtitle_lines(0);
         row.add_row(&detail);
 
         let rec = adw::ActionRow::new();
         rec.set_title("Remediation");
-        rec.set_subtitle(&gtk4::glib::markup_escape_text(&f.finding.recommendation));
+        rec.set_subtitle(&f.finding.recommendation);
         rec.set_subtitle_lines(0);
         row.add_row(&rec);
 
@@ -377,7 +436,7 @@ impl SecurityView {
                 sub.push_str(" — ");
                 sub.push_str(&change.note);
             }
-            r.set_subtitle(&gtk4::glib::markup_escape_text(&sub));
+            r.set_subtitle(&sub);
             row.add_row(&r);
         }
 
@@ -455,7 +514,8 @@ impl SecurityView {
                 .await
                 .map(|_| ())
                 .map_err(|e| format!("{e:#}"));
-                tx.send(AppMsg::FindingDispositionSet { scope, result }).ok();
+                tx.send(AppMsg::FindingDispositionSet { scope, result })
+                    .ok();
             });
         });
         btn
@@ -497,6 +557,27 @@ fn severity_label(s: Severity) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn finding_search_combines_case_insensitive_text_and_triage_filters() {
+        let mut finding: PersistedFinding = serde_json::from_value(serde_json::json!({
+            "key":"fixture", "disposition":{"kind":"open"},
+            "first_seen":"2026-09-01T10:00:00Z","last_seen":"2026-09-09T12:00:00Z","scan_count":1,
+            "finding":{"id":"fixture","host_ip":"WEB01","severity":"high",
+                "title":"Root login","detail":"PermitRootLogin yes","recommendation":"Review access"}
+        })).unwrap();
+        assert!(matches_finding(&finding, " web01 ", 2));
+        assert!(matches_finding(&finding, "permitrootlogin", 1));
+        assert!(!matches_finding(&finding, "web02", 0));
+        finding.disposition = Disposition::AcceptedRisk {
+            reason: "Reviewed".into(),
+            until: None,
+        };
+        assert!(!matches_finding(&finding, "", 2));
+        assert!(matches_finding(&finding, "ROOT", 3));
+        assert!(!matches_finding(&finding, "", 4));
+    }
 
     #[test]
     fn severity_ranks_worst_first() {
@@ -534,16 +615,61 @@ mod tests {
         .iter()
         .map(|s| severity_rank(*s))
         .collect();
-        assert_eq!(ranks.len(), 5, "two severities sharing a rank sort at random");
+        assert_eq!(
+            ranks.len(),
+            5,
+            "two severities sharing a rank sort at random"
+        );
     }
 
     #[test]
     fn only_the_top_two_severities_read_as_an_error() {
         // The pill is what an operator scans for. Making everything red means
         // nothing is red.
-        assert!(matches!(severity_pill(Severity::Critical), PillStatus::Error));
+        assert!(matches!(
+            severity_pill(Severity::Critical),
+            PillStatus::Error
+        ));
         assert!(matches!(severity_pill(Severity::High), PillStatus::Error));
-        assert!(!matches!(severity_pill(Severity::Medium), PillStatus::Error));
+        assert!(!matches!(
+            severity_pill(Severity::Medium),
+            PillStatus::Error
+        ));
         assert!(!matches!(severity_pill(Severity::Info), PillStatus::Error));
     }
+}
+
+fn load_scope(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>, scope: String) {
+    let tx = tx.clone();
+    rt.spawn(async move {
+        let result = async {
+            Ok::<_, anyhow::Error>((
+                crate::dbus_client::dbus_findings_summary(&scope).await?,
+                crate::dbus_client::dbus_findings_list(&scope).await?,
+            ))
+        }
+        .await
+        .map_err(|e| e.to_string());
+        tx.send(AppMsg::FindingsLoaded { scope, result }).ok();
+    });
+}
+
+fn matches_finding(f: &PersistedFinding, query: &str, filter: u32) -> bool {
+    let status = match filter {
+        1 => matches!(f.disposition, Disposition::Open),
+        2 => {
+            matches!(f.disposition, Disposition::Open)
+                && matches!(f.finding.severity, Severity::High | Severity::Critical)
+        }
+        3 => matches!(f.disposition, Disposition::AcceptedRisk { .. }),
+        4 => matches!(f.disposition, Disposition::Fixed { .. }),
+        _ => true,
+    };
+    status
+        && format!(
+            "{} {} {}",
+            f.finding.title, f.finding.host_ip, f.finding.detail
+        )
+        .to_lowercase()
+        .contains(&query.trim().to_lowercase())
 }
