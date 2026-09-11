@@ -269,10 +269,13 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
         info!("running: {}", cmd_str);
     }
 
-    let out = tokio::process::Command::new("swanctl")
+    let out_future = tokio::process::Command::new("swanctl")
         .args(args)
-        .output()
+        .output();
+        
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
         .await
+        .map_err(|_| BackendError::Interface("swanctl command timed out after 15 seconds".into()))?
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 BackendError::Interface(

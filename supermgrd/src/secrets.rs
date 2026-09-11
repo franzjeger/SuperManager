@@ -103,13 +103,26 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
     let tmp = path.with_extension("tmp");
     let text = serde_json::to_string_pretty(map).context("serialise secrets map")?;
 
-    tokio::fs::write(&tmp, text.as_bytes())
+    let mut open_options = tokio::fs::OpenOptions::new();
+    open_options.write(true).create(true).truncate(true);
+
+    #[cfg(unix)]
+    open_options.mode(0o600);
+
+    let mut file = open_options
+        .open(&tmp)
+        .await
+        .with_context(|| format!("create secrets tmp file {}", tmp.display()))?;
+
+    use tokio::io::AsyncWriteExt;
+    file.write_all(text.as_bytes())
         .await
         .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
-
-    // chmod 600 — must happen before rename.
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("chmod 600 {}", tmp.display()))?;
+    
+    // Ensure all data is flushed to disk before rename
+    file.sync_all()
+        .await
+        .with_context(|| format!("sync secrets tmp file {}", tmp.display()))?;
 
     tokio::fs::rename(&tmp, &path)
         .await

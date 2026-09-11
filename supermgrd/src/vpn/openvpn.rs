@@ -110,10 +110,13 @@ async fn iface_routes(iface: &str) -> Vec<String> {
 
 /// Run an `openvpn3` subcommand and return (stdout, stderr, success).
 async fn run_openvpn3(args: &[&str]) -> Result<(String, String, bool), BackendError> {
-    let out = tokio::process::Command::new("openvpn3")
+    let out_future = tokio::process::Command::new("openvpn3")
         .args(args)
-        .output()
+        .output();
+        
+    let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
         .await
+        .map_err(|_| BackendError::Interface("openvpn3 command timed out after 15 seconds".into()))?
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 BackendError::Interface("openvpn3 not found — please install openvpn3".into())
