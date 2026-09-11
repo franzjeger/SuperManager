@@ -280,6 +280,7 @@ pub fn populate_vpn_sidebar(
         };
 
         let row = adw::ActionRow::builder()
+            .name(profile.id.to_string())
             .title(profile.name.as_str())
             .title_lines(1)
             .subtitle(subtitle)

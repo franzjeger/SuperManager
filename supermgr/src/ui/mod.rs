@@ -1369,12 +1369,10 @@ pub fn build_ui(
         let split_routes_row = vpn_detail.split_routes_row.clone();
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_profile_list.connect_row_activated(move |list, row| {
-            let idx = row.index() as usize;
+            let row_id = row.widget_name().to_string();
             let (profile_name, profile_exists, ac, ft, ks, supports_split, split_routes, is_editable, is_wg, azure) = {
                 let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-                let mut sorted: Vec<&ProfileSummary> = s.profiles.iter().collect();
-                sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                let entry = sorted.get(idx).copied();
+                let entry = s.profiles.iter().find(|p| p.id.to_string() == row_id);
                 let name = entry.map(|p| p.name.clone());
                 let exists = entry.is_some();
                 let ac = entry.is_some_and(|p| p.auto_connect);
