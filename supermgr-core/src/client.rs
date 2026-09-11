@@ -57,3 +57,23 @@ pub async fn connect() -> Result<DaemonClient, String> {
         .await
         .map_err(|e| format!("named-pipe connect failed (is the SuperManager service running?): {e}"))
 }
+#[cfg(target_os = "macos")]
+impl DaemonClient {
+    pub async fn fortigate_api(&self, _host: &str, _method: &str, _path: &str, _body: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn list_hosts(&self) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn ssh_list_keys(&self) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn ssh_execute_command(&self, _host: &str, _cmd: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn get_status(&self) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn list_profiles(&self) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn connect(&self, _profile: &str) -> Result<(), String> { Err("macOS stub".into()) }
+    pub async fn disconnect(&self) -> Result<(), String> { Err("macOS stub".into()) }
+    pub async fn add_host(&self, _json: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn test_host_connection(&self, _host: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn toggle_host_pin(&self, _host: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn ssh_set_password(&self, _host: &str, _pwd: &str) -> Result<(), String> { Err("macOS stub".into()) }
+    pub async fn ssh_set_api_token(&self, _host: &str, _token: &str, _port: u16) -> Result<(), String> { Err("macOS stub".into()) }
+    pub async fn unifi_set_inform(&self, _host: &str, _url: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn unifi_api(&self, _host: &str, _method: &str, _path: &str, _body: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn fortigate_push_ssh_key(&self, _host: &str, _key: &str, _user: &str) -> Result<String, String> { Err("macOS stub".into()) }
+    pub async fn fortigate_backup_config(&self, _host: &str) -> Result<String, String> { Err("macOS stub".into()) }
+}
