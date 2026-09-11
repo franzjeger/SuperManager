@@ -142,11 +142,12 @@ pub fn build_vpn_sidebar(
 ) -> (gtk4::ListBox, gtk4::SearchEntry, adw::NavigationPage) {
     let profile_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::Single)
-        .css_classes(["navigation-sidebar"])
+        .css_classes(["navigation-sidebar", "supermgr-profile-list"])
         .build();
 
     let search_entry = gtk4::SearchEntry::builder()
         .placeholder_text("Search profiles\u{2026}")
+        .css_classes(["supermgr-profile-search"])
         .margin_start(8)
         .margin_end(8)
         .margin_top(8)
@@ -161,6 +162,10 @@ pub fn build_vpn_sidebar(
     let sidebar_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .build();
+    let heading = gtk4::Label::new(Some("VPN"));
+    heading.set_xalign(0.0);
+    heading.add_css_class("supermgr-list-heading");
+    sidebar_box.append(&heading);
     sidebar_box.append(&search_entry);
     sidebar_box.append(&sidebar_scroll);
 

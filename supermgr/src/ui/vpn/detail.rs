@@ -276,10 +276,22 @@ pub struct VpnDetail {
 // Build
 // ---------------------------------------------------------------------------
 
-/// Add one row to the statistics card and hand back the label to update.
-fn stat_row(card: &adw::PreferencesGroup, title: &str, monospace: bool) -> gtk4::Label {
-    let (row, value) = design::live_detail_row(title, monospace);
-    card.add(&row);
+/// A compact live metric; hiding its value also removes the complete tile.
+fn stat_row(card: &gtk4::FlowBox, title: &str, monospace: bool) -> gtk4::Label {
+    let tile = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical)
+        .spacing(8).css_classes(["supermgr-metric"]).build();
+    let caption = gtk4::Label::builder().label(title).xalign(0.0)
+        .css_classes(["dim-label", "caption"]).build();
+    let value = gtk4::Label::builder().label("—").xalign(0.0).selectable(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End).max_width_chars(20)
+        .css_classes(["heading"]).build();
+    if monospace { value.add_css_class("monospace"); }
+    tile.append(&caption);
+    tile.append(&value);
+    card.append(&tile);
+    if let Some(slot) = tile.parent() {
+        value.bind_property("visible", &slot, "visible").sync_create().build();
+    }
     value
 }
 
@@ -304,6 +316,12 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // --- Header -------------------------------------------------------------
 
     let header = design::DetailHeader::new();
+    header.widget.add_css_class("supermgr-hero");
+    let hero_icon = design::icon(design::icons::VPN);
+    hero_icon.set_pixel_size(26);
+    hero_icon.set_valign(gtk4::Align::Center);
+    hero_icon.add_css_class("supermgr-hero-icon");
+    header.widget.prepend(&hero_icon);
     let profile_name_label = header.title.clone();
 
     let connect_btn = gtk4::Button::builder()
@@ -328,7 +346,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
         .selectable(true)
         .visible(false)
         .margin_bottom(18)
-        .css_classes(["dim-label"])
+        .css_classes(["dim-label", "supermgr-notice"])
         .build();
 
     // --- Tunnel card --------------------------------------------------------
@@ -336,7 +354,9 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // Every live fact about the connection, as a definition list. All of it
     // is meaningless without a tunnel, so the whole card comes and goes as
     // one.
-    let stats_card = design::card("Tunnel");
+    let stats_card = gtk4::FlowBox::builder().selection_mode(gtk4::SelectionMode::None)
+        .min_children_per_line(2).max_children_per_line(3).homogeneous(true)
+        .column_spacing(12).row_spacing(12).build();
     let stats_interface = stat_row(&stats_card, "Interface", true);
     let stats_virtual_ip = stat_row(&stats_card, "VPN IP", true);
     let stats_routes = stat_row(&stats_card, "Routes", true);
@@ -367,14 +387,14 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     settings_card.add(&design::toggle_row(
         &auto_connect_switch,
         "Connect automatically",
-        "Bring this tunnel up when SuperManager starts",
+        "Reconnect when the network returns or the tunnel drops",
     ));
 
     let full_tunnel_switch = gtk4::Switch::builder().active(true).sensitive(false).build();
     let full_tunnel_row = design::toggle_row(
         &full_tunnel_switch,
         "Route all traffic",
-        "Everything goes through the tunnel, not just the routes below",
+        "Send all traffic through this VPN",
     );
     settings_card.add(&full_tunnel_row);
 
@@ -418,10 +438,15 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // visibility to its button's, so every existing call still means what it
     // meant.
 
-    let profile_card = design::card("Profile");
+    let profile_card = design::card("");
+    let profile_actions = adw::ExpanderRow::builder()
+        .title("Manage profile")
+        .subtitle("Credentials, rename, export and duplicate")
+        .build();
+    profile_card.add(&profile_actions);
 
     let rename_btn = gtk4::Button::builder().sensitive(false).build();
-    profile_card.add(&design::button_row(
+    profile_actions.add_row(&design::button_row(
         &rename_btn,
         "Rename\u{2026}",
         "Change how this profile is listed",
@@ -429,7 +454,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     ));
 
     let edit_creds_btn = gtk4::Button::builder().visible(false).build();
-    profile_card.add(&design::button_row(
+    profile_actions.add_row(&design::button_row(
         &edit_creds_btn,
         "Edit credentials\u{2026}",
         "Username, password and certificates",
@@ -437,7 +462,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     ));
 
     let rotate_key_btn = gtk4::Button::builder().visible(false).build();
-    profile_card.add(&design::button_row(
+    profile_actions.add_row(&design::button_row(
         &rotate_key_btn,
         "Rotate WireGuard key\u{2026}",
         "Generate a new keypair; the peer must be updated too",
@@ -445,7 +470,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     ));
 
     let export_btn = gtk4::Button::builder().sensitive(false).build();
-    profile_card.add(&design::button_row(
+    profile_actions.add_row(&design::button_row(
         &export_btn,
         "Export profile\u{2026}",
         "Write the configuration to a file",
@@ -453,7 +478,7 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     ));
 
     let duplicate_btn = gtk4::Button::builder().sensitive(false).build();
-    profile_card.add(&design::button_row(
+    profile_actions.add_row(&design::button_row(
         &duplicate_btn,
         "Duplicate profile",
         "Copy everything except the secrets",
@@ -468,17 +493,17 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // width as calm margin instead of turning row labels into a long-distance
     // reading exercise.
     scroller.set_child(None::<&gtk4::Widget>);
-    let content_clamp = adw::Clamp::builder().maximum_size(1040).build();
+    let content_clamp = adw::Clamp::builder().maximum_size(920).build();
     content_clamp.set_child(Some(&content));
     scroller.set_child(Some(&content_clamp));
     content.append(&header.widget);
     content.append(&status_detail);
 
-    let columns = design::reflowing_columns();
-    design::add_card(&columns, &stats_box);
-    design::add_card(&columns, &settings_card);
-    design::add_card(&columns, &profile_card);
-    content.append(&columns);
+    content.append(&stats_box);
+    settings_card.set_margin_top(22);
+    content.append(&settings_card);
+    profile_card.set_margin_top(22);
+    content.append(&profile_card);
 
     detail_stack.add_named(&scroller, Some("detail"));
     detail_stack.set_visible_child_name("empty");
@@ -558,11 +583,11 @@ pub fn apply_vpn_state(w: &VpnStatusWidgets, state: &AppState) {
     w.connect_btn.set_label(view.action);
     w.connect_btn.remove_css_class("suggested-action");
     w.connect_btn.remove_css_class("destructive-action");
-    w.connect_btn.add_css_class(if view.destructive {
-        "destructive-action"
-    } else {
-        "suggested-action"
-    });
+    if !view.destructive {
+        w.connect_btn.add_css_class("suggested-action");
+    } else if view.status != Status::Connected {
+        w.connect_btn.add_css_class("destructive-action");
+    }
     w.connect_btn.set_sensitive(view.action_enabled);
 
     match &state.vpn_state {
