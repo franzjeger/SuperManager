@@ -177,13 +177,27 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 
     // 5. Bootstrap the job. `kickstart -k` then forces a restart in
     // case launchd cached an earlier instance.
-    let bootstrap = Command::new("/bin/launchctl")
-        .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
-        .output()
-        .context("bootstrapping LaunchDaemon")?;
-    if !bootstrap.status.success() {
-        let stderr = String::from_utf8_lossy(&bootstrap.stderr);
-        bail!("launchctl bootstrap failed: {}", stderr.trim());
+    let mut last_err = String::new();
+    let mut bootstrapped = false;
+    for attempt in 1..=5u32 {
+        match Command::new("/bin/launchctl")
+            .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                bootstrapped = true;
+                break;
+            }
+            Ok(o) => last_err = String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+            Err(e) => last_err = e.to_string(),
+        }
+        if attempt < 5 {
+            std::thread::sleep(std::time::Duration::from_millis(u64::from(attempt) * 300));
+        }
+    }
+
+    if !bootstrapped {
+        bail!("launchctl bootstrap failed: {}", last_err);
     }
 
     let _ = Command::new("/bin/launchctl")
