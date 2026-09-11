@@ -74,7 +74,11 @@ enum HelperInstaller {
         // when the helper is up) instead of trusting the file-existence
         // check, which can be stale after a bootout.
         if await HelperClient.shared.isReachable() {
-            return
+            let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+            if let installedVersion = try? await HelperClient.shared.helperVersion(),
+               installedVersion == bundledVersion {
+                return
+            }
         }
 
         // Try the modern API first. Skip silently if it errors — the
