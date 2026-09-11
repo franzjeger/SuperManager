@@ -87,7 +87,8 @@ enum HelperInstaller {
         if (try? trySMAppService()) != nil {
             // Wait for socket to come up.
             for _ in 0 ..< 30 {
-                if await HelperClient.shared.isReachable() {
+                let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+                if let v = try? await HelperClient.shared.helperVersion(), v == bundledVersion {
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -185,7 +186,8 @@ enum HelperInstaller {
         // launchctl is async — wait for the socket to come up before
         // returning so the caller can immediately make IPC calls.
         for _ in 0 ..< 50 {
-            if await HelperClient.shared.isReachable() {
+            let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+            if let v = try? await HelperClient.shared.helperVersion(), v == bundledVersion {
                 return
             }
             try? await Task.sleep(for: .milliseconds(100))
