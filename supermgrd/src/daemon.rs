@@ -81,6 +81,9 @@ pub struct DaemonState {
     /// Active VPN backend, if any.
     pub active_backend: Option<Arc<dyn VpnBackend>>,
 
+    /// Changes on every explicit connect/disconnect; invalidates stale retries.
+    vpn_generation: u64,
+
     /// Directory where VPN profile TOML files are persisted.
     pub profile_dir: PathBuf,
 
@@ -159,6 +162,7 @@ impl DaemonState {
             profiles: std::collections::HashMap::new(),
             vpn_state: VpnState::Disconnected,
             active_backend: None,
+            vpn_generation: 0,
             profile_dir,
             customers: std::collections::HashMap::new(),
             customer_dir: base.join("customers"),
@@ -997,6 +1001,11 @@ impl DaemonService {
         let id = Uuid::parse_str(key_id)
             .map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let mut state = self.state.lock().await;
+        let assigned = state.hosts.values().filter(|host| host.auth_key_id == Some(id)
+            && matches!(host.auth_method, AuthMethod::Key | AuthMethod::Certificate)).count();
+        if assigned != 0 {
+            return Err(fdo::Error::Failed(format!("This key is assigned to {assigned} host(s). Select replacement keys in their connection settings before deleting it. See Key usage for the affected hosts.")));
+        }
         let key = state.ssh_keys.remove(&id);
         if key.is_some() {
             let _ = state.delete_ssh_key_file(id);
@@ -1043,6 +1052,25 @@ impl DaemonService {
     /// Initiate a connection for the profile identified by `profile_id`.
     ///
     /// Returns immediately; progress is reported via `StateChanged` signals.
+    ///
+    /// # Why `ACTION_MANAGE` and not `ACTION_SECRETS`
+    ///
+    /// This is the Connect button, and `ACTION_SECRETS` is `auth_admin` with
+    /// no grace period — deliberately, because each grant *discloses* a
+    /// long-lived credential to the caller. Connecting discloses nothing:
+    /// the daemon reads the profile's secret, hands it to the VPN backend,
+    /// and the caller never sees it. Gating it as a disclosure put an
+    /// administrator password prompt on every click, including every retry
+    /// after a failed handshake, which is the friction the policy file warns
+    /// twice about getting a control switched off.
+    ///
+    /// `ACTION_MANAGE` is where the policy already documents VPN state
+    /// changes belonging, and it is what [`Self::disconnect`] uses — the two
+    /// halves of the same toggle should not sit at different levels. Its
+    /// `auth_admin_keep` still means an unprivileged local account cannot
+    /// silently bring up an administrator's tunnel: somebody authenticates
+    /// once per active session, and reconnect attempts within it do not
+    /// re-prompt.
     async fn connect(
         &self,
         #[zbus(signal_context)] ctx: SignalContext<'_>,
@@ -1050,7 +1078,7 @@ impl DaemonService {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
     ) -> fdo::Result<()> {
-        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_SECRETS).await?;
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
 
@@ -1084,6 +1112,14 @@ impl DaemonService {
         crate::audit::log_event("VPN_DISCONNECT", "");
         let backend = {
             let mut state = self.state.lock().await;
+            if matches!(state.vpn_state, VpnState::Disconnecting { .. }) && state.active_backend.is_none() {
+                return Ok(()); // An explicit disconnect already owns cleanup.
+            }
+            state.vpn_generation = state.vpn_generation.wrapping_add(1);
+            // Reserve the transition even when only a retained kill switch
+            // remains. A queued reconnect cannot race firewall removal.
+            let profile_id = state.vpn_state.profile_id().unwrap_or_else(Uuid::new_v4);
+            state.vpn_state = VpnState::Disconnecting { profile_id };
             match state.active_backend.take() {
                 Some(b) => {
                     let profile_id = state.vpn_state.profile_id();
@@ -2416,7 +2452,14 @@ impl DaemonService {
     /// List all SSH keys as a JSON array of summaries.
     async fn ssh_list_keys(&self) -> fdo::Result<String> {
         let state = self.state.lock().await;
-        let summaries: Vec<SshKeySummary> = state.ssh_keys.values().map(SshKeySummary::from).collect();
+        let summaries: Vec<SshKeySummary> = state.ssh_keys.values().map(|key| {
+            let mut summary = SshKeySummary::from(key);
+            summary.assigned_host_ids = state.hosts.values()
+                .filter(|host| matches!(host.auth_method, AuthMethod::Key | AuthMethod::Certificate) && host.auth_key_id == Some(key.id))
+                .map(|host| host.id).collect();
+            summary.assigned_host_ids.sort();
+            summary
+        }).collect();
         serde_json::to_string(&summaries).map_err(|e| fdo::Error::Failed(e.to_string()))
     }
 
@@ -2435,6 +2478,110 @@ impl DaemonService {
             .map_err(fdo::Error::Failed)?;
         serde_json::to_string(&nodes)
             .map_err(|e| fdo::Error::Failed(format!("serialise nodes: {e}")))
+    }
+
+    async fn tailscale_management(&self) -> fdo::Result<String> {
+        serde_json::to_string(&crate::tailscale_management::snapshot().await)
+            .map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn tailscale_apply_preferences(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        patch_json: &str,
+    ) -> fdo::Result<String> {
+        let patch: supermgr_core::tailscale::TailscalePreferencesPatch = serde_json::from_str(patch_json)
+            .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))?;
+        let routing = patch.accept_routes.is_some() || patch.exit_node_allow_lan.is_some()
+            || patch.advertise_routes.is_some() || patch.advertise_exit_node.is_some();
+        crate::polkit::authorize(conn, &hdr, if routing { crate::polkit::ACTION_TAILSCALE_EXIT_NODE } else { crate::polkit::ACTION_MANAGE }).await?;
+        crate::tailscale_management::apply(&patch).await.map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_set_running(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str, running: bool,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        crate::tailscale_management::set_running(profile_id, running).await.map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_switch_profile(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        crate::tailscale_management::switch_profile(profile_id).await.map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_logout(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
+        crate::tailscale_management::logout(profile_id).await.map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_ping(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        node_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
+        crate::tailscale_management::ping(node_id).await.map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_begin_login(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_REPAIR).await?;
+        let uid = caller_uid(conn, &hdr).await?;
+        let attempt = crate::tailscale_accounts::start(profile_id, uid).await.map_err(fdo::Error::Failed)?;
+        serde_json::to_string(&attempt).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn tailscale_login_status(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        attempt_id: &str,
+    ) -> fdo::Result<String> {
+        let uid = caller_uid(conn, &hdr).await?;
+        let attempt = crate::tailscale_accounts::status(attempt_id, uid).map_err(fdo::Error::Failed)?;
+        serde_json::to_string(&attempt).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn tailscale_cancel_login(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        attempt_id: &str,
+    ) -> fdo::Result<()> {
+        let uid = caller_uid(conn, &hdr).await?;
+        crate::tailscale_accounts::cancel(attempt_id, uid).map_err(fdo::Error::Failed)
+    }
+
+    async fn tailscale_dns_diagnostics(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
+        let report = crate::tailscale_diagnostics::diagnose(profile_id).await.map_err(fdo::Error::Failed)?;
+        serde_json::to_string(&report).map_err(|e| fdo::Error::Failed(e.to_string()))
+    }
+
+    async fn tailscale_change_exit_node(&self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] hdr: zbus::message::Header<'_>,
+        profile_id: &str,
+        node_id: &str,
+    ) -> fdo::Result<String> {
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_EXIT_NODE).await?;
+        crate::tailscale_exit::change(profile_id, node_id).await.map_err(fdo::Error::Failed)
     }
 
     /// Select or clear the Tailscale exit node.
@@ -2495,7 +2642,20 @@ impl DaemonService {
         #[zbus(header)] hdr: zbus::MessageHeader<'_>,
     ) -> fdo::Result<String> {
         crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_TAILSCALE_REPAIR).await?;
-        crate::tailscale::login_start().await.map_err(fdo::Error::Failed)
+        let uid = caller_uid(conn, &hdr).await?;
+        if crate::tailscale::health().await.is_running() {
+            return Err(fdo::Error::Failed("Already signed in. Use Add account to sign in to another tailnet.".into()));
+        }
+        let profiles = crate::tailscale_management::profiles().await.map_err(fdo::Error::Failed)?;
+        let expected = profiles.iter().find(|p| p.selected).map_or("", |p| p.id.as_str());
+        let attempt = crate::tailscale_accounts::start(expected, uid).await.map_err(fdo::Error::Failed)?;
+        for _ in 0..8 {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            let view = crate::tailscale_accounts::status(&attempt.id, uid).map_err(fdo::Error::Failed)?;
+            if !view.auth_url.is_empty() || view.state == "complete" { return Ok(view.auth_url); }
+            if view.state != "waiting" { return Err(fdo::Error::Failed(view.message)); }
+        }
+        Ok(String::new())
     }
 
     /// Return a single SSH key as JSON.
@@ -3978,10 +4138,13 @@ impl DaemonService {
                 .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
 
             let key_label = if host.auth_method == AuthMethod::Key {
-                host.auth_key_id.and_then(|kid| {
+                host.auth_key_id.map(|kid| {
                     state.ssh_keys.get(&kid)
                         .map(|k| k.private_key_ref.label().to_owned())
-                })
+                        .ok_or_else(|| fdo::Error::Failed(
+                            "The SSH key assigned to this host no longer exists. Edit the host and select an available key.".into(),
+                        ))
+                }).transpose()?
             } else {
                 None
             };
@@ -4001,10 +4164,9 @@ impl DaemonService {
         // of these is written; agent or on-box-key auth writes neither and
         // exposes nothing.
         //
-        // Every failure below is a warning rather than an error: the command
-        // is still useful without the credential — `ssh` prompts, or the
-        // user's own key works — and returning nothing at all would turn a
-        // staging problem into "the Connect button is broken".
+        // A configured credential must reach the caller. Falling back to
+        // plain ssh on failure silently changes authentication and produces
+        // repeated password prompts instead of explaining the real problem.
         let (password_label, secret_label) = match auth_method {
             AuthMethod::Password => (password_label, None),
             AuthMethod::Key => (None, secret_label),
@@ -4013,36 +4175,21 @@ impl DaemonService {
 
         let mut password_file: Option<PathBuf> = None;
         if let Some(ref pw_label) = password_label {
-            info!("ssh_connect_command: retrieving password from '{pw_label}'");
-            match crate::secrets::retrieve_secret(pw_label).await {
-                Ok(pw_bytes) => match stage_credential("pw", &pw_bytes, uid) {
-                    Ok(path) => {
-                        debug!("ssh_connect_command: password staged for uid {uid}");
-                        password_file = Some(path);
-                    }
-                    Err(e) => warn!("ssh_connect_command: failed to stage password: {e}"),
-                },
-                Err(e) => warn!("ssh_connect_command: failed to retrieve password: {e}"),
-            }
+            let bytes = crate::secrets::retrieve_secret(pw_label).await
+                .map_err(|e| fdo::Error::Failed(format!("Could not retrieve the stored SSH password: {e}")))?;
+            password_file = Some(stage_credential("pw", &bytes, uid)
+                .map_err(|e| fdo::Error::Failed(format!("Could not prepare the stored SSH password: {e}")))?);
+            debug!("ssh_connect_command: password staged for uid {uid}");
         }
 
         let mut key_file: Option<PathBuf> = None;
         if let Some(label) = secret_label {
-            if let Ok(bytes) = crate::secrets::retrieve_secret(&label).await {
-                // Written 0600 and owned by the caller, which is exactly what
-                // `ssh -i` insists on, so the path goes straight into the
-                // command. The old code copied it to `/tmp/.supermgr_key_<uuid>`
-                // and chmod'd afterwards — a predictable name in a
-                // world-writable directory, with the copy landing at the
-                // shell's umask before the chmod caught up.
-                match stage_credential("key", &bytes, uid) {
-                    Ok(path) => {
-                        debug!("ssh_connect_command: private key staged for uid {uid}");
-                        key_file = Some(path);
-                    }
-                    Err(e) => warn!("ssh_connect_command: failed to stage private key: {e}"),
-                }
-            }
+            let bytes = crate::secrets::retrieve_secret(&label).await
+                .map_err(|e| fdo::Error::Failed(format!("Could not retrieve the stored SSH private key: {e}")))?;
+            // Written 0600 and owned by the caller, as required by ssh -i.
+            key_file = Some(stage_credential("key", &bytes, uid)
+                .map_err(|e| fdo::Error::Failed(format!("Could not prepare the stored SSH private key: {e}")))?);
+            debug!("ssh_connect_command: private key staged for uid {uid}");
         }
 
         let tmp_files_to_clean: Vec<PathBuf> =
@@ -5131,7 +5278,10 @@ impl DaemonService {
         config: &str,
     ) -> fdo::Result<String> {
         crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
-        use std::io::Write;
+        if device_type.is_empty() || device_type.len() > 64 || !device_type.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)) {
+            return Err(fdo::Error::InvalidArgs("invalid configuration device type".into()));
+        }
 
         let dir = PathBuf::from("/etc/supermgrd/configs");
         std::fs::create_dir_all(&dir)
@@ -5142,13 +5292,13 @@ impl DaemonService {
             .chars()
             .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
             .collect::<String>();
-        let filename = format!("{}_{}_{}_.conf", sanitized, device_type.to_lowercase(), ts);
+        let filename = format!("{}_{}_{}_{}.conf", sanitized, device_type.to_lowercase(), ts, Uuid::new_v4().simple());
         let path = dir.join(&filename);
 
-        let mut f = std::fs::File::create(&path)
-            .map_err(|e| fdo::Error::Failed(format!("cannot create config file: {e}")))?;
-        f.write_all(config.as_bytes())
-            .map_err(|e| fdo::Error::Failed(format!("cannot write config file: {e}")))?;
+        let bytes = config.as_bytes().to_vec();
+        tokio::task::spawn_blocking(move || crate::secure_file::create_private(&path, &bytes, None))
+            .await.map_err(|e| fdo::Error::Failed(format!("config write task: {e}")))?
+            .map_err(|e| fdo::Error::Failed(format!("cannot write private config file: {e}")))?;
 
         info!("saved config version: {filename}");
         Ok(filename)
@@ -5482,19 +5632,9 @@ impl DaemonService {
         // scope would fail slug validation, and silently dropping the findings
         // because nobody filled in a customer field is worse than filing them
         // somewhere findable.
-        let scope = if host.customer.trim().is_empty() {
-            id.simple().to_string()
-        } else {
-            host.customer.clone()
-        };
-        let findings = supermgr_core::compliance::failures_as_findings(
-            &run,
-            &supermgr_core::ssh_compliance::linux_default_checks(),
-        );
-        // `reconcile` is what auto-resolves controls that now pass, so it runs
-        // even when this scan produced nothing: an empty list is the signal
-        // that everything previously failing is fixed.
-        match supermgr_core::findings_store::reconcile(&scope, &findings) {
+        let scope = supermgr_core::findings_store::scope_for_customer(&host.customer, &id);
+        match supermgr_core::findings_store::reconcile_compliance(
+            &scope, &run, &supermgr_core::ssh_compliance::linux_default_checks()) {
             Ok(diff) => info!(
                 "compliance_run_linux: findings for {scope} — {} new, {} still open, \
                  {} regressed, {} auto-resolved",
@@ -5541,6 +5681,12 @@ impl DaemonService {
         let checks = supermgr_core::compliance::list_checks();
         serde_json::to_string(&checks)
             .map_err(|e| fdo::Error::Failed(format!("serialise checks: {e}")))
+    }
+
+    /// Names of persisted scopes, including archived customers and hosts.
+    async fn findings_scopes(&self) -> fdo::Result<Vec<String>> {
+        supermgr_core::findings_store::list_scopes()
+            .map_err(|e| fdo::Error::Failed(format!("list scopes: {e}")))
     }
 
     /// Every stored finding for a scope, newest-triage-first.
@@ -6462,7 +6608,9 @@ fn render_kill_switch(mode: &KillSwitchMode) -> Result<String, String> {
     // place (which would temporarily block all traffic, including established
     // connections).
     let mut script = String::from(
-        "table inet supermgr_killswitch {\n\
+        "add table inet supermgr_killswitch\n\
+         delete table inet supermgr_killswitch\n\
+         table inet supermgr_killswitch {\n\
          \tchain output {\n\
          \t\ttype filter hook output priority -1;\n\
          \t\tpolicy drop;\n\
@@ -6526,14 +6674,9 @@ async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
 
     let script = render_kill_switch(mode)?;
 
-    // Best-effort removal of any stale table from a previous run. Suppress
-    // nft's expected "No such file or directory" diagnostic when absent.
-    let _ = tokio::process::Command::new("nft")
-        .args(["delete", "table", "inet", "supermgr_killswitch"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
+    // `add table` is idempotent. Add/delete/recreate in ONE transaction
+    // works with or without an existing table and retains the old rules if
+    // nft rejects the replacement. Never delete the live table separately.
 
     // Feed the script to nft as a single atomic transaction.
     let mut child = tokio::process::Command::new("nft")
@@ -6542,6 +6685,7 @@ async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("could not start nft: {e}"))?;
 
@@ -6555,9 +6699,9 @@ async fn install_kill_switch(mode: &KillSwitchMode) -> Result<(), String> {
     }
     drop(stdin);
 
-    let output = child
-        .wait_with_output()
+    let output = tokio::time::timeout(Duration::from_secs(3), child.wait_with_output())
         .await
+        .map_err(|_| "nft rules transaction timed out".to_owned())?
         .map_err(|e| format!("could not wait for nft: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -6620,6 +6764,15 @@ pub async fn connect_profile(
     state: Arc<Mutex<DaemonState>>,
     ctx: SignalContext<'_>,
 ) -> fdo::Result<()> {
+    connect_profile_if_current(profile, state, ctx, None).await
+}
+
+async fn connect_profile_if_current(
+    profile: Profile,
+    state: Arc<Mutex<DaemonState>>,
+    ctx: SignalContext<'_>,
+    expected_generation: Option<u64>,
+) -> fdo::Result<()> {
     let id = profile.id;
 
     // For Azure profiles, set up an mpsc channel so the backend can relay
@@ -6631,8 +6784,11 @@ pub async fn connect_profile(
         (None, None)
     };
 
-    let backend = {
+    let (backend, generation) = {
         let mut s = state.lock().await;
+        if !retry_is_current(expected_generation, s.vpn_generation, &s.vpn_state) {
+            return Err(fdo::Error::Failed("connection attempt was cancelled or superseded".into()));
+        }
 
         // Re-check idleness under the lock to guard against races.
         if !s.vpn_state.is_idle() {
@@ -6649,7 +6805,8 @@ pub async fn connect_profile(
             phase: "initialising".into(),
         };
         s.active_backend = Some(Arc::clone(&backend));
-        backend
+        s.vpn_generation = s.vpn_generation.wrapping_add(1);
+        (backend, s.vpn_generation)
     };
 
     // Spawn the auth-challenge relay task (Azure only).
@@ -6808,7 +6965,7 @@ pub async fn connect_profile(
         // Only update state if we are still in the Connecting phase for this
         // profile.  A concurrent Disconnect() call may have already moved the
         // state to Disconnecting/Disconnected — don't overwrite that.
-        let still_connecting = matches!(
+        let still_connecting = s.vpn_generation == generation && matches!(
             &s.vpn_state,
             VpnState::Connecting { profile_id: pid, .. } if *pid == id
         );
@@ -6822,25 +6979,26 @@ pub async fn connect_profile(
                 // not a best-effort extra. Do not publish Connected until nft
                 // confirms that the rules are actually active.
                 let kill_result = if let Some(mode) = &kill_mode {
-                    drop(s);
-                    let result = install_kill_switch(mode).await;
-                    s = state_arc.lock().await;
-                    result
+                    // Serialize the short firewall transaction with Disconnect:
+                    // a late install must never recreate a table after cleanup.
+                    install_kill_switch(mode).await
                 } else {
+                    if s.active_kill_switch_mode.is_some() {
+                        remove_kill_switch().await;
+                    }
                     Ok(())
                 };
 
                 // A Disconnect() may have completed while nft was running.
                 // Never resurrect that connection or leave a late table behind.
-                let still_connecting = matches!(
+                let still_connecting = s.vpn_generation == generation && matches!(
                     &s.vpn_state,
                     VpnState::Connecting { profile_id: pid, .. } if *pid == id
                 );
                 if !still_connecting {
                     drop(s);
-                    if kill_mode.is_some() && kill_result.is_ok() {
-                        remove_kill_switch().await;
-                    }
+                    // The disconnect task owns cleanup. A later connection
+                    // may already own this table, so never remove it here.
                     return;
                 }
 
@@ -6879,6 +7037,7 @@ pub async fn connect_profile(
                             );
                         }
                         s = state_arc.lock().await;
+                        if s.vpn_generation != generation { return; }
                         s.vpn_state = VpnState::Error {
                             profile_id: Some(id),
                             code: supermgr_core::vpn::state::ErrorCode::Internal,
@@ -6887,7 +7046,8 @@ pub async fn connect_profile(
                             ),
                         };
                         s.active_backend = None;
-                        s.active_kill_switch_mode = None;
+                        // Failed atomic replacement leaves any previous
+                        // kill-switch table in force during recovery.
                     }
                 }
             }
@@ -6903,10 +7063,16 @@ pub async fn connect_profile(
                     warn!("cleanup after failed connect: {de}");
                 }
                 s = state_arc.lock().await;
+                if s.vpn_generation != generation { return; }
+                let message = if s.active_kill_switch_mode.is_some() {
+                    format!("{e}. Kill switch remains active. Retry the connection or Disconnect to release it.")
+                } else {
+                    e.to_string()
+                };
                 s.vpn_state = VpnState::Error {
                     profile_id: Some(id),
                     code: supermgr_core::vpn::state::ErrorCode::from(&e),
-                    message: e.to_string(),
+                    message,
                 };
                 s.active_backend = None;
             }
@@ -6918,6 +7084,11 @@ pub async fn connect_profile(
     });
 
     Ok(())
+}
+
+/// A delayed retry must still belong to the idle session that scheduled it.
+fn retry_is_current(expected: Option<u64>, actual: u64, state: &VpnState) -> bool {
+    expected.is_none_or(|generation| generation == actual && state.is_idle())
 }
 
 // ---------------------------------------------------------------------------
@@ -7399,9 +7570,9 @@ pub fn spawn_monitor_task(
                 }
             }
 
-            let (backend, current_state) = {
+            let (backend, current_state, generation) = {
                 let state = state.lock().await;
-                (state.active_backend.clone(), state.vpn_state.clone())
+                (state.active_backend.clone(), state.vpn_state.clone(), state.vpn_generation)
             };
 
             let Some(backend) = backend else { continue };
@@ -7440,6 +7611,15 @@ pub fn spawn_monitor_task(
                     // Check for unexpected disconnects.
                     if supermgr_core::vpn::backend::reconcile_status(&current_state, &backend_status).is_some()
                     {
+                        {
+                            let mut s = state.lock().await;
+                            if s.vpn_generation != generation || !s.vpn_state.is_connected() {
+                                continue;
+                            }
+                            s.vpn_state = VpnState::Disconnecting {
+                                profile_id: current_state.profile_id().expect("connected profile"),
+                            };
+                        }
                         // The VPN dropped unexpectedly.  Run backend.disconnect()
                         // to restore the original default route, revert DNS, and
                         // remove endpoint host routes.  This is safe even if the
@@ -7449,6 +7629,10 @@ pub fn spawn_monitor_task(
                         info!("VPN dropped unexpectedly — running backend cleanup");
                         if let Err(e) = backend.disconnect().await {
                             warn!("cleanup after unexpected VPN drop: {e}");
+                        }
+
+                        if state.lock().await.vpn_generation != generation {
+                            continue;
                         }
 
                         // Webhook: VPN disconnected unexpectedly.
@@ -7486,8 +7670,6 @@ pub fn spawn_monitor_task(
                                 "VPN dropped unexpectedly — kill switch is active, \
                                  all traffic is blocked until reconnect or disconnect"
                             );
-                        } else {
-                            remove_kill_switch().await;
                         }
 
                         let error_state = if kill_switch_active {
@@ -7502,62 +7684,51 @@ pub fn spawn_monitor_task(
                             VpnState::Disconnected
                         };
 
-                        let object_path = zbus::zvariant::ObjectPath::try_from(
-                            supermgr_core::dbus::DBUS_OBJECT_PATH,
-                        )
-                        .expect("static path");
-                        if let Ok(ctx) = SignalContext::new(&conn, object_path) {
-                            if let Ok(json) = state_to_json(&error_state) {
-                                let _ = DaemonService::state_changed(&ctx, json).await;
-                            }
-                        }
-                        // Auto-reconnect: if the profile has auto_connect and
-                        // the kill switch is NOT active, attempt to reconnect
-                        // after a short delay.
-                        let auto_reconnect_profile = if !kill_switch_active {
-                            let s = state.lock().await;
-                            if let VpnState::Connected { profile_id, .. } = &current_state {
-                                s.profiles.get(profile_id)
-                                    .filter(|p| p.auto_connect)
-                                    .cloned()
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-
-                        {
+                        // Keep the firewall installed throughout recovery. A
+                        // retry is never permission to expose the physical link.
+                        let auto_reconnect_id = {
                             let mut s = state.lock().await;
+                            if s.vpn_generation != generation { continue; }
+                            let id = current_state.profile_id().filter(|id| {
+                                s.profiles.get(id).is_some_and(|p| p.auto_connect)
+                            });
                             s.vpn_state = error_state;
                             s.active_backend = None;
-                        }
+                            let object_path = zbus::zvariant::ObjectPath::try_from(
+                                supermgr_core::dbus::DBUS_OBJECT_PATH,
+                            ).expect("static path");
+                            if let Ok(ctx) = SignalContext::new(&conn, object_path) {
+                                if let Ok(json) = state_to_json(&s.vpn_state) {
+                                    let _ = DaemonService::state_changed(&ctx, json).await;
+                                }
+                            }
+                            id
+                        };
 
-                        // Attempt auto-reconnect with backoff.
-                        if let Some(profile) = auto_reconnect_profile {
-                            info!("auto-reconnect: will retry '{}' in 5 s", profile.name);
+                        if let Some(id) = auto_reconnect_id {
+                            info!("auto-reconnect: will retry in 5 s (kill switch retained)");
                             let state_c = Arc::clone(&state);
                             let conn_c = conn.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(Duration::from_secs(5)).await;
-                                // Only reconnect if still idle.
-                                let idle = {
+                                let profile = {
                                     let s = state_c.lock().await;
-                                    s.vpn_state.is_idle()
+                                    if !retry_is_current(Some(generation), s.vpn_generation, &s.vpn_state) {
+                                        return;
+                                    }
+                                    // Honour deletion and changes to auto-connect
+                                    // made while the retry was waiting.
+                                    s.profiles.get(&id).filter(|p| p.auto_connect).cloned()
                                 };
-                                if !idle {
-                                    info!("auto-reconnect: skipped, tunnel already active");
-                                    return;
-                                }
+                                let Some(profile) = profile else { return };
                                 let object_path = zbus::zvariant::ObjectPath::try_from(
                                     supermgr_core::dbus::DBUS_OBJECT_PATH,
                                 ).expect("static path");
                                 if let Ok(ctx) = SignalContext::new(&conn_c, object_path) {
-                                    info!("auto-reconnect: connecting '{}'", profile.name);
-                                    if let Err(e) = connect_profile(
-                                        profile.clone(), Arc::clone(&state_c), ctx,
+                                    if let Err(e) = connect_profile_if_current(
+                                        profile, Arc::clone(&state_c), ctx, Some(generation),
                                     ).await {
-                                        warn!("auto-reconnect failed: {e}");
+                                        warn!("auto-reconnect did not start: {e}");
                                     }
                                 }
                             });
@@ -7726,6 +7897,44 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delayed_reconnect_does_not_resurrect_cancelled_sessions() {
+        assert!(retry_is_current(Some(8), 8, &VpnState::Disconnected));
+        assert!(retry_is_current(Some(8), 8, &VpnState::Error {
+            profile_id: Some(Uuid::new_v4()),
+            code: supermgr_core::vpn::state::ErrorCode::Internal,
+            message: "kill switch retained".into(),
+        }));
+        assert!(!retry_is_current(Some(8), 9, &VpnState::Disconnected));
+        assert!(!retry_is_current(Some(8), 8, &VpnState::Connecting {
+            profile_id: Uuid::new_v4(), since: chrono::Utc::now(), phase: "connecting".into(),
+        }));
+    }
+
+    #[tokio::test]
+    #[ignore = "run only inside an isolated user/network namespace"]
+    async fn kill_switch_replacement_preserves_protection() {
+        assert_ne!(std::fs::read_link("/proc/self/ns/net").unwrap(),
+                   std::path::PathBuf::from(std::env::var("SUPERMGR_HOST_NET_NS").expect("parent network namespace ID")),
+                   "refusing to alter the host firewall");
+        let created = tokio::process::Command::new("ip")
+            .args(["link", "add", "wg-test", "type", "dummy"]).status().await.unwrap();
+        assert!(created.success());
+        let mode = KillSwitchMode::Interface { iface: "wg-test".into(), allowed_ips: vec!["192.0.2.1".into()] };
+        install_kill_switch(&mode).await.unwrap();
+        install_kill_switch(&mode).await.unwrap();
+        // The kernel rejects this missing interface after parsing the entire
+        // replacement transaction. The previous DROP policy must survive.
+        let rejected = KillSwitchMode::Interface { iface: "missing-iface".into(), allowed_ips: vec![] };
+        assert!(install_kill_switch(&rejected).await.is_err());
+        let rules = tokio::process::Command::new("nft")
+            .args(["list", "table", "inet", "supermgr_killswitch"]).output().await.unwrap();
+        assert!(rules.status.success());
+        let text = String::from_utf8_lossy(&rules.stdout);
+        assert!(text.contains("policy drop"));
+        assert_eq!(text.matches("192.0.2.1").count(), 1, "replacement must not append old rules");
+    }
 
     #[test]
     fn duplicate_host_endpoint_is_case_and_trailing_dot_insensitive() {
@@ -8264,6 +8473,25 @@ mod tests {
                 live.add_ssh_key(k);
             }
             assert!(live.find_orphans(left.keys()).is_empty());
+        }
+
+        #[tokio::test]
+        async fn assigned_keys_cannot_be_deleted_and_usage_is_separate_from_deployment() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let mut state = DaemonState::new(tmp.path().join("profiles")).unwrap();
+            let key_id = Uuid::new_v4(); let host_id = Uuid::new_v4(); let deployed_id = Uuid::new_v4();
+            let mut host = host_with_all_credentials(host_id);
+            host.auth_method = AuthMethod::Key; host.auth_key_id = Some(key_id);
+            let mut key = ssh_key(key_id); key.deployed_to.push(deployed_id);
+            state.hosts.insert(host_id, host); state.ssh_keys.insert(key_id, key);
+            let svc = service(state);
+            let summaries: Vec<SshKeySummary> = serde_json::from_str(&svc.ssh_list_keys().await.unwrap()).unwrap();
+            assert_eq!(summaries[0].assigned_host_ids, [host_id]);
+            assert_eq!(summaries[0].deployed_host_ids, [deployed_id]);
+            assert!(svc.delete_ssh_key_inner(&key_id.to_string()).await.unwrap_err().to_string().contains("assigned"));
+            let state = svc.state.lock().await;
+            assert!(state.ssh_keys.contains_key(&key_id));
+            assert_eq!(state.hosts[&host_id].auth_key_id, Some(key_id));
         }
 
         /// A profile that is still connected keeps its secrets.

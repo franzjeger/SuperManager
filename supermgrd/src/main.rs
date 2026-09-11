@@ -38,6 +38,10 @@ mod docs;
 mod opnsense;
 mod sophos;
 mod tailscale;
+mod tailscale_management;
+mod tailscale_accounts;
+mod tailscale_diagnostics;
+mod tailscale_exit;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -195,9 +199,12 @@ async fn main() -> anyhow::Result<()> {
         .context("D-Bus system connection failed")?;
 
     // -----------------------------------------------------------------------
-    // 5. Register D-Bus service
+    // 5. Recover an interrupted account login, then register D-Bus service.
     // -----------------------------------------------------------------------
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    if let Err(error) = tailscale_accounts::recover().await {
+        tracing::warn!("Tailscale account recovery: {error}");
+    }
 
     let service = DaemonService {
         state: Arc::clone(&state),

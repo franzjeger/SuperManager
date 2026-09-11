@@ -20,6 +20,13 @@ use tracing::{debug, warn};
 // `crate::tailscale::TailscaleNode` paths keep resolving.
 pub use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 
+async fn status_output() -> std::io::Result<std::process::Output> {
+    tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::process::Command::new("tailscale").args(["status", "--json"])
+            .stdin(std::process::Stdio::null()).kill_on_drop(true).output())
+        .await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Tailscale status timed out"))?
+}
+
 /// Diagnose the local Tailscale stack: CLI present, daemon answering,
 /// backend state, pending login URL.
 ///
@@ -28,10 +35,7 @@ pub use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 /// GUI renders the returned struct; `TailscaleRepair` and `TailscaleLogin`
 /// consume it to decide what needs doing.
 pub async fn health() -> TailscaleHealth {
-    let out = match tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
+    let out = match status_output().await
     {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -131,7 +135,7 @@ fn which_exists(name: &str) -> bool {
 /// Bring the local Tailscale stack up as far as it can go without a human:
 /// install the package if the CLI is missing, start and enable tailscaled,
 /// and `tailscale up` if the backend was deliberately stopped. Login is the
-/// one step this cannot do — that is [`login_start`]'s job, because it needs
+/// one step this cannot do — that is [`crate::tailscale_accounts::start`]'s job, because it needs
 /// a browser and a person.
 ///
 /// Idempotent by construction: each step is skipped when its condition
@@ -141,6 +145,8 @@ fn which_exists(name: &str) -> bool {
 /// The package name is a constant and the package manager is detected, not
 /// caller-supplied — nothing from the bus reaches these command lines.
 pub async fn repair() -> Result<String, String> {
+    let _guard = crate::tailscale_management::CONTROL_LOCK.lock().await;
+    crate::tailscale_accounts::ensure_idle()?;
     let mut done: Vec<String> = Vec::new();
     let mut state = health().await;
 
@@ -215,78 +221,13 @@ pub async fn repair() -> Result<String, String> {
     }
 }
 
-/// Start an interactive login and return the URL a person must visit.
-///
-/// Spawns `tailscale login` detached — it blocks until the browser flow
-/// completes, which can be minutes away — and then polls the daemon's
-/// status for the `AuthURL` it registers. Control-plane round-trips can be
-/// slow, so an empty string is a legitimate return: the URL was not there
-/// yet, but it will appear in [`health`]'s `auth_url` shortly, and the GUI
-/// polls that anyway. Distinguishing "not yet" from "failed" is exactly
-/// what the health polling is for.
-///
-/// Calling this twice is safe: tailscaled hands every `login` the same
-/// pending URL until it is used, and the detached child exits on its own
-/// when the login completes or tailscaled drops the attempt.
-pub async fn login_start() -> Result<String, String> {
-    let state = health().await;
-    if !state.cli_present || !state.daemon_running {
-        return Err("tailscale is not installed or tailscaled is not running — \
-                    repair first, then log in"
-            .to_owned());
-    }
-    if state.is_running() {
-        return Err("already logged in".to_owned());
-    }
-    if !state.auth_url.is_empty() {
-        // A login is already pending; reuse its URL rather than spawning a
-        // second child to be told the same thing.
-        return Ok(state.auth_url);
-    }
-
-    let mut child = tokio::process::Command::new("tailscale")
-        .arg("login")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("failed to start tailscale login: {e}"))?;
-    // Reap the child whenever it finishes; its lifetime is the login flow's,
-    // not this method's.
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-
-    // The URL comes from a control-plane round-trip that is usually fast
-    // and occasionally ~30s. Poll briefly here so the common case returns
-    // the URL directly; past the deadline, hand the wait over to the GUI's
-    // health polling instead of holding the bus call open.
-    const ATTEMPTS: u32 = 8;
-    for _ in 0..ATTEMPTS {
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        let state = health().await;
-        if !state.auth_url.is_empty() {
-            return Ok(state.auth_url);
-        }
-        if state.is_running() {
-            // Logged in before we even saw the URL — some other flow (CLI,
-            // another session) completed it. Nothing left to visit.
-            return Ok(String::new());
-        }
-    }
-    Ok(String::new())
-}
-
 /// Run `tailscale status --json` and parse the output into a normalized
 /// node list. Returns an error string suitable for surfacing to the GUI on
 /// any failure (CLI not installed, daemon not running, JSON parse error).
 pub async fn list_nodes() -> Result<Vec<TailscaleNode>, String> {
     debug!("tailscale::list_nodes: spawning `tailscale status --json`");
 
-    let out = tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
+    let out = status_output().await
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 "tailscale CLI not found — install the tailscale package".to_owned()
@@ -369,6 +310,8 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
             .to_owned(),
         rx_bytes: v.get("RxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
         tx_bytes: v.get("TxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        current_address: v.get("CurAddr").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+        relay: v.get("Relay").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
     }
 }
 
@@ -390,44 +333,11 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
 pub async fn set_exit_node(value: &str) -> Result<(), String> {
     let value = value.trim();
     if !value.is_empty() && !is_plausible_exit_node(value) {
-        return Err(format!(
-            "{value:?} is not a Tailscale address or MagicDNS name"
-        ));
+        return Err("Select a Tailscale address or MagicDNS name".into());
     }
-
-    let out = tokio::process::Command::new("tailscale")
-        .arg("set")
-        .arg(format!("--exit-node={value}"))
-        .output()
-        .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "the tailscale CLI is not installed".to_owned()
-            } else {
-                format!("could not run tailscale: {e}")
-            }
-        })?;
-
-    if out.status.success() {
-        if value.is_empty() {
-            debug!("tailscale exit node cleared");
-        } else {
-            debug!(exit_node = %value, "tailscale exit node set");
-        }
-        return Ok(());
-    }
-
-    // tailscale writes the useful part to stderr — "exit node not found",
-    // "not logged in". Pass it through: it is better than anything we would
-    // write, and the failure modes are somebody else's state, not ours.
-    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-    let message = if stderr.is_empty() {
-        format!("tailscale set failed ({})", out.status)
-    } else {
-        stderr
-    };
-    warn!(exit_node = %value, "{message}");
-    Err(message)
+    let profiles = crate::tailscale_management::profiles().await?;
+    let profile = profiles.iter().find(|p| p.selected).ok_or("No active Tailscale account")?;
+    crate::tailscale_exit::change(&profile.id, value).await.map(|_| ())
 }
 
 /// Whether `value` looks like a Tailscale IP or a MagicDNS name.

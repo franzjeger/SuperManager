@@ -82,8 +82,9 @@ pub const ACTION_EXECUTE: &str = "org.supermgr.daemon.execute";
 
 /// Selecting or clearing a Tailscale exit node.
 ///
-/// Gated, even though `connect` (bring up a VPN profile) is not, and the
-/// difference is worth stating rather than leaving as an inconsistency.
+/// Its own action rather than [`ACTION_MANAGE`], which is where bringing up
+/// a VPN profile sits, and the split is worth stating rather than leaving as
+/// an inconsistency.
 ///
 /// The bus policy lets **any** local account talk to this daemon —
 /// `context="default"` with a bare `allow send_destination`. An exit node
@@ -91,9 +92,9 @@ pub const ACTION_EXECUTE: &str = "org.supermgr.daemon.execute";
 /// choosing, so ungated it would let any local user silently redirect
 /// another user's traffic through a machine they control. That is a
 /// different shape of problem from starting a VPN the admin already
-/// configured, and the direction this daemon has been moving is to gate
-/// exactly that kind of surface once it is noticed rather than to match the
-/// loosest existing precedent.
+/// configured, and a separate action is what lets an administrator tighten
+/// it to `auth_admin` without making ordinary profile management equally
+/// cumbersome.
 ///
 /// `auth_admin_keep` for the same reason as SSH connect: the operator
 /// comparing two exit nodes would otherwise authenticate on every attempt,
@@ -405,6 +406,46 @@ mod tests {
         );
     }
 
+    /// `connect` is gated, but not as a credential *disclosure*.
+    ///
+    /// The Connect button reads a stored secret and hands it to the VPN
+    /// backend; the caller never sees it. Behind `auth_admin` — which
+    /// [`ACTION_SECRETS`] is, on purpose and with no grace period — that
+    /// meant an administrator password prompt on every click, and one per
+    /// retry after a failed handshake. This test pins it at
+    /// [`ACTION_MANAGE`], where the policy already documents VPN state
+    /// changes belonging and where `disconnect` sits, so the two halves of
+    /// the same toggle cannot drift apart again.
+    ///
+    /// Same shape as the tests below: comments are stripped first, so a
+    /// deleted guard with its explanation left behind still fails.
+    #[test]
+    fn connect_is_gated_as_management_not_as_secret_disclosure() {
+        let daemon = include_str!("daemon.rs");
+        let body: String = daemon
+            .split("async fn connect(")
+            .nth(1)
+            .expect("connect exists")
+            .split("\n    /// ")
+            .next()
+            .expect("something follows connect")
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            body.contains("authorize(conn, &hdr, crate::polkit::ACTION_MANAGE)"),
+            "connect no longer authorizes against {ACTION_MANAGE}"
+        );
+        assert!(
+            !body.contains("crate::polkit::ACTION_SECRETS"),
+            "connect is behind {ACTION_SECRETS}, which is auth_admin with no \
+             grace period: that is a password prompt on every connect attempt, \
+             and it discloses nothing to the caller to justify one."
+        );
+    }
+
     /// Same shape as the test above, and the same reason for the shape:
     /// comments are stripped so a deleted guard with its explanation left
     /// behind still fails.
@@ -442,7 +483,7 @@ mod tests {
     #[test]
     fn tailscale_repair_and_login_are_gated() {
         let daemon = include_str!("daemon.rs");
-        for method in ["async fn tailscale_repair", "async fn tailscale_login"] {
+        for method in ["async fn tailscale_repair(", "async fn tailscale_login(", "async fn tailscale_begin_login("] {
             let body: String = daemon
                 .split(method)
                 .nth(1)

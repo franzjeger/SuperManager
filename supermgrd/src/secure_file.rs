@@ -74,7 +74,7 @@ pub fn write_private(path: &Path, bytes: &[u8], owner: Option<u32>) -> io::Resul
 /// # Errors
 ///
 /// `AlreadyExists` if anything is at `path`, symlink included, plus whatever
-/// the write or chown returns.
+/// the write or chown returns. A newly created file is removed on failure.
 pub fn create_private(path: &Path, bytes: &[u8], owner: Option<u32>) -> io::Result<()> {
     use std::io::Write as _;
 
@@ -83,16 +83,27 @@ pub fn create_private(path: &Path, bytes: &[u8], owner: Option<u32>) -> io::Resu
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    file.write_all(bytes)?;
-    file.flush()?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.flush()?;
 
-    // Handed over through the descriptor, not the path, so nothing can be
-    // swapped underneath in between — and while it is still 0600, so it goes
-    // straight from daemon-only to caller-only.
-    if let Some(uid) = owner {
-        std::os::unix::fs::fchown(&file, Some(uid), None)?;
+        // Handed over through the descriptor, not the path, so nothing can be
+        // swapped underneath in between — and while it is still 0600, so it goes
+        // straight from daemon-only to caller-only.
+        if let Some(uid) = owner {
+            std::os::unix::fs::fchown(&file, Some(uid), None)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        // The caller never receives the path on failure, so its scheduled
+        // cleanup cannot run. Only remove a file this call actually created;
+        // an O_EXCL failure above must leave an existing path untouched.
+        if let Err(error) = std::fs::remove_file(path) {
+            tracing::warn!("failed to remove incomplete credential file: {error}");
+        }
     }
-    Ok(())
+    result
 }
 
 /// Create `dir` at `mode` owned by us, or verify that an existing one is.
@@ -225,6 +236,38 @@ mod tests {
 
         assert_eq!(std::fs::metadata(&path).unwrap().uid(), target);
         assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn failed_ownership_handoff_removes_the_secret() {
+        // Root needs the bounded-service integration test below to exercise
+        // failure; an ordinary user cannot hand a file to another account.
+        if nix::unistd::getuid().is_root() {
+            return;
+        }
+        let dir = scratch();
+        let path = dir.path().join("key");
+        let error = create_private(&path, b"synthetic test key", Some(0)).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(nix::libc::EPERM));
+        assert!(!path.exists(), "failed handoff left a secret behind");
+    }
+
+    #[test]
+    #[ignore = "run scripts/test-ssh-credential-service.py as root with this test binary"]
+    fn bounded_service_credential_handoff() {
+        assert!(nix::unistd::getuid().is_root());
+        let path = std::path::PathBuf::from(std::env::var("SUPERMGR_TEST_CREDENTIAL_PATH").unwrap());
+        let uid: u32 = std::env::var("SUPERMGR_TEST_CALLER_UID").unwrap().parse().unwrap();
+        assert_ne!(uid, 0);
+        let result = create_private(&path, b"synthetic test key", Some(uid));
+        if std::env::var("SUPERMGR_TEST_EXPECT_HANDOFF").unwrap() == "1" {
+            result.unwrap();
+            assert_eq!(std::fs::metadata(&path).unwrap().uid(), uid);
+            assert_eq!(mode_of(&path), 0o600);
+        } else {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(nix::libc::EPERM));
+            assert!(!path.exists(), "failed handoff left a secret behind");
+        }
     }
 
     #[test]
