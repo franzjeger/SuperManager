@@ -317,6 +317,8 @@ extension AppState {
         }
         DebugLog.write("[ts] installTailscaled: starting, daemon=\(daemonPath)")
         do {
+            try await HelperInstaller.install()
+            
             let result = try await HelperClient.shared.tailscaledInstall(
                 bundledDaemonPath: daemonPath
             )
