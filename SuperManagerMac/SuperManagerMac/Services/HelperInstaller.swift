@@ -87,7 +87,7 @@ enum HelperInstaller {
         if (try? trySMAppService()) != nil {
             // Wait for socket to come up.
             for _ in 0 ..< 30 {
-                if FileManager.default.fileExists(atPath: HelperClient.socketPath) {
+                if await HelperClient.shared.isReachable() {
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -150,7 +150,10 @@ enum HelperInstaller {
         # Replace any existing daemon registration; bootout is a no-op the
         # first time. Then bootstrap from the freshly-written plist.
         launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
-        launchctl bootstrap system \(q(systemPlistPath))
+        for attempt in {1..5}; do
+            if launchctl bootstrap system \(q(systemPlistPath)); then break; fi
+            sleep 0.3
+        done
         # Ask launchd to launch the daemon now rather than waiting on
         # KeepAlive semantics.
         launchctl kickstart -k system/\(helperLabel) >/dev/null 2>&1 || true
@@ -182,7 +185,7 @@ enum HelperInstaller {
         // launchctl is async — wait for the socket to come up before
         // returning so the caller can immediately make IPC calls.
         for _ in 0 ..< 50 {
-            if FileManager.default.fileExists(atPath: HelperClient.socketPath) {
+            if await HelperClient.shared.isReachable() {
                 return
             }
             try? await Task.sleep(for: .milliseconds(100))
