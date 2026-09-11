@@ -50,6 +50,7 @@
 mod app;
 mod backup;
 mod dbus_client;
+mod diagnostics;
 mod master_password;
 mod settings;
 mod tray;
