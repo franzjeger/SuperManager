@@ -46,6 +46,7 @@ fn customers_dir() -> PathBuf {
 /// Convert a display name to a URL-safe slug. Lowercase, ASCII
 /// alphanumerics + hyphens only, collapsing runs of separators.
 /// Stable across re-runs: same input always produces same slug.
+#[must_use] 
 pub fn slugify(name: &str) -> String {
     supermgr_core::customer::slugify(name)
 }
@@ -98,7 +99,7 @@ fn load_path(path: &Path) -> Result<Customer> {
 /// hidden-file prefix (`.`), and empty input.
 ///
 /// Centralized here because every save / load / delete path
-/// (customer, engagement, findings_store, notify) interpolates
+/// (customer, engagement, `findings_store`, notify) interpolates
 /// the slug into a filename. Unvalidated slugs were the
 /// path-traversal vector flagged in the security review.
 /// The rules live in `supermgr-core::findings::validate_slug` now, because the
@@ -169,7 +170,7 @@ pub fn delete(slug: &str) -> Result<()> {
 /// PDF when the customer wants paper.
 ///
 /// Aggregation is read-only: walk customer file, walk each site's
-/// host_ids, look up each host's compliance history + deployment
+/// `host_ids`, look up each host's compliance history + deployment
 /// history. The engine doesn't need a database join — the
 /// per-host JSON stores already partition cleanly.
 pub async fn render_customer_report(
@@ -305,12 +306,9 @@ pub async fn render_customer_report(
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let host = match host_lookup.get(&host_id) {
-                    Some(h) => h,
-                    None => {
-                        writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
-                        continue;
-                    }
+                let host = if let Some(h) = host_lookup.get(&host_id) { h } else {
+                    writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
+                    continue;
                 };
                 writeln!(out, "#### {} ({})", host.label, format_device_type(host.device_type)).unwrap();
                 writeln!(out).unwrap();

@@ -3,8 +3,8 @@
 //! Produces and consumes the same `PortableBackup` JSON the Linux daemon
 //! does, so a backup taken on one platform restores on the other. This
 //! half covers everything in the engine's own state and file-backed
-//! secret store: profiles, SSH keys and hosts, and the WireGuard keys,
-//! SSH material, API tokens and UniFi passwords the store holds.
+//! secret store: profiles, SSH keys and hosts, and the `WireGuard` keys,
+//! SSH material, API tokens and `UniFi` passwords the store holds.
 //!
 //! The IKEv2/OpenVPN login credentials that live in the macOS app
 //! Keychain are NOT visible here — the Swift app merges them into the

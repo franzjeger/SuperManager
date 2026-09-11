@@ -336,12 +336,11 @@ impl SshSession {
                 Some(russh::ChannelMsg::Data { data }) => {
                     stdout.extend_from_slice(&data);
                 }
-                Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
-                    if ext == 1 {
+                Some(russh::ChannelMsg::ExtendedData { data, ext })
+                    if ext == 1 => {
                         // ext == 1 is stderr
                         stderr.extend_from_slice(&data);
                     }
-                }
                 Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
                     exit_status = code;
                 }
@@ -362,7 +361,7 @@ impl SshSession {
     /// Run an interactive shell session, sending lines sequentially.
     ///
     /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
-    /// line.  Used for commands that prompt for input (e.g. FortiGate
+    /// line.  Used for commands that prompt for input (e.g. `FortiGate`
     /// `generate-key` which asks for the admin password).
     pub async fn shell_interact(
         &self,

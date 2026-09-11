@@ -1,4 +1,4 @@
-//! UniFi controller JSON-RPC handlers.
+//! `UniFi` controller JSON-RPC handlers.
 //!
 //! Inform-URL push, controller credential CRUD, connection test, and
 //! the generic `unifi_api` REST proxy.

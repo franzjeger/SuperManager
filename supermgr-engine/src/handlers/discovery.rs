@@ -59,16 +59,14 @@ impl EngineServer {
             .unwrap_or_default();
         let ports: Vec<u16> = params
             .get("ports")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
+            .and_then(|v| v.as_array()).map_or_else(|| crate::probes::COMMON_PORTS.to_vec(), |arr| {
                 arr.iter()
                     .filter_map(|x| x.as_u64().map(|n| n as u16))
                     .collect()
-            })
-            .unwrap_or_else(|| crate::probes::COMMON_PORTS.to_vec());
+            });
         let cap = params
             .get("max_targets")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(512) as usize;
         let targets = crate::discovery::expand_targets(&targets_raw, cap);
         if targets.is_empty() {
@@ -165,7 +163,7 @@ impl EngineServer {
                 // both see the operator's chosen type. We just
                 // stash the override string on the host; the
                 // GUI's row renderer treats it as authoritative.
-                for host in result.hosts.iter_mut() {
+                for host in &mut result.hosts {
                     if let Some(ref mac) = host.mac {
                         if let Some(t) = override_store.get(mac).await {
                             host.device_type_override = Some(t);
@@ -185,7 +183,7 @@ impl EngineServer {
                             &macs,
                         )
                         .await;
-                        for host in result.hosts.iter_mut() {
+                        for host in &mut result.hosts {
                             if let Some(ref mac) = host.mac {
                                 if let Some(state) = by_mac.get(&mac.to_ascii_lowercase()) {
                                     host.controller_state = Some(state.clone());
@@ -217,7 +215,7 @@ impl EngineServer {
         }
     }
 
-    /// Set (or clear, when device_type is null/empty) a
+    /// Set (or clear, when `device_type` is null/empty) a
     /// manual device-type override. Params:
     ///   - `mac` (or `key`) — the MAC the override applies to
     ///   - `scope` — `"mac"` (default) for exact-MAC match,
@@ -306,7 +304,7 @@ impl EngineServer {
     }
 
     /// Analyse a packet capture for cleartext-protocol exposure.
-    /// Parses the .pcap, classifies events per (src_ip, protocol),
+    /// Parses the .pcap, classifies events per (`src_ip`, protocol),
     /// emits findings, and writes redacted evidence files to the
     /// engagement's `captures/` directory. The full unredacted
     /// .pcap stays on disk for the operator's Wireshark review.
@@ -330,13 +328,10 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        let evidence_dir = match engagement_id.as_deref() {
-            Some(eid) => crate::traffic_sniff::engagement_evidence_dir(eid),
-            None => {
-                let mut p = crate::secrets::default_data_dir();
-                p.push("captures");
-                p
-            }
+        let evidence_dir = if let Some(eid) = engagement_id.as_deref() { crate::traffic_sniff::engagement_evidence_dir(eid) } else {
+            let mut p = crate::secrets::default_data_dir();
+            p.push("captures");
+            p
         };
 
         let pcap = std::path::Path::new(&pcap_path);

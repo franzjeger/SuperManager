@@ -18,7 +18,7 @@
 //! secrets without triggering the "Type your login password to allow
 //! access" prompt every time the binary's hash changes.
 //!
-//! Mechanism: `kSecUseDataProtectionKeychain: true` on every SecItem
+//! Mechanism: `kSecUseDataProtectionKeychain: true` on every `SecItem`
 //! call.
 //!
 //! ## Entitlement requirement
@@ -73,15 +73,16 @@ use security_framework_sys::keychain_item::{
 use supermgr_core::error::SecretError;
 use supermgr_core::keyring::{SecretStore, ZeroizingSecret};
 
-/// Service identifier used for every SuperManager keychain item.
+/// Service identifier used for every `SuperManager` keychain item.
 /// Keychain `service` + `account` together uniquely identify an item;
-/// we hold the service constant and let the SecretStore label become
+/// we hold the service constant and let the `SecretStore` label become
 /// the account name.
 const KEYCHAIN_SERVICE: &str = "com.sybr.supermanager";
 
 pub struct KeychainSecretStore;
 
 impl KeychainSecretStore {
+    #[must_use] 
     pub fn new() -> Self {
         Self
     }
@@ -141,7 +142,7 @@ fn dp_query(label: &str) -> Vec<(CFString, CFType)> {
     options.query
 }
 
-/// SecItemAdd then, if the item already exists, fall back to update.
+/// `SecItemAdd` then, if the item already exists, fall back to update.
 fn dp_store(label: &str, secret: &[u8]) -> Result<(), SecretError> {
     let mut query = dp_query(label);
     let value = CFData::from_buffer(secret);
@@ -164,7 +165,7 @@ fn dp_store(label: &str, secret: &[u8]) -> Result<(), SecretError> {
     )))
 }
 
-/// SecItemUpdate the value of an existing entry.
+/// `SecItemUpdate` the value of an existing entry.
 fn dp_update(label: &str, secret: &[u8]) -> Result<(), SecretError> {
     let query_dict = CFDictionary::from_CFType_pairs(&dp_query(label));
     let value = CFData::from_buffer(secret);
@@ -191,7 +192,7 @@ fn dp_update(label: &str, secret: &[u8]) -> Result<(), SecretError> {
     }
 }
 
-/// SecItemCopyMatching, ask for the data, return the bytes.
+/// `SecItemCopyMatching`, ask for the data, return the bytes.
 fn dp_retrieve(label: &str) -> Result<Vec<u8>, SecretError> {
     let mut query = dp_query(label);
     query.push((
@@ -200,7 +201,7 @@ fn dp_retrieve(label: &str) -> Result<Vec<u8>, SecretError> {
     ));
     let dict = CFDictionary::from_CFType_pairs(&query);
     let mut result: CFTypeRef = std::ptr::null();
-    let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &mut result) };
+    let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &raw mut result) };
     if status == errSecItemNotFound {
         return Err(SecretError::NotFound { label: label.to_owned() });
     }
@@ -217,7 +218,7 @@ fn dp_retrieve(label: &str) -> Result<Vec<u8>, SecretError> {
     Ok(cf_data.bytes().to_vec())
 }
 
-/// SecItemDelete on the (service, account, data-protection) tuple.
+/// `SecItemDelete` on the (service, account, data-protection) tuple.
 fn dp_delete(label: &str) -> Result<(), SecretError> {
     let dict = CFDictionary::from_CFType_pairs(&dp_query(label));
     let status = unsafe { SecItemDelete(dict.as_concrete_TypeRef()) };

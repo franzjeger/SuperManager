@@ -21,11 +21,13 @@ pub struct FileSecretStore {
 
 impl FileSecretStore {
     /// Create a new file-based store at the given path.
+    #[must_use] 
     pub fn new(path: PathBuf) -> Self {
         Self { path }
     }
 
     /// Create with the default path for the current platform.
+    #[must_use] 
     pub fn default_path() -> Self {
         let dir = super::default_data_dir();
         Self::new(dir.join("secrets.json"))

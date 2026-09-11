@@ -1,4 +1,4 @@
-//! FortiGate compliance runners.
+//! `FortiGate` compliance runners.
 //!
 //! The model, the check library, scoring, drift, report rendering and
 //! persistence all live in [`supermgr_core::compliance`] now — none of it is
@@ -6,7 +6,7 @@
 //! a second set that can disagree.
 //!
 //! What stays here is what genuinely cannot move: the four functions that
-//! reach into engine state (`DaemonState`), the FortiGate REST client, or an
+//! reach into engine state (`DaemonState`), the `FortiGate` REST client, or an
 //! engine SSH session. Everything they operate on comes from core, re-exported
 //! below so existing `compliance::Status` style paths keep resolving.
 
@@ -209,7 +209,7 @@ async fn extract_api(
         serde_json::from_str(&resp.body).context("response is not JSON")?;
     let pointed = v
         .pointer(pointer)
-        .ok_or_else(|| anyhow!("pointer {} not found in response", pointer))?;
+        .ok_or_else(|| anyhow!("pointer {pointer} not found in response"))?;
     Ok(match pointed {
         serde_json::Value::String(s) => s.trim().to_owned(),
         serde_json::Value::Number(n) => n.to_string(),
@@ -218,9 +218,9 @@ async fn extract_api(
     })
 }
 
-/// Run compliance against every FortiGate host that has an API
+/// Run compliance against every `FortiGate` host that has an API
 /// token configured. Hosts run in parallel up to a small cap so
-/// we don't open hundreds of FortiOS sessions concurrently.
+/// we don't open hundreds of `FortiOS` sessions concurrently.
 ///
 /// `min_age_hours` is honoured: a host whose last run is more
 /// recent than this threshold gets `error: "skipped (recent)"`,

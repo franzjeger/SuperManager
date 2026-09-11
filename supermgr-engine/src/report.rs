@@ -16,7 +16,7 @@
 //!   1. Title block (engagement title, customer, dates, scope)
 //!   2. Executive summary (severity counts, posture)
 //!   3. Scope & methodology
-//!   4. Findings detail (sorted by severity then first_seen)
+//!   4. Findings detail (sorted by severity then `first_seen`)
 //!   5. Resolved during this engagement
 //!   6. Audit log
 //!   7. Generated-at footer
@@ -50,7 +50,7 @@ pub fn render_markdown(input: &ReportInput<'_>) -> Result<String> {
 /// Requires `pandoc` on PATH (probed by `tools::status`) **plus**
 /// at least one PDF-engine — `tectonic`, `xelatex`, `pdflatex`,
 /// `lualatex`, `wkhtmltopdf`, or `weasyprint` (tried in that order).
-/// Returns the PDF bytes — the caller writes to disk via NSSavePanel.
+/// Returns the PDF bytes — the caller writes to disk via `NSSavePanel`.
 ///
 /// Temp paths use `tempfile::NamedTempFile` (mode 0o600, random
 /// suffix, auto-cleanup on drop) so a local attacker can't symlink-
@@ -62,7 +62,7 @@ pub fn render_markdown(input: &ReportInput<'_>) -> Result<String> {
 /// regular `anyhow::Error`. The handler downcasts at the boundary
 /// to emit a structured RPC error for the pdf-engine-missing case
 /// — that's the case the Mac client wants to handle differently
-/// (silent WebKit fallback vs. hard dialog).
+/// (silent `WebKit` fallback vs. hard dialog).
 pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     use std::io::Write;
     use std::time::Duration;
@@ -126,7 +126,7 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     cmd.arg(format!("--pdf-engine={engine}"));
     cmd.arg("-o").arg(&out_path).arg(&in_path);
 
-    let res = tokio::time::timeout(Duration::from_secs(60), cmd.output())
+    let res = tokio::time::timeout(Duration::from_mins(1), cmd.output())
         .await
         .context("pandoc timeout")??;
 
@@ -191,7 +191,7 @@ fn pick_pdf_engine() -> Option<&'static str> {
 
 /// Render the engagement report to a self-contained HTML document.
 /// Used as a fallback when no LaTeX/PDF engine is installed — the
-/// Mac client renders this via WKWebView and prints to PDF locally.
+/// Mac client renders this via `WKWebView` and prints to PDF locally.
 ///
 /// Only depends on `pandoc` itself (no LaTeX), so it always works
 /// on a fresh Homebrew install.
@@ -240,7 +240,7 @@ pub async fn render_html(input: &ReportInput<'_>) -> Result<String> {
 }
 
 fn inject_default_style(html: &str) -> String {
-    const STYLE: &str = r#"<style>
+    const STYLE: &str = r"<style>
 body{font-family:-apple-system,'Helvetica Neue',Arial,sans-serif;color:#1d1d1f;max-width:780px;margin:2em auto;padding:0 1.5em;line-height:1.55;font-size:11pt}
 h1{font-size:24pt;margin-top:0;border-bottom:1px solid #d2d2d7;padding-bottom:0.3em}
 h2{font-size:16pt;margin-top:1.6em;border-bottom:1px solid #e5e5ea;padding-bottom:0.2em}
@@ -253,7 +253,7 @@ code{font-family:'SF Mono',Menlo,Consolas,monospace;background:#f5f5f7;padding:1
 pre{background:#f5f5f7;padding:8px;border-radius:6px;overflow-x:auto;font-size:9.5pt}
 hr{border:0;border-top:1px solid #d2d2d7;margin:2em 0}
 @media print{body{margin:0;max-width:none;padding:0 1cm}h1,h2,h3{page-break-after:avoid}}
-</style>"#;
+</style>";
     if let Some(idx) = html.find("</head>") {
         let (head, tail) = html.split_at(idx);
         format!("{head}{STYLE}{tail}")
@@ -366,7 +366,7 @@ fn scope_methodology(out: &mut String, input: &ReportInput<'_>) {
 }
 
 fn technique_label(t: &crate::engagement::Technique) -> &'static str {
-    use crate::engagement::Technique::*;
+    use crate::engagement::Technique::{Recon, Discovery, VulnScan, TlsAudit, CredTest, WebExploit, SmbEnum, SnmpRead, Wireless, DosTest};
     match t {
         Recon => "Reconnaissance (passive discovery, ARP, mDNS)",
         Discovery => "Active discovery (TCP sweep, banner-grab)",

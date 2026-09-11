@@ -34,7 +34,7 @@ pub fn spawn() {
             if let Err(e) = tick().await {
                 warn!("scheduler tick failed: {e:#}");
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(Duration::from_mins(1)).await;
         }
     });
 }

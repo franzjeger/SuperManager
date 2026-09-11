@@ -24,8 +24,7 @@ impl EngineServer {
         let limit = params
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .map(|n| n as usize)
-            .unwrap_or(200);
+            .map_or(200, |n| n as usize);
         let events = crate::activity_log::timeline(&slug, limit);
         match serde_json::to_value(&events) {
             Ok(v) => Response::ok(id, v),

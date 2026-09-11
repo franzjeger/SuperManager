@@ -43,7 +43,7 @@ pub struct DaemonState {
     /// Directory where SSH host TOML files are stored.
     pub ssh_host_dir: PathBuf,
 
-    /// First-class UniFi controller registry. Keyed by UUID
+    /// First-class `UniFi` controller registry. Keyed by UUID
     /// and persisted as TOML in `unifi_controller_dir`. NOT
     /// tied to an SSH host — see `unifi_controllers.rs` for
     /// the architectural reasoning.

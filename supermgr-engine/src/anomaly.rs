@@ -56,6 +56,7 @@ fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
     p
 }
 
+#[must_use] 
 pub fn load(customer_slug: &str, host_ip: &str) -> HostBaseline {
     let path = baseline_path(customer_slug, host_ip);
     if !path.exists() { return HostBaseline::default(); }

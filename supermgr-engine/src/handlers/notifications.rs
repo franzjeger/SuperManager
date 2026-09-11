@@ -1,4 +1,4 @@
-//! Notification config handlers (webhooks, PagerDuty, OpsGenie).
+//! Notification config handlers (webhooks, `PagerDuty`, `OpsGenie`).
 
 use crate::protocol::{self, Response};
 use crate::server::EngineServer;
@@ -40,7 +40,7 @@ impl EngineServer {
         }
     }
 
-    /// Set/clear PagerDuty Events API v2 routing key for a customer
+    /// Set/clear `PagerDuty` Events API v2 routing key for a customer
     /// scope. Empty `key` removes the entry (no escalation).
     pub(crate) async fn handle_notify_set_pagerduty(
         &self,
@@ -64,7 +64,7 @@ impl EngineServer {
         }
     }
 
-    /// Set/clear OpsGenie Genie API key for a customer scope.
+    /// Set/clear `OpsGenie` Genie API key for a customer scope.
     pub(crate) async fn handle_notify_set_opsgenie(
         &self,
         id: u64,

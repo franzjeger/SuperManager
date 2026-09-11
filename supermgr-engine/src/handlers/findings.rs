@@ -9,8 +9,8 @@ use crate::server::EngineServer;
 
 impl EngineServer {
     /// Resolve a "scope" parameter — either an explicit `scope`,
-    /// or an `engagement_id` whose customer_slug we pull from disk,
-    /// or a customer_slug. Returns the storage scope string.
+    /// or an `engagement_id` whose `customer_slug` we pull from disk,
+    /// or a `customer_slug`. Returns the storage scope string.
     // Boxing `Response` here would ripple through every `?` in the
     // handler layer for an unmeasured stack-size win.
     #[allow(clippy::result_large_err)]
