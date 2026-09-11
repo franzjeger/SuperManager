@@ -22,7 +22,7 @@ pub mod dbus;
 #[cfg(target_os = "windows")]
 pub mod pipe;
 pub mod protocol;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod client;
 pub mod compliance;
 pub mod customer;

@@ -12,6 +12,12 @@ struct BackupSettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var status: BackupStatus = .idle
     @State private var lastResult: String?
+    /// A run that completed but did not do everything it was asked to —
+    /// credentials the Keychain would not give up on export, or would
+    /// not take on import. Kept apart from `lastResult` so a partial run
+    /// never renders under a green checkmark, and apart from `error` so
+    /// it doesn't claim the whole operation failed.
+    @State private var lastWarning: String?
     @State private var error: String?
 
     /// Confirmation alert state. Restore needs the user to acknowledge
@@ -93,6 +99,17 @@ struct BackupSettingsView: View {
             }
 
             // Status / result
+            if let warning = lastWarning {
+                Section {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(warning)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                    }
+                }
+            }
             if let result = lastResult {
                 Section {
                     HStack(spacing: 8) {
@@ -201,6 +218,7 @@ struct BackupSettingsView: View {
 
         status = .exporting
         lastResult = nil
+        lastWarning = nil
         Task.detached(priority: .userInitiated) {
             do {
                 try await Backup.export(to: url)
@@ -231,17 +249,28 @@ struct BackupSettingsView: View {
 
         status = .exporting
         lastResult = nil
+        lastWarning = nil
         Task { @MainActor in
             do {
-                let data = try await PortableBackup.export(client: appState.client)
-                try data.write(to: url, options: [.atomic])
+                let result = try await PortableBackup.export(client: appState.client)
+                try result.data.write(to: url, options: [.atomic])
                 // Owner-only: the file carries private keys and passwords.
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: url.path)
                 let size = ByteCountFormatter.string(
-                    fromByteCount: Int64(data.count), countStyle: .file)
+                    fromByteCount: Int64(result.data.count), countStyle: .file)
                 status = .idle
                 lastResult = "Exported \(size) to \(url.lastPathComponent)"
+                if !result.unreadable.isEmpty {
+                    // The file is written and otherwise valid — it just
+                    // isn't a complete one. Say which credentials are
+                    // missing now, rather than at connect time on the
+                    // machine this gets restored to.
+                    lastWarning =
+                        "\(result.unreadable.count) credential(s) could not be read "
+                        + "from the Keychain and are NOT in this backup: "
+                        + result.unreadable.joined(separator: ", ")
+                }
             } catch {
                 status = .idle
                 self.error = error.localizedDescription
@@ -259,6 +288,7 @@ struct BackupSettingsView: View {
 
         status = .restoring
         lastResult = nil
+        lastWarning = nil
         Task { @MainActor in
             do {
                 let data = try Data(contentsOf: url)
@@ -269,7 +299,15 @@ struct BackupSettingsView: View {
                 status = .idle
                 lastResult =
                     "Imported \(summary.profiles) profile(s), \(summary.sshKeys) key(s), "
-                    + "\(summary.hosts) host(s), \(summary.secrets) secret(s)"
+                    + "\(summary.hosts) host(s), \(summary.secrets) secret(s), "
+                    + "\(summary.keychainSecrets) Keychain credential(s)"
+                if !summary.keychainFailures.isEmpty {
+                    lastWarning =
+                        "\(summary.keychainFailures.count) credential(s) could not be "
+                        + "written to the Keychain — those profiles still have no "
+                        + "password and will fail to connect: "
+                        + summary.keychainFailures.joined(separator: ", ")
+                }
             } catch {
                 status = .idle
                 self.error = error.localizedDescription
@@ -329,6 +367,7 @@ struct BackupSettingsView: View {
     private func runRestore(from url: URL) {
         status = .restoring
         lastResult = nil
+        lastWarning = nil
         Task.detached(priority: .userInitiated) {
             do {
                 try await Backup.restore(from: url)

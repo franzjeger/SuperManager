@@ -22,6 +22,14 @@ pub type DaemonClient = crate::dbus::DaemonProxy<'static>;
 #[cfg(target_os = "windows")]
 pub use crate::pipe::PipeClient as DaemonClient;
 
+#[cfg(target_os = "macos")]
+pub struct DaemonClient {}
+
+#[cfg(target_os = "macos")]
+pub async fn connect() -> Result<DaemonClient, String> {
+    Err("supermgr-mcp is currently not supported natively on macOS via this client".into())
+}
+
 /// Connect to the local daemon.
 ///
 /// On Linux this acquires a system-bus connection and creates a `DaemonProxy`.
