@@ -229,7 +229,7 @@ pub async fn send_message(
     model: &str,
     allow_changes: bool,
 ) -> Result<Vec<Value>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap_or_default();
     let model = crate::settings::anthropic_model_id(model);
 
     // Build the full system prompt with injected state context.

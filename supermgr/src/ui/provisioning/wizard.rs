@@ -3242,7 +3242,7 @@ async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Re
 
 /// Send a provisioning prompt via the Anthropic API (API key mode).
 async fn send_provisioning_api(api_key: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
     let model = crate::settings::anthropic_model_id(model);
     let body = serde_json::json!({
         "model": model,

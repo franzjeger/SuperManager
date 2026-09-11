@@ -649,7 +649,7 @@ pub fn populate_dashboard(
 async fn fetch_unifi_cloud_devices(
     api_key: &str,
 ) -> anyhow::Result<Vec<(String, String, String, Value)>> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
 
     // Fetch hosts (consoles) to get site names.
     let resp = client
@@ -785,7 +785,7 @@ async fn fetch_unifi_cloud_devices(
                 "\u{26a0}\u{fe0f} UniFi devices offline: {}",
                 offline.join(", ")
             );
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
             let payload = serde_json::json!({ "text": &msg, "content": &msg });
             let _ = client.post(&settings.webhook_url)
                 .json(&payload)

@@ -219,7 +219,7 @@ pub async fn generate(
         !settings.openai_api_key.trim().is_empty(),
         "Add an OpenAI API key in Settings → AI."
     );
-    let response = reqwest::Client::new().post("https://api.openai.com/v1/responses")
+    let response = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap_or_default().post("https://api.openai.com/v1/responses")
         .bearer_auth(&settings.openai_api_key)
         .json(&json!({"model":settings.openai_model,"instructions":system,"input":prompt,"store":false,"max_output_tokens":16384}))
         .send().await?;
