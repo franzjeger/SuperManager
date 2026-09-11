@@ -1,0 +1,16 @@
+/* The installer explicitly grants daemon access through the supermgr group.
+ * Routine operations belong to that role for an active local desktop user.
+ * A fresh D-Bus connection or a dashboard refresh must not ask again.
+ * Credential exports and machine-wide routing/repair retain their own policy.
+ */
+polkit.addRule(function(action, subject) {
+    var routine = [
+        "org.supermgr.daemon.manage",
+        "org.supermgr.daemon.execute",
+        "org.supermgr.daemon.ssh-connect"
+    ];
+    if (routine.indexOf(action.id) !== -1 && subject.local && subject.active &&
+        subject.isInGroup("supermgr")) {
+        return polkit.Result.YES;
+    }
+});

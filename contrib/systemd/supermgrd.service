@@ -34,7 +34,9 @@ LogsDirectory=supermgrd
 LogsDirectoryMode=0750
 
 # Security hardening
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+# SSH credentials are created 0600 and then handed to the authenticated
+# caller with fchown. Without CAP_CHOWN even uid 0 gets EPERM here.
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN CAP_NET_RAW
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 ProtectSystem=strict
 ProtectHome=read-only

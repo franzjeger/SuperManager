@@ -95,15 +95,17 @@
     <message>Authentication is required to send this machine's network traffic through another device</message>
 
     <!--
-      Gated even though starting a VPN profile is not, and the asymmetry is
-      deliberate.
+      Its own action rather than org.supermgr.daemon.manage, where bringing
+      a VPN profile up and down sits, and the split is deliberate.
 
       The bus policy for this daemon allows context="default", i.e. every
       local account. An exit node sends every packet this machine emits
       through a host the caller picked. Ungated, any local user could
       silently redirect another user's traffic through a machine they
       control — which is a different thing from starting a VPN an admin
-      already configured and stored credentials for.
+      already configured and stored credentials for. A separate action is
+      what lets an administrator raise this one to auth_admin without
+      making ordinary profile management equally cumbersome.
 
       auth_admin_keep, not auth_admin: choosing between exit nodes means
       trying one, checking it, trying another. A prompt per attempt is the

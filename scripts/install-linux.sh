@@ -108,6 +108,7 @@ FILES=(
     "contrib/dbus/org.supermgr.Daemon.conf|/usr/share/dbus-1/system.d/org.supermgr.Daemon.conf|644"
     "contrib/dbus/org.supermgr.Daemon.service|/usr/share/dbus-1/system-services/org.supermgr.Daemon.service|644"
     "contrib/polkit/org.supermgr.Daemon.policy|/usr/share/polkit-1/actions/org.supermgr.Daemon.policy|644"
+    "contrib/polkit/49-supermgr-operators.rules|/usr/share/polkit-1/rules.d/49-supermgr-operators.rules|644"
     "contrib/desktop/org.supermgr.SuperManager.desktop|/usr/share/applications/org.supermgr.SuperManager.desktop|644"
     "contrib/icons/org.supermgr.SuperManager.svg|/usr/share/icons/hicolor/scalable/apps/org.supermgr.SuperManager.svg|644"
     "contrib/icons/hicolor/16.png|/usr/share/icons/hicolor/16x16/apps/org.supermgr.SuperManager.png|644"
