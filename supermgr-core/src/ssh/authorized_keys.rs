@@ -4,7 +4,7 @@
 //!
 //! 1. **SFTP** (preferred) — read the file, edit it, write it back.
 //! 2. **Exec fallback** — base64-encode the key to avoid shell-quoting
-//!    issues; compatible with BusyBox (UniFi, OpenWRT, pfSense, etc.).
+//!    issues; compatible with `BusyBox` (`UniFi`, `OpenWRT`, pfSense, etc.).
 //! 3. **Sudo** — operate on `/root/.ssh/authorized_keys` via `sudo`.
 //!
 //! Everything here runs against the [`RemoteShell`] trait rather than a
@@ -129,7 +129,7 @@ async fn push_via_sftp(shell: &dyn RemoteShell, pub_line: &str) -> Result<(), Ss
 /// Push using shell commands only — no SFTP required.
 ///
 /// Uses base64 encoding to safely transfer the key without shell-quoting
-/// issues. Compatible with BusyBox (UniFi, OpenWRT, pfSense, etc.).
+/// issues. Compatible with `BusyBox` (`UniFi`, `OpenWRT`, pfSense, etc.).
 async fn push_via_exec(shell: &dyn RemoteShell, pub_line: &str) -> Result<(), SshError> {
     let home = remote_home(shell).await?;
     let ssh_dir = format!("{home}/.ssh");

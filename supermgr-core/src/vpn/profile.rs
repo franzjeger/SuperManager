@@ -8,7 +8,7 @@
 //!
 //! Keys and passwords are **never** stored inline.  Instead, a [`SecretRef`] is a
 //! handle (a human-readable label) that the daemon resolves against the system
-//! secret store (GNOME Keyring / KWallet) at connect time.
+//! secret store (GNOME Keyring / `KWallet`) at connect time.
 
 use std::net::IpAddr;
 
@@ -25,7 +25,7 @@ use zeroize::ZeroizeOnDrop;
 /// An opaque handle into the system secret store.
 ///
 /// The daemon stores the actual secret bytes under this label in GNOME Keyring
-/// or KWallet.  Config files only ever contain the label string.
+/// or `KWallet`.  Config files only ever contain the label string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SecretRef(pub String);
@@ -54,7 +54,7 @@ impl std::fmt::Display for SecretRef {
 // WireGuard config
 // ---------------------------------------------------------------------------
 
-/// Configuration for a single WireGuard peer (remote endpoint).
+/// Configuration for a single `WireGuard` peer (remote endpoint).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireGuardPeer {
     /// Peer's static public key (base64-encoded).
@@ -80,13 +80,13 @@ pub struct WireGuardPeer {
     pub persistent_keepalive: Option<u16>,
 }
 
-/// Configuration for the local WireGuard interface.
+/// Configuration for the local `WireGuard` interface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireGuardConfig {
     /// Reference to the interface private key in the system keyring.
     pub private_key: SecretRef,
 
-    /// IP addresses assigned to the local WireGuard interface.
+    /// IP addresses assigned to the local `WireGuard` interface.
     pub addresses: Vec<IpNet>,
 
     /// DNS servers to configure via `systemd-resolved` when the tunnel is up.
@@ -97,11 +97,11 @@ pub struct WireGuardConfig {
     #[serde(default)]
     pub dns_search: Vec<String>,
 
-    /// MTU override.  `None` lets the kernel or WireGuard choose.
+    /// MTU override.  `None` lets the kernel or `WireGuard` choose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtu: Option<u16>,
 
-    /// Listen port for the local WireGuard socket.  `None` picks a random port.
+    /// Listen port for the local `WireGuard` socket.  `None` picks a random port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
 
@@ -116,8 +116,8 @@ pub struct WireGuardConfig {
     /// Routes to push through the tunnel when `Profile.full_tunnel` is `false`.
     ///
     /// When split-tunnel mode is active these prefixes replace the catch-all
-    /// `0.0.0.0/0` / `::/0` entries in each peer's AllowedIPs.  If this list
-    /// is empty and the peer AllowedIPs contains no specific (non-catch-all)
+    /// `0.0.0.0/0` / `::/0` entries in each peer's `AllowedIPs`.  If this list
+    /// is empty and the peer `AllowedIPs` contains no specific (non-catch-all)
     /// prefixes, connecting in split-tunnel mode will return an error.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split_routes: Vec<IpNet>,
@@ -127,16 +127,16 @@ pub struct WireGuardConfig {
 // FortiGate IPsec / IKEv2 config
 // ---------------------------------------------------------------------------
 
-/// Configuration for a FortiGate VPN connection driven via strongSwan.
+/// Configuration for a `FortiGate` VPN connection driven via strongSwan.
 ///
-/// IKEv2 with EAP-MSCHAPv2 user authentication and a group PSK for IKE SA
+/// `IKEv2` with EAP-MSCHAPv2 user authentication and a group PSK for IKE SA
 /// authentication, mode-config for virtual IP assignment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FortiGateConfig {
-    /// Hostname or IP address of the FortiGate appliance.
+    /// Hostname or IP address of the `FortiGate` appliance.
     pub host: String,
 
-    /// EAP username (sent in IKE_AUTH as the EAP identity).
+    /// EAP username (sent in `IKE_AUTH` as the EAP identity).
     pub username: String,
 
     /// Keyring reference to the EAP password.
@@ -156,12 +156,12 @@ pub struct FortiGateConfig {
     #[serde(default)]
     pub routes: Vec<IpNet>,
 
-    /// Optional IKE identity the client sends as IDi (`local.id` in
+    /// Optional IKE identity the client sends as `IDi` (`local.id` in
     /// strongSwan, `leftid` in ipsec.conf). Some gateways route an
     /// incoming connection to the correct dial-up tunnel by this identity
-    /// BEFORE authentication (FortiGate "peer ID" with several tunnels on
+    /// BEFORE authentication (`FortiGate` "peer ID" with several tunnels on
     /// one public IP). Empty means "don't set it" — strongSwan then
-    /// defaults IDi to the connection's local IP, which is today's
+    /// defaults `IDi` to the connection's local IP, which is today's
     /// behaviour. `#[serde(default)]` keeps profiles saved before this
     /// field existed loading unchanged.
     #[serde(default)]
@@ -172,7 +172,7 @@ pub struct FortiGateConfig {
 // OpenVPN config
 // ---------------------------------------------------------------------------
 
-/// Configuration for an OpenVPN connection.
+/// Configuration for an `OpenVPN` connection.
 ///
 /// Managed via the `openvpn` v2 CLI tool.  The actual `.ovpn` config file is
 /// stored in the daemon's data directory; only the path is kept here.
@@ -195,7 +195,7 @@ pub struct OpenVpnConfig {
 // ---------------------------------------------------------------------------
 
 /// Configuration for an Azure Point-to-Site VPN connection that authenticates
-/// via Microsoft Entra ID (formerly Azure AD) using the OAuth2 device-code
+/// via Microsoft Entra ID (formerly Azure AD) using the `OAuth2` device-code
 /// flow.
 ///
 /// # Connection lifecycle (daemon side)
@@ -217,12 +217,12 @@ pub struct AzureVpnConfig {
     /// `<tenant>` field in `azurevpnconfig.xml`.
     pub tenant_id: String,
 
-    /// OAuth2 client / audience ID (the well-known Azure VPN app ID
+    /// `OAuth2` client / audience ID (the well-known Azure VPN app ID
     /// `c632b3df-fb67-4d84-bdcf-b95ad541b5c8` unless overridden by the
     /// gateway administrator).
     pub client_id: String,
 
-    /// 512-character hex string (256 bytes) used as the OpenVPN `tls-crypt`
+    /// 512-character hex string (256 bytes) used as the `OpenVPN` `tls-crypt`
     /// key.  Sourced from `<serversecret>` in `azurevpnconfig.xml`.
     pub server_secret_hex: String,
 
@@ -243,10 +243,10 @@ pub struct AzureVpnConfig {
 // FortiGate / FortiClient SSL VPN
 // ---------------------------------------------------------------------------
 
-/// Configuration for a FortiGate **SSL VPN** connection driven via the
+/// Configuration for a `FortiGate` **SSL VPN** connection driven via the
 /// open-source `openfortivpn` client.
 ///
-/// Distinct from [`FortiGateConfig`], which targets FortiGate's IKEv2 IPsec
+/// Distinct from [`FortiGateConfig`], which targets `FortiGate`'s `IKEv2` `IPsec`
 /// stack via strongSwan (Linux) / Windows RAS. SSL VPN deployments are far
 /// more common in the wild and use a completely different protocol — HTTPS
 /// on a configurable port, with optional client-certificate auth on top of
@@ -256,14 +256,14 @@ pub struct AzureVpnConfig {
 /// backend layer handles the subprocess + management lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForticlientSslvpnConfig {
-    /// FortiGate appliance hostname or IP. Without a port, defaults to 443.
+    /// `FortiGate` appliance hostname or IP. Without a port, defaults to 443.
     pub host: String,
 
-    /// SSL VPN portal port. FortiGate typically listens on 443 or 10443.
+    /// SSL VPN portal port. `FortiGate` typically listens on 443 or 10443.
     #[serde(default = "default_sslvpn_port")]
     pub port: u16,
 
-    /// SSL VPN username (the same one the user types into the FortiClient).
+    /// SSL VPN username (the same one the user types into the `FortiClient`).
     pub username: String,
 
     /// Keyring reference to the user's password.
@@ -298,7 +298,7 @@ const fn default_sslvpn_port() -> u16 {
 // ---------------------------------------------------------------------------
 
 /// Configuration for a backend that is not yet natively supported, stored as
-/// an arbitrary key-value map (e.g. for future OpenVPN or AnyConnect profiles).
+/// an arbitrary key-value map (e.g. for future `OpenVPN` or `AnyConnect` profiles).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct GenericConfig {
     /// Backend identifier string (e.g. `"openvpn"`, `"anyconnect"`).
@@ -316,14 +316,14 @@ pub struct GenericConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "backend", rename_all = "snake_case")]
 pub enum ProfileConfig {
-    /// WireGuard via the kernel netlink API.
+    /// `WireGuard` via the kernel netlink API.
     WireGuard(WireGuardConfig),
-    /// FortiGate IPsec / IKEv2 via strongSwan.
+    /// `FortiGate` `IPsec` / `IKEv2` via strongSwan.
     FortiGate(FortiGateConfig),
-    /// FortiGate **SSL VPN** via `openfortivpn`.  Most common FortiGate
+    /// `FortiGate` **SSL VPN** via `openfortivpn`.  Most common `FortiGate`
     /// remote-access deployment today.
     ForticlientSslvpn(ForticlientSslvpnConfig),
-    /// OpenVPN session managed via the `openvpn` v2 CLI.
+    /// `OpenVPN` session managed via the `openvpn` v2 CLI.
     OpenVpn(OpenVpnConfig),
     /// Azure Point-to-Site VPN with Entra ID (device-code) authentication.
     AzureVpn(AzureVpnConfig),
@@ -433,7 +433,7 @@ impl Profile {
         }
     }
 
-    /// Returns the kernel interface name to use for this profile (WireGuard only).
+    /// Returns the kernel interface name to use for this profile (`WireGuard` only).
     ///
     /// Uses the explicit name from the config if set; otherwise derives one
     /// from the first 8 hex digits of the UUID to avoid collisions.
@@ -471,20 +471,20 @@ pub struct ProfileSummary {
     /// Route all traffic through this VPN.
     #[serde(default = "default_true")]
     pub full_tunnel: bool,
-    /// Split-tunnel routes (CIDR strings).  Only meaningful for WireGuard
+    /// Split-tunnel routes (CIDR strings).  Only meaningful for `WireGuard`
     /// profiles with `full_tunnel = false`.  Empty for all other backends.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub split_routes: Vec<String>,
     /// Unix epoch seconds of the most recent successful connection, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_connected_secs: Option<u64>,
-    /// For FortiGate: the appliance hostname or IP.
+    /// For `FortiGate`: the appliance hostname or IP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
     /// For FortiGate/OpenVPN: the authentication username.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// For FortiGate: user-supplied DNS-server overrides. Empty when the
+    /// For `FortiGate`: user-supplied DNS-server overrides. Empty when the
     /// profile relies on whatever the gateway pushes via mode-config.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dns_servers: Vec<IpAddr>,
@@ -494,7 +494,7 @@ pub struct ProfileSummary {
     /// Customer / tenant tag for grouping. Empty = ungrouped.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub customer: String,
-    /// IKE identity (IDi) for FortiGate/IKEv2 profiles; empty when unset or not
+    /// IKE identity (`IDi`) for FortiGate/IKEv2 profiles; empty when unset or not
     /// applicable. Carried on the summary so an edit form can prefill it
     /// without fetching the whole profile — same reason `username` and
     /// `dns_servers` are here.
@@ -506,13 +506,13 @@ impl From<&Profile> for ProfileSummary {
     fn from(p: &Profile) -> Self {
         let split_routes = match &p.config {
             ProfileConfig::WireGuard(wg) => {
-                wg.split_routes.iter().map(|r| r.to_string()).collect()
+                wg.split_routes.iter().map(std::string::ToString::to_string).collect()
             }
             ProfileConfig::FortiGate(fg) => {
-                fg.routes.iter().map(|r| r.to_string()).collect()
+                fg.routes.iter().map(std::string::ToString::to_string).collect()
             }
             ProfileConfig::ForticlientSslvpn(fc) => {
-                fc.routes.iter().map(|r| r.to_string()).collect()
+                fc.routes.iter().map(std::string::ToString::to_string).collect()
             }
             _ => Vec::new(),
         };
@@ -557,7 +557,7 @@ impl From<&Profile> for ProfileSummary {
 
 /// Strip an inline `# comment` (or `; comment`) from a `.conf` value.
 ///
-/// WireGuard tools commonly emit lines like:
+/// `WireGuard` tools commonly emit lines like:
 /// ```text
 /// Address = 10.0.0.1/24 # tunnel address
 /// DNS     = 1.1.1.1     ; Cloudflare
@@ -580,9 +580,9 @@ fn strip_inline_comment(value: &str) -> &str {
     }
 }
 
-/// Validate and normalise a WireGuard `Endpoint` value.
+/// Validate and normalise a `WireGuard` `Endpoint` value.
 ///
-/// Accepts all three forms that WireGuard tools emit:
+/// Accepts all three forms that `WireGuard` tools emit:
 ///
 /// | Form | Example |
 /// |------|---------|
@@ -601,16 +601,16 @@ fn parse_endpoint(value: &str) -> Result<String, String> {
     // `hostname:port` and `[IPv6]:port` (whose host contains colons).
     let (host, port_str) = value
         .rsplit_once(':')
-        .ok_or_else(|| format!("expected host:port, got {:?}", value))?;
+        .ok_or_else(|| format!("expected host:port, got {value:?}"))?;
 
     if host.is_empty() {
-        return Err(format!("host part is empty in {:?}", value));
+        return Err(format!("host part is empty in {value:?}"));
     }
 
     // Validate the port is a u16; reject garbage like "abc" or "99999".
     port_str
         .parse::<u16>()
-        .map_err(|_| format!("port {:?} is not a valid u16 in {:?}", port_str, value))?;
+        .map_err(|_| format!("port {port_str:?} is not a valid u16 in {value:?}"))?;
 
     // The host is accepted as-is (hostname, bare IPv4, or `[IPv6]`).
     // We do not resolve or further validate hostnames at import time.
@@ -621,7 +621,7 @@ fn parse_endpoint(value: &str) -> Result<String, String> {
 // WireGuard .conf file importer
 // ---------------------------------------------------------------------------
 
-/// Parses a WireGuard `.conf` file (INI format) and returns a [`WireGuardConfig`].
+/// Parses a `WireGuard` `.conf` file (INI format) and returns a [`WireGuardConfig`].
 ///
 /// The caller is responsible for storing the private key (returned separately
 /// by [`import_wireguard_conf`]) in the system keyring.
@@ -961,14 +961,14 @@ impl ZeroingKey {
     }
 }
 
-/// The AllowedIPs a WireGuard peer should actually be configured with,
+/// The `AllowedIPs` a `WireGuard` peer should actually be configured with,
 /// reconciling `Profile.full_tunnel` and the profile's `split_routes`
 /// against the peer's stored list.
 ///
 /// Shared by the macOS engine (which renders a `wg-quick` config) and the
 /// Linux daemon (which programs the kernel interface) so a profile routes
 /// identically on both. It used to live only in the engine; the daemon
-/// had its own split-tunnel logic that replaced a peer's AllowedIPs with
+/// had its own split-tunnel logic that replaced a peer's `AllowedIPs` with
 /// `split_routes` alone, dropping peer-specific prefixes — e.g. the
 /// gateway's own LAN, reachable only through the tunnel — that the engine
 /// keeps. One function is the only way the two platforms cannot drift.
@@ -1030,20 +1030,20 @@ pub fn effective_allowed_ips(
 /// guaranteed reachable.
 ///
 /// The failure this prevents: a gateway hands out an internal DNS server
-/// (IKEv2 `INTERNAL_IP4_DNS`) that sits *outside* the split-include
+/// (`IKEv2` `INTERNAL_IP4_DNS`) that sits *outside* the split-include
 /// prefixes it also hands out. The client obediently installs both — a
 /// nameserver, and a selector set that cannot reach it. Every lookup then
 /// burns a full resolver timeout (~5 s) against the dead server before
 /// falling back to a local one, which the user experiences as "every page
-/// load hangs, full tunnel is fine". Seen live against a FortiGate whose
+/// load hangs, full tunnel is fine". Seen live against a `FortiGate` whose
 /// split profile carried 10.20.3.0/24 + 10.20.21.0/24 while assigning
 /// 10.20.200.1 as DNS.
 ///
-/// IPsec selectors are negotiated with the peer, so a client cannot patch
+/// `IPsec` selectors are negotiated with the peer, so a client cannot patch
 /// this up after the fact with a kernel route — packets to the DNS server
 /// would match no policy and be dropped. The host prefixes have to be part
 /// of the proposed `remote_ts`. A gateway that narrows them away leaves us
-/// no worse off than today; one that accepts them (FortiGate accepts
+/// no worse off than today; one that accepts them (`FortiGate` accepts
 /// selectors inside its own address space) makes the assigned DNS usable.
 ///
 /// Full tunnel never needs this — the catch-all covers everything — so
@@ -1059,11 +1059,11 @@ pub fn split_ts_with_dns(routes: &[IpNet], dns_servers: &[IpAddr]) -> Vec<IpNet>
 /// Host prefixes for the DNS servers that no entry in `covered` reaches.
 ///
 /// The WireGuard-shaped half of the same problem `split_ts_with_dns`
-/// solves for IKEv2: a split profile whose AllowedIPs don't cover the
+/// solves for `IKEv2`: a split profile whose `AllowedIPs` don't cover the
 /// profile's DNS servers configures a resolver the tunnel cannot carry.
-/// WireGuard's cryptokey routing means a prefix may belong to exactly one
+/// `WireGuard`'s cryptokey routing means a prefix may belong to exactly one
 /// peer, so this function only *computes* the missing host prefixes — the
-/// caller decides which peer's AllowedIPs they join (in practice the
+/// caller decides which peer's `AllowedIPs` they join (in practice the
 /// first peer; split profiles overwhelmingly have one). Duplicate servers
 /// in `dns_servers` produce one prefix.
 #[must_use = "the returned prefixes must be added to a peer's AllowedIPs; ignoring them leaves the DNS unreachable"]
@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     /// The regression the shared function exists to prevent: split tunnel
-    /// must strip the catch-all and substitute split_routes.
+    /// must strip the catch-all and substitute `split_routes`.
     #[test]
     fn split_tunnel_replaces_catch_all_with_split_routes() {
         let peer = vec![ip("0.0.0.0/0"), ip("::/0")];
@@ -1101,7 +1101,7 @@ mod tests {
     }
 
     /// The exact cross-platform divergence from the review: a peer-specific
-    /// prefix (the gateway LAN) must survive alongside split_routes, not be
+    /// prefix (the gateway LAN) must survive alongside `split_routes`, not be
     /// dropped the way the Linux daemon used to drop it.
     #[test]
     fn split_tunnel_keeps_specific_peer_prefixes() {
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn wireguard_config_roundtrip() {
-        let conf = r#"[Interface]
+        let conf = r"[Interface]
 PrivateKey = cGhvbnktcHJpdmF0ZS1rZXktYmFzZTY0LXRlc3Q=
 Address = 10.0.0.2/24
 DNS = 1.1.1.1, 8.8.8.8
@@ -1226,7 +1226,7 @@ PublicKey = cGVlci1wdWJsaWMta2V5LWJhc2U2NC10ZXN0AA==
 Endpoint = vpn.example.com:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
-"#;
+";
         let (cfg, key, psks) =
             import_wireguard_conf(conf, "test/wg").expect("parse WireGuard conf");
 

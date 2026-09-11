@@ -57,6 +57,7 @@ pub struct ReconService {
 }
 
 /// Common port names are hints, never proof of what is listening.
+#[must_use] 
 pub fn service_hint(port: u16) -> &'static str {
     match port {
         22 => "SSH",
@@ -75,6 +76,7 @@ pub fn service_hint(port: u16) -> &'static str {
 }
 
 /// Changes are comparable only when the target and selected ports are identical.
+#[must_use] 
 pub fn service_changes(
     previous: &ReconScanResult,
     current: &ReconScanResult,

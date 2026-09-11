@@ -11,16 +11,16 @@
 //!
 //! Everything the daemons hold that a restore needs: VPN profiles, SSH
 //! keys and hosts, the whole secret store (`label -> base64(bytes)`:
-//! WireGuard keys and PSKs, SSH private keys and passwords, API tokens,
+//! `WireGuard` keys and PSKs, SSH private keys and passwords, API tokens,
 //! and — where the caller supplies them — IKEv2/OpenVPN credentials),
-//! plus GUI settings and any FortiGate config snapshots.
+//! plus GUI settings and any `FortiGate` config snapshots.
 //!
 //! ## Secret storage is the platform-specific part
 //!
 //! Linux keeps every secret in one file store, so its export is
 //! self-contained by construction. macOS splits them: the engine's file
-//! store holds WireGuard keys, SSH material, API tokens and UniFi
-//! passwords, while IKEv2 and OpenVPN login credentials live in the app
+//! store holds `WireGuard` keys, SSH material, API tokens and `UniFi`
+//! passwords, while `IKEv2` and `OpenVPN` login credentials live in the app
 //! Keychain. The `secrets` map here is just `label -> base64` and does
 //! not care which store a value came from — the exporter merges both
 //! sources in, and the importer routes each label back to the right
@@ -63,7 +63,7 @@ pub struct PortableBackup {
     #[serde(default)]
     pub exported_at: String,
 
-    /// VPN profiles (WireGuard, IKEv2/FortiGate, OpenVPN, Azure).
+    /// VPN profiles (`WireGuard`, IKEv2/FortiGate, `OpenVPN`, Azure).
     #[serde(default)]
     pub profiles: Vec<Profile>,
 
@@ -90,7 +90,7 @@ pub struct PortableBackup {
     #[serde(default)]
     pub gui_settings: serde_json::Value,
 
-    /// FortiGate config snapshots as `filename -> contents`.
+    /// `FortiGate` config snapshots as `filename -> contents`.
     #[serde(default)]
     pub config_backups: HashMap<String, String>,
 }

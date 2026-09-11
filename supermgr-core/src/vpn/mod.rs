@@ -3,7 +3,7 @@
 //! This module is a direct port of the `vpnr-core` VPN types into the
 //! `supermgr-core` namespace.  Sub-modules:
 //!
-//! - [`profile`] — VPN profile definitions and WireGuard config import.
+//! - [`profile`] — VPN profile definitions and `WireGuard` config import.
 //! - [`state`]   — Connection state machine and tunnel statistics.
 //! - [`backend`] — The [`VpnBackend`] trait and reconciliation logic.
 

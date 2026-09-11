@@ -1,4 +1,4 @@
-//! Where SuperManager keeps its data, per platform.
+//! Where `SuperManager` keeps its data, per platform.
 //!
 //! Moved here from `supermgr-engine::secrets` because the engine is macOS-only
 //! and this is not: the Linux daemon needs the same answer to write compliance
@@ -107,7 +107,7 @@ mod tests {
                    PathBuf::from("/data"));
     }
 
-    /// The bug: a set-but-empty XDG_DATA_HOME must fall back, not yield "".
+    /// The bug: a set-but-empty `XDG_DATA_HOME` must fall back, not yield "".
     #[test]
     fn xdg_empty_falls_back_to_home() {
         assert_eq!(xdg_data_base(Some(""), Some("/home/x")),
@@ -120,7 +120,7 @@ mod tests {
                    PathBuf::from("/home/x/.local/share"));
     }
 
-    /// XDG spec: a relative XDG_DATA_HOME is ignored — honouring it would
+    /// XDG spec: a relative `XDG_DATA_HOME` is ignored — honouring it would
     /// reintroduce the relative-path divergence by another door.
     #[test]
     fn xdg_relative_is_ignored() {

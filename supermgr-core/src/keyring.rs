@@ -4,7 +4,7 @@
 //! with platform-specific implementations:
 //!
 //! - **Linux**: [`LibsecretStore`] backed by the D-Bus Secret Service protocol
-//!   (GNOME Keyring, KWallet).
+//!   (GNOME Keyring, `KWallet`).
 //! - **macOS**: [`KeychainStore`] backed by the macOS Keychain via the
 //!   `security-framework` crate.
 //!

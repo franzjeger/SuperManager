@@ -5200,8 +5200,8 @@ impl DaemonService {
         };
 
         // --- Test FortiGate API connectivity (if configured) ---
-        let api_result = if host.api_token_ref.is_some() {
-            let token_label = host.api_token_ref.as_ref().unwrap().label().to_owned();
+        let api_result = if let Some(token_ref) = &host.api_token_ref {
+            let token_label = token_ref.label().to_owned();
             let api_port = host.api_port.unwrap_or(443);
 
             match secrets::retrieve_secret(&token_label).await {

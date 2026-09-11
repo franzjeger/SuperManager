@@ -57,7 +57,7 @@ pub struct TailscaleNode {
     pub id: String,
     /// Short hostname (e.g. `franzjeger`).
     pub hostname: String,
-    /// MagicDNS name (e.g. `franzjeger.tailb0b06a.ts.net`).
+    /// `MagicDNS` name (e.g. `franzjeger.tailb0b06a.ts.net`).
     pub dns_name: String,
     /// Operating system as reported by tailscaled (e.g. `linux`, `macOS`,
     /// `iOS`, `windows`).
@@ -196,7 +196,7 @@ impl TailscaleNode {
     }
 
     /// Hostname if tailscaled reported one, otherwise the leading label of the
-    /// MagicDNS name, otherwise the node ID.
+    /// `MagicDNS` name, otherwise the node ID.
     ///
     /// Never empty, because this is what a row is labelled with — a blank row
     /// is worse than an ugly one.

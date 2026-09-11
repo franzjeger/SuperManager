@@ -83,7 +83,7 @@ pub struct SshKeySummary {
     /// Hosts configured to use this key for SSH authentication.
     #[serde(default)]
     pub assigned_host_ids: Vec<Uuid>,
-    /// Recorded public-key deployments; not a live authorized_keys audit.
+    /// Recorded public-key deployments; not a live `authorized_keys` audit.
     #[serde(default)]
     pub deployed_host_ids: Vec<Uuid>,
 

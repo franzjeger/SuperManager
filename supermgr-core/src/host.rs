@@ -86,24 +86,24 @@ pub struct Host {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vpn_profile_id: Option<Uuid>,
 
-    /// FortiGate REST API port (typically 443).  Only used when
+    /// `FortiGate` REST API port (typically 443).  Only used when
     /// `device_type` is [`DeviceType::Fortigate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
 
-    /// Reference to the FortiGate REST API token in the secret service.
+    /// Reference to the `FortiGate` REST API token in the secret service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token_ref: Option<SecretRef>,
 
-    /// Skip TLS certificate verification for FortiGate REST API calls.
+    /// Skip TLS certificate verification for `FortiGate` REST API calls.
     #[serde(default)]
     pub api_verify_tls: bool,
 
-    /// UniFi Controller URL (e.g. "https://unifi.example.com:8443").
+    /// `UniFi` Controller URL (e.g. "<https://unifi.example.com:8443>").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unifi_controller_url: Option<String>,
 
-    /// Reference to the UniFi Controller API credentials in the secret service.
+    /// Reference to the `UniFi` Controller API credentials in the secret service.
     /// Stored as JSON: `{"username": "...", "password": "..."}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unifi_api_token_ref: Option<SecretRef>,
@@ -120,7 +120,7 @@ pub struct Host {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_forwards: Vec<PortForward>,
 
-    /// UUID of another SSH host to use as a jump/bastion host (ProxyJump).
+    /// UUID of another SSH host to use as a jump/bastion host (`ProxyJump`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump: Option<Uuid>,
 
@@ -182,11 +182,11 @@ pub struct HostSummary {
     #[serde(default)]
     pub has_password: bool,
 
-    /// Whether a FortiGate REST API token is configured for this host.
+    /// Whether a `FortiGate` REST API token is configured for this host.
     #[serde(default)]
     pub has_api: bool,
 
-    /// FortiGate REST API port (for display in edit dialog).
+    /// `FortiGate` REST API port (for display in edit dialog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_port: Option<u16>,
 
@@ -194,11 +194,11 @@ pub struct HostSummary {
     #[serde(default)]
     pub has_certificate: bool,
 
-    /// Whether a UniFi Controller URL is configured for this host.
+    /// Whether a `UniFi` Controller URL is configured for this host.
     #[serde(default)]
     pub has_unifi_controller: bool,
 
-    /// UniFi Controller URL (for display in edit dialog).
+    /// `UniFi` Controller URL (for display in edit dialog).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unifi_controller_url: Option<String>,
 
@@ -214,7 +214,7 @@ pub struct HostSummary {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_forwards: Vec<PortForward>,
 
-    /// UUID of another SSH host to use as a jump/bastion host (ProxyJump).
+    /// UUID of another SSH host to use as a jump/bastion host (`ProxyJump`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump: Option<Uuid>,
 
