@@ -1,49 +1,18 @@
-//! Tailscale page — the tailnet as a device list, with self-heal.
+//! Tailscale workspace: saved accounts, connection controls, network settings,
+//! peer search, diagnostics and exit-node selection.
 //!
-//! # What this can and cannot do
-//!
-//! List the tailnet, choose an exit node, and repair a broken stack. The
-//! first two are `TailscaleListNodes` and `TailscaleSetExitNode`; the third
-//! is `TailscaleHealth` + `TailscaleRepair` + `TailscaleLogin`. The one
-//! thing the page cannot do for you is the browser half of a login — it
-//! opens the URL and waits.
-//!
-//! # Exit nodes
-//!
-//! Only peers advertising the capability are offered — `exit_node_option`, not
-//! `exit_node`. The second means "this is the one currently carrying my
-//! traffic", and offering every peer as a choice when tailscaled would refuse
-//! most of them is how a control teaches people not to trust it.
-//!
-//! Selecting one is polkit-gated in the daemon, so the first use per session
-//! raises an authentication prompt. That is deliberate: it decides where every
-//! packet this machine sends goes, and this bus is reachable by every local
-//! account. A dismissed prompt comes back as an error and is shown as one.
-//!
-//! # Broken is a state with a button, not an error
-//!
-//! An empty list and a broken tailscale are different facts, and collapsing
-//! them into "no devices" is how someone spends ten minutes wondering why
-//! their tailnet is missing when the answer is that tailscaled is not
-//! running. It used to stop there — the failure was at least named. But
-//! naming a condition the daemon can fix, on a machine the operator manages
-//! with this very app, is a dead end wearing a diagnosis: every state of
-//! the stack the daemon can distinguish (CLI missing, service stopped,
-//! logged out, brought down) renders as that state *with the button that
-//! fixes it*. Only the states nobody but a human can fix — the browser
-//! login, an unreachable supermgrd — render without a remedy attached.
-//!
-//! # The login flow, from this side
-//!
-//! Log in → daemon spawns `tailscale login` and hands back the URL (or the
-//! URL arrives on a later health poll — the control plane can be slow) →
-//! [`AppMsg::TailscaleLoginUrl`] opens the browser once → this page shows
-//! "waiting" while a poll task watches `TailscaleHealth` → the moment the
-//! backend reports `Running`, the poll fetches nodes and the page becomes
-//! the device list. The poll is bounded; someone abandoning the browser tab
-//! leaves the page saying it is still logged out, which is the truth.
+//! The daemon projects preferences into typed fields and applies only explicit
+//! edits to the expected active account. Reading never requests authorization.
+//! Mutations and diagnostics run on operator action; routing changes retain
+//! their separate polkit policy. Login and repair keep persistent status pages.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::{cell::RefCell, rc::Rc};
+
+mod controls;
+mod preferences;
+mod accounts;
+mod diagnostics;
 
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -51,7 +20,7 @@ use libadwaita::prelude::*;
 
 use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 
-use crate::app::AppMsg;
+use crate::app::{AppMsg, AppState};
 use crate::ui::design::{self, Status};
 
 /// Which daemon method a remedy button invokes. Two, not one per state:
@@ -69,21 +38,40 @@ enum Remedy {
 /// used on page open, after a repair, after a login, after a timeout. One
 /// function so the health-before-nodes ordering cannot be forgotten at one
 /// of the call sites.
+static REFRESH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub async fn refresh(tx: &mpsc::Sender<AppMsg>) {
-    match crate::dbus_client::dbus_tailscale_health().await {
-        Err(e) => {
-            tx.send(AppMsg::TailscaleHealthUpdated(Err(format!("{e:#}")))).ok();
+    use std::sync::atomic::Ordering;
+    let generation = REFRESH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let health = crate::dbus_client::dbus_tailscale_health().await.map_err(|e| format!("{e:#}"));
+    let nodes = if health.as_ref().is_ok_and(|health| health.is_running()) {
+        Some(crate::dbus_client::dbus_tailscale_list_nodes().await.map_err(|e| format!("{e:#}")))
+    } else { None };
+    let management = crate::dbus_client::dbus_tailscale_management().await.map_err(|e| format!("{e:#}"));
+    if generation != REFRESH_GENERATION.load(Ordering::SeqCst) { return; }
+    tx.send(AppMsg::TailscaleManagementUpdated(management)).ok();
+    if let Some(nodes) = nodes { tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok(); }
+    else { tx.send(AppMsg::TailscaleHealthUpdated(health)).ok(); }
+}
+
+/// Refresh on network changes and resume, without reconnecting or changing routes.
+pub fn watch_environment(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>) {
+    let network_tx = tx.clone();
+    gtk4::gio::NetworkMonitor::default().connect_network_changed(move |_, _| {
+        network_tx.send(AppMsg::TailscaleEnvironmentChanged).ok();
+    });
+    let tx = tx.clone();
+    rt.spawn(async move {
+        use futures_util::StreamExt;
+        let Ok(conn) = zbus::Connection::system().await else { return };
+        let Ok(proxy) = zbus::Proxy::new(&conn, "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager").await else { return };
+        let Ok(mut signals) = proxy.receive_signal("PrepareForSleep").await else { return };
+        while let Some(message) = signals.next().await {
+            if message.body().deserialize::<(bool,)>().is_ok_and(|(sleeping,)| !sleeping) {
+                tx.send(AppMsg::TailscaleEnvironmentChanged).ok();
+            }
         }
-        Ok(h) if h.is_running() => {
-            let nodes = crate::dbus_client::dbus_tailscale_list_nodes()
-                .await
-                .map_err(|e| format!("{e:#}"));
-            tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok();
-        }
-        Ok(h) => {
-            tx.send(AppMsg::TailscaleHealthUpdated(Ok(h))).ok();
-        }
-    }
+    });
 }
 
 /// Handles the page needs in order to re-render without being rebuilt.
@@ -102,6 +90,15 @@ pub struct TailscaleView {
     rt: tokio::runtime::Handle,
     /// Where those calls report back to.
     tx: mpsc::Sender<AppMsg>,
+    controls: gtk4::Box,
+    window: adw::ApplicationWindow,
+    app_state: Arc<Mutex<AppState>>,
+    rows: Rc<RefCell<Vec<(adw::ExpanderRow, TailscaleNode)>>>,
+    search: gtk4::SearchEntry,
+    filter: gtk4::DropDown,
+    profile_id: Rc<RefCell<Option<String>>>,
+    operation_status: gtk4::Label,
+    operation_pending: Rc<std::cell::Cell<bool>>,
 }
 
 /// Build the page. Starts in the "asking" state — the first render replaces it.
@@ -109,22 +106,72 @@ pub struct TailscaleView {
 pub fn build_tailscale_page(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
+    window: &adw::ApplicationWindow,
+    app_state: &Arc<Mutex<AppState>>,
 ) -> TailscaleView {
-    let (scroller, content) = design::detail_body();
+    let (scroller, content) = design::workspace_body(
+        "Tailscale",
+        "Manage your accounts, network preferences and connected devices.",
+    );
 
     let heading = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
     let title_box = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
-    let title = gtk4::Label::new(Some("Tailnet"));
-    title.add_css_class("title-2");
-    title.set_halign(gtk4::Align::Start);
     let subtitle = gtk4::Label::new(Some("Reading local tailscaled…"));
     subtitle.add_css_class("dim-label");
     subtitle.set_halign(gtk4::Align::Start);
-    title_box.append(&title);
     title_box.append(&subtitle);
     title_box.set_hexpand(true);
     heading.append(&title_box);
+    let reload = gtk4::Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Refresh Tailscale")
+        .build();
+    {
+        let rt = rt.clone();
+        let tx = tx.clone();
+        reload.connect_clicked(move |_| {
+            let tx = tx.clone();
+            rt.spawn(async move {
+                refresh(&tx).await;
+            });
+        });
+    }
+    heading.append(&reload);
     content.append(&heading);
+    let operation_status = gtk4::Label::builder().wrap(true).xalign(0.0).visible(false).build();
+    content.append(&operation_status);
+
+    let controls = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    content.append(&controls);
+    let search = gtk4::SearchEntry::builder()
+        .placeholder_text("Find a device, address or OS")
+        .hexpand(true)
+        .build();
+    let filter = gtk4::DropDown::from_strings(&["All devices", "Online", "Offline", "Exit nodes"]);
+    let searchbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+    searchbar.append(&search);
+    searchbar.append(&filter);
+    content.append(&searchbar);
+    let rows: Rc<RefCell<Vec<(adw::ExpanderRow, TailscaleNode)>>> = Rc::new(RefCell::new(vec![]));
+    let apply_filter = {
+        let rows = Rc::clone(&rows);
+        let search = search.clone();
+        let filter = filter.clone();
+        Rc::new(move || {
+            for (row, node) in rows.borrow().iter() {
+                row.set_visible(controls::matches_node(
+                    node,
+                    &search.text(),
+                    filter.selected(),
+                ));
+            }
+        })
+    };
+    {
+        let apply = Rc::clone(&apply_filter);
+        search.connect_search_changed(move |_| apply());
+    }
+    filter.connect_selected_notify(move |_| apply_filter());
 
     let list = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     let status_slot = adw::Bin::new();
@@ -149,10 +196,26 @@ pub fn build_tailscale_page(
         subtitle,
         rt: rt.clone(),
         tx: tx.clone(),
+        controls,
+        window: window.clone(),
+        app_state: Arc::clone(app_state),
+        rows,
+        search,
+        filter,
+        profile_id: Rc::new(RefCell::new(None)),
+        operation_status,
+        operation_pending: Rc::new(std::cell::Cell::new(false)),
     }
 }
 
 impl TailscaleView {
+    pub fn render_management(
+        &self,
+        result: &Result<supermgr_core::tailscale::TailscaleManagement, String>,
+    ) {
+        *self.profile_id.borrow_mut() = result.as_ref().ok().and_then(|management| management.preferences.as_ref()).and_then(|preferences| preferences.profile_id.clone());
+        controls::render_management(self, result);
+    }
     /// Render the outcome of a `TailscaleListNodes` call.
     ///
     /// Takes the whole `Result` rather than just the nodes so the error path
@@ -232,7 +295,10 @@ impl TailscaleView {
             // state name is the most honest thing available.
             Ok(h) => {
                 let description = if h.detail.is_empty() {
-                    format!("tailscaled reports state \u{201c}{}\u{201d}.", h.backend_state)
+                    format!(
+                        "tailscaled reports state \u{201c}{}\u{201d}.",
+                        h.backend_state
+                    )
                 } else {
                     h.detail.clone()
                 };
@@ -314,77 +380,22 @@ impl TailscaleView {
     /// finishing the browser flow ends with the page saying the machine is
     /// still logged out, which it is.
     fn wire_login_button(&self, button: &gtk4::Button) {
-        let rt = self.rt.clone();
-        let tx = self.tx.clone();
-        let status_slot = self.status_slot.clone();
-        button.connect_clicked(move |btn| {
-            btn.set_sensitive(false);
-            status_slot.set_child(Some(&design::empty_state(
-                design::icon_name(design::icons::MESH),
-                "Waiting for the browser login",
-                "A Tailscale login page is opening in your browser. This \
-                 page updates by itself once the login completes.",
-            )));
-            let tx = tx.clone();
-            rt.spawn(async move {
-                let mut url_opened = false;
-                match crate::dbus_client::dbus_tailscale_login().await {
-                    Err(e) => {
-                        tx.send(AppMsg::OperationFailed(format!("{e:#}"))).ok();
-                        refresh(&tx).await;
-                        return;
-                    }
-                    Ok(url) if !url.is_empty() => {
-                        tx.send(AppMsg::TailscaleLoginUrl(url)).ok();
-                        url_opened = true;
-                    }
-                    // Empty URL: the control plane had not handed one out
-                    // within the daemon's patience. The poll below picks it
-                    // up from health.auth_url.
-                    Ok(_) => {}
-                }
-                const TICKS: u32 = 150; // × 2 s = five minutes
-                for _ in 0..TICKS {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    match crate::dbus_client::dbus_tailscale_health().await {
-                        // Transient bus trouble mid-poll: keep going, the
-                        // deadline bounds the total wait either way.
-                        Err(_) => {}
-                        Ok(h) if h.is_running() => {
-                            refresh(&tx).await;
-                            return;
-                        }
-                        Ok(h) => {
-                            if !url_opened && !h.auth_url.is_empty() {
-                                tx.send(AppMsg::TailscaleLoginUrl(h.auth_url.clone())).ok();
-                                url_opened = true;
-                            }
-                        }
-                    }
-                }
-                // Timed out. Render the truth — still logged out — with the
-                // login button back.
-                refresh(&tx).await;
-            });
-        });
+        let rt = self.rt.clone(); let tx = self.tx.clone(); let window = self.window.clone();
+        let profile = Rc::clone(&self.profile_id);
+        button.connect_clicked(move |_| accounts::show(&window, &rt, &tx, profile.borrow().as_deref().unwrap_or("")));
     }
 
     fn show_nodes(&self, nodes: &[TailscaleNode]) {
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
+        self.rows.borrow_mut().clear();
 
         // This device first, then online peers, then offline — the order the
         // question is usually asked in. Stable within each group by name so
         // rows do not jump around between refreshes of the same tailnet.
         let mut ordered: Vec<&TailscaleNode> = nodes.iter().collect();
-        ordered.sort_by_key(|n| {
-            (
-                !n.is_self,
-                !n.online,
-                n.display_name().to_ascii_lowercase(),
-            )
-        });
+        ordered.sort_by_key(|n| (!n.is_self, !n.online, n.display_name().to_ascii_lowercase()));
 
         let online = nodes.iter().filter(|n| n.online).count();
         self.subtitle.set_text(&format!(
@@ -399,7 +410,14 @@ impl TailscaleView {
 
         let group = design::card("Devices");
         for node in ordered {
-            group.add(&Self::node_row(node));
+            let row = controls::node_row(self, node);
+            row.set_visible(controls::matches_node(
+                node,
+                &self.search.text(),
+                self.filter.selected(),
+            ));
+            group.add(&row);
+            self.rows.borrow_mut().push((row, node.clone()));
         }
         self.list.append(&group);
         self.stack.set_visible_child_name("list");
@@ -424,14 +442,14 @@ impl TailscaleView {
 
         let card = design::card("Exit node");
         card.set_description(Some(
-            "All traffic from this machine leaves through the device you pick.",
+            "Route internet traffic through a device. Switching checks TCP access to 1.1.1.1 and 8.8.8.8 on port 443 and restores the previous selection if connectivity fails.",
         ));
 
         if let Some(node) = active {
             let row = adw::ActionRow::new();
             row.set_title(node.display_name());
-            row.set_subtitle("Carrying this machine's traffic");
-            row.add_prefix(&design::status_pill(Status::Connected, "In use"));
+            row.set_subtitle("Selected for internet traffic");
+            row.add_prefix(&design::status_pill(if node.online { Status::Connected } else { Status::Error }, if node.online { "Selected" } else { "Offline" }));
             let stop = gtk4::Button::with_label("Stop using");
             stop.add_css_class("destructive-action");
             stop.set_valign(gtk4::Align::Center);
@@ -453,7 +471,7 @@ impl TailscaleView {
             } else {
                 "Offline — tailscale will refuse this one"
             });
-            let use_btn = gtk4::Button::with_label("Use");
+            let use_btn = gtk4::Button::with_label("Use and verify");
             use_btn.set_valign(gtk4::Align::Center);
             // An offline peer cannot carry traffic, and tailscaled says so
             // rather than trying. Disabling the button says the same thing
@@ -485,72 +503,31 @@ impl TailscaleView {
     /// `set` that reported success and a peer that then refused traffic would
     /// otherwise leave the page claiming something untrue.
     fn wire_exit_node_button(&self, button: &gtk4::Button, value: String) {
-        let rt = self.rt.clone();
-        let tx = self.tx.clone();
-        button.connect_clicked(move |btn| {
-            btn.set_sensitive(false);
-            let tx = tx.clone();
+        let rt = self.rt.clone(); let tx = self.tx.clone();
+        let profile = Rc::clone(&self.profile_id); let pending = Rc::clone(&self.operation_pending);
+        let status = self.operation_status.clone(); let controls = self.controls.clone(); let list = self.list.clone();
+        button.connect_clicked(move |_| {
+            if pending.replace(true) { return; }
+            let Some(profile) = profile.borrow().clone() else {
+                pending.set(false); tx.send(AppMsg::OperationFailed("Account settings are not available yet. Refresh Tailscale first.".into())).ok(); return;
+            };
+            controls.set_sensitive(false); list.set_sensitive(false);
+            status.set_visible(true); status.remove_css_class("error"); status.set_label("Updating exit node and checking connectivity…");
             let value = value.clone();
-            rt.spawn(async move {
-                let outcome = crate::dbus_client::dbus_tailscale_set_exit_node(&value)
-                    .await
-                    .map_err(|e| format!("{e:#}"));
-                if let Err(message) = outcome {
-                    tx.send(AppMsg::OperationFailed(message)).ok();
+            let controls = controls.clone(); let list = list.clone(); let status = status.clone(); let pending = Rc::clone(&pending);
+            let rt = rt.clone(); let tx = tx.clone();
+            // The D-Bus call runs on the tokio runtime; the widget updates
+            // await it back on the GTK main thread.
+            gtk4::glib::spawn_future_local(async move {
+                match rt.spawn(async move { crate::dbus_client::dbus_tailscale_change_exit_node(&profile, &value).await }).await {
+                    Ok(Ok(message)) => status.set_label(&message),
+                    Ok(Err(error)) => { status.set_label(&format!("{error}")); status.add_css_class("error"); },
+                    Err(error) => { status.set_label(&format!("Exit-node task stopped: {error}")); status.add_css_class("error"); },
                 }
-                // Re-list either way: on success to pick up the new active
-                // node, on failure because the page's picture of the tailnet
-                // is now unverified — including the case where the operator
-                // dismissed the authentication prompt.
-                let nodes = crate::dbus_client::dbus_tailscale_list_nodes()
-                    .await
-                    .map_err(|e| format!("{e:#}"));
-                tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok();
+                pending.set(false); controls.set_sensitive(true); list.set_sensitive(true);
+                rt.spawn(async move { refresh(&tx).await; });
             });
         });
-    }
-
-    /// One device. Title is the name, subtitle carries the address and the
-    /// MagicDNS name — the two things that get copied into an ssh command.
-    fn node_row(node: &TailscaleNode) -> adw::ActionRow {
-        let row = adw::ActionRow::new();
-        row.set_title(node.display_name());
-
-        let mut detail = String::new();
-        if let Some(ip) = node.primary_ip() {
-            detail.push_str(ip);
-        }
-        if !node.dns_name.is_empty() {
-            let dns = node.dns_name.trim_end_matches('.');
-            if !detail.is_empty() {
-                detail.push_str(" · ");
-            }
-            detail.push_str(dns);
-        }
-        if !node.os.is_empty() {
-            if !detail.is_empty() {
-                detail.push_str(" · ");
-            }
-            detail.push_str(&node.os);
-        }
-        row.set_subtitle(&detail);
-        // Addresses and DNS names are for copying, and a row that renders them
-        // without letting you select them just moves the terminal trip later.
-        row.set_subtitle_selectable(true);
-
-        if node.is_self {
-            row.add_suffix(&design::badge("This device"));
-        }
-        if node.exit_node {
-            row.add_suffix(&design::badge("Exit node"));
-        }
-        let (status, label) = if node.online {
-            (Status::Connected, "Online")
-        } else {
-            (Status::Disconnected, "Offline")
-        };
-        row.add_suffix(&design::status_pill(status, label));
-        row
     }
 }
 
@@ -572,6 +549,8 @@ mod tests {
             last_seen: String::new(),
             rx_bytes: 0,
             tx_bytes: 0,
+            current_address: String::new(),
+            relay: String::new(),
         }
     }
 

@@ -490,11 +490,12 @@ pub fn build_ui(
     let compliance_page_ref = view_stack.page(&compliance_view.widget);
     compliance_page_ref.set_icon_name(Some(design::icon_name(&["emblem-ok-symbolic", "dialog-ok"])));
 
-    let tailscale_view = tailscale::build_tailscale_page(&rt, &tx);
+    let tailscale_view = tailscale::build_tailscale_page(&rt, &tx, &window, &app_state);
     view_stack.add_titled(&tailscale_view.widget, Some("tailscale"), "Tailscale");
     let tailscale_page_ref = view_stack.page(&tailscale_view.widget);
     tailscale_page_ref.set_icon_name(Some(design::icon_name(design::icons::MESH)));
     let tailscale_view = std::rc::Rc::new(tailscale_view);
+    tailscale::watch_environment(&rt, &tx);
 
     // =========================================================================
     // Security page (standalone, full-width)
@@ -2930,6 +2931,11 @@ pub fn build_ui(
     let rx_rt = rt.clone();
     let rx_tx = tx.clone();
     let rx_tray_handle = Arc::clone(&tray_handle);
+    let rx_view_stack = view_stack.clone();
+    let rx_key_usage = ssh_key_detail.deployed_list.clone();
+    let rx_ssh_key_search = ssh_key_search.clone();
+    let rx_ssh_host_search = ssh_host_search.clone();
+    let rx_environment_refresh_pending = std::rc::Rc::new(std::cell::Cell::new(false));
     let rx_ssh_key_list = ssh_key_list.clone();
     let rx_ssh_host_list = ssh_host_list.clone();
     let rx_keys_content_stack = keys_content_stack.clone();
@@ -3338,6 +3344,14 @@ pub fn build_ui(
                         }
                     }
                 }
+                AppMsg::TailscaleEnvironmentChanged => {
+                    if rx_view_stack.visible_child_name().as_deref() == Some("tailscale") && !rx_environment_refresh_pending.replace(true) {
+                        let pending = std::rc::Rc::clone(&rx_environment_refresh_pending); let rt = rx_rt.clone(); let tx = rx_tx.clone();
+                        glib::timeout_add_local_once(std::time::Duration::from_secs(2), move || {
+                            pending.set(false); rt.spawn(async move { tailscale::refresh(&tx).await; });
+                        });
+                    }
+                }
                 AppMsg::TailscaleNodesUpdated(result) => {
                     // Deliberately no toast on the error path: the page shows
                     // the failure itself and keeps showing it. A toast would
@@ -3349,6 +3363,7 @@ pub fn build_ui(
                     }
                     rx_tailscale_view.render(&result);
                 }
+                AppMsg::TailscaleManagementUpdated(result) => rx_tailscale_view.render_management(&result),
                 AppMsg::TailscaleHealthUpdated(result) => {
                     // Same no-toast reasoning as the node list: a broken
                     // stack is the page's own state — now with the button

@@ -261,6 +261,8 @@ pub enum AppMsg {
     /// state, not a transient toast. "tailscaled is not running" needs to stay
     /// on screen until it stops being true.
     TailscaleNodesUpdated(Result<Vec<TailscaleNode>, String>),
+    TailscaleEnvironmentChanged,
+    TailscaleManagementUpdated(Result<supermgr_core::tailscale::TailscaleManagement, String>),
     /// Outcome of a `TailscaleHealth` call, for the Tailscale page.
     ///
     /// Sent instead of `TailscaleNodesUpdated` when the stack is not up —

@@ -547,6 +547,12 @@ pub async fn dbus_compliance_list_checks() -> anyhow::Result<Vec<CheckDefinition
     serde_json::from_str(&json).context("parse check library")
 }
 
+/// Persisted customer/host scopes independent of current inventory.
+pub async fn dbus_findings_scopes() -> anyhow::Result<Vec<String>> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.findings_scopes().await?)
+}
+
 /// Call `FindingsList` on the daemon.
 ///
 /// `scope` is a customer slug, or a host id for a host with no customer set —
@@ -602,6 +608,66 @@ pub async fn dbus_tailscale_list_nodes() -> anyhow::Result<Vec<TailscaleNode>> {
     serde_json::from_str(&json).context("parse tailscale nodes")
 }
 
+pub async fn dbus_tailscale_management() -> anyhow::Result<supermgr_core::tailscale::TailscaleManagement> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(serde_json::from_str(&proxy.tailscale_management().await?)?)
+}
+
+pub async fn dbus_tailscale_apply_preferences(patch: &supermgr_core::tailscale::TailscalePreferencesPatch) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(proxy.tailscale_apply_preferences(&serde_json::to_string(patch)?).await?)
+}
+
+pub async fn dbus_tailscale_set_running(profile: &str, running: bool) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.tailscale_set_running(profile, running).await?)
+}
+
+pub async fn dbus_tailscale_switch_profile(profile: &str) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.tailscale_switch_profile(profile).await?)
+}
+
+pub async fn dbus_tailscale_logout(profile: &str) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.tailscale_logout(profile).await?)
+}
+
+pub async fn dbus_tailscale_begin_login(profile: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
+    let conn = zbus::Connection::system().await?;
+    Ok(serde_json::from_str(&DaemonProxy::new(&conn).await?.tailscale_begin_login(profile).await?)?)
+}
+
+pub async fn dbus_tailscale_login_status(attempt: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
+    let conn = zbus::Connection::system().await?;
+    Ok(serde_json::from_str(&DaemonProxy::new(&conn).await?.tailscale_login_status(attempt).await?)?)
+}
+
+pub async fn dbus_tailscale_cancel_login(attempt: &str) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.tailscale_cancel_login(attempt).await?)
+}
+
+pub async fn dbus_tailscale_dns_diagnostics(profile: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleDnsReport> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(90), proxy.tailscale_dns_diagnostics(profile)).await??;
+    Ok(serde_json::from_str(&reply)?)
+}
+
+pub async fn dbus_tailscale_change_exit_node(profile: &str, node: &str) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    let proxy = DaemonProxy::new(&conn).await?;
+    Ok(tokio::time::timeout(std::time::Duration::from_secs(180), proxy.tailscale_change_exit_node(profile, node)).await??)
+}
+
+pub async fn dbus_tailscale_ping(node: &str) -> anyhow::Result<String> {
+    let conn = zbus::Connection::system().await?;
+    Ok(DaemonProxy::new(&conn).await?.tailscale_ping(node).await?)
+}
+
 /// Call `TailscaleHealth` on the daemon.
 ///
 /// The `Err` here is only ever "could not reach supermgrd" — every state of
@@ -635,6 +701,7 @@ pub async fn dbus_tailscale_repair() -> anyhow::Result<String> {
 /// An empty URL is not a failure — the control plane had not handed one out
 /// yet, and it will surface in `TailscaleHealth.auth_url`, which the caller
 /// polls during a login anyway.
+#[allow(dead_code)] // Compatibility adapter; new GUI uses owned login attempts.
 pub async fn dbus_tailscale_login() -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
@@ -651,6 +718,7 @@ pub async fn dbus_tailscale_login() -> anyhow::Result<String> {
 /// Polkit-gated on the daemon side, so a cancelled prompt arrives here as an
 /// error — `describe_daemon_error` is what turns that into "you dismissed the
 /// prompt" rather than "you lack permission".
+#[allow(dead_code)] // Compatibility adapter; new GUI supplies the expected account.
 pub async fn dbus_tailscale_set_exit_node(value: &str) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
