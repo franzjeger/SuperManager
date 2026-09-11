@@ -48,6 +48,7 @@
 #![deny(missing_docs)]
 
 mod app;
+mod backup;
 mod dbus_client;
 mod master_password;
 mod settings;

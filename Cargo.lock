@@ -7143,6 +7143,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "argon2",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "gtk4",
