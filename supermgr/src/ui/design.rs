@@ -83,8 +83,7 @@ pub mod icons {
     /// Security and compliance.
     pub const SHIELD: &[&str] = &["security-high-symbolic", "security-high"];
     /// Reachability, for a connection test.
-    pub const CONNECTIVITY: &[&str] =
-        &["network-transmit-receive-symbolic", "network-connect"];
+    pub const CONNECTIVITY: &[&str] = &["network-transmit-receive-symbolic", "network-connect"];
     /// A plug-in or third-party integration.
     pub const INTEGRATION: &[&str] = &["application-x-addon-symbolic", "applications-other"];
     /// A host.
@@ -251,6 +250,7 @@ impl Status {
 #[must_use]
 pub fn status_pill(status: Status, label: &str) -> gtk4::Box {
     let pill = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    pill.set_valign(gtk4::Align::Center);
     pill.add_css_class("supermgr-pill");
     pill.add_css_class(status.style_class());
 
@@ -310,8 +310,8 @@ pub fn reflowing_columns() -> gtk4::FlowBox {
     flow.set_valign(gtk4::Align::Start);
     flow.set_max_children_per_line(3);
     flow.set_min_children_per_line(1);
-    flow.set_column_spacing(24);
-    flow.set_row_spacing(24);
+    flow.set_column_spacing(20);
+    flow.set_row_spacing(20);
     flow.set_homogeneous(false);
     flow
 }
@@ -325,13 +325,8 @@ pub fn reflowing_columns() -> gtk4::FlowBox {
 /// and the remaining cards close the gap.
 pub fn add_card(flow: &gtk4::FlowBox, card: &impl IsA<gtk4::Widget>) {
     let card = card.as_ref();
-    // The `minmax(340px, …)` floor. `FlowBox` decides the column count from
-    // the widest card's natural width and then, being homogeneous, stretches
-    // every column to fill — so cards always reach the edges of their column
-    // and the count follows the window. An `AdwClamp` would pin the natural
-    // width and get more columns, but it centres its child inside the cell,
-    // which puts the gaps back where the columns used to be.
-    card.set_size_request(340, -1);
+    card.set_size_request(280, -1);
+    card.set_valign(gtk4::Align::Start);
     flow.append(card);
     if let Some(slot) = card.parent() {
         card.bind_property("visible", &slot, "visible")
@@ -349,6 +344,7 @@ pub fn section_caps(text: &str) -> gtk4::Label {
     let label = gtk4::Label::new(Some(&text.to_uppercase()));
     label.set_xalign(0.0);
     label.add_css_class("caption-heading");
+    label.add_css_class("supermgr-section-label");
     label.add_css_class("dim-label");
     label.set_margin_bottom(4);
     label
@@ -362,6 +358,7 @@ pub fn section_caps(text: &str) -> gtk4::Label {
 #[must_use]
 pub fn card(title: &str) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
+    group.add_css_class("supermgr-card");
     if !title.is_empty() {
         group.set_title(title);
     }
@@ -414,6 +411,7 @@ pub fn toggle_row(switch: &gtk4::Switch, title: &str, subtitle: &str) -> adw::Ac
     row.set_title(title);
     if !subtitle.is_empty() {
         row.set_subtitle(subtitle);
+        row.set_subtitle_lines(2);
     }
     switch.set_valign(gtk4::Align::Center);
     row.add_suffix(switch);
@@ -450,6 +448,7 @@ pub fn button_row(
     row.set_title(title);
     if !subtitle.is_empty() {
         row.set_subtitle(subtitle);
+        row.set_subtitle_lines(2);
     }
     if !icon.is_empty() {
         row.add_prefix(&gtk4::Image::from_icon_name(icon));
@@ -508,7 +507,8 @@ impl DetailHeader {
     #[must_use]
     pub fn new() -> Self {
         let widget = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        widget.set_margin_bottom(18);
+        widget.set_margin_bottom(24);
+        widget.add_css_class("supermgr-detail-header");
 
         let left = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         left.set_hexpand(true);
@@ -516,7 +516,7 @@ impl DetailHeader {
 
         let title = gtk4::Label::new(None);
         title.set_xalign(0.0);
-        title.add_css_class("title-1");
+        title.add_css_class("supermgr-title");
         title.set_wrap(true);
         // Selectable so a hostname or profile name can be copied, but not
         // focusable: a selectable label that takes focus selects all of its
@@ -537,7 +537,12 @@ impl DetailHeader {
         actions.set_valign(gtk4::Align::Center);
         widget.append(&actions);
 
-        Self { widget, title, status_slot, actions }
+        Self {
+            widget,
+            title,
+            status_slot,
+            actions,
+        }
     }
 }
 
@@ -567,10 +572,11 @@ impl Default for DetailHeader {
 #[must_use]
 pub fn detail_body() -> (gtk4::ScrolledWindow, gtk4::Box) {
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    content.set_margin_top(26);
-    content.set_margin_bottom(26);
-    content.set_margin_start(32);
-    content.set_margin_end(32);
+    content.add_css_class("supermgr-detail-body");
+    content.set_margin_top(28);
+    content.set_margin_bottom(28);
+    content.set_margin_start(24);
+    content.set_margin_end(24);
 
     let scroller = gtk4::ScrolledWindow::new();
     scroller.set_hscrollbar_policy(gtk4::PolicyType::Never);
@@ -578,6 +584,71 @@ pub fn detail_body() -> (gtk4::ScrolledWindow, gtk4::Box) {
     scroller.set_child(Some(&content));
 
     (scroller, content)
+}
+
+/// A bounded workspace for overview pages, with consistent title and spacing.
+pub fn workspace_body(title: &str, subtitle: &str) -> (gtk4::ScrolledWindow, gtk4::Box) {
+    let (scroll, content) = detail_body();
+    scroll.set_child(None::<&gtk4::Widget>);
+    let clamp = adw::Clamp::builder()
+        .maximum_size(1120)
+        .tightening_threshold(880)
+        .child(&content)
+        .build();
+    scroll.set_child(Some(&clamp));
+    content.set_spacing(20);
+    let heading = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    heading.append(
+        &gtk4::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .css_classes(["supermgr-page-title"])
+            .build(),
+    );
+    heading.append(
+        &gtk4::Label::builder()
+            .label(subtitle)
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build(),
+    );
+    content.append(&heading);
+    (scroll, content)
+}
+
+/// An explicit, private JSON export for operational reports.
+pub fn export_json(
+    parent: Option<&gtk4::Window>,
+    name: &str,
+    value: &serde_json::Value,
+    tx: &std::sync::mpsc::Sender<crate::app::AppMsg>,
+) {
+    let bytes = match serde_json::to_vec_pretty(value) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tx.send(crate::app::AppMsg::OperationFailed(e.to_string()))
+                .ok();
+            return;
+        }
+    };
+    let dialog = gtk4::FileDialog::builder()
+        .title("Export report")
+        .initial_name(name)
+        .build();
+    let tx = tx.clone();
+    dialog.save(parent, None::<&gtk4::gio::Cancellable>, move |result| {
+        if let Ok(file) = result {
+            if let Some(path) = file.path() {
+                if let Err(e) = crate::backup::write_private(&path, &bytes) {
+                    tx.send(crate::app::AppMsg::OperationFailed(format!(
+                        "Export failed: {e}"
+                    )))
+                    .ok();
+                }
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -605,28 +676,106 @@ pub fn empty_state(icon: &str, title: &str, description: &str) -> adw::StatusPag
 // Stylesheet
 // ---------------------------------------------------------------------------
 
-/// The only CSS this application ships.
-///
-/// Deliberately tiny, and deliberately free of colours. Everything here is
-/// shape and spacing for the two widgets libadwaita has no equivalent of —
-/// the status pill and the badge. Their colours come from the style classes
-/// already on them, so they follow the theme.
-pub const STYLESHEET: &str = "
+/// Shared proportions and surfaces for the Linux application. Named GTK
+/// colours preserve custom accents and light/dark desktop preferences.
+pub const STYLESHEET: &str = r#"
+.supermgr-chat-surface {
+  background: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.08);
+  border-radius: 12px;
+}
+.supermgr-chat-text, .supermgr-chat-text text { background: transparent; }
+.supermgr-page-title { font-size: 26px; font-weight: 700; letter-spacing: -0.6px; }
+.supermgr-metric {
+  padding: 14px 16px;
+  border-radius: 10px;
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@window_fg_color, 0.07);
+}
+.supermgr-window { font-size: 13px; background: @window_bg_color; color: @window_fg_color; }
+.supermgr-window headerbar {
+    min-height: 46px;
+    background: @window_bg_color;
+    box-shadow: none;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.07);
+}
+.supermgr-list-pane { background: @sidebar_bg_color; }
+paned.supermgr-split > separator { min-width: 3px; background: alpha(@window_fg_color, 0.10); }
+paned.supermgr-split > separator:hover { background: @accent_bg_color; }
+.supermgr-nav { background: @sidebar_bg_color; padding: 4px 8px; }
+.supermgr-nav list { background: transparent; }
+.supermgr-nav row {
+    min-height: 34px;
+    padding: 0 10px;
+    margin: 2px 0;
+    border-radius: 7px;
+    font-weight: 500;
+}
+.supermgr-nav row:selected, .supermgr-nav row.active {
+    color: @accent_color;
+    background: alpha(@accent_bg_color, 0.13);
+}
+.supermgr-nav row image { -gtk-icon-size: 16px; opacity: 0.8; }
+.supermgr-section-label { font-size: 10px; letter-spacing: 1px; font-weight: 600; }
+.supermgr-brand { font-size: 13px; font-weight: 650; }
+.supermgr-title { font-size: 24px; font-weight: 650; letter-spacing: -0.5px; }
+.supermgr-detail-header button { min-height: 32px; padding: 3px 18px; border-radius: 9px; }
+.supermgr-hero {
+    padding: 22px;
+    background: @card_bg_color;
+    border: 1px solid alpha(@window_fg_color, 0.07);
+    border-radius: 14px;
+    box-shadow: 0 2px 8px alpha(black, 0.03);
+}
+.supermgr-hero-icon {
+    padding: 14px;
+    border-radius: 12px;
+    color: @accent_color;
+    background: alpha(@accent_bg_color, 0.10);
+}
+.supermgr-card > box > box > label { font-size: 11px; font-weight: 600; }
+.supermgr-card list.boxed-list {
+    border-radius: 12px;
+    box-shadow: 0 0 0 1px alpha(@window_fg_color, 0.07);
+}
+.supermgr-card row { min-height: 42px; }
+.supermgr-card row .title { font-size: 12px; }
+.supermgr-card row .subtitle { font-size: 11px; }
+.supermgr-card row:not(:last-child) { border-bottom-color: alpha(@window_fg_color, 0.05); }
+.supermgr-card switch { min-height: 20px; min-width: 36px; }
 .supermgr-pill {
-    padding: 3px 10px 3px 8px;
-    border-radius: 999px;
-    background: alpha(currentColor, 0.12);
+    padding: 3px 9px;
+    border-radius: 6px;
+    background: alpha(currentColor, 0.09);
+    font-size: 11px;
 }
 .supermgr-badge {
-    padding: 1px 7px;
-    border-radius: 4px;
-    background: alpha(currentColor, 0.10);
-    opacity: 0.85;
+    padding: 2px 7px;
+    border-radius: 5px;
+    background: alpha(currentColor, 0.07);
+    font-size: 10px;
 }
-.supermgr-nav row {
-    padding: 2px 0;
+.supermgr-profile-list { padding: 8px; background: transparent; }
+.supermgr-profile-list row {
+    padding: 9px 8px;
+    margin: 3px 0;
+    border-radius: 10px;
+    border: 1px solid transparent;
 }
-";
+.supermgr-profile-list row:selected {
+    color: @window_fg_color;
+    background: alpha(@accent_bg_color, 0.09);
+    border-color: alpha(@accent_bg_color, 0.22);
+}
+.supermgr-profile-list row .title { font-size: 13px; font-weight: 600; }
+.supermgr-profile-list row .subtitle { font-size: 11px; }
+.supermgr-profile-list row button { min-width: 20px; min-height: 24px; padding: 2px; }
+.supermgr-profile-list row .supermgr-pill { padding: 2px; background: transparent; }
+.supermgr-profile-list row .supermgr-pill label { font-size: 10px; }
+.supermgr-profile-search { margin: 8px 14px 4px; border-radius: 8px; }
+.supermgr-list-heading { font-size: 18px; font-weight: 650; margin: 18px 18px 4px; }
+.supermgr-notice { padding: 12px 16px; border-radius: 10px; background: alpha(currentColor, 0.06); }
+"#;
 
 /// Install [`STYLESHEET`], and the desktop's palette where there is one.
 ///
@@ -639,14 +788,27 @@ pub const STYLESHEET: &str = "
 /// If there is no default display, which means there is no GUI to style and
 /// nothing this function could usefully do instead.
 pub fn install_stylesheet() {
-    let display =
-        gtk4::gdk::Display::default().expect("a display, since a window is being built");
+    let display = gtk4::gdk::Display::default().expect("a display, since a window is being built");
 
     // The desktop's colours first, so the shapes below are layered on a
     // palette that already matches the surrounding desktop.
     if let Some(palette) = super::palette::desktop_palette() {
         let colours = gtk4::CssProvider::new();
-        colours.load_from_string(&palette.to_css());
+        let manager = adw::StyleManager::default();
+        let refresh = move |manager: &adw::StyleManager, provider: &gtk4::CssProvider| {
+            // A forced Light choice must not keep the desktop's dark colours.
+            provider.load_from_string(
+                if manager.is_dark() == palette.is_dark() {
+                    palette.to_css()
+                } else {
+                    String::new()
+                }
+                .as_str(),
+            );
+        };
+        refresh(&manager, &colours);
+        let live_colours = colours.clone();
+        manager.connect_dark_notify(move |manager| refresh(manager, &live_colours));
         gtk4::style_context_add_provider_for_display(
             &display,
             &colours,
@@ -711,7 +873,10 @@ mod tests {
         // Both mean "not settled yet, do not rely on this". The brief maps
         // them to the same orange. Asserted so that a later change to one of
         // them is a decision rather than a drift.
-        assert_eq!(Status::Connecting.style_class(), Status::Degraded.style_class());
+        assert_eq!(
+            Status::Connecting.style_class(),
+            Status::Degraded.style_class()
+        );
     }
 
     #[test]
@@ -773,7 +938,10 @@ mod tests {
         // is the answer. An empty string here would be a widget with no
         // content rather than a widget with the wrong picture, and those look
         // very different when something goes wrong.
-        assert_eq!(icon_name(&["definitely-not-an-icon", "fallback-name"]), "fallback-name");
+        assert_eq!(
+            icon_name(&["definitely-not-an-icon", "fallback-name"]),
+            "fallback-name"
+        );
         assert!(!icon_name(&[]).is_empty());
     }
 

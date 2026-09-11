@@ -25,6 +25,7 @@ pub mod compliance;
 pub mod console;
 pub mod customers;
 pub mod design;
+mod layout;
 pub mod navigation;
 mod lock;
 pub mod palette;

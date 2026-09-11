@@ -38,9 +38,55 @@ pub enum ColorScheme {
     Dark,
 }
 
+/// AI provider selected in the console. Existing installations retain Claude.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProvider {
+    /// Anthropic API or the Claude Code subscription.
+    #[default]
+    Claude,
+    /// Codex CLI with the operator's existing ChatGPT/Codex login.
+    Codex,
+    /// OpenAI Responses API with a separately configured API key.
+    OpenAi,
+}
+
+/// Default Anthropic model, overridable in Settings.
+pub fn default_anthropic_model() -> String { anthropic_model_id("").into() }
+
+/// Recover the retired original default, including old saved settings.
+/// Preserve other explicit model IDs instead of guessing from a 404.
+pub fn anthropic_model_id(configured: &str) -> &str {
+    match configured.trim() {
+        "" | "claude-sonnet-4-20250514" | "claude-sonnet-4-0" => "claude-sonnet-5",
+        model => model,
+    }
+}
+
+fn deserialize_anthropic_model<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let model = String::deserialize(deserializer)?;
+    Ok(anthropic_model_id(&model).to_owned())
+}
+/// Default OpenAI API model, overridable in Settings.
+pub fn default_openai_model() -> String { "gpt-6-astra".into() }
+
 /// Serialisable application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default)]
+    pub layout: LayoutSettings,
+    /// AI backend used for new console requests.
+    #[serde(default)]
+    pub ai_provider: AiProvider,
+    /// OpenAI API credential; not used for Codex subscription login.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub openai_api_key: String,
+    /// OpenAI Responses model ID.
+    #[serde(default = "default_openai_model")]
+    pub openai_model: String,
+    /// Claude model ID, shared by the API and subscription CLI.
+    #[serde(default = "default_anthropic_model", deserialize_with = "deserialize_anthropic_model")]
+    pub anthropic_model: String,
     /// Which colour scheme to use.
     #[serde(default)]
     pub color_scheme: ColorScheme,
@@ -93,6 +139,32 @@ pub struct AppSettings {
     pub rdp_client: String,
 }
 
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_settings_recover_retired_or_empty_models_without_losing_other_settings() {
+        for model in ["", "  ", "claude-sonnet-4-20250514", " claude-sonnet-4-0 "] {
+            let saved = serde_json::json!({"anthropic_model":model,"use_claude_subscription":true,"opacity":0.8});
+            let settings: AppSettings = serde_json::from_value(saved).unwrap();
+            assert_eq!(settings.anthropic_model, "claude-sonnet-5");
+            assert!(settings.use_claude_subscription);
+            assert_eq!(settings.opacity, 0.8);
+        }
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.anthropic_model, "claude-sonnet-5");
+    }
+
+    #[test]
+    fn explicit_custom_models_survive_loading_and_saving() {
+        let saved = serde_json::json!({"anthropic_model":"  custom-accessible-model  "});
+        let settings: AppSettings = serde_json::from_value(saved).unwrap();
+        assert_eq!(settings.anthropic_model, "custom-accessible-model");
+        assert_eq!(serde_json::to_value(settings).unwrap()["anthropic_model"], "custom-accessible-model");
+    }
+}
+
 fn default_rdp_client() -> String {
     "auto".into()
 }
@@ -112,6 +184,11 @@ fn default_true() -> bool {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            layout: LayoutSettings::default(),
+            ai_provider: AiProvider::default(),
+            openai_api_key: String::new(),
+            openai_model: default_openai_model(),
+            anthropic_model: default_anthropic_model(),
             color_scheme: ColorScheme::default(),
             opacity: 1.0,
             anthropic_api_key: String::new(),
@@ -124,6 +201,21 @@ impl Default for AppSettings {
             unifi_cloud_api_key: String::new(),
             rdp_client: "auto".into(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutSettings {
+    pub window_width: i32,
+    pub window_height: i32,
+    pub maximized: bool,
+    pub sidebar_widths: std::collections::BTreeMap<String, i32>,
+}
+
+impl Default for LayoutSettings {
+    fn default() -> Self {
+        Self { window_width: 1280, window_height: 800, maximized: false, sidebar_widths: Default::default() }
     }
 }
 
@@ -181,7 +273,7 @@ impl AppSettings {
             let _ = std::fs::create_dir_all(parent);
         }
         if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            let _ = crate::backup::write_private(&path, text.as_bytes());
         }
     }
 
