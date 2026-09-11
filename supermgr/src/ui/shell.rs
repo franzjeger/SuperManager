@@ -34,7 +34,6 @@
 
 use gtk4::prelude::*;
 use libadwaita as adw;
-use libadwaita::prelude::*;
 
 use super::design;
 
@@ -91,7 +90,7 @@ pub fn all_sections() -> Vec<Section> {
 /// The built shell and the handles the rest of the UI needs.
 pub struct Shell {
     /// The widget to put in the window.
-    pub widget: adw::NavigationSplitView,
+    pub widget: adw::OverlaySplitView,
     /// Where the toolbar's trailing buttons go.
     pub header_end: gtk4::Box,
     /// Where the VPN status pill goes; replace its child to update it.
@@ -121,25 +120,30 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
     let mut rows: Vec<(gtk4::ListBox, &'static [Section])> = Vec::new();
     for (heading, group) in [("Manage", MANAGE), ("Operate", OPERATE)] {
         let caps = design::section_caps(heading);
-        caps.set_margin_start(18);
-        caps.set_margin_top(10);
-        caps.set_margin_bottom(2);
+        caps.set_margin_start(10);
+        caps.set_margin_top(18);
+        caps.set_margin_bottom(6);
         nav.append(&caps);
 
         let list = gtk4::ListBox::new();
         list.add_css_class("navigation-sidebar");
-        list.set_selection_mode(gtk4::SelectionMode::Single);
+        list.set_selection_mode(gtk4::SelectionMode::None);
 
         for section in group {
-            let row = adw::ActionRow::new();
-            row.set_title(section.title);
+            let row = gtk4::ListBoxRow::new();
+            let contents = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
             let icon = design::icon(section.icon);
-            row.add_prefix(&icon);
+            contents.append(&icon);
+            let label = gtk4::Label::new(Some(section.title));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            contents.append(&label);
+            row.set_child(Some(&contents));
             // A section with nothing behind it says so here rather than
             // after the operator has clicked it and found an empty page.
             if !section.built {
                 let tag = design::badge("Soon");
-                row.add_suffix(&tag);
+                contents.append(&tag);
             }
             list.append(&row);
         }
@@ -147,22 +151,11 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         rows.push((list, group));
     }
 
-    // Selecting in one list clears the other, so the two behave as one.
-    //
-    // The row's position in its list is what identifies the section: rows
-    // are appended in `group` order and never reordered, so index and
-    // section stay in step. Attaching the id to the widget instead would
-    // mean `set_data`, which is unsafe, and the workspace forbids that.
+    // Rows stay in section order; activation explicitly opens a workspace.
     for (list, group) in &rows {
         let stack = stack.clone();
         let group: &'static [Section] = group;
-        let others: Vec<gtk4::ListBox> =
-            rows.iter().map(|(l, _)| l.clone()).filter(|l| l != list).collect();
-        list.connect_row_selected(move |_, row| {
-            let Some(row) = row else { return };
-            for other in &others {
-                other.select_row(None::<&gtk4::ListBoxRow>);
-            }
+        list.connect_row_activated(move |_, row| {
             let index = usize::try_from(row.index()).unwrap_or(usize::MAX);
             let Some(section) = group.get(index) else { return };
             if stack.child_by_name(section.id).is_some() {
@@ -171,26 +164,18 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         });
     }
 
-    // Anything else that switches the stack — the Ctrl+N shortcuts, an
-    // action, a toast button — has to move the sidebar with it. The old view
-    // switcher was bound to the stack and did this for free; a `ListBox` is
-    // not, so without this a Ctrl+2 changes the page and leaves the sidebar
-    // highlighting the section you just left.
+    // Navigation follows activation, not focus/selection. Expanding the
+    // sidebar after a resize can restore focus to an old row; it must never
+    // switch the current workspace as a side effect.
     {
         let rows = rows.clone();
         stack.connect_visible_child_name_notify(move |stack| {
             let Some(name) = stack.visible_child_name() else { return };
             for (list, group) in &rows {
-                let Some(index) = group.iter().position(|s| s.id == name) else {
-                    list.select_row(None::<&gtk4::ListBoxRow>);
-                    continue;
-                };
-                let Ok(index) = i32::try_from(index) else { continue };
-                if let Some(row) = list.row_at_index(index) {
-                    // Re-selecting the current row would bounce back through
-                    // the handler above for no reason.
-                    if !row.is_selected() {
-                        list.select_row(Some(&row));
+                for (index, section) in group.iter().enumerate() {
+                    if let Some(row) = list.row_at_index(index as i32) {
+                        if section.id == name { row.add_css_class("active"); }
+                        else { row.remove_css_class("active"); }
                     }
                 }
             }
@@ -210,14 +195,10 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         }
     }
 
-    // Start on VPN, which is where the old window started too. By id rather
-    // than by position, so reordering the group cannot silently change which
-    // section the application opens on.
-    if let Some((list, group)) = rows.first() {
-        if let Some(index) = group.iter().position(|s| s.id == "vpn") {
-            if let Some(row) = i32::try_from(index).ok().and_then(|i| list.row_at_index(i)) {
-                list.select_row(Some(&row));
-            }
+    stack.set_visible_child_name("vpn");
+    for (list, group) in &rows {
+        for (index, section) in group.iter().enumerate() {
+            if section.id == "vpn" { if let Some(row) = list.row_at_index(index as i32) { row.add_css_class("active"); } }
         }
     }
 
@@ -229,7 +210,9 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
     // --- Sidebar chrome ---------------------------------------------------
 
     let sidebar_header = adw::HeaderBar::new();
-    sidebar_header.set_title_widget(Some(&adw::WindowTitle::new("SuperManager", "")));
+    let brand = gtk4::Label::new(Some("SuperManager"));
+    brand.add_css_class("supermgr-brand");
+    sidebar_header.set_title_widget(Some(&brand));
 
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&sidebar_header);
@@ -260,13 +243,22 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
 
     // --- Put it together --------------------------------------------------
 
-    let split = adw::NavigationSplitView::builder().vexpand(true).build();
+    let split = adw::OverlaySplitView::builder().vexpand(true).build();
     // The brief's 152pt. Wide enough for "Provisioning" and a badge, narrow
     // enough that it is chrome rather than content.
-    split.set_min_sidebar_width(190.0);
-    split.set_max_sidebar_width(240.0);
+    split.set_min_sidebar_width(174.0);
+    split.set_max_sidebar_width(190.0);
     split.set_sidebar(Some(&sidebar_page));
     split.set_content(Some(&content_page));
+
+    let toggle = gtk4::ToggleButton::builder().icon_name("sidebar-show-symbolic")
+        .tooltip_text("Show or hide navigation").active(true).build();
+    content_header.pack_start(&toggle);
+    split.bind_property("show-sidebar", &toggle, "active").bidirectional().sync_create().build();
+    let sidebar_control = split.clone();
+    stack.connect_visible_child_name_notify(move |_| {
+        if sidebar_control.is_collapsed() { sidebar_control.set_show_sidebar(false); }
+    });
 
     Shell { widget: split, header_end, vpn_status }
 }

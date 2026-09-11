@@ -38,6 +38,9 @@ pub mod ssh;
 pub mod tailscale;
 pub mod vpn;
 
+#[cfg(test)]
+mod preview;
+
 use std::sync::{mpsc, Arc, Mutex};
 
 use gtk4::{gio, glib, prelude::*};
@@ -159,9 +162,11 @@ pub fn build_ui(
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("SuperManager")
-        .default_width(1200)
-        .default_height(750)
+        .css_classes(["supermgr-window"])
+        .default_width(1280)
+        .default_height(800)
         .build();
+    layout::remember_window(&window, app, &app_settings);
 
     // Apply persisted opacity.
     {
@@ -465,11 +470,8 @@ pub fn build_ui(
     }
     let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
-    let vpn_split = adw::NavigationSplitView::builder().vexpand(true).build();
-    vpn_split.set_min_sidebar_width(260.0);
-    vpn_split.set_max_sidebar_width(340.0);
-    vpn_split.set_sidebar(Some(&vpn_sidebar_page));
-    vpn_split.set_content(Some(&vpn_content_page));
+    let vpn_split = layout::split(&vpn_sidebar_page, &vpn_content_page, 320);
+    layout::remember_split(&vpn_split, &app_settings, "vpn");
 
     view_stack.add_titled(&vpn_split, Some("vpn"), "VPN");
     let vpn_page = view_stack.page(&vpn_split);
@@ -660,11 +662,8 @@ pub fn build_ui(
         .child(&hosts_content_stack)
         .build();
 
-    let hosts_split = adw::NavigationSplitView::builder().vexpand(true).build();
-    hosts_split.set_min_sidebar_width(280.0);
-    hosts_split.set_max_sidebar_width(400.0);
-    hosts_split.set_sidebar(Some(&hosts_sidebar_page));
-    hosts_split.set_content(Some(&hosts_content_page));
+    let hosts_split = layout::split(&hosts_sidebar_page, &hosts_content_page, 320);
+    layout::remember_split(&hosts_split, &app_settings, "hosts");
 
     view_stack.add_titled(&hosts_split, Some("hosts"), "Hosts");
     let hosts_page_ref = view_stack.page(&hosts_split);
@@ -1047,6 +1046,7 @@ pub fn build_ui(
     // was packed into that header moves to the shell's own, so the buttons
     // are unchanged — only what carries them differs.
     let shell = shell::build(&view_stack, &toast_overlay);
+    layout::adapt_shell(&window, &shell.widget);
     // The toolbar pill is painted by the same code that paints the VPN detail
     // pane, because they answer to the same events; it just answers a
     // different question — the daemon's state rather than the selected
@@ -3360,7 +3360,7 @@ pub fn build_ui(
                         rx_toast_overlay.add_toast(adw::Toast::new(&msg));
                     } else {
                         // Truncated toast with a "Details" button for long errors.
-                        let short = format!("{}…", &msg[..77]);
+                        let short = format!("{}…", msg.chars().take(77).collect::<String>());
                         let toast = adw::Toast::builder()
                             .title(&short)
                             .button_label("Details")
@@ -4152,7 +4152,7 @@ fn notification_row(notification: &crate::app::Notification) -> adw::ActionRow {
     // size and their own idea of where a timestamp goes. It is a list of
     // things that happened; it looks like every other list.
     let row = adw::ActionRow::builder()
-        .title(glib::markup_escape_text(&notification.message))
+        .title(&notification.message)
         .activatable(false)
         // Long messages wrap rather than being cut off at the popover's
         // edge — a truncated VPN error is no use to anybody.

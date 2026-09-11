@@ -91,7 +91,7 @@ pub fn show_settings_dialog(
 
     // --- Claude Console group ---
     let console_group = adw::PreferencesGroup::builder()
-        .title("Claude Console")
+        .title("Claude")
         .description("Choose between Claude subscription (free with Claude Code login) or API key (pay-per-token)")
         .build();
 
@@ -353,10 +353,93 @@ pub fn show_settings_dialog(
         });
     }
 
+    let anthropic_model = adw::EntryRow::builder().title("Claude model").build();
+    anthropic_model.set_tooltip_text(Some("Used by the console and provisioning, with API key or Claude subscription. Leave blank to use the default model."));
+    anthropic_model.set_text(&app_settings.lock().unwrap_or_else(|e| e.into_inner()).anthropic_model);
+    console_group.add(&anthropic_model);
+    {
+        let settings = Arc::clone(&app_settings);
+        anthropic_model.connect_changed(move |row| {
+            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.anthropic_model = row.text().trim().to_owned();
+            s.save();
+        });
+    }
+    let openai_group = adw::PreferencesGroup::builder().title("OpenAI API")
+        .description("Separate API billing. For your ChatGPT subscription, choose Codex in the assistant.")
+        .build();
+    let openai_key = adw::PasswordEntryRow::builder().title("OpenAI API key").build();
+    let openai_model = adw::EntryRow::builder().title("OpenAI model").build();
+    {
+        let settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        openai_key.set_text(&settings.openai_api_key);
+        openai_model.set_text(&settings.openai_model);
+    }
+    openai_group.add(&openai_key);
+    openai_group.add(&openai_model);
+    {
+        let settings = Arc::clone(&app_settings);
+        openai_key.connect_changed(move |row| {
+            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.openai_api_key = row.text().trim().to_owned();
+            s.save();
+        });
+    }
+    {
+        let settings = Arc::clone(&app_settings);
+        openai_model.connect_changed(move |row| {
+            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            s.openai_model = row.text().trim().to_owned();
+            s.save();
+        });
+    }
+    let codex_group = adw::PreferencesGroup::builder().title("Codex")
+        .description("Uses the Codex CLI and its existing ChatGPT login. SuperManager never reads your login tokens.")
+        .build();
+    let login_row = adw::ActionRow::builder().title("ChatGPT account")
+        .subtitle("Sign in using your browser; requires Codex CLI on this computer")
+        .build();
+    let login_button = gtk4::Button::with_label("Sign in…");
+    login_button.set_valign(gtk4::Align::Center);
+    login_row.add_suffix(&login_button);
+    login_row.set_activatable_widget(Some(&login_button));
+    codex_group.add(&login_row);
+    {
+        let rt = rt.clone();
+        let tx = tx.clone();
+        login_button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            let tx = tx.clone();
+            let (done_tx, done_rx) = mpsc::channel();
+            rt.spawn(async move {
+                let result = tokio::time::timeout(std::time::Duration::from_secs(180),
+                    tokio::process::Command::new("codex").arg("login")
+                        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null()).kill_on_drop(true).status()).await;
+                let message = match result {
+                    Ok(Ok(status)) if status.success() => AppMsg::ShowToast("Codex sign-in complete".into()),
+                    Ok(Err(_)) => AppMsg::OperationFailed("Codex CLI is unavailable. Install Codex, then sign in again.".into()),
+                    _ => AppMsg::OperationFailed("Codex sign-in did not complete. You can also run 'codex login' in a terminal.".into()),
+                };
+                let _ = tx.send(message);
+                let _ = done_tx.send(());
+            });
+            let button = button.clone();
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                if matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                    gtk4::glib::ControlFlow::Continue
+                } else {
+                    button.set_sensitive(true);
+                    gtk4::glib::ControlFlow::Break
+                }
+            });
+        });
+    }
+
     // --- Backup & Restore group ---
     let backup_group = adw::PreferencesGroup::builder()
         .title("Backup & Restore")
-        .description("Export or import all configuration")
+        .description("Portable backups for Linux and Mac. Contains passwords and private keys; keep on encrypted storage.")
         .build();
 
     let export_row = adw::ActionRow::builder()
@@ -382,6 +465,43 @@ pub fn show_settings_dialog(
         .build();
     import_row.add_suffix(&import_btn);
     backup_group.add(&import_row);
+
+    let verify_row = adw::ActionRow::builder()
+        .title("Verify Backup")
+        .subtitle("Check a portable backup without importing it")
+        .build();
+    let verify_btn = gtk4::Button::with_label("Verify…");
+    verify_btn.set_valign(gtk4::Align::Center);
+    verify_row.add_suffix(&verify_btn);
+    verify_row.set_activatable_widget(Some(&verify_btn));
+    backup_group.add(&verify_row);
+    {
+        let window = window.clone();
+        verify_btn.connect_clicked(move |_| {
+            let window = window.clone();
+            let file_dialog = gtk4::FileDialog::builder().title("Verify Backup").modal(true).build();
+            let parent = window.clone();
+            file_dialog.open(Some(&parent), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                let window = window.clone();
+                gtk4::glib::spawn_future_local(async move {
+                    let result = gio::spawn_blocking(move || {
+                        let bytes = std::fs::read(path)?;
+                        crate::backup::verify(&bytes)
+                    }).await;
+                    let (heading, body) = match result {
+                        Ok(Ok(summary)) => ("Backup checked", summary),
+                        Ok(Err(e)) => ("Backup check failed", e.to_string()),
+                        Err(_) => ("Backup check failed", "The file could not be checked.".into()),
+                    };
+                    let alert = adw::AlertDialog::builder().heading(heading).body(&body).build();
+                    alert.add_response("close", "Close");
+                    alert.present(Some(&window));
+                });
+            });
+        });
+    }
 
     // Export button: show file save dialog first, then fetch config and write.
     {
@@ -424,7 +544,7 @@ pub fn show_settings_dialog(
                 let tx = tx.clone();
                 rt.spawn(async move {
                     match crate::dbus_client::dbus_export_all().await {
-                        Ok(json) => match std::fs::write(&path, &json) {
+                        Ok(json) => match crate::backup::write_private(&path, json.as_bytes()) {
                             Ok(()) => {
                                 let _ = tx.send(AppMsg::ShowToast(
                                     format!("Config exported to {}", path.display()),
@@ -689,6 +809,65 @@ pub fn show_settings_dialog(
         });
     }
 
+    let diagnostics_group = adw::PreferencesGroup::builder()
+        .title("Support report")
+        .description("Save network and service diagnostics locally. Includes addresses and hostnames; review before sharing.")
+        .build();
+    let logs_row = adw::SwitchRow::builder()
+        .title("Include recent daemon logs")
+        .subtitle("Optional: driver output can contain sensitive information")
+        .active(false)
+        .build();
+    diagnostics_group.add(&logs_row);
+    let support_row = adw::ActionRow::builder()
+        .title("Save Support Report")
+        .subtitle("Collect routing, DNS and service status without changing connections")
+        .build();
+    let support_btn = gtk4::Button::with_label("Save…");
+    support_btn.set_valign(gtk4::Align::Center);
+    support_row.add_suffix(&support_btn);
+    support_row.set_activatable_widget(Some(&support_btn));
+    diagnostics_group.add(&support_row);
+    {
+        let window = window.clone();
+        let rt = rt.clone();
+        let tx = tx.clone();
+        support_btn.connect_clicked(move |button| {
+            let include_logs = logs_row.is_active();
+            let dialog = gtk4::FileDialog::builder()
+                .title("Save Support Report")
+                .initial_name("supermanager-support.txt")
+                .modal(true).build();
+            let rt = rt.clone();
+            let tx = tx.clone();
+            let button = button.clone();
+            dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                button.set_sensitive(false);
+                let (done_tx, done_rx) = mpsc::channel();
+                rt.spawn(async move {
+                    let report = crate::diagnostics::collect(include_logs).await;
+                    let result = crate::backup::write_private(&path, report.as_bytes());
+                    let message = match result {
+                        Ok(()) => AppMsg::ShowToast(format!("Support report saved to {}", path.display())),
+                        Err(e) => AppMsg::OperationFailed(format!("Could not save report: {e}")),
+                    };
+                    let _ = tx.send(message);
+                    let _ = done_tx.send(());
+                });
+                gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    if matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                        gtk4::glib::ControlFlow::Continue
+                    } else {
+                        button.set_sensitive(true);
+                        gtk4::glib::ControlFlow::Break
+                    }
+                });
+            });
+        });
+    }
+
     // One page per topic, rather than seven groups in one scroller. The
     // groups themselves are untouched — this only decides which page each
     // one is on.
@@ -707,8 +886,9 @@ pub fn show_settings_dialog(
         (
             "Integrations",
             crate::ui::design::icon_name(crate::ui::design::icons::INTEGRATION),
-            vec![&console_group, &unifi_group],
+            vec![&unifi_group],
         ),
+        ("AI", "avatar-default-symbolic", vec![&codex_group, &console_group, &openai_group]),
         (
             "Backup",
             "document-save-symbolic",
@@ -719,6 +899,7 @@ pub fn show_settings_dialog(
             "software-update-available-symbolic",
             vec![&updates_group],
         ),
+        ("Diagnostics", "utilities-system-monitor-symbolic", vec![&diagnostics_group]),
     ] {
         let page = adw::PreferencesPage::builder()
             .title(title)
