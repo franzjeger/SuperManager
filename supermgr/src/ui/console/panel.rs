@@ -1,6 +1,9 @@
-//! Console panel — GTK4 chat interface for Claude.
+//! Console panel — GTK4 chat interface for Claude, Codex and OpenAI.
 
-use std::sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    mpsc, Arc, Mutex,
+};
 
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -9,8 +12,6 @@ use libadwaita::prelude::*;
 use supermgr_core::vpn::state::VpnState;
 
 use crate::app::{AppMsg, AppState};
-
-const API_KEY_URL: &str = "https://console.anthropic.com/settings/keys";
 
 /// Widget bundle for the console panel.
 #[derive(Clone)]
@@ -30,13 +31,13 @@ pub struct ConsolePanel {
 /// Build the console page content.
 pub fn build_console_page(
     app_state: &Arc<Mutex<AppState>>,
+    app_settings: &Arc<Mutex<crate::settings::AppSettings>>,
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) -> (ConsolePanel, gtk4::Widget) {
     // =====================================================================
     // Setup page (shown when no API key)
     // =====================================================================
-    let setup_page = build_setup_page();
 
     // =====================================================================
     // Chat page (shown when API key is configured)
@@ -85,7 +86,7 @@ pub fn build_console_page(
 
     let send_btn = gtk4::Button::builder()
         .icon_name("go-next-symbolic")
-        .tooltip_text("Send (Ctrl+Enter)")
+        .tooltip_text("Send (Enter; Shift+Enter for a new line)")
         .css_classes(["suggested-action", "circular"])
         .valign(gtk4::Align::End)
         .build();
@@ -134,6 +135,79 @@ pub fn build_console_page(
         .vexpand(true)
         .hexpand(true)
         .build();
+    let provider = adw::ComboRow::builder()
+        .title("Provider")
+        .model(&gtk4::StringList::new(&[
+            "Claude",
+            "Codex · ChatGPT login",
+            "OpenAI API",
+        ]))
+        .build();
+    let settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+    provider.set_selected(match settings.ai_provider {
+        crate::settings::AiProvider::Claude => 0,
+        crate::settings::AiProvider::Codex => 1,
+        crate::settings::AiProvider::OpenAi => 2,
+    });
+    drop(settings);
+    let allow_changes = gtk4::CheckButton::with_label("Allow changes for this conversation");
+    allow_changes.set_tooltip_text(Some("Enables remote commands and configuration changes you request. Read-only data access is the default."));
+    let controls = adw::PreferencesGroup::new();
+    controls.set_margin_start(20);
+    controls.set_margin_end(20);
+    controls.set_margin_top(16);
+    controls.set_margin_bottom(10);
+    controls.add(&provider);
+    controls.add(&allow_changes);
+    let heading = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(6)
+        .margin_start(20)
+        .margin_end(20)
+        .margin_top(28)
+        .margin_bottom(8)
+        .build();
+    heading.append(
+        &gtk4::Label::builder()
+            .label("Assistant")
+            .xalign(0.0)
+            .css_classes(["supermgr-page-title"])
+            .build(),
+    );
+    heading.append(
+        &gtk4::Label::builder()
+            .label("Explore your fleet and turn findings into a clear next step.")
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label"])
+            .build(),
+    );
+    chat_page.append(&heading);
+    chat_page.append(&controls);
+    let suggestions = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Horizontal)
+        .spacing(8)
+        .margin_start(20)
+        .margin_end(20)
+        .margin_bottom(12)
+        .build();
+    for (label, prompt) in [
+        ("Fleet overview", "Summarize my managed hosts and their last known health. Call the relevant read-only tools and distinguish stale or missing data."),
+        ("Security findings", "List the saved findings scopes, then summarize open high and critical findings. Do not run scans or make changes."),
+        ("Compliance coverage", "Which compliance checks are available, and what do they actually cover?"),
+    ] {
+        let button = gtk4::Button::with_label(label);
+        let input = input_view.clone();
+        button.connect_clicked(move |_| { input.buffer().set_text(prompt); input.grab_focus(); });
+        suggestions.append(&button);
+    }
+    chat_page.append(&suggestions);
+    chat_scroll.add_css_class("supermgr-chat-surface");
+    chat_scroll.set_margin_start(20);
+    chat_scroll.set_margin_end(20);
+    chat_scroll.set_margin_bottom(12);
+    chat_view.add_css_class("supermgr-chat-text");
+    input_view.add_css_class("supermgr-chat-text");
     chat_page.append(&api_key_banner);
     chat_page.append(&chat_scroll);
     chat_page.append(&input_row);
@@ -142,45 +216,89 @@ pub fn build_console_page(
     // Stack: setup vs chat
     // =====================================================================
     let setup_stack = gtk4::Stack::new();
-    setup_stack.add_named(&setup_page, Some("setup"));
-    setup_stack.add_named(&chat_page, Some("chat"));
+    let clamp = adw::Clamp::builder()
+        .maximum_size(1120)
+        .tightening_threshold(880)
+        .child(&chat_page)
+        .build();
+    setup_stack.add_named(&clamp, Some("chat"));
+    setup_stack.set_visible_child_name("chat");
+    append_system_msg(&chat_buffer,
+        "Ask about your fleet, customers, compliance results or security findings.\nChoose an assistant above. Configure API keys and models in Settings → AI; Codex uses your existing CLI login.\nRead-only until you enable changes.\n");
 
-    // Show correct page based on auth state.
-    let use_sub = super::claude::use_subscription();
-    let has_key = super::claude::has_api_key();
-    if use_sub || has_key {
-        setup_stack.set_visible_child_name("chat");
-        let mode = if use_sub { "subscription (Claude Code CLI)" } else { "API key" };
-        append_system_msg(
-            &chat_buffer,
-            &format!(
-                "Claude Console — connected to SuperManager.\n\
-                 Mode: {mode}\n\n\
-                 I can manage your SSH connections and VPN profiles.\n\
-                 Try: \"list my SSH hosts\" or \"connect to VPN\".\n",
-            ),
-        );
-    } else {
-        setup_stack.set_visible_child_name("setup");
-    }
-
-    // =====================================================================
-    // Wire up send + stop
-    // =====================================================================
-    let cancel_flag = Arc::new(AtomicBool::new(false));
-
-    // Stop button — kills running claude subprocess and resets UI.
+    let busy = Arc::new(AtomicBool::new(false));
+    let generation = Arc::new(AtomicU64::new(0));
+    let running: Arc<Mutex<Option<tokio::task::AbortHandle>>> = Arc::new(Mutex::new(None));
     {
-        let cancel_flag = Arc::clone(&cancel_flag);
+        let busy = Arc::clone(&busy);
+        let running = Arc::clone(&running);
         let tx = tx.clone();
+        let generation = Arc::clone(&generation);
+        let provider = provider.clone();
+        let allow_changes = allow_changes.clone();
         stop_btn.connect_clicked(move |_| {
-            cancel_flag.store(true, Ordering::Relaxed);
-            // Kill any running claude --print subprocess.
-            let _ = std::process::Command::new("pkill")
-                .args(["-f", "claude --print"])
-                .status();
+            generation.fetch_add(1, Ordering::AcqRel);
+            provider.set_sensitive(true);
+            allow_changes.set_sensitive(true);
+            if let Some(task) = running.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                task.abort();
+            }
+            busy.store(false, Ordering::Release);
+            super::claude::reset_session();
             let _ = tx.send(AppMsg::ConsoleResponse("\n[Stopped]\n".into()));
             let _ = tx.send(AppMsg::ConsoleThinking(false));
+        });
+    }
+    {
+        let app_state = Arc::clone(app_state);
+        let app_settings = Arc::clone(app_settings);
+        let chat_buffer = chat_buffer.clone();
+        let busy = Arc::clone(&busy);
+        provider.connect_selected_notify(move |row| {
+            if busy.load(Ordering::Acquire) {
+                return;
+            }
+            let chosen = match row.selected() {
+                1 => crate::settings::AiProvider::Codex,
+                2 => crate::settings::AiProvider::OpenAi,
+                _ => crate::settings::AiProvider::Claude,
+            };
+            let mut settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            if settings.ai_provider == chosen {
+                return;
+            }
+            settings.ai_provider = chosen;
+            settings.save();
+            app_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .console_messages
+                .clear();
+            super::claude::reset_session();
+            chat_buffer.set_text("");
+            append_system_msg(
+                &chat_buffer,
+                &format!(
+                    "{} selected. New conversation.\n",
+                    super::provider_name(chosen)
+                ),
+            );
+        });
+    }
+    {
+        let app_state = Arc::clone(app_state);
+        let chat_buffer = chat_buffer.clone();
+        allow_changes.connect_toggled(move |_| {
+            append_system_msg(
+                &chat_buffer,
+                "Access changed. Starting a new conversation context.\n",
+            );
+            app_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .console_messages
+                .clear();
+            super::claude::reset_session();
         });
     }
 
@@ -191,18 +309,31 @@ pub fn build_console_page(
         let tx = tx.clone();
         let rt = rt.clone();
         let app_state = Arc::clone(app_state);
-        let cancel_flag = Arc::clone(&cancel_flag);
+        let busy = Arc::clone(&busy);
+        let running = Arc::clone(&running);
+        let app_settings = Arc::clone(app_settings);
+        let provider = provider.clone();
+        let allow_changes = allow_changes.clone();
+        let generation = Arc::clone(&generation);
         let send = move || {
             let buf = input_view.buffer();
             let text = buf
                 .text(&buf.start_iter(), &buf.end_iter(), false)
                 .to_string();
-            if text.trim().is_empty() {
+            if text.trim().is_empty() || busy.load(Ordering::Acquire) {
                 return;
             }
             buf.set_text("");
 
-            cancel_flag.store(false, Ordering::Relaxed);
+            let request_id = generation.fetch_add(1, Ordering::AcqRel) + 1;
+            busy.store(true, Ordering::Release);
+            provider.set_sensitive(false);
+            allow_changes.set_sensitive(false);
+            let settings = app_settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let actions_allowed = allow_changes.is_active();
             append_tagged(&chat_buffer, &format!("\nYou: {text}\n"), "user");
 
             let tx = tx.clone();
@@ -212,7 +343,9 @@ pub fn build_console_page(
                 let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                 let vpn = match &s.vpn_state {
                     VpnState::Connected { profile_id, .. } => {
-                        let name = s.profiles.iter()
+                        let name = s
+                            .profiles
+                            .iter()
                             .find(|p| p.id == *profile_id)
                             .map(|p| p.name.as_str())
                             .unwrap_or("unknown");
@@ -221,54 +354,72 @@ pub fn build_console_page(
                     VpnState::Disconnected => "VPN: disconnected".into(),
                     _ => "VPN: transitioning".into(),
                 };
-                let hosts: Vec<String> = s.hosts.iter()
+                let hosts: Vec<String> = s
+                    .hosts
+                    .iter()
                     .map(|h| {
                         let mut info = format!(
                             "- {} ({}@{}:{}, {}, auth={:?}, id={})",
-                            h.label, h.username, h.hostname, h.port, h.device_type,
-                            h.auth_method, h.id
+                            h.label,
+                            h.username,
+                            h.hostname,
+                            h.port,
+                            h.device_type,
+                            h.auth_method,
+                            h.id
                         );
                         if h.has_api {
                             info.push_str(&format!(", api_port={}", h.api_port.unwrap_or(443)));
                         }
                         if let Some(ref vpn_id) = h.vpn_profile_id {
-                            if let Some(p) = s.profiles.iter().find(|p| p.id.to_string() == vpn_id.to_string()) {
+                            if let Some(p) = s
+                                .profiles
+                                .iter()
+                                .find(|p| p.id.to_string() == vpn_id.to_string())
+                            {
                                 info.push_str(&format!(", auto_vpn='{}'", p.name));
                             }
                         }
-                        if h.pinned { info.push_str(", pinned"); }
+                        if h.pinned {
+                            info.push_str(", pinned");
+                        }
                         info
                     })
                     .collect();
-                let keys: Vec<String> = s.ssh_keys.iter()
-                    .map(|k| format!("- {} ({:?}, {}, deployed_to={})", k.name, k.key_type, k.fingerprint, k.deployed_count))
+                let keys: Vec<String> = s
+                    .ssh_keys
+                    .iter()
+                    .map(|k| {
+                        format!(
+                            "- {} ({:?}, {}, deployed_to={})",
+                            k.name, k.key_type, k.fingerprint, k.deployed_count
+                        )
+                    })
                     .collect();
-                let profiles: Vec<String> = s.profiles.iter()
+                let profiles: Vec<String> = s
+                    .profiles
+                    .iter()
                     .map(|p| format!("- {} ({}, id={})", p.name, p.backend, p.id))
                     .collect();
-                let health: Vec<String> = s.host_health.iter()
+                let health: Vec<String> = s
+                    .host_health
+                    .iter()
                     .map(|(id, ok)| {
-                        let label = s.hosts.iter()
+                        let label = s
+                            .hosts
+                            .iter()
                             .find(|h| h.id.to_string() == *id)
                             .map(|h| h.label.as_str())
                             .unwrap_or(id);
-                        format!("- {}: {}", label, if *ok { "reachable" } else { "UNREACHABLE" })
+                        format!(
+                            "- {}: {}",
+                            label,
+                            if *ok { "reachable" } else { "UNREACHABLE" }
+                        )
                     })
                     .collect();
                 let ctx = format!(
                     "{vpn}\n\n\
-                     ## Your capabilities\n\
-                     You have DIRECT ACCESS to all these hosts via SSH. You can:\n\
-                     - Execute any shell command on any reachable host (ssh_execute)\n\
-                     - Manage FortiGate via REST API (fortigate_api) for hosts with api_port\n\
-                     - Push SSH keys to FortiGate admins (fortigate_push_ssh_key)\n\
-                     - Generate FortiGate API tokens (fortigate_generate_api_token)\n\
-                     - Run CIS compliance checks (fortigate_compliance_check)\n\
-                     - Backup FortiGate configs (fortigate_backup_config)\n\
-                     - Set UniFi inform URL (unifi_set_inform)\n\
-                     - Connect/disconnect VPN profiles\n\
-                     - Add/edit SSH hosts and keys\n\
-                     Do NOT ask the user for permission — just use the tools directly.\n\n\
                      ## VPN Profiles\n{}\n\n\
                      ## SSH Hosts\n{}\n\n\
                      ## SSH Keys\n{}\n\n\
@@ -276,44 +427,80 @@ pub fn build_console_page(
                     profiles.join("\n"),
                     hosts.join("\n"),
                     keys.join("\n"),
-                    if health.is_empty() { "No health data yet".into() } else { health.join("\n") },
+                    if health.is_empty() {
+                        "No health data yet".into()
+                    } else {
+                        health.join("\n")
+                    },
                 );
                 (s.console_messages.clone(), ctx)
             };
-            rt.spawn(async move {
-                let _ = tx.send(AppMsg::ConsoleThinking(true));
-
-                let use_sub = super::claude::use_subscription();
-
-                if use_sub {
-                    // Use Claude Code CLI (subscription — no API tokens).
-                    match super::claude::send_message_subscription(&text, &tx, &context).await {
-                        Ok(()) => {}
-                        Err(e) => {
-                            let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
-                        }
+            // Per-request channels keep a cancelled request from writing into a
+            // newer conversation. Only the GTK thread commits history/UI state.
+            let (events_tx, events_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let _ = tx.send(AppMsg::ConsoleThinking(true));
+            let task = rt.spawn(async move {
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    super::send(
+                        &settings,
+                        &text,
+                        &events_tx,
+                        messages,
+                        &context,
+                        actions_allowed,
+                    ),
+                )
+                .await;
+                let result = match result {
+                    Ok(result) => result.map_err(|e| e.to_string()),
+                    Err(_) => Err("Request timed out after five minutes.".into()),
+                };
+                let _ = done_tx.send(result);
+            });
+            *running.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+            let provider = provider.clone();
+            let allow_changes = allow_changes.clone();
+            let generation = Arc::clone(&generation);
+            let busy = Arc::clone(&busy);
+            let running = Arc::clone(&running);
+            gtk4::glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                if generation.load(Ordering::Acquire) != request_id {
+                    return gtk4::glib::ControlFlow::Break;
+                }
+                for event in events_rx.try_iter() {
+                    let _ = tx.send(event);
+                }
+                let result = match done_rx.try_recv() {
+                    Err(mpsc::TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        Err("Assistant request stopped unexpectedly.".into())
                     }
-                } else {
-                    // Use API key (pay-per-token).
-                    let api_key = super::claude::load_api_key();
-                    let Some(api_key) = api_key else {
-                        let _ = tx.send(AppMsg::ConsoleResponse(
-                            "\nNo API key configured. Go to Settings to add one, or enable 'Use Claude subscription'.\n".into(),
-                        ));
-                        let _ = tx.send(AppMsg::ConsoleThinking(false));
-                        return;
-                    };
-
-                    match super::claude::send_message(&api_key, &text, &tx, messages, &context).await {
-                        Ok(updated_messages) => {
-                            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages = updated_messages;
-                        }
-                        Err(e) => {
-                            let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
-                        }
+                    Ok(result) => result,
+                };
+                // Completion may arrive between the first event drain and the
+                // result read; preserve the final answer before clearing busy.
+                for event in events_rx.try_iter() {
+                    let _ = tx.send(event);
+                }
+                match result {
+                    Ok(messages) => {
+                        app_state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .console_messages = messages
+                    }
+                    Err(e) => {
+                        let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
                     }
                 }
+                busy.store(false, Ordering::Release);
+                running.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let _ = tx.send(AppMsg::ConsoleThinking(false));
+                provider.set_sensitive(true);
+                allow_changes.set_sensitive(true);
+                gtk4::glib::ControlFlow::Break
             });
         };
 
@@ -342,9 +529,27 @@ pub fn build_console_page(
     {
         let chat_buffer = chat_buffer.clone();
         let app_state = Arc::clone(app_state);
+        let running = Arc::clone(&running);
+        let busy = Arc::clone(&busy);
+        let tx = tx.clone();
+        let generation = Arc::clone(&generation);
+        let provider = provider.clone();
+        let allow_changes = allow_changes.clone();
         clear_btn.connect_clicked(move |_| {
+            generation.fetch_add(1, Ordering::AcqRel);
+            provider.set_sensitive(true);
+            allow_changes.set_sensitive(true);
+            if let Some(task) = running.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                task.abort();
+            }
+            busy.store(false, Ordering::Release);
+            let _ = tx.send(AppMsg::ConsoleThinking(false));
             chat_buffer.set_text("");
-            app_state.lock().unwrap_or_else(|e| e.into_inner()).console_messages.clear();
+            app_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .console_messages
+                .clear();
             super::claude::reset_session();
             append_system_msg(&chat_buffer, "Conversation cleared.\n");
         });
@@ -369,113 +574,13 @@ pub fn build_console_page(
 // Setup page — API key entry with "Get API Key" browser button
 // ---------------------------------------------------------------------------
 
-fn build_setup_page() -> gtk4::Widget {
-    let status = adw::StatusPage::builder()
-        .title("Claude Console")
-        .description("Connect an Anthropic API key to use the AI assistant.")
-        .icon_name(crate::ui::design::icon_name(crate::ui::design::icons::TERMINAL))
-        .build();
-
-    let group = adw::PreferencesGroup::builder()
-        .margin_start(48)
-        .margin_end(48)
-        .build();
-
-    let key_row = adw::PasswordEntryRow::builder()
-        .title("Anthropic API Key")
-        .build();
-    group.add(&key_row);
-
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .halign(gtk4::Align::Center)
-        .spacing(12)
-        .margin_top(16)
-        .build();
-
-    let get_key_btn = gtk4::Button::builder()
-        .label("Get API Key")
-        .tooltip_text("Opens console.anthropic.com in your browser")
-        .css_classes(["flat"])
-        .build();
-    get_key_btn.connect_clicked(|_| {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(API_KEY_URL)
-            .spawn();
-    });
-
-    let save_btn = gtk4::Button::builder()
-        .label("Save & Continue")
-        .css_classes(["suggested-action", "pill"])
-        .sensitive(false)
-        .build();
-
-    btn_box.append(&get_key_btn);
-    btn_box.append(&save_btn);
-
-    // Enable save only when key looks valid (sk-ant-...)
-    {
-        let save_btn = save_btn.clone();
-        key_row.connect_changed(move |row| {
-            let text = row.text();
-            save_btn.set_sensitive(text.starts_with("sk-ant-"));
-        });
-    }
-
-    // Save button stores key and switches to chat
-    {
-        let key_row = key_row.clone();
-        save_btn.connect_clicked(move |btn| {
-            let key = key_row.text().to_string();
-            if key.is_empty() {
-                return;
-            }
-            let mut settings = crate::settings::AppSettings::load();
-            settings.anthropic_api_key = key;
-            settings.save();
-
-            // Walk up to find the Stack and switch to "chat"
-            if let Some(stack) = btn
-                .ancestor(gtk4::Stack::static_type())
-                .and_then(|w| w.downcast::<gtk4::Stack>().ok())
-            {
-                stack.set_visible_child_name("chat");
-            }
-        });
-    }
-
-    let vbox = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .valign(gtk4::Align::Center)
-        .vexpand(true)
-        .build();
-    vbox.append(&status);
-    vbox.append(&group);
-    vbox.append(&btn_box);
-
-    vbox.upcast()
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 fn init_tags(buffer: &gtk4::TextBuffer) {
     let tt = buffer.tag_table();
 
     // Use weight/style distinctions instead of hardcoded colors so the
     // console looks correct on both dark and light Adwaita themes.
-    tt.add(
-        &gtk4::TextTag::builder()
-            .name("user")
-            .weight(700)
-            .build(),
-    );
-    tt.add(
-        &gtk4::TextTag::builder()
-            .name("assistant")
-            .build(),
-    );
+    tt.add(&gtk4::TextTag::builder().name("user").weight(700).build());
+    tt.add(&gtk4::TextTag::builder().name("assistant").build());
 
     // "tool" — italic monospace, dimmed via half-opacity foreground so it
     // adapts to whatever the current text colour is.
@@ -500,7 +605,7 @@ fn init_tags(buffer: &gtk4::TextBuffer) {
 pub fn append_tagged(buffer: &gtk4::TextBuffer, text: &str, tag_name: &str) {
     let mut end = buffer.end_iter();
     buffer.insert(&mut end, text);
-    let start = buffer.iter_at_offset(end.offset() - text.len() as i32);
+    let start = buffer.iter_at_offset(end.offset() - text.chars().count() as i32);
     if let Some(tag) = buffer.tag_table().lookup(tag_name) {
         buffer.apply_tag(&tag, &start, &end);
     }

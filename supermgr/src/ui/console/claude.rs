@@ -5,32 +5,33 @@ use std::sync::mpsc;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use supermgr_core::dbus::DaemonProxy;
 
 use crate::app::AppMsg;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-sonnet-4-20250514";
 const MAX_TOKENS: u64 = 4096;
-/// Check if an API key is configured in settings.
-pub fn has_api_key() -> bool {
-    let s = crate::settings::AppSettings::load();
-    !s.anthropic_api_key.is_empty()
+
+/// Both console and provisioning use the operator's model selection.
+/// An explicit --model also overrides inherited CLI defaults or old sessions.
+pub fn subscription_command(model: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("claude");
+    command.args([
+        "--print", "--model", crate::settings::anthropic_model_id(model),
+        "--tools", "", "--strict-mcp-config", "--setting-sources", "",
+        "--disable-slash-commands", "--permission-prompts", "none",
+    ]).kill_on_drop(true).stdin(std::process::Stdio::null());
+    command
 }
 
-/// Load the API key from settings.
-pub fn load_api_key() -> Option<String> {
-    let s = crate::settings::AppSettings::load();
-    if s.anthropic_api_key.is_empty() { None } else { Some(s.anthropic_api_key) }
+pub fn api_error(status: reqwest::StatusCode, body: &str, model: &str) -> String {
+    if status == reqwest::StatusCode::NOT_FOUND {
+        format!("Claude model '{model}' is unavailable for this account. Select an accessible model in Settings → AI → Claude model. {body}")
+    } else {
+        format!("Anthropic API error {status} (model '{model}'): {body}")
+    }
 }
-
-/// Check if subscription mode is enabled.
-pub fn use_subscription() -> bool {
-    crate::settings::AppSettings::load().use_claude_subscription
-}
-
 /// Check if Claude Code CLI is available.
 #[allow(dead_code)]
 pub fn has_claude_cli() -> bool {
@@ -42,7 +43,7 @@ pub fn has_claude_cli() -> bool {
 }
 
 /// Path to the MCP server binary (next to the GUI binary, or in /usr/bin).
-fn mcp_binary_path() -> String {
+pub(super) fn mcp_binary_path() -> String {
     if let Ok(exe) = std::env::current_exe() {
         let sibling = exe.with_file_name("supermgr-mcp");
         if sibling.exists() {
@@ -69,33 +70,23 @@ pub async fn send_message_subscription(
     user_text: &str,
     tx: &mpsc::Sender<AppMsg>,
     context: &str,
+    allow_changes: bool,
+    model: &str,
 ) -> Result<()> {
     let mcp_path = mcp_binary_path();
 
     let mcp_config = json!({
         "mcpServers": {
             "supermgr": {
-                "command": mcp_path
+                "command": mcp_path,
+                "env": if allow_changes { json!({}) } else { json!({"SUPERMGR_MCP_READ_ONLY":"1"}) }
             }
         }
     });
 
-    let allowed_tools = [
-        "mcp__supermgr__ssh_list_hosts",
-        "mcp__supermgr__ssh_list_keys",
-        "mcp__supermgr__ssh_execute",
-        "mcp__supermgr__vpn_status",
-        "mcp__supermgr__vpn_list_profiles",
-        "mcp__supermgr__vpn_connect",
-        "mcp__supermgr__vpn_disconnect",
-        "mcp__supermgr__ssh_add_host",
-        "mcp__supermgr__fortigate_api",
-        "mcp__supermgr__fortigate_set_api_token",
-        "mcp__supermgr__fortigate_push_ssh_key",
-        "mcp__supermgr__unifi_set_inform",
-        "mcp__supermgr__unifi_api",
-        "mcp__supermgr__fortigate_compliance_check",
-    ].join(",");
+    let allowed_tools = supermgr_mcp::available_tools(allow_changes).as_array().unwrap().iter()
+        .filter_map(|tool| tool["name"].as_str().map(|name| format!("mcp__supermgr__{name}")))
+        .collect::<Vec<_>>().join(",");
 
     let system_with_context = format!(
         "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
@@ -103,9 +94,8 @@ pub async fn send_message_subscription(
 
     let session_id = SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = subscription_command(model);
     cmd.args([
-        "--print",
         "--output-format", "stream-json",
         "--verbose",
         "--mcp-config", &mcp_config.to_string(),
@@ -119,11 +109,14 @@ pub async fn send_message_subscription(
         cmd.args(["--resume", sid]);
     }
 
+    if !allow_changes { cmd.env("SUPERMGR_MCP_READ_ONLY", "1"); }
+    else { cmd.env_remove("SUPERMGR_MCP_READ_ONLY"); }
+    cmd.kill_on_drop(true);
     cmd.arg(user_text);
     cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
 
-    info!("sending via Claude Code CLI (subscription)");
+    info!(model = crate::settings::anthropic_model_id(model), "sending via Claude Code CLI (subscription)");
 
     let mut child = cmd.spawn()
         .context("failed to start `claude` CLI — is it installed?")?;
@@ -133,12 +126,13 @@ pub async fn send_message_subscription(
 
     // Read streaming JSON lines from stdout.
     let tx_stream = tx.clone();
-    let reader_handle = tokio::spawn(async move {
+    let reader = async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         let mut new_session_id: Option<String> = None;
         let mut sent_text = false;
+        let mut failure = None;
 
         while let Ok(Some(line)) = lines.next_line().await {
             if line.trim().is_empty() {
@@ -179,6 +173,9 @@ pub async fn send_message_subscription(
                     }
                 }
                 Some("result") => {
+                    if parsed["is_error"] == true {
+                        failure = Some(parsed["result"].as_str().unwrap_or("Claude CLI request failed").to_owned());
+                    }
                     // Final result — extract text if we haven't streamed yet.
                     if !sent_text {
                         if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
@@ -197,203 +194,23 @@ pub async fn send_message_subscription(
                 _ => {} // ignore rate_limit_event etc.
             }
         }
-        new_session_id
-    });
+        (new_session_id, failure)
+    };
 
-    // Wait with timeout.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        child.wait(),
-    ).await;
-
-    match result {
-        Ok(Ok(status)) => {
-            if !status.success() {
-                warn!("claude CLI exited with {status}");
-            }
-        }
-        Ok(Err(e)) => {
-            warn!("claude CLI wait error: {e}");
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            anyhow::bail!("claude CLI timed out after 5 minutes");
-        }
-    }
-
-    // Save session ID for next message.
-    if let Ok(Some(sid)) = reader_handle.await {
-        info!("Claude CLI session: {sid}");
+    // Both futures belong to this request. Cancelling it drops the child and
+    // its reader, so no detached task can append to the next conversation.
+    let (session, status) = tokio::join!(reader, child.wait());
+    let status = status.context("Claude CLI exited unexpectedly")?;
+    if let Some(failure) = session.1 { anyhow::bail!("{failure}"); }
+    anyhow::ensure!(status.success(), "Claude CLI exited with {status}. Check 'claude auth status'.");
+    if let Some(sid) = session.0 {
         *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid);
     }
 
     Ok(())
 }
 
-/// Tool definitions sent to the Claude API.
-fn tools() -> Value {
-    json!([
-        {
-            "name": "list_hosts",
-            "description": "List all configured SSH hosts with their connection details.",
-            "input_schema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "ssh_list_keys",
-            "description": "List all managed SSH keys.",
-            "input_schema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "ssh_execute",
-            "description": "Execute a shell command on a remote SSH host. The host must be reachable (VPN active if needed).",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the target SSH host" },
-                    "command": { "type": "string", "description": "Shell command to execute" }
-                },
-                "required": ["host_id", "command"]
-            }
-        },
-        {
-            "name": "vpn_status",
-            "description": "Get current VPN connection status.",
-            "input_schema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "vpn_list_profiles",
-            "description": "List all VPN profiles.",
-            "input_schema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "vpn_connect",
-            "description": "Connect to a VPN profile.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "profile_id": { "type": "string", "description": "UUID of the VPN profile" }
-                },
-                "required": ["profile_id"]
-            }
-        },
-        {
-            "name": "vpn_disconnect",
-            "description": "Disconnect the active VPN.",
-            "input_schema": { "type": "object", "properties": {}, "required": [] }
-        },
-        {
-            "name": "add_host",
-            "description": "Add a new SSH host.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "label": { "type": "string" },
-                    "hostname": { "type": "string" },
-                    "port": { "type": "integer" },
-                    "username": { "type": "string" },
-                    "group": { "type": "string" },
-                    "device_type": { "type": "string", "description": "linux, uni_fi, pf_sense, open_wrt, fortigate, windows" },
-                    "auth_method": { "type": "string", "description": "key or password" },
-                    "auth_key_id": { "type": "string" }
-                },
-                "required": ["label", "hostname", "username", "auth_method"]
-            }
-        },
-        {
-            "name": "fortigate_api",
-            "description": "Call the FortiGate REST API on a host that has an API token configured. Use this for FortiGate management tasks like reading config, pushing SSH keys, managing firewall policies, etc. Common paths: /api/v2/cmdb/system/admin (admin users), /api/v2/monitor/system/status (system status), /api/v2/cmdb/firewall/policy (firewall policies).",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the FortiGate host" },
-                    "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE" },
-                    "path": { "type": "string", "description": "API path, e.g. /api/v2/cmdb/system/admin/admin" },
-                    "body": { "type": "string", "description": "Optional JSON request body (for POST/PUT)" }
-                },
-                "required": ["host_id", "method", "path"]
-            }
-        },
-        {
-            "name": "fortigate_set_api_token",
-            "description": "Store a FortiGate REST API token and HTTPS port for a host. The token is stored securely.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the FortiGate host" },
-                    "token": { "type": "string", "description": "FortiGate REST API token" },
-                    "port": { "type": "integer", "description": "HTTPS admin port (default 443, common: 8443, 10000)" }
-                },
-                "required": ["host_id", "token"]
-            }
-        },
-        {
-            "name": "fortigate_push_ssh_key",
-            "description": "Push an SSH public key to a FortiGate admin user via REST API. Sets ssh-public-key1 on the admin user. Requires an API token to be configured on the host.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the FortiGate host" },
-                    "key_id": { "type": "string", "description": "UUID of the SSH key to push" },
-                    "admin_user": { "type": "string", "description": "FortiGate admin username (e.g. 'admin')" }
-                },
-                "required": ["host_id", "key_id", "admin_user"]
-            }
-        },
-        {
-            "name": "unifi_set_inform",
-            "description": "Execute set-inform on a UniFi device via SSH to adopt it to a controller. The host must be a UniFi device type.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the UniFi device host" },
-                    "inform_url": { "type": "string", "description": "Controller inform URL (e.g. https://unifi.example.com:8443/inform)" }
-                },
-                "required": ["host_id", "inform_url"]
-            }
-        },
-        {
-            "name": "unifi_api",
-            "description": "Call the UniFi Controller REST API on a host that has controller credentials configured. Authenticates automatically. Common paths: /proxy/network/api/s/default/stat/device (list devices), /proxy/network/api/s/default/stat/sta (list clients), /proxy/network/api/s/default/rest/setting (settings).",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the UniFi host with controller configured" },
-                    "method": { "type": "string", "description": "HTTP method: GET, POST, PUT, DELETE" },
-                    "path": { "type": "string", "description": "API path, e.g. /proxy/network/api/s/default/stat/device" },
-                    "body": { "type": "string", "description": "Optional JSON request body (for POST/PUT)" }
-                },
-                "required": ["host_id", "method", "path"]
-            }
-        },
-        {
-            "name": "fortigate_compliance_check",
-            "description": "Run CIS benchmark compliance checks against a FortiGate device via SSH. Checks admin port, strong crypto, telnet, password policy, logging, WAN interface access, DoS policy, and admin-maintainer settings. Returns a JSON report with pass/fail for each check and an overall score.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "host_id": { "type": "string", "description": "UUID of the FortiGate host to check" }
-                },
-                "required": ["host_id"]
-            }
-        }
-    ])
-}
-
-const SYSTEM_PROMPT: &str = "\
-You are an AI assistant integrated into SuperManager, a unified SSH + VPN management application.\n\n\
-IMPORTANT BEHAVIOR RULES:\n\
-- You have DIRECT ACCESS to all SSH hosts listed in the current state. Do NOT ask \
-  the user if you can connect — just use ssh_execute with the host_id directly.\n\
-- You have DIRECT ACCESS to FortiGate REST API for hosts with api_port configured. \
-  Just call fortigate_api directly.\n\
-- You can connect/disconnect VPN. If a host requires VPN (has auto_vpn), connect \
-  the VPN first, then execute the command.\n\
-- You can run ANY shell command on ANY reachable host. Do not hesitate or ask permission.\n\
-- The user is an experienced sysadmin. Be concise and action-oriented.\n\
-- When the user asks you to do something on a device, JUST DO IT. Use the tools.\n\
-- Show command output clearly. Summarize results.\n\
-- For FortiGate: prefer REST API when api_port is configured, fall back to SSH.\n\
-- For UniFi: use ssh_execute for CLI commands, unifi_api for controller operations.";
+const SYSTEM_PROMPT: &str = super::SYSTEM;
 
 /// Send a user message to Claude and handle the response (including tool use loops).
 ///
@@ -409,24 +226,11 @@ pub async fn send_message(
     tx: &mpsc::Sender<AppMsg>,
     mut messages: Vec<Value>,
     context: &str,
+    model: &str,
+    allow_changes: bool,
 ) -> Result<Vec<Value>> {
-    // Try D-Bus connection; if it fails (daemon restarted), notify the user
-    // and retry once after a short delay.
-    let conn = match zbus::Connection::system().await {
-        Ok(c) => c,
-        Err(_) => {
-            let _ = tx.send(AppMsg::ConsoleResponse(
-                "\nDaemon connection lost — reconnecting...\n".into(),
-            ));
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            zbus::Connection::system()
-                .await
-                .context("D-Bus reconnect failed — is the daemon running?")?
-        }
-    };
-    let proxy = DaemonProxy::new(&conn).await.context("DaemonProxy")?;
-
     let client = reqwest::Client::new();
+    let model = crate::settings::anthropic_model_id(model);
 
     // Build the full system prompt with injected state context.
     let full_system = format!("{SYSTEM_PROMPT}\n\n## Current State\n{context}");
@@ -435,17 +239,18 @@ pub async fn send_message(
     messages.push(json!({ "role": "user", "content": user_text }));
 
     // Tool use loop — Claude may call tools and we feed results back.
-    loop {
+    for _ in 0..12 {
         let body = json!({
-            "model": MODEL,
+            "model": model,
+            "thinking": {"type": "disabled"},
             "max_tokens": MAX_TOKENS,
             "system": full_system,
-            "tools": tools(),
+            "tools": super::anthropic_tools(allow_changes),
             "messages": messages,
             "stream": true,
         });
 
-        debug!("Claude API request (streaming): {} messages", messages.len());
+        debug!(model, "Claude API request (streaming): {} messages", messages.len());
 
         let resp = client
             .post(API_URL)
@@ -460,7 +265,7 @@ pub async fn send_message(
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("API error {status}: {body}");
+            anyhow::bail!("{}", api_error(status, &body, model));
         }
 
         // --- Stream SSE events ---
@@ -470,7 +275,7 @@ pub async fn send_message(
         // Always record the assistant response in history.
         if stop_reason != "tool_use" || tool_calls.is_empty() {
             messages.push(json!({ "role": "assistant", "content": content }));
-            break;
+            return Ok(messages);
         }
 
         // Execute tools and build tool_result messages.
@@ -478,7 +283,7 @@ pub async fn send_message(
 
         let mut tool_results: Vec<Value> = Vec::new();
         for (id, name, input) in &tool_calls {
-            let result = execute_tool(&proxy, name, input).await;
+            let result = super::execute_tool(name, input, allow_changes).await;
             let (result_text, is_error) = match result {
                 Ok(v) => (serde_json::to_string_pretty(&v).unwrap_or_default(), false),
                 Err(e) => (format!("Error: {e}"), true),
@@ -486,7 +291,7 @@ pub async fn send_message(
 
             // Show tool result in console (truncated).
             let preview = if result_text.len() > 500 {
-                format!("{}...", &result_text[..500])
+                format!("{}…", result_text.chars().take(500).collect::<String>())
             } else {
                 result_text.clone()
             };
@@ -503,7 +308,7 @@ pub async fn send_message(
         messages.push(json!({ "role": "user", "content": tool_results }));
     }
 
-    Ok(messages)
+    anyhow::bail!("Tool limit reached. Review the results and send a follow-up to continue.")
 }
 
 /// Parse an SSE stream from the Claude API, sending text chunks to the UI
@@ -516,11 +321,8 @@ async fn parse_stream(
 ) -> Result<(Vec<Value>, String, Vec<(String, String, Value)>)> {
     let mut stream = resp.bytes_stream();
 
-    // Accumulated SSE line buffer (handles partial lines across chunks).
-    let mut line_buf = String::new();
-    // Current SSE event type and data lines.
-    let mut event_type = String::new();
-    let mut data_buf = String::new();
+    let mut parser = super::openai::Events::default();
+    let mut completed = false;
 
     // Accumulated content blocks for conversation history.
     let mut content_blocks: Vec<Value> = Vec::new();
@@ -541,47 +343,23 @@ async fn parse_stream(
     let mut tool_calls: Vec<(String, String, Value)> = Vec::new();
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.context("stream read error")?;
-        line_buf.push_str(&String::from_utf8_lossy(&chunk));
-
-        // Process complete lines.
-        while let Some(newline_pos) = line_buf.find('\n') {
-            let line = line_buf[..newline_pos].trim_end_matches('\r').to_owned();
-            line_buf = line_buf[newline_pos + 1..].to_owned();
-
-            if line.is_empty() {
-                // Empty line = end of SSE event; dispatch it.
-                if !data_buf.is_empty() {
-                    dispatch_sse_event(
-                        &event_type,
-                        &data_buf,
-                        tx,
-                        &mut content_blocks,
-                        &mut current_text,
-                        &mut has_open_text_block,
-                        &mut tool_id,
-                        &mut tool_name,
-                        &mut tool_input_json,
-                        &mut in_tool_block,
-                        &mut stop_reason,
-                        &mut sent_prefix,
-                        &mut tool_calls,
-                    );
-                }
-                event_type.clear();
-                data_buf.clear();
-            } else if let Some(rest) = line.strip_prefix("event: ") {
-                event_type = rest.to_owned();
-            } else if let Some(rest) = line.strip_prefix("data: ") {
-                if !data_buf.is_empty() {
-                    data_buf.push('\n');
-                }
-                data_buf.push_str(rest);
-            } else if line.starts_with(':') {
-                // SSE comment, ignore.
+        for event in parser.push(&chunk_result.context("stream read error")?)? {
+            let event_type = event["type"].as_str().unwrap_or("");
+            if event_type == "error" {
+                anyhow::bail!("Anthropic stream error: {}", event["error"]["message"].as_str().unwrap_or("request failed"));
             }
+            if event_type == "message_stop" { completed = true; }
+            dispatch_sse_event(event_type, &event.to_string(), tx,
+                &mut content_blocks, &mut current_text, &mut has_open_text_block,
+                &mut tool_id, &mut tool_name, &mut tool_input_json, &mut in_tool_block,
+                &mut stop_reason, &mut sent_prefix, &mut tool_calls)?;
         }
+        if completed { break; }
     }
+    anyhow::ensure!(completed && matches!(stop_reason.as_str(), "end_turn" | "tool_use" | "stop_sequence"),
+        "Claude response was incomplete ({}). Retry or narrow the request.",
+        if stop_reason.is_empty() { "stream ended early" } else { &stop_reason });
+    anyhow::ensure!(!in_tool_block, "Claude tool arguments were incomplete; no commands were executed.");
 
     // Finalize any open text block.
     if has_open_text_block && !current_text.is_empty() {
@@ -609,14 +387,8 @@ fn dispatch_sse_event(
     stop_reason: &mut String,
     sent_prefix: &mut bool,
     tool_calls: &mut Vec<(String, String, Value)>,
-) {
-    let parsed: Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("SSE data parse error: {e}");
-            return;
-        }
-    };
+) -> Result<()> {
+    let parsed: Value = serde_json::from_str(data)?;
 
     match event_type {
         "content_block_start" => {
@@ -626,7 +398,7 @@ fn dispatch_sse_event(
                 if *in_tool_block {
                     finalize_tool_block(
                         content_blocks, tool_id, tool_name, tool_input_json, tool_calls,
-                    );
+                    )?;
                     *in_tool_block = false;
                 }
                 *has_open_text_block = true;
@@ -671,7 +443,7 @@ fn dispatch_sse_event(
             if *in_tool_block {
                 finalize_tool_block(
                     content_blocks, tool_id, tool_name, tool_input_json, tool_calls,
-                );
+                )?;
                 *in_tool_block = false;
             }
             // Text blocks stay open until the next block or stream end.
@@ -688,6 +460,7 @@ fn dispatch_sse_event(
             debug!("unhandled SSE event type: {other}");
         }
     }
+    Ok(())
 }
 
 /// Finalize a tool_use content block and record it for execution.
@@ -697,8 +470,10 @@ fn finalize_tool_block(
     tool_name: &mut String,
     tool_input_json: &mut String,
     tool_calls: &mut Vec<(String, String, Value)>,
-) {
-    let input: Value = serde_json::from_str(tool_input_json).unwrap_or(json!({}));
+) -> Result<()> {
+    let input: Value = if tool_input_json.is_empty() { json!({}) }
+        else { serde_json::from_str(tool_input_json).context("Invalid Claude tool arguments; no command was executed")? };
+    anyhow::ensure!(input.is_object(), "Tool arguments must be a JSON object");
     tool_calls.push((tool_id.clone(), tool_name.clone(), input.clone()));
     content_blocks.push(json!({
         "type": "tool_use",
@@ -709,103 +484,50 @@ fn finalize_tool_block(
     tool_id.clear();
     tool_name.clear();
     tool_input_json.clear();
+    Ok(())
 }
 
-/// Execute a single tool call against the daemon via D-Bus.
-async fn execute_tool(proxy: &DaemonProxy<'_>, name: &str, args: &Value) -> Result<Value> {
-    match name {
-        "list_hosts" => {
-            let j = proxy.list_hosts().await?;
-            Ok(serde_json::from_str(&j)?)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subscription_overrides_old_cli_models_and_respects_explicit_model_choices() {
+        for (configured, expected) in [("claude-sonnet-4-20250514", "claude-sonnet-5"), ("", "claude-sonnet-5"), (" custom-model ", "custom-model")] {
+            let command = subscription_command(configured);
+            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
+            let models: Vec<_> = args.windows(2).filter(|a| a[0] == "--model").map(|a| a[1]).collect();
+            assert_eq!(models, [expected]);
+            assert!(args.windows(2).any(|a| a == ["--tools", ""]));
+            assert!(args.windows(2).any(|a| a == ["--permission-prompts", "none"]));
         }
-        "ssh_list_keys" => {
-            let j = proxy.ssh_list_keys().await?;
-            Ok(serde_json::from_str(&j)?)
+    }
+
+    #[tokio::test]
+    async fn incomplete_and_failed_streams_are_not_successful_answers() {
+        let (tx, _rx) = mpsc::channel();
+        for body in [
+            "data: {\"type\":\"message_start\"}\n\n",
+            "data: {\"type\":\"error\",\"error\":{\"message\":\"overloaded\"}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n",
+        ] {
+            assert!(parse_stream(super::super::tests::response(body).await, &tx).await.is_err());
         }
-        "ssh_execute" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let command = args["command"].as_str().context("missing command")?;
-            info!("tool ssh_execute: host={host_id} cmd={command}");
-            let j = proxy.ssh_execute_command(host_id, command).await?;
-            Ok(serde_json::from_str(&j)?)
-        }
-        "vpn_status" => {
-            let j = proxy.get_status().await?;
-            Ok(serde_json::from_str(&j)?)
-        }
-        "vpn_list_profiles" => {
-            let j = proxy.list_profiles().await?;
-            Ok(serde_json::from_str(&j)?)
-        }
-        "vpn_connect" => {
-            let id = args["profile_id"].as_str().context("missing profile_id")?;
-            proxy.connect(id).await?;
-            Ok(json!({ "status": "connecting", "profile_id": id }))
-        }
-        "vpn_disconnect" => {
-            proxy.disconnect().await?;
-            Ok(json!({ "status": "disconnecting" }))
-        }
-        "add_host" => {
-            let host = json!({
-                "label": args["label"].as_str().unwrap_or(""),
-                "hostname": args["hostname"].as_str().unwrap_or(""),
-                "port": args["port"].as_u64().unwrap_or(22),
-                "username": args["username"].as_str().unwrap_or("root"),
-                "group": args["group"].as_str().unwrap_or(""),
-                "device_type": args["device_type"].as_str().unwrap_or("linux"),
-                "auth_method": args["auth_method"].as_str().unwrap_or("password"),
-                "auth_key_id": args.get("auth_key_id"),
-            });
-            let id = proxy.add_host(&host.to_string()).await?;
-            Ok(json!({ "id": id, "status": "created" }))
-        }
-        "fortigate_api" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let method = args["method"].as_str().context("missing method")?;
-            let path = args["path"].as_str().context("missing path")?;
-            let body = args["body"].as_str().unwrap_or("");
-            info!("tool fortigate_api: {method} {path} on {host_id}");
-            let resp = proxy.fortigate_api(host_id, method, path, body).await?;
-            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
-        }
-        "fortigate_set_api_token" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let token = args["token"].as_str().context("missing token")?;
-            let port = args["port"].as_u64().unwrap_or(443) as u16;
-            proxy.ssh_set_api_token(host_id, token, port).await?;
-            Ok(json!({ "status": "stored", "host_id": host_id, "port": port }))
-        }
-        "fortigate_push_ssh_key" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let key_id = args["key_id"].as_str().context("missing key_id")?;
-            let admin_user = args["admin_user"].as_str().context("missing admin_user")?;
-            info!("tool fortigate_push_ssh_key: key={key_id} admin={admin_user} host={host_id}");
-            let resp = proxy.fortigate_push_ssh_key(host_id, key_id, admin_user).await?;
-            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
-        }
-        "unifi_set_inform" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let inform_url = args["inform_url"].as_str().context("missing inform_url")?;
-            info!("tool unifi_set_inform: host={host_id} url={inform_url}");
-            let resp = proxy.unifi_set_inform(host_id, inform_url).await?;
-            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
-        }
-        "unifi_api" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            let method = args["method"].as_str().context("missing method")?;
-            let path = args["path"].as_str().context("missing path")?;
-            let body = args["body"].as_str().unwrap_or("");
-            info!("tool unifi_api: {method} {path} on {host_id}");
-            let resp = proxy.unifi_api(host_id, method, path, body).await?;
-            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
-        }
-        "fortigate_compliance_check" => {
-            let host_id = args["host_id"].as_str().context("missing host_id")?;
-            info!("tool fortigate_compliance_check: host={host_id}");
-            let resp = proxy.fortigate_compliance_check(host_id).await?;
-            Ok(serde_json::from_str(&resp).unwrap_or(json!({ "raw": resp })))
-        }
-        _ => anyhow::bail!("unknown tool: {name}"),
+    }
+
+    #[tokio::test]
+    async fn complete_tool_stream_preserves_arguments_and_stop_reason() {
+        let events = [
+            json!({"type":"content_block_start","content_block":{"type":"tool_use","id":"call1","name":"findings_list"}}),
+            json!({"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"scope\":\"Blåbær\"}"}}),
+            json!({"type":"content_block_stop"}),
+            json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
+            json!({"type":"message_stop"}),
+        ];
+        let body = events.iter().map(|e|format!("data: {e}\n\n")).collect::<String>();
+        let (tx, _rx) = mpsc::channel();
+        let (_, reason, calls) = parse_stream(super::super::tests::response(&body).await, &tx).await.unwrap();
+        assert_eq!(reason, "tool_use");
+        assert_eq!(calls, vec![("call1".into(), "findings_list".into(), json!({"scope":"Blåbær"}))]);
     }
 }

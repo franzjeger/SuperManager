@@ -898,7 +898,7 @@ pub fn build_ui(
     // Console tab — built-in Claude AI chat
     // =========================================================================
     let (console_panel, console_widget) =
-        console::panel::build_console_page(&app_state, &tx, &rt);
+        console::panel::build_console_page(&app_state, &app_settings, &tx, &rt);
 
     view_stack.add_titled(&console_widget, Some("console"), "Console");
     let console_page_ref = view_stack.page(&console_widget);

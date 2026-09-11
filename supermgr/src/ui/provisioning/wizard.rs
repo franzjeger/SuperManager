@@ -1,8 +1,8 @@
 //! Multi-step provisioning wizard for FortiGate and UniFi devices.
 //!
 //! Collects customer info, network design, services, security policies,
-//! then generates device configuration via Claude and pushes it over
-//! REST API or SSH.
+//! then generates drafts through the selected AI provider. Reviewed commands
+//! can be pushed over SSH after a successful backup; controller JSON is exported.
 
 use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
@@ -31,13 +31,13 @@ and industry best practices.\n\n\
 CRITICAL RULES — FOLLOW EXACTLY:\n\
 - Output FortiGate config as CLI commands ONLY. No markdown fences, no explanations, \
   no text before or after the config. Just pure FortiGate CLI.\n\
-- Output UniFi config as JSON suitable for the UniFi Controller API.\n\
+- Output UniFi config as valid JSON suitable for the UniFi Controller API, without comments.\n\
 - The LAN base subnet MUST match the subnet specified in the input — use the EXACT value.\n\
 - All VLAN subnets must use the exact values from the input — do not change octets.\n\
 - For web filter categories, add an inline comment with the category name \
   (e.g. set category 2  # Adult/Mature Content).\n\
 - Mark all placeholder credentials with CHANGE-ME.\n\
-- Add a deployment checklist at the end as CLI comments.\n\n\
+- For FortiGate only, add a deployment checklist at the end as CLI comments.\n\n\
 VPN RULES:\n\
 - ONLY include VPN configuration if the input has a '## VPN' section.\n\
 - If there is NO '## VPN' section in the input, do NOT generate ANY VPN config — \
@@ -1637,6 +1637,18 @@ fn build_step4_security(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
 // Step 5: Review & Deploy
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+pub(crate) fn preview_review(
+    app_state: &Arc<Mutex<AppState>>, tx: &mpsc::Sender<AppMsg>, rt: &tokio::runtime::Handle,
+) -> gtk4::Widget {
+    let state = Rc::new(RefCell::new(WizardState {
+        customer_name: "Nordic Systems".into(), device_type: "FortiGate".into(),
+        generated_config: "config system global\n    set hostname oslo-gateway\nend\n".into(),
+        ..WizardState::default()
+    }));
+    build_step5_review(&state, app_state, tx, rt)
+}
+
 fn build_step5_review(
     state: &Rc<RefCell<WizardState>>,
     _app_state: &Arc<Mutex<AppState>>,
@@ -1651,8 +1663,6 @@ fn build_step5_review(
 
     // Config preview
     let config_buffer = gtk4::TextBuffer::new(None::<&gtk4::TextTagTable>);
-    config_buffer.set_text("# Configuration will appear here after generation.\n\
-                            # Click \"Generate with Claude\" to create the device config.\n");
 
     let config_view = gtk4::TextView::builder()
         .buffer(&config_buffer)
@@ -1670,9 +1680,19 @@ fn build_step5_review(
     let config_scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vexpand(true)
+        .margin_start(16).margin_end(16)
         .child(&config_view)
         .build();
-    config_scroll.add_css_class("card");
+    config_scroll.add_css_class("supermgr-chat-surface");
+    config_view.add_css_class("supermgr-chat-text");
+
+    {
+        let state = Rc::clone(state);
+        config_buffer.connect_changed(move |buffer| {
+            state.borrow_mut().generated_config = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+        });
+    }
 
     // Summary label above config
     let summary_label = gtk4::Label::builder()
@@ -1684,17 +1704,14 @@ fn build_step5_review(
         .margin_bottom(8)
         .build();
 
-    // Button bar
-    let btn_box = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .spacing(12)
-        .halign(gtk4::Align::Center)
-        .margin_top(12)
-        .margin_bottom(16)
-        .build();
+    // Actions wrap on laptop-sized windows instead of clipping the editor.
+    let btn_box = gtk4::FlowBox::builder().selection_mode(gtk4::SelectionMode::None)
+        .max_children_per_line(5).min_children_per_line(1)
+        .column_spacing(8).row_spacing(8).margin_start(16).margin_end(16)
+        .margin_top(12).margin_bottom(16).build();
 
     let generate_btn = gtk4::Button::builder()
-        .label("Generate with Claude")
+        .label("Generate with AI")
         .css_classes(["suggested-action", "pill"])
         .build();
 
@@ -1703,10 +1720,10 @@ fn build_step5_review(
         .build();
 
     let push_btn = gtk4::Button::builder()
-        .label("Push Config")
+        .label("Back up & push")
         .css_classes(["pill"])
         .sensitive(false)
-        .tooltip_text("Deploy configuration to the target device via SSH")
+        .tooltip_text("Validate the draft, save the current configuration, then send commands over SSH")
         .build();
 
     let export_btn = gtk4::Button::builder()
@@ -1749,15 +1766,52 @@ fn build_step5_review(
         .tooltip_text("View previous config versions for this customer")
         .build();
 
-    btn_box.append(&generate_spinner);
+    let validate = gtk4::Button::with_label("Validate draft");
+    {
+        let state = Rc::clone(state);
+        let push = push_btn.clone(); let diff = diff_btn.clone();
+        let exports = [export_btn.clone(), export_html_btn.clone(), export_pdf_btn.clone()];
+        config_buffer.connect_changed(move |buffer| {
+            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            let available = !text.trim().is_empty() && !text.starts_with("# Error") && !text.starts_with("Generating configuration");
+            let json = state.borrow().device_type == "UniFi" && super::validation::is_controller_json(&text);
+            push.set_sensitive(available && !json);
+            push.set_tooltip_text(Some(if json { "UniFi controller JSON is export-only; it cannot be sent over SSH" }
+                else { "Validate the draft, save the current configuration, then send commands over SSH" }));
+            diff.set_sensitive(available && !json);
+            for button in &exports { button.set_sensitive(available); }
+        });
+    }
+    let initial = state.borrow().generated_config.clone();
+    config_buffer.set_text(&initial);
+    {
+        let state = Rc::clone(state); let tx = tx.clone(); let rt = rt.clone();
+        validate.connect_clicked(move |_| {
+            let state = state.borrow().clone(); let tx = tx.clone();
+            rt.spawn_blocking(move || {
+                let result = super::validation::validate(&state.device_type, &state.generated_config);
+                tx.send(match result {
+                    Ok(count) => AppMsg::ShowToast(format!("Draft structure checked: {count} non-comment lines. Device support must still be reviewed. UniFi controller JSON is export-only.")),
+                    Err(e) => AppMsg::OperationFailed(format!("Draft validation: {e}")),
+                }).ok();
+            });
+        });
+    }
+    btn_box.append(&validate);
     btn_box.append(&generate_btn);
     btn_box.append(&push_btn);
     btn_box.append(&diff_btn);
-    btn_box.append(&export_btn);
-    btn_box.append(&export_html_btn);
-    btn_box.append(&export_pdf_btn);
-    btn_box.append(&diagram_btn);
-    btn_box.append(&history_btn);
+    let more = gtk4::MenuButton::builder().label("More").build();
+    let popover = gtk4::Popover::new();
+    let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+    for button in [&export_btn, &export_html_btn, &export_pdf_btn, &diagram_btn, &history_btn] {
+        menu.append(button);
+        let popover = popover.clone();
+        button.connect_clicked(move |_| popover.popdown());
+    }
+    popover.set_child(Some(&menu));
+    more.set_popover(Some(&popover));
+    btn_box.append(&more);
 
     // Generate button — sends wizard state to Claude.
     //
@@ -1790,19 +1844,21 @@ fn build_step5_review(
             {
                 let slot = Arc::clone(&result_slot);
                 rt.spawn(async move {
-                    let use_sub = super::super::console::claude::use_subscription();
-
-                    let result = if use_sub {
-                        send_provisioning_subscription(&prompt).await
-                    } else {
-                        let api_key = super::super::console::claude::load_api_key();
-                        match api_key {
-                            Some(key) => send_provisioning_api(&key, &prompt).await,
-                            None => Err(anyhow::anyhow!(
-                                "No API key configured. Go to Settings to add one, \
-                                 or enable 'Use Claude subscription'."
-                            )),
+                    let settings = crate::settings::AppSettings::load();
+                    let generation = async {
+                        if settings.ai_provider != crate::settings::AiProvider::Claude {
+                            super::super::console::generate_draft(&settings, &prompt, PROVISIONING_SYSTEM_PROMPT).await
+                        } else if settings.use_claude_subscription {
+                            send_provisioning_subscription(&prompt, &settings.anthropic_model).await
+                        } else if !settings.anthropic_api_key.trim().is_empty() {
+                            send_provisioning_api(&settings.anthropic_api_key, &prompt, &settings.anthropic_model).await
+                        } else {
+                            Err(anyhow::anyhow!("Configure an AI provider in Settings → AI."))
                         }
+                    };
+                    let result = match tokio::time::timeout(std::time::Duration::from_secs(300), generation).await {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("Configuration generation timed out after five minutes.")),
                     };
 
                     let config_text = match result {
@@ -1831,8 +1887,9 @@ fn build_step5_review(
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
                     let ok = !config_text.starts_with("# Error");
-                    pb.set_sensitive(ok);
-                    db.set_sensitive(ok);
+                    let json = ws.borrow().device_type == "UniFi" && super::validation::is_controller_json(&config_text);
+                    pb.set_sensitive(ok && !json);
+                    db.set_sensitive(ok && !json);
                     eb.set_sensitive(ok);
                     ehb.set_sensitive(ok);
                     epb.set_sensitive(ok);
@@ -1886,8 +1943,8 @@ fn build_step5_review(
                     let result = push_config_to_device(&s).await;
 
                     let msg = match result {
-                        Ok(output) => format!("Config pushed successfully:\n{output}"),
-                        Err(e) => format!("Push failed: {e}"),
+                        Ok(output) => format!("Configuration commands sent. Review the device response:\n{output}"),
+                        Err(e) => format!("Push failed: {e:#}"),
                     };
 
                     let _ = tx.send(AppMsg::ShowToast(msg));
@@ -1899,7 +1956,7 @@ fn build_step5_review(
             glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
                 if *done_flag.lock().unwrap_or_else(|e| e.into_inner()) {
                     btn.set_sensitive(true);
-                    btn.set_label("Push Config");
+                    btn.set_label("Back up & push");
                     return glib::ControlFlow::Break;
                 }
                 glib::ControlFlow::Continue
@@ -2316,7 +2373,11 @@ fn build_step5_review(
         });
     }
 
-    page.append(&summary_label);
+    let heading = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+    heading.append(&summary_label);
+    generate_spinner.set_valign(gtk4::Align::Center);
+    heading.append(&generate_spinner);
+    page.append(&heading);
     page.append(&config_scroll);
     page.append(&btn_box);
 
@@ -3158,33 +3219,34 @@ fn build_generation_prompt(s: &WizardState) -> String {
 }
 
 /// Send a provisioning prompt via the Claude Code CLI (subscription mode).
-async fn send_provisioning_subscription(prompt: &str) -> anyhow::Result<String> {
-    use tokio::process::Command;
-
+async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Result<String> {
     let full_prompt = format!(
         "{}\n\n---\n\nUser request:\n{}",
         PROVISIONING_SYSTEM_PROMPT, prompt
     );
 
-    let output = Command::new("claude")
-        .args(["--print"])
+    let output = super::super::console::claude::subscription_command(model)
+        .arg("--no-session-persistence")
         .arg(&full_prompt)
         .output()
         .await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Claude CLI failed: {stderr}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!("Claude CLI failed (model '{}'): {stderr}\n{stdout}", crate::settings::anthropic_model_id(model));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Send a provisioning prompt via the Anthropic API (API key mode).
-async fn send_provisioning_api(api_key: &str, prompt: &str) -> anyhow::Result<String> {
+async fn send_provisioning_api(api_key: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
     let client = reqwest::Client::new();
+    let model = crate::settings::anthropic_model_id(model);
     let body = serde_json::json!({
-        "model": "claude-sonnet-4-20250514",
+        "model": model,
+        "thinking": {"type": "disabled"},
         "max_tokens": 8192,
         "system": PROVISIONING_SYSTEM_PROMPT,
         "messages": [{
@@ -3205,14 +3267,14 @@ async fn send_provisioning_api(api_key: &str, prompt: &str) -> anyhow::Result<St
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("API error {status}: {text}");
+        anyhow::bail!("{}", super::super::console::claude::api_error(status, &text, model));
     }
 
     let json: serde_json::Value = resp.json().await?;
-    let text = json["content"][0]["text"]
-        .as_str()
-        .unwrap_or("(no content in response)")
-        .to_string();
+    anyhow::ensure!(json["stop_reason"] == "end_turn", "Claude did not finish the configuration; generate again with a narrower request.");
+    let text = json["content"].as_array().into_iter().flatten()
+        .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n");
+    anyhow::ensure!(!text.trim().is_empty(), "Claude returned no configuration.");
 
     Ok(text)
 }
@@ -3224,9 +3286,17 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
     if state.target_host_id.is_empty() {
         anyhow::bail!("No target host selected");
     }
-    if state.generated_config.is_empty() {
-        anyhow::bail!("No configuration generated yet");
-    }
+    let device_type = state.device_type.clone();
+    let config = state.generated_config.clone();
+    tokio::task::spawn_blocking(move || super::validation::validate_for_push(&device_type, &config))
+        .await.context("Draft validation task failed")??;
+
+    let current = fetch_device_config(&state.target_host_id, &state.device_type).await
+        .context("Pre-deployment backup failed; no commands were sent")?;
+    anyhow::ensure!(!current.trim().is_empty(), "The device returned an empty configuration; no commands were sent");
+    let backup = save_config_version_dbus(&state.customer_name,
+        &format!("{}-before-push", state.device_type), &current).await
+        .context("Could not save the pre-deployment backup; no commands were sent")?;
 
     let conn = zbus::Connection::system()
         .await
@@ -3237,14 +3307,65 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
         .await
         .context("DaemonProxy creation failed")?;
 
-    // For FortiGate, we can send the config as a single SSH command batch.
-    // For UniFi, the config would be API calls — for now, push via SSH.
+    // Only reviewed command drafts reach SSH. Controller JSON is export-only.
     let result = proxy
         .ssh_execute_command(&state.target_host_id, &state.generated_config)
         .await
-        .context("SSH execute failed")?;
+        .with_context(|| format!("SSH push failed. Pre-deployment backup: {backup}"))?;
 
-    Ok(result)
+    let output = checked_push_result(&result)
+        .with_context(|| format!("Push did not complete. Pre-deployment backup: {backup}"))?;
+    let lower = output.to_ascii_lowercase();
+    if state.device_type == "FortiGate" && ["command fail.", "command parse error", "return code -", "unknown action"]
+        .iter().any(|marker|lower.contains(marker)) {
+        anyhow::bail!("Device rejected commands. Pre-deployment backup: {backup}\n{output}");
+    }
+    Ok(format!("Pre-deployment backup: {backup}\n{output}"))
+}
+
+fn checked_push_result(result: &str) -> anyhow::Result<String> {
+    let result: serde_json::Value = serde_json::from_str(result)?;
+    let code = result["exit_code"].as_i64()
+        .ok_or_else(|| anyhow::anyhow!("Device response did not include an exit status"))?;
+    let stdout = result["stdout"].as_str().unwrap_or("");
+    let stderr = result["stderr"].as_str().unwrap_or("");
+    anyhow::ensure!(code == 0, "Device command failed (exit {code}): {stderr}\n{stdout}");
+    Ok(format!("{stdout}\n{stderr}").trim().to_owned())
+}
+
+#[cfg(test)]
+mod push_tests {
+    #[tokio::test]
+    #[ignore = "uses configured Anthropic API key and Claude login; synthetic prompts only"]
+    async fn configured_claude_model_smoke() {
+        let settings = crate::settings::AppSettings::load();
+        let prompt = "Connection test only. Reply exactly OK. Do not generate any configuration or call tools.";
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let check = async {
+            // Exercise migration at the request boundary as well as the
+            // selected model in both provisioning adapters.
+            let answer = crate::ui::console::claude::send_message(
+                &settings.anthropic_api_key, prompt, &tx, vec![],
+                "Synthetic connection test. No device data.",
+                "claude-sonnet-4-20250514", false,
+            ).await.unwrap();
+            assert!(!answer.last().unwrap()["content"].as_array().unwrap().is_empty());
+            let answer = super::send_provisioning_api(
+                &settings.anthropic_api_key, prompt, &settings.anthropic_model,
+            ).await.unwrap();
+            assert!(answer.contains("OK"));
+            let answer = super::send_provisioning_subscription(prompt, &settings.anthropic_model).await.unwrap();
+            assert!(answer.contains("OK"));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(120), check).await.unwrap();
+    }
+
+    #[test]
+    fn device_rejection_is_not_reported_as_success() {
+        assert!(super::checked_push_result(r#"{"exit_code":1,"stdout":"partial","stderr":"denied"}"#).is_err());
+        assert!(super::checked_push_result(r#"{"stdout":"missing status"}"#).is_err());
+        assert_eq!(super::checked_push_result(r#"{"exit_code":0,"stdout":"applied","stderr":""}"#).unwrap(), "applied");
+    }
 }
 
 use gtk4::gio;
@@ -4140,7 +4261,15 @@ async fn fetch_device_config(host_id: &str, device_type: &str) -> anyhow::Result
         .await
         .context("SSH execute failed")?;
 
-    Ok(result)
+    let text = checked_push_result(&result)?;
+    if device_type == "FortiGate" {
+        anyhow::ensure!(!["command fail.", "command parse error", "return code -", "unknown action"]
+            .iter().any(|marker| text.to_ascii_lowercase().contains(marker)), "Device rejected the configuration read: {text}");
+    }
+    let envelope: serde_json::Value = serde_json::from_str(&result)?;
+    let config = envelope["stdout"].as_str().unwrap_or("").trim();
+    anyhow::ensure!(!config.is_empty(), "Device returned no configuration: {text}");
+    Ok(config.to_owned())
 }
 
 /// Compute a simple line-based diff for side-by-side display.
