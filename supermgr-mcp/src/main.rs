@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 use tracing::{debug, error, info};
 
 use supermgr_core::client::{self, DaemonClient};
+use supermgr_mcp::execute_tool;
+#[cfg(test)]
+use supermgr_mcp::tool_definitions;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -52,396 +55,6 @@ struct JsonRpcError {
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-fn tool_definitions() -> Value {
-    json!([
-        {
-            "name": "list_hosts",
-            "description": "List all configured SSH hosts with their connection details (hostname, port, username, device type, auth method).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "ssh_list_keys",
-            "description": "List all managed SSH keys with their type, fingerprint, and deployment status.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "ssh_execute",
-            "description": "Execute a shell command on a remote SSH host managed by SuperManager. The host must be configured and reachable (VPN must be active if the host is behind one). Returns stdout, stderr, and exit code.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the target SSH host (from list_hosts)"
-                    },
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute on the remote host"
-                    }
-                },
-                "required": ["host_id", "command"]
-            }
-        },
-        {
-            "name": "vpn_status",
-            "description": "Get the current VPN connection status (connected/disconnected, active profile, tunnel stats).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "vpn_list_profiles",
-            "description": "List all configured VPN profiles with their backend type and connection state.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "vpn_connect",
-            "description": "Connect to a VPN profile by UUID. Returns immediately; the connection is established asynchronously.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile_id": {
-                        "type": "string",
-                        "description": "UUID of the VPN profile to connect"
-                    }
-                },
-                "required": ["profile_id"]
-            }
-        },
-        {
-            "name": "vpn_disconnect",
-            "description": "Disconnect the currently active VPN connection.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "add_host",
-            "description": "Add a new SSH host configuration.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "label": { "type": "string", "description": "Display name" },
-                    "hostname": { "type": "string", "description": "Hostname or IP" },
-                    "port": { "type": "integer", "description": "SSH port (default 22)" },
-                    "username": { "type": "string", "description": "Login username" },
-                    "group": { "type": "string", "description": "Logical group (optional)" },
-                    "device_type": { "type": "string", "description": "linux, uni_fi, pf_sense, open_wrt, fortigate, windows" },
-                    "auth_method": { "type": "string", "description": "key or password" },
-                    "auth_key_id": { "type": "string", "description": "UUID of SSH key (for key auth)" }
-                },
-                "required": ["label", "hostname", "username", "auth_method"]
-            }
-        },
-        {
-            "name": "test_host_connection",
-            "description": "Test SSH and (optionally) FortiGate API connectivity for a host. Returns a JSON object like {\"ssh\": \"ok\", \"api\": \"ok\"} or {\"ssh\": \"timeout\", \"api\": \"auth_failed\"}.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH host to test"
-                    }
-                },
-                "required": ["host_id"]
-            }
-        },
-        {
-            "name": "toggle_host_pin",
-            "description": "Pin or unpin an SSH host (toggle its favourite/pinned state). Returns the refreshed host list.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH host to pin/unpin"
-                    }
-                },
-                "required": ["host_id"]
-            }
-        },
-        {
-            "name": "ssh_set_password",
-            "description": "Store an SSH password for a host in the secret store. Used for password-based authentication.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH host"
-                    },
-                    "password": {
-                        "type": "string",
-                        "description": "SSH password to store"
-                    }
-                },
-                "required": ["host_id", "password"]
-            }
-        },
-        {
-            "name": "ssh_set_api_token",
-            "description": "Store a FortiGate REST API token and optional port for a host. Pass port 0 to keep the existing port.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host"
-                    },
-                    "token": {
-                        "type": "string",
-                        "description": "FortiGate REST API token"
-                    },
-                    "port": {
-                        "type": "integer",
-                        "description": "API port (default 0 to keep existing)"
-                    }
-                },
-                "required": ["host_id", "token"]
-            }
-        },
-        {
-            "name": "unifi_set_inform",
-            "description": "Execute set-inform on a UniFi device via SSH. Tells the device to adopt to the given controller URL.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the UniFi device host"
-                    },
-                    "inform_url": {
-                        "type": "string",
-                        "description": "Controller inform URL (e.g. http://controller:8080/inform)"
-                    }
-                },
-                "required": ["host_id", "inform_url"]
-            }
-        },
-        {
-            "name": "unifi_api",
-            "description": "Call the UniFi Controller REST API on a host. Requires controller credentials to be configured via unifi_set_controller first.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the UniFi host with controller credentials"
-                    },
-                    "method": {
-                        "type": "string",
-                        "description": "HTTP method: GET, POST, PUT, or DELETE"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "API path (e.g. /proxy/network/api/s/default/stat/device)"
-                    },
-                    "body": {
-                        "type": "string",
-                        "description": "Optional JSON request body (empty string for none)"
-                    }
-                },
-                "required": ["host_id", "method", "path"]
-            }
-        },
-        {
-            "name": "fortigate_push_ssh_key",
-            "description": "Push an SSH public key to a FortiGate admin user via REST API. The host must have an API token configured.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host with API token configured"
-                    },
-                    "key_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH key whose public key will be pushed"
-                    },
-                    "admin_user": {
-                        "type": "string",
-                        "description": "FortiGate admin username (e.g. admin)"
-                    }
-                },
-                "required": ["host_id", "key_id", "admin_user"]
-            }
-        },
-        {
-            "name": "fortigate_backup_config",
-            "description": "Download the FortiGate running configuration and save it to disk. Returns the backup filename on success.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host with API token configured"
-                    }
-                },
-                "required": ["host_id"]
-            }
-        }
-    ])
-}
-
-// ---------------------------------------------------------------------------
-// Tool execution
-// ---------------------------------------------------------------------------
-
-async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Result<Value, String> {
-    match name {
-        "list_hosts" => {
-            let json_str = proxy.list_hosts().await.map_err(|e| e.to_string())?;
-            let hosts: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
-            Ok(hosts)
-        }
-        "ssh_list_keys" => {
-            let json_str = proxy.ssh_list_keys().await.map_err(|e| e.to_string())?;
-            let keys: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
-            Ok(keys)
-        }
-        "ssh_execute" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let command = args.get("command").and_then(|v| v.as_str())
-                .ok_or("missing command")?;
-            let result = proxy.ssh_execute_command(host_id, command).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "vpn_status" => {
-            let json_str = proxy.get_status().await.map_err(|e| e.to_string())?;
-            let status: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
-            Ok(status)
-        }
-        "vpn_list_profiles" => {
-            let json_str = proxy.list_profiles().await.map_err(|e| e.to_string())?;
-            let profiles: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
-            Ok(profiles)
-        }
-        "vpn_connect" => {
-            let profile_id = args.get("profile_id").and_then(|v| v.as_str())
-                .ok_or("missing profile_id")?;
-            proxy.connect(profile_id).await.map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "connecting", "profile_id": profile_id }))
-        }
-        "vpn_disconnect" => {
-            proxy.disconnect().await.map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "disconnecting" }))
-        }
-        "add_host" => {
-            let host_json = json!({
-                "label": args.get("label").and_then(|v| v.as_str()).unwrap_or(""),
-                "hostname": args.get("hostname").and_then(|v| v.as_str()).unwrap_or(""),
-                "port": args.get("port").and_then(|v| v.as_u64()).unwrap_or(22),
-                "username": args.get("username").and_then(|v| v.as_str()).unwrap_or("root"),
-                "group": args.get("group").and_then(|v| v.as_str()).unwrap_or(""),
-                "device_type": args.get("device_type").and_then(|v| v.as_str()).unwrap_or("linux"),
-                "auth_method": args.get("auth_method").and_then(|v| v.as_str()).unwrap_or("password"),
-                "auth_key_id": args.get("auth_key_id"),
-            });
-            let id = proxy.add_host(&host_json.to_string()).await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "id": id, "status": "created" }))
-        }
-        "test_host_connection" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let result = proxy.test_host_connection(host_id).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "toggle_host_pin" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let result = proxy.toggle_host_pin(host_id).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "ssh_set_password" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let password = args.get("password").and_then(|v| v.as_str())
-                .ok_or("missing password")?;
-            proxy.ssh_set_password(host_id, password).await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "ok", "host_id": host_id }))
-        }
-        "ssh_set_api_token" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let token = args.get("token").and_then(|v| v.as_str())
-                .ok_or("missing token")?;
-            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
-            proxy.ssh_set_api_token(host_id, token, port).await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "ok", "host_id": host_id }))
-        }
-        "unifi_set_inform" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let inform_url = args.get("inform_url").and_then(|v| v.as_str())
-                .ok_or("missing inform_url")?;
-            let result = proxy.unifi_set_inform(host_id, inform_url).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "unifi_api" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let method = args.get("method").and_then(|v| v.as_str())
-                .ok_or("missing method")?;
-            let path = args.get("path").and_then(|v| v.as_str())
-                .ok_or("missing path")?;
-            let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
-            let result = proxy.unifi_api(host_id, method, path, body).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "fortigate_push_ssh_key" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let key_id = args.get("key_id").and_then(|v| v.as_str())
-                .ok_or("missing key_id")?;
-            let admin_user = args.get("admin_user").and_then(|v| v.as_str())
-                .ok_or("missing admin_user")?;
-            let result = proxy.fortigate_push_ssh_key(host_id, key_id, admin_user).await
-                .map_err(|e| e.to_string())?;
-            let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
-            Ok(parsed)
-        }
-        "fortigate_backup_config" => {
-            let host_id = args.get("host_id").and_then(|v| v.as_str())
-                .ok_or("missing host_id")?;
-            let filename = proxy.fortigate_backup_config(host_id).await
-                .map_err(|e| e.to_string())?;
-            Ok(json!({ "status": "ok", "filename": filename }))
-        }
-        _ => Err(format!("unknown tool: {name}")),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MCP message handlers
 // ---------------------------------------------------------------------------
@@ -468,7 +81,7 @@ fn handle_tools_list(id: &Value) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".into(),
         id: id.clone(),
-        result: Some(json!({ "tools": tool_definitions() })),
+        result: Some(json!({ "tools": supermgr_mcp::available_tools(std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_none()) })),
         error: None,
     }
 }
@@ -481,9 +94,16 @@ async fn handle_tools_call(
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    debug!("tool call: {tool_name} args={arguments}");
+    debug!("tool call: {tool_name}");
 
-    match execute_tool(proxy, tool_name, &arguments).await {
+    let result = if std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_some()
+        && !supermgr_mcp::is_read_only(tool_name)
+    {
+        Err("This console session is read-only. Enable Allow changes to use this tool.".into())
+    } else {
+        execute_tool(proxy, tool_name, &arguments).await
+    };
+    match result {
         Ok(result) => JsonRpcResponse {
             jsonrpc: "2.0".into(),
             id: id.clone(),
@@ -717,7 +337,7 @@ mod tests {
     /// test keeps them together.
     #[test]
     fn advertised_tools_and_dispatched_tools_are_the_same_set() {
-        let source = include_str!("main.rs");
+        let source = include_str!("lib.rs");
         // Bound this to `execute_tool` itself. Taking everything after it
         // also picks up the main loop's `"initialize" =>` method dispatch,
         // which is a different match on a different string.
@@ -740,7 +360,11 @@ mod tests {
         // advertise. The catch-all `unknown` arm is excluded by construction
         // since it doesn't match the `"name" =>` shape.
         let advertised = advertised_tool_names();
+        let mut linux_only = false;
         for line in dispatch_body.lines() {
+            if line.trim() == "#[cfg(target_os = \"linux\")]" { linux_only = true; continue; }
+            if linux_only && !cfg!(target_os = "linux") { linux_only = false; continue; }
+            linux_only = false;
             let trimmed = line.trim();
             let Some(rest) = trimmed.strip_prefix('"') else {
                 continue;
