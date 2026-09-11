@@ -37,6 +37,8 @@ pub struct SshHostDetail {
     pub device_type_row: adw::ActionRow,
     pub auth_method_row: adw::ActionRow,
     pub jump_host_row: adw::ActionRow,
+    pub connection_notice: adw::Banner,
+    pub connection_issue_host: std::rc::Rc<std::cell::Cell<Option<uuid::Uuid>>>,
 
     /// Shows the host-key fingerprint the daemon has recorded for this host,
     /// with a button to forget it. Forgetting is the documented remedy after
@@ -303,6 +305,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         .build();
     header.actions.append(&pin_btn);
     header.actions.append(&connect_btn);
+    let connection_notice = adw::Banner::new("");
+    connection_notice.set_button_label(Some("Edit host"));
 
     let session_card = design::card("Session");
 
@@ -399,6 +403,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 
     let (scroller, content) = design::detail_body();
     content.append(&header.widget);
+    content.append(&connection_notice);
 
     let columns = design::reflowing_columns();
     design::add_card(&columns, &details_group);
@@ -424,6 +429,8 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         device_type_row,
         auth_method_row,
         jump_host_row,
+        connection_notice,
+        connection_issue_host: Default::default(),
         host_key_row,
         forget_host_key_btn,
         connect_btn,
@@ -463,8 +470,33 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 // Update
 // ---------------------------------------------------------------------------
 
+/// Configuration checks only: no authentication, probes or secret reads.
+pub fn connection_issue(host: &HostSummary, hosts: &[HostSummary], keys: &[supermgr_core::ssh::key::SshKeySummary]) -> Option<(uuid::Uuid, String)> {
+    let mut current = host;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(current.id) {
+            return Some((current.id, "The jump-host chain contains a loop. Edit the jump-host connection.".into()));
+        }
+        if matches!(current.auth_method, AuthMethod::Key | AuthMethod::Certificate) {
+            if let Some(id) = current.auth_key_id {
+                if !keys.iter().any(|key| key.id == id) {
+                    return Some((current.id, format!("{} uses an SSH key that no longer exists. Select an available key in Edit host.", current.label)));
+                }
+            }
+        }
+        match current.proxy_jump {
+            Some(id) => match hosts.iter().find(|host| host.id == id) {
+                Some(jump) => current = jump,
+                None => return Some((current.id, format!("{} has a jump host that no longer exists. Edit this connection to select another host.", current.label))),
+            },
+            None => return None,
+        }
+    }
+}
+
 /// Update the host detail panel to show the given host.
-pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_hosts: &[HostSummary]) {
+pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_hosts: &[HostSummary], keys: &[supermgr_core::ssh::key::SshKeySummary]) {
     detail.host_label_lbl.set_label(&host.label);
 
     if host.group.is_empty() {
@@ -484,7 +516,20 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
         AuthMethod::Key => "Public Key",
         AuthMethod::Certificate => "Certificate",
     };
-    detail.auth_method_row.set_subtitle(auth_str);
+    let auth_description = if let Some(key_id) = host.auth_key_id {
+        keys.iter().find(|key| key.id == key_id)
+            .map(|key| format!("{auth_str} · {}", key.name))
+            .unwrap_or_else(|| format!("{auth_str} · Missing assigned key"))
+    } else if host.auth_method == AuthMethod::Key { "SSH agent or local keys".into() }
+    else { auth_str.into() };
+    detail.auth_method_row.set_subtitle(&auth_description);
+    let issue = connection_issue(host, all_hosts, keys);
+    let message = issue.as_ref().map(|(_, message)| message.as_str());
+    detail.connection_issue_host.set(issue.as_ref().map(|(id, _)| *id));
+    detail.connection_notice.set_title(message.unwrap_or(""));
+    detail.connection_notice.set_revealed(issue.is_some());
+    detail.connect_btn.set_sensitive(issue.is_none());
+    detail.connect_btn.set_tooltip_text(Some(message.unwrap_or("Open SSH session in terminal")));
 
     // Show jump host name if configured.
     if let Some(jump_id) = host.proxy_jump {
@@ -1374,4 +1419,35 @@ pub fn show_compliance_dialog(parent: &adw::ApplicationWindow, data: &Value) {
     dialog.set_body(&body);
     dialog.add_response("close", "Close");
     dialog.present(Some(parent));
+}
+
+
+#[cfg(test)]
+mod configuration_tests {
+    use super::*;
+    fn host(id: u128) -> HostSummary {
+        serde_json::from_value(serde_json::json!({
+            "id":uuid::Uuid::from_u128(id),"label":format!("host-{id}"),"hostname":"test.invalid","port":22,
+            "username":"operator","device_type":"linux","auth_method":"key","group":"", "customer":"", "has_api":false,"pinned":false
+        })).unwrap()
+    }
+    #[test]
+    fn missing_jump_credentials_offer_to_edit_the_jump_host() {
+        let mut target = host(1); let mut jump = host(2);
+        target.proxy_jump = Some(jump.id); jump.auth_key_id = Some(uuid::Uuid::from_u128(10));
+        let (id, message) = connection_issue(&target, &[target.clone(), jump.clone()], &[]).unwrap();
+        assert_eq!(id, jump.id); assert!(message.contains("key that no longer exists"));
+        jump.auth_method = AuthMethod::Password;
+        assert!(connection_issue(&target, &[jump], &[]).is_none());
+    }
+    #[test]
+    fn missing_or_cyclic_jump_hosts_are_actionable_but_agent_auth_is_valid() {
+        let mut target = host(1); let mut jump = host(2);
+        assert!(connection_issue(&target, &[], &[]).is_none());
+        target.proxy_jump = Some(jump.id);
+        assert_eq!(connection_issue(&target, &[], &[]).unwrap().0, target.id);
+        jump.proxy_jump = Some(target.id);
+        let (_, message) = connection_issue(&target, &[target.clone(), jump], &[]).unwrap();
+        assert!(message.contains("loop"));
+    }
 }

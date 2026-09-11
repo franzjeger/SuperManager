@@ -20,6 +20,50 @@ use crate::dbus_client::{
     dbus_ssh_import_key, dbus_ssh_push_key, dbus_ssh_revoke_key,
 };
 
+/// The canonical device-type picker order: each entry pairs the
+/// `DeviceType` variant with the slug the daemon stores (its serde name).
+/// Labels come from `Display`, so the picker, the labels and the stored
+/// value all read from one list and cannot drift apart — and
+/// `device_type_slugs_match_serde` fails the build if a slug stops matching
+/// the serde rename.
+const DEVICE_TYPES: &[(supermgr_core::DeviceType, &str)] = &[
+    (supermgr_core::DeviceType::Linux, "linux"),
+    (supermgr_core::DeviceType::UniFi, "uni_fi"),
+    (supermgr_core::DeviceType::PfSense, "pf_sense"),
+    (supermgr_core::DeviceType::OpnSense, "opn_sense"),
+    (supermgr_core::DeviceType::Sophos, "sophos"),
+    (supermgr_core::DeviceType::OpenWrt, "open_wrt"),
+    (supermgr_core::DeviceType::Fortigate, "fortigate"),
+    (supermgr_core::DeviceType::Windows, "windows"),
+    (supermgr_core::DeviceType::Custom, "custom"),
+];
+
+/// Combo model for the device-type picker: every variant's label, in order.
+fn device_type_model() -> gtk4::StringList {
+    let list = gtk4::StringList::new(&[]);
+    for (dt, _) in DEVICE_TYPES {
+        list.append(&dt.to_string());
+    }
+    list
+}
+
+/// The slug stored for the combo's selected position (Linux if the index
+/// is somehow out of range).
+fn selected_device_type_slug(row: &adw::ComboRow) -> String {
+    DEVICE_TYPES
+        .get(row.selected() as usize)
+        .map_or(DEVICE_TYPES[0].1, |(_, slug)| *slug)
+        .to_owned()
+}
+
+/// The picker position of an existing host's device type.
+fn device_type_index(dt: supermgr_core::DeviceType) -> u32 {
+    DEVICE_TYPES
+        .iter()
+        .position(|(variant, _)| *variant == dt)
+        .unwrap_or(0) as u32
+}
+
 // ---------------------------------------------------------------------------
 // Generate Key dialog
 // ---------------------------------------------------------------------------
@@ -196,13 +240,9 @@ pub fn show_add_host_dialog_prefilled(
         .title("Group (optional)")
         .build();
 
-    let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OPNsense", "Sophos", "OpenWrt", "FortiGate",
-        "Windows", "Custom",
-    ]);
     let device_row = adw::ComboRow::builder()
         .title("Device type")
-        .model(&device_model)
+        .model(&device_type_model())
         .selected(0)
         .build();
 
@@ -350,18 +390,7 @@ pub fn show_add_host_dialog_prefilled(
             let port: u16 = port_row.text().parse().unwrap_or(22);
             let username = username_row.text().to_string();
             let group = group_row.text().to_string();
-            let device_type = match device_row.selected() {
-                1 => "uni_fi",
-                2 => "pf_sense",
-                3 => "opn_sense",
-                4 => "sophos",
-                5 => "open_wrt",
-                6 => "fortigate",
-                7 => "windows",
-                8 => "custom",
-                _ => "linux",
-            }
-            .to_owned();
+            let device_type = selected_device_type_slug(&device_row);
             let auth_method = match auth_row.selected() {
                 1 => "password",
                 2 => "certificate",
@@ -952,24 +981,10 @@ pub fn show_edit_host_dialog(
     let username_row = adw::EntryRow::builder().title("Username").text(&host.username).build();
     let group_row = adw::EntryRow::builder().title("Group (optional)").text(&host.group).build();
 
-    let device_model = gtk4::StringList::new(&[
-        "Linux", "UniFi", "pfSense", "OPNsense", "Sophos", "OpenWrt", "FortiGate", "Windows", "Custom",
-    ]);
-    let device_idx = match host.device_type {
-        supermgr_core::DeviceType::Linux => 0u32,
-        supermgr_core::DeviceType::UniFi => 1,
-        supermgr_core::DeviceType::PfSense => 2,
-        supermgr_core::DeviceType::OpnSense => 3,
-        supermgr_core::DeviceType::Sophos => 4,
-        supermgr_core::DeviceType::OpenWrt => 5,
-        supermgr_core::DeviceType::Fortigate => 6,
-        supermgr_core::DeviceType::Windows => 7,
-        supermgr_core::DeviceType::Custom => 8,
-    };
     let device_row = adw::ComboRow::builder()
         .title("Device type")
-        .model(&device_model)
-        .selected(device_idx)
+        .model(&device_type_model())
+        .selected(device_type_index(host.device_type))
         .build();
 
     let auth_model = gtk4::StringList::new(&["Public Key", "Password", "Certificate"]);
@@ -984,18 +999,21 @@ pub fn show_edit_host_dialog(
         .selected(auth_idx)
         .build();
 
-    let key_names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
-    let key_model = gtk4::StringList::new(&key_names);
-    // Pre-select the key currently assigned to this host (fall back to 0).
-    let current_key_idx = host.auth_key_id
-        .and_then(|kid| keys.iter().position(|k| k.id == kid))
-        .unwrap_or(0) as u32;
-    let key_row = adw::ComboRow::builder()
-        .title("SSH Key")
-        .model(&key_model)
-        .selected(current_key_idx)
-        .visible(auth_idx == 0 || auth_idx == 2)
-        .build();
+    let mut key_names = vec!["SSH agent / local keys".to_owned()];
+    key_names.extend(keys.iter().map(|key| key.name.clone()));
+    let mut key_ids: Vec<Option<String>> = vec![None];
+    key_ids.extend(keys.iter().map(|key| Some(key.id.to_string())));
+    let missing_key = host.auth_key_id.is_some_and(|id| !keys.iter().any(|key| key.id == id));
+    let missing_index = if missing_key {
+        key_names.push("Missing assigned key — choose a replacement".into());
+        key_ids.push(host.auth_key_id.map(|id| id.to_string()));
+        Some((key_names.len() - 1) as u32)
+    } else { None };
+    let current_key_idx = host.auth_key_id.and_then(|id| keys.iter().position(|key| key.id == id))
+        .map(|index| index as u32 + 1).or(missing_index).unwrap_or(0);
+    let key_model = gtk4::StringList::new(&key_names.iter().map(String::as_str).collect::<Vec<_>>());
+    let key_row = adw::ComboRow::builder().title("SSH Key").model(&key_model)
+        .selected(current_key_idx).visible(auth_idx == 0 || auth_idx == 2).build();
 
     let pass_title = if host.has_password { "Password (configured — leave empty to keep)" } else { "Password" };
     let pass_row = adw::PasswordEntryRow::builder()
@@ -1178,15 +1196,16 @@ pub fn show_edit_host_dialog(
         let auth_row = auth_row.clone();
         let pass_row = pass_row.clone();
         let cert_row = cert_row.clone();
+        let key_row = key_row.clone();
         let save_btn = save_btn.clone();
         Rc::new(move || {
             let basic_ok = !label_row.text().is_empty()
                 && !hostname_row.text().is_empty()
                 && !username_row.text().is_empty();
             let auth_ok = match auth_row.selected() {
-                0 => true,                                           // key — always ok
+                0 => Some(key_row.selected()) != missing_index,
                 1 => has_password || !pass_row.text().is_empty(),    // password
-                2 => has_certificate || !cert_row.text().is_empty(), // certificate
+                2 => (has_certificate || !cert_row.text().is_empty()) && Some(key_row.selected()) != missing_index,
                 _ => true,
             };
             save_btn.set_sensitive(basic_ok && auth_ok);
@@ -1198,13 +1217,14 @@ pub fn show_edit_host_dialog(
     { let v = Rc::clone(&validate); pass_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); cert_row.connect_changed(move |_| v()); }
     { let v = Rc::clone(&validate); auth_row.connect_selected_notify(move |_| v()); }
+    { let v = Rc::clone(&validate); key_row.connect_selected_notify(move |_| v()); }
+    validate();
 
     {
         let dialog = dialog.clone();
         cancel_btn.connect_clicked(move |_| { dialog.close(); });
     }
 
-    let key_ids: Vec<String> = keys.iter().map(|k| k.id.to_string()).collect();
     let vpn_profile_ids: Vec<String> = vpn_profiles.iter().map(|p| p.id.to_string()).collect();
     let jump_host_ids: Vec<String> = other_hosts.iter().map(|h| h.id.to_string()).collect();
     let host_id = host.id.to_string();
@@ -1219,15 +1239,12 @@ pub fn show_edit_host_dialog(
             let port: u16 = port_row.text().parse().unwrap_or(22);
             let username = username_row.text().to_string();
             let group = group_row.text().to_string();
-            let device_type = match device_row.selected() {
-                1 => "uni_fi", 2 => "pf_sense", 3 => "open_wrt",
-                4 => "fortigate", 5 => "windows", 6 => "custom", _ => "linux",
-            }.to_owned();
+            let device_type = selected_device_type_slug(&device_row);
             let auth_method = match auth_row.selected() {
                 1 => "password", 2 => "certificate", _ => "key",
             }.to_owned();
             let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
-                key_ids.get(key_row.selected() as usize).cloned()
+                key_ids.get(key_row.selected() as usize).cloned().flatten()
             } else {
                 None
             };
@@ -1565,4 +1582,29 @@ pub fn show_batch_command_dialog(
     }
 
     dialog.present(Some(window));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stored slug must stay the variant's serde name, or the daemon
+    /// deserializes hosts as the wrong device type.
+    #[test]
+    fn device_type_slugs_match_serde() {
+        for (dt, slug) in DEVICE_TYPES {
+            assert_eq!(
+                serde_json::to_string(dt).unwrap(),
+                format!("{slug:?}"),
+                "slug for {dt:?} no longer matches its serde rename"
+            );
+        }
+    }
+
+    #[test]
+    fn device_type_index_round_trips_every_variant() {
+        for (dt, _) in DEVICE_TYPES {
+            assert_eq!(&DEVICE_TYPES[device_type_index(*dt) as usize].0, dt);
+        }
+    }
 }

@@ -46,6 +46,7 @@ pub fn build_ssh_dashboard(
     // Flow box for device cards.
     let flow_box = gtk4::FlowBox::builder()
         .homogeneous(true)
+        .valign(gtk4::Align::Start)
         .min_children_per_line(1)
         .max_children_per_line(4)
         .selection_mode(gtk4::SelectionMode::None)
@@ -1572,4 +1573,10 @@ mod summary_tests {
         // just be the same news twice.
         assert_eq!(summary_text(&[]), "");
     }
+}
+
+
+#[cfg(test)]
+pub(crate) fn preview_cards(flow: &gtk4::FlowBox, hosts: &[HostSummary], state: &Arc<Mutex<AppState>>) {
+    for host in hosts { flow.insert(&build_device_card(host, state), -1); }
 }

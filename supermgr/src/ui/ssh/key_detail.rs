@@ -80,9 +80,34 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
     // --- Identity card ------------------------------------------------------
 
     let identity = design::card("Identity");
-    let (fingerprint_row, fingerprint_label) = design::live_detail_row("Fingerprint", true);
-    fingerprint_label.set_wrap(true);
-    fingerprint_label.set_max_width_chars(26);
+    let fingerprint_label = gtk4::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk4::pango::WrapMode::Char)
+        .hexpand(true)
+        .css_classes(["monospace"])
+        .build();
+    let fingerprint_body = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    fingerprint_body.set_hexpand(true);
+    fingerprint_body.append(
+        &gtk4::Label::builder()
+            .label("Fingerprint")
+            .xalign(0.0)
+            .css_classes(["caption", "dim-label"])
+            .build(),
+    );
+    fingerprint_body.append(&fingerprint_label);
+    let fingerprint_content = gtk4::Box::builder()
+        .spacing(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(14)
+        .margin_end(10)
+        .build();
+    fingerprint_content.append(&fingerprint_body);
+    let fingerprint_row = adw::PreferencesRow::builder()
+        .child(&fingerprint_content)
+        .build();
 
     let fp_copy_btn = gtk4::Button::builder()
         .icon_name("edit-copy-symbolic")
@@ -90,7 +115,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
         .css_classes(["flat"])
         .valign(gtk4::Align::Center)
         .build();
-    fingerprint_row.add_suffix(&fp_copy_btn);
+    fingerprint_content.append(&fp_copy_btn);
     identity.add(&fingerprint_row);
 
     {
@@ -105,6 +130,7 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
 
     let (tags_row, tags_label) = design::live_detail_row("Tags", false);
     tags_label.set_wrap(true);
+    tags_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
     tags_label.set_max_width_chars(26);
     tags_label.set_visible(false);
     identity.add(&tags_row);
@@ -151,7 +177,8 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
 
     // --- Deployment card ----------------------------------------------------
 
-    let deployed_card = design::card("Deployed to");
+    let deployed_card = design::card("Key usage");
+    deployed_card.set_description(Some("Login assignments and recorded public-key installations. Remote files are not checked in the background."));
     let deployed_list = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
@@ -208,6 +235,69 @@ pub fn build_ssh_key_detail() -> (SshKeyDetail, gtk4::Widget) {
     (bundle, widget)
 }
 
+pub fn populate_key_usage(
+    list: &gtk4::ListBox,
+    key: &SshKeySummary,
+    hosts: &[HostSummary],
+    tx: &std::sync::mpsc::Sender<crate::app::AppMsg>,
+) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    let mut ids = key.assigned_host_ids.clone();
+    ids.extend(&key.deployed_host_ids);
+    ids.sort();
+    ids.dedup();
+    ids.sort_by_key(|id| {
+        hosts
+            .iter()
+            .find(|host| host.id == *id)
+            .map(|host| host.label.to_lowercase())
+            .unwrap_or_default()
+    });
+    if ids.is_empty() {
+        list.append(&adw::ActionRow::builder().title("No recorded use")
+            .subtitle("Assign this key in a host's connection settings, or use Push to Hosts to install its public key.").subtitle_lines(3).build());
+    }
+    for id in ids {
+        let host = hosts.iter().find(|host| host.id == id);
+        let assigned = key.assigned_host_ids.contains(&id);
+        let deployed = key.deployed_host_ids.contains(&id);
+        let usage = match (assigned, deployed) {
+            (true, true) => "Used for login · Deployment recorded",
+            (true, false) => "Used for login · No deployment recorded",
+            _ => "Deployment recorded · Not assigned for login",
+        };
+        let row = adw::ActionRow::builder()
+            .title(
+                &host
+                    .map(|host| host.label.clone())
+                    .unwrap_or_else(|| format!("Removed host · {id}")),
+            )
+            .subtitle(usage)
+            .title_lines(1)
+            .subtitle_lines(2)
+            .build();
+        row.add_prefix(&design::icon(design::icons::HOST));
+        if host.is_some() {
+            let open = gtk4::Button::builder()
+                .icon_name("go-next-symbolic")
+                .tooltip_text("Open host")
+                .valign(gtk4::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let tx = tx.clone();
+            open.connect_clicked(move |_| {
+                tx.send(crate::app::AppMsg::SelectSshHost(id.to_string()))
+                    .ok();
+            });
+            row.add_suffix(&open);
+            row.set_activatable_widget(Some(&open));
+        }
+        list.append(&row);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Update
 // ---------------------------------------------------------------------------
@@ -222,7 +312,9 @@ pub fn update_ssh_key_detail(
     deployed_host_ids: &[String],
 ) {
     detail.key_name_label.set_label(&key.name);
-    detail.key_type_badge.set_label(&format!("{:?}", key.key_type));
+    detail
+        .key_type_badge
+        .set_label(&format!("{:?}", key.key_type));
     detail.fingerprint_label.set_label(&key.fingerprint);
     detail.public_key_view.buffer().set_text(public_key_text);
 
@@ -249,7 +341,10 @@ pub fn update_ssh_key_detail(
                 .iter()
                 .find(|h| h.id.to_string() == *host_id)
                 .map_or(host_id.as_str(), |h| h.label.as_str());
-            let row = adw::ActionRow::builder().title(label).activatable(false).build();
+            let row = adw::ActionRow::builder()
+                .title(label)
+                .activatable(false)
+                .build();
             row.add_prefix(&design::icon(design::icons::HOST));
             detail.deployed_list.append(&row);
         }

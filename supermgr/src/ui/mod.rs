@@ -47,8 +47,6 @@ use libadwaita::prelude::*;
 use tracing::{error, info};
 
 use supermgr_core::vpn::{profile::ProfileSummary, state::VpnState};
-use supermgr_core::ssh::key::SshKeySummary;
-use supermgr_core::host::HostSummary;
 
 use crate::app::{AppMsg, AppState};
 use crate::dbus_client::{
@@ -738,11 +736,8 @@ pub fn build_ui(
         .child(&keys_content_stack)
         .build();
 
-    let keys_split = adw::NavigationSplitView::builder().vexpand(true).build();
-    keys_split.set_min_sidebar_width(280.0);
-    keys_split.set_max_sidebar_width(400.0);
-    keys_split.set_sidebar(Some(&keys_sidebar_page));
-    keys_split.set_content(Some(&keys_content_page));
+    let keys_split = ssh::key_list::build_ssh_key_split(&keys_sidebar_page, &keys_content_page);
+    layout::remember_split(&keys_split, &app_settings, "keys");
 
     view_stack.add_titled(&keys_split, Some("keys"), "Keys");
     let keys_page_ref = view_stack.page(&keys_split);
@@ -1448,18 +1443,16 @@ pub fn build_ui(
         let key_name_label = ssh_key_detail.key_name_label.clone();
         let key_type_badge = ssh_key_detail.key_type_badge.clone();
         let fingerprint_label = ssh_key_detail.fingerprint_label.clone();
-        let _public_key_view = ssh_key_detail.public_key_view.clone();
+        let public_key_view = ssh_key_detail.public_key_view.clone();
         let tags_label = ssh_key_detail.tags_label.clone();
         let deployed_list = ssh_key_detail.deployed_list.clone();
         let key_detail_stack = ssh_key_detail.detail_stack.clone();
         let rt_for_key = rt.clone();
         let tx_for_key = tx.clone();
         ssh_key_list.connect_row_activated(move |_list, row| {
-            let idx = row.index() as usize;
             let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            let mut sorted: Vec<SshKeySummary> = s.ssh_keys.clone();
-            sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            if let Some(key) = sorted.get(idx) {
+            let key = s.ssh_keys.iter().find(|key| key.id.to_string() == row.widget_name()).cloned();
+            if let Some(key) = key {
                 key_name_label.set_label(&key.name);
                 key_type_badge.set_label(&format!("{:?}", key.key_type));
                 fingerprint_label.set_label(&key.fingerprint);
@@ -1468,23 +1461,8 @@ pub fn build_ui(
                 tags_label.set_label(&key.tags.join(", "));
                 tags_label.set_visible(!key.tags.is_empty());
 
-                // Clear deployed-to list
-                while let Some(child) = deployed_list.first_child() {
-                    deployed_list.remove(&child);
-                }
-                let deployed_row = if key.deployed_count == 0 {
-                    adw::ActionRow::builder()
-                        .title("Not deployed anywhere")
-                        .subtitle("Use Push to Hosts to install it")
-                        .activatable(false)
-                        .build()
-                } else {
-                    adw::ActionRow::builder()
-                        .title(format!("{} host(s)", key.deployed_count))
-                        .activatable(false)
-                        .build()
-                };
-                deployed_list.append(&deployed_row);
+                public_key_view.buffer().set_text("Loading public key…");
+                ssh::key_detail::populate_key_usage(&deployed_list, &key, &s.hosts, &tx_for_key);
 
                 key_detail_stack.set_visible_child_name("detail");
                 keys_content_stack.set_visible_child_name("key-detail");
@@ -1495,9 +1473,9 @@ pub fn build_ui(
                 let key_id = key.id.to_string();
                 let tx2 = tx_for_key.clone();
                 rt_for_key.spawn(async move {
-                    match crate::dbus_client::dbus_ssh_export_public_key(key_id).await {
+                    match crate::dbus_client::dbus_ssh_export_public_key(key_id.clone()).await {
                         Ok(pubkey) => {
-                            let _ = tx2.send(AppMsg::SshPublicKeyFetched(pubkey));
+                            let _ = tx2.send(AppMsg::SshPublicKeyFetched { key_id, text: pubkey });
                         }
                         Err(e) => {
                             tracing::error!("fetch public key: {e}");
@@ -1529,33 +1507,10 @@ pub fn build_ui(
             if !row.is_selectable() {
                 return;
             }
-            let idx = row.index();
             let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-            // Reconstruct the grouped order to find which host this row maps to.
-            let mut groups: std::collections::BTreeMap<String, Vec<HostSummary>> =
-                std::collections::BTreeMap::new();
-            for host in &s.hosts {
-                let group_name = if host.group.is_empty() {
-                    "Ungrouped".to_owned()
-                } else {
-                    host.group.clone()
-                };
-                groups.entry(group_name).or_default().push(host.clone());
-            }
-            for hosts in groups.values_mut() {
-                hosts.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-            }
-            // Flatten with group headers as None.
-            let mut flat: Vec<Option<HostSummary>> = Vec::new();
-            for hosts_in_group in groups.values() {
-                flat.push(None); // group header
-                for h in hosts_in_group {
-                    flat.push(Some(h.clone()));
-                }
-            }
-
-            if let Some(Some(host)) = flat.get(idx as usize) {
-                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.hosts);
+            let selected_host = s.hosts.iter().find(|host| host.id.to_string() == row.widget_name()).cloned();
+            if let Some(ref host) = selected_host {
+                ssh::host_detail::update_ssh_host_detail(&ssh_host_detail_for_closure, host, &s.hosts, &s.ssh_keys);
                 hosts_content_stack.set_visible_child_name("host-detail");
                 s.selected_ssh_host = Some(host.id.to_string());
                 s.selected_ssh_key = None;
@@ -1590,6 +1545,14 @@ pub fn build_ui(
                     });
                 }
             }
+        });
+    }
+
+    {
+        let target = ssh_host_detail.connection_issue_host.clone();
+        let tx = tx.clone();
+        ssh_host_detail.connection_notice.connect_button_clicked(move |_| {
+            if let Some(id) = target.get() { let _ = tx.send(AppMsg::EditSshHost(id.to_string())); }
         });
     }
 
@@ -3469,8 +3432,10 @@ pub fn build_ui(
                     }
                 }
                 // === SSH messages =========================================
-                AppMsg::SshPublicKeyFetched(pubkey) => {
-                    rx_ssh_key_pubkey_view.buffer().set_text(&pubkey);
+                AppMsg::SshPublicKeyFetched { key_id, text: pubkey } => {
+                    if rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_key.as_deref() == Some(&key_id) {
+                        rx_ssh_key_pubkey_view.buffer().set_text(&pubkey);
+                    }
                 }
                 AppMsg::SshKeysRefreshed(keys) => {
                     {
@@ -3478,7 +3443,7 @@ pub fn build_ui(
                         s.ssh_keys = keys;
                     }
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
-                    let filter = s.ssh_filter.clone();
+                    let filter = rx_ssh_key_search.text().to_string();
                     populate_ssh_key_list(
                         &rx_ssh_key_list,
                         &s.ssh_keys,
@@ -3488,6 +3453,12 @@ pub fn build_ui(
                         &rx_tx,
                         &filter,
                     );
+                    if let Some(host) = s.hosts.iter().find(|host| Some(host.id.to_string()).as_ref() == s.selected_ssh_host.as_ref()) {
+                        ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.hosts, &s.ssh_keys);
+                    }
+                    if let Some(key) = s.ssh_keys.iter().find(|key| Some(key.id.to_string()).as_ref() == s.selected_ssh_key.as_ref()) {
+                        ssh::key_detail::populate_key_usage(&rx_key_usage, key, &s.hosts, &rx_tx);
+                    }
                     // If the selected key was deleted, go back to empty.
                     if let Some(sel) = &s.selected_ssh_key {
                         if !s.ssh_keys.iter().any(|k| k.id.to_string() == *sel) {
@@ -3501,6 +3472,9 @@ pub fn build_ui(
                 AppMsg::SshHostsRefreshed(hosts) => {
                     {
                         let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        for key in &mut s.ssh_keys {
+                            key.assigned_host_ids = hosts.iter().filter(|host| host.auth_key_id == Some(key.id) && matches!(host.auth_method, supermgr_core::host::AuthMethod::Key | supermgr_core::host::AuthMethod::Certificate)).map(|host| host.id).collect();
+                        }
                         s.hosts = hosts;
                     }
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
@@ -3516,10 +3490,14 @@ pub fn build_ui(
                         &filter,
                         &health,
                     );
+                    populate_ssh_key_list(&rx_ssh_key_list, &s.ssh_keys, s.selected_ssh_key.as_deref(), &rx_window, &rx_rt, &rx_tx, &rx_ssh_key_search.text());
+                    if let Some(key) = s.ssh_keys.iter().find(|key| Some(key.id.to_string()).as_ref() == s.selected_ssh_key.as_ref()) {
+                        ssh::key_detail::populate_key_usage(&rx_key_usage, key, &s.hosts, &rx_tx);
+                    }
                     if let Some(sel) = &s.selected_ssh_host {
                         if let Some(host) = s.hosts.iter().find(|h| h.id.to_string() == *sel) {
                             // Refresh the detail panel with updated data.
-                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.hosts);
+                            ssh::host_detail::update_ssh_host_detail(&rx_ssh_host_detail, host, &s.hosts, &s.ssh_keys);
                         } else {
                             drop(s);
                             rx_app_state.lock().unwrap_or_else(|e| e.into_inner()).selected_ssh_host = None;
@@ -3597,6 +3575,23 @@ pub fn build_ui(
                 } => {
                     rx_toast_overlay
                         .add_toast(adw::Toast::new(&format!("{host_label}: {message}")));
+                }
+                AppMsg::SelectSshHost(host_id) => {
+                    rx_view_stack.set_visible_child_name("hosts");
+                    rx_ssh_host_search.set_text("");
+                    let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                    populate_ssh_host_list(&rx_ssh_host_list, &s.hosts, Some(&host_id), &rx_window, &rx_rt, &rx_tx, "", &s.host_health);
+                    drop(s);
+                    let mut child = rx_ssh_host_list.first_child();
+                    while let Some(row) = child {
+                        child = row.next_sibling();
+                        if row.widget_name() == host_id {
+                            if let Ok(row) = row.downcast::<gtk4::ListBoxRow>() {
+                                rx_ssh_host_list.emit_by_name::<()>("row-activated", &[&row]);
+                            }
+                            break;
+                        }
+                    }
                 }
                 AppMsg::EditSshHost(host_id) => {
                     let s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());

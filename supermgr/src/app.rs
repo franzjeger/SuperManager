@@ -297,7 +297,9 @@ pub enum AppMsg {
     },
     // SSH messages
     /// The public key text for the currently selected SSH key was fetched.
-    SshPublicKeyFetched(String),
+    SshPublicKeyFetched { key_id: String, text: String },
+    /// Open an assigned host from the key usage panel.
+    SelectSshHost(String),
     /// SSH key list was refreshed from the daemon.
     SshKeysRefreshed(Vec<SshKeySummary>),
     /// SSH host list was refreshed from the daemon.

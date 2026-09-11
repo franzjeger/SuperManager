@@ -259,10 +259,12 @@ pub fn populate_ssh_host_list(
             let view = host_row_view(host, health.get(&host.id.to_string()).copied());
 
             let row = adw::ActionRow::builder()
-                .title(host.label.as_str())
-                .subtitle(view.meta.as_str())
+                .title(&host.label)
+                .subtitle(&view.meta)
+                .title_lines(1).subtitle_lines(1)
                 .activatable(true)
                 .build();
+            row.set_widget_name(&host.id.to_string());
 
             // Reachability, in the shared vocabulary rather than as a
             // bullet character with a colour class hung on it.

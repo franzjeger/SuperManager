@@ -1,8 +1,8 @@
 //! SSH key list sidebar widget.
 //!
 //! Builds a [`gtk4::ListBox`] where each row is an [`adw::ActionRow`] showing
-//! key name, type, and truncated fingerprint.  Context menu offers Push,
-//! Revoke, Export, and Delete.
+//! full-width names with metadata underneath. Key actions are available
+//! from a menu button and the right-click menu.
 
 use std::sync::mpsc;
 
@@ -56,6 +56,14 @@ pub fn build_ssh_key_list() -> gtk4::ListBox {
 // Populate
 // ---------------------------------------------------------------------------
 
+/// Leave enough space for key names even when the app navigation is visible.
+pub fn build_ssh_key_split(
+    sidebar: &adw::NavigationPage,
+    content: &adw::NavigationPage,
+) -> gtk4::Paned {
+    crate::ui::layout::split(sidebar, content, 320)
+}
+
 /// Rebuild the key list from the current SSH keys.
 pub fn populate_ssh_key_list(
     list_box: &gtk4::ListBox,
@@ -91,7 +99,11 @@ pub fn populate_ssh_key_list(
 
     if filtered.is_empty() {
         let placeholder = adw::ActionRow::builder()
-            .title(if filter.is_empty() { "No SSH keys" } else { "No matching keys" })
+            .title(if filter.is_empty() {
+                "No SSH keys"
+            } else {
+                "No matching keys"
+            })
             .subtitle(if filter.is_empty() {
                 "Generate or import a key to get started"
             } else {
@@ -108,89 +120,21 @@ pub fn populate_ssh_key_list(
     sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     for key in &sorted {
+        let deployment = format!("{} assigned", key.assigned_host_ids.len());
         let row = adw::ActionRow::builder()
-            .title(key.name.as_str())
-            .subtitle(&short_fingerprint(&key.fingerprint))
+            .title(&key.name)
+            .subtitle(&format!(
+                "{:?} · {deployment}\n{}",
+                key.key_type,
+                short_fingerprint(&key.fingerprint)
+            ))
+            .title_lines(1)
+            .subtitle_lines(2)
             .activatable(true)
+            .tooltip_text(format!("{}\n{}", key.name, key.fingerprint))
             .build();
         row.add_prefix(&design::icon(design::icons::KEY));
-
-        // Key type as a badge, as backends are in the VPN list — the same
-        // fact in the same shape, so the two lists read the same way.
-        row.add_suffix(&design::badge(&format!("{:?}", key.key_type)));
-
-        // Deployment count. Zero is worth saying: a key that exists but is
-        // installed nowhere is the one an operator is usually looking for,
-        // and the old list simply omitted the badge in that case, which made
-        // "not deployed" indistinguishable from "not rendered".
-        let deployed = design::badge(&if key.deployed_count == 0 {
-            "unused".to_owned()
-        } else {
-            format!("{} host(s)", key.deployed_count)
-        });
-        deployed.set_tooltip_text(Some(&if key.deployed_count == 0 {
-            "Not deployed to any host".to_owned()
-        } else {
-            format!("Deployed to {} host(s)", key.deployed_count)
-        }));
-        row.add_suffix(&deployed);
-
-        // Delete button.
-        let delete_btn = gtk4::Button::builder()
-            .icon_name("user-trash-symbolic")
-            .tooltip_text("Delete key")
-            .css_classes(["flat"])
-            .valign(gtk4::Align::Center)
-            .build();
-        row.add_suffix(&delete_btn);
-
-        let key_id = key.id.to_string();
-        let key_name = key.name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        {
-        let key_id = key_id.clone();
-        let key_name = key_name.clone();
-        let window = window.clone();
-        let rt = rt.clone();
-        let tx = tx.clone();
-        delete_btn.connect_clicked(move |_| {
-            let dialog = adw::AlertDialog::new(
-                Some(&format!("Delete key \"{}\"?", key_name)),
-                Some("The private key will be removed from the keyring. This cannot be undone."),
-            );
-            dialog.add_response("cancel", "Cancel");
-            dialog.add_response("delete", "Delete");
-            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-            dialog.set_default_response(Some("cancel"));
-            dialog.set_close_response("cancel");
-
-            let key_id = key_id.clone();
-            let rt = rt.clone();
-            let tx = tx.clone();
-            dialog.connect_response(Some("delete"), move |_dlg, _resp| {
-                let key_id = key_id.clone();
-                let tx = tx.clone();
-                rt.spawn(async move {
-                    let msg = match dbus_ssh_delete_key(key_id.clone()).await {
-                        Ok(()) => {
-                            info!("deleted SSH key {}", key_id);
-                            let keys = crate::dbus_client::dbus_ssh_list_keys().await.unwrap_or_default();
-                            AppMsg::SshKeysRefreshed(keys)
-                        }
-                        Err(e) => {
-                            error!("delete SSH key failed: {:#}", e);
-                            AppMsg::OperationFailed(e.to_string())
-                        }
-                    };
-                    tx.send(msg).ok();
-                });
-            });
-
-            dialog.present(Some(&window));
-        });
-        }
+        row.set_widget_name(&key.id.to_string());
 
         // ----- Right-click context menu -----
         {
@@ -204,12 +148,27 @@ pub fn populate_ssh_key_list(
             menu_model.append(Some("Push to Hosts"), Some("key-ctx.push"));
 
             let export_section = gio::Menu::new();
-            export_section.append(Some("Export Public Key\u{2026}"), Some("key-ctx.export-pub"));
-            export_section.append(Some("Export Private Key\u{2026}"), Some("key-ctx.export-priv"));
+            export_section.append(
+                Some("Export Public Key\u{2026}"),
+                Some("key-ctx.export-pub"),
+            );
+            export_section.append(
+                Some("Export Private Key\u{2026}"),
+                Some("key-ctx.export-priv"),
+            );
             export_section.append(Some("Export to ~/.ssh/"), Some("key-ctx.export-ssh-dir"));
             menu_model.append_submenu(Some("Export"), &export_section);
 
             menu_model.append(Some("Delete"), Some("key-ctx.delete"));
+
+            let actions = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Key actions")
+                .css_classes(["flat"])
+                .valign(gtk4::Align::Center)
+                .menu_model(&menu_model)
+                .build();
+            row.add_suffix(&actions);
 
             let popover = gtk4::PopoverMenu::from_model(Some(&menu_model));
             popover.set_has_arrow(true);
@@ -301,33 +260,44 @@ pub fn populate_ssh_key_list(
                     let key_id = key_id.clone();
                     let rt = rt.clone();
                     let tx = tx.clone();
-                    dialog.save(Some(&window_exp), gtk4::gio::Cancellable::NONE, move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                let key_id = key_id.clone();
-                                let tx = tx.clone();
-                                let path = path.clone();
-                                rt.spawn(async move {
-                                    match dbus_ssh_export_public_key(key_id).await {
-                                        Ok(content) => {
-                                            if let Err(e) = write_key_file(&path, &content, 0o644) {
-                                                tx.send(AppMsg::OperationFailed(
-                                                    format!("Failed to write public key: {}", e),
-                                                )).ok();
-                                            } else {
-                                                tx.send(AppMsg::ShowToast(
-                                                    format!("Public key exported to {}", path.display()),
-                                                )).ok();
+                    dialog.save(
+                        Some(&window_exp),
+                        gtk4::gio::Cancellable::NONE,
+                        move |result| {
+                            if let Ok(file) = result {
+                                if let Some(path) = file.path() {
+                                    let key_id = key_id.clone();
+                                    let tx = tx.clone();
+                                    let path = path.clone();
+                                    rt.spawn(async move {
+                                        match dbus_ssh_export_public_key(key_id).await {
+                                            Ok(content) => {
+                                                if let Err(e) =
+                                                    write_key_file(&path, &content, 0o644)
+                                                {
+                                                    tx.send(AppMsg::OperationFailed(format!(
+                                                        "Failed to write public key: {}",
+                                                        e
+                                                    )))
+                                                    .ok();
+                                                } else {
+                                                    tx.send(AppMsg::ShowToast(format!(
+                                                        "Public key exported to {}",
+                                                        path.display()
+                                                    )))
+                                                    .ok();
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tx.send(AppMsg::OperationFailed(e.to_string()))
+                                                    .ok();
                                             }
                                         }
-                                        Err(e) => {
-                                            tx.send(AppMsg::OperationFailed(e.to_string())).ok();
-                                        }
-                                    }
-                                });
+                                    });
+                                }
                             }
-                        }
-                    });
+                        },
+                    );
                 });
                 action_group.add_action(&action);
             }
@@ -348,33 +318,44 @@ pub fn populate_ssh_key_list(
                     let key_id = key_id.clone();
                     let rt = rt.clone();
                     let tx = tx.clone();
-                    dialog.save(Some(&window_exp), gtk4::gio::Cancellable::NONE, move |result| {
-                        if let Ok(file) = result {
-                            if let Some(path) = file.path() {
-                                let key_id = key_id.clone();
-                                let tx = tx.clone();
-                                let path = path.clone();
-                                rt.spawn(async move {
-                                    match dbus_ssh_export_private_key(key_id).await {
-                                        Ok(content) => {
-                                            if let Err(e) = write_key_file(&path, &content, 0o600) {
-                                                tx.send(AppMsg::OperationFailed(
-                                                    format!("Failed to write private key: {}", e),
-                                                )).ok();
-                                            } else {
-                                                tx.send(AppMsg::ShowToast(
-                                                    format!("Private key exported to {}", path.display()),
-                                                )).ok();
+                    dialog.save(
+                        Some(&window_exp),
+                        gtk4::gio::Cancellable::NONE,
+                        move |result| {
+                            if let Ok(file) = result {
+                                if let Some(path) = file.path() {
+                                    let key_id = key_id.clone();
+                                    let tx = tx.clone();
+                                    let path = path.clone();
+                                    rt.spawn(async move {
+                                        match dbus_ssh_export_private_key(key_id).await {
+                                            Ok(content) => {
+                                                if let Err(e) =
+                                                    write_key_file(&path, &content, 0o600)
+                                                {
+                                                    tx.send(AppMsg::OperationFailed(format!(
+                                                        "Failed to write private key: {}",
+                                                        e
+                                                    )))
+                                                    .ok();
+                                                } else {
+                                                    tx.send(AppMsg::ShowToast(format!(
+                                                        "Private key exported to {}",
+                                                        path.display()
+                                                    )))
+                                                    .ok();
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tx.send(AppMsg::OperationFailed(e.to_string()))
+                                                    .ok();
                                             }
                                         }
-                                        Err(e) => {
-                                            tx.send(AppMsg::OperationFailed(e.to_string())).ok();
-                                        }
-                                    }
-                                });
+                                    });
+                                }
                             }
-                        }
-                    });
+                        },
+                    );
                 });
                 action_group.add_action(&action);
             }
@@ -392,7 +373,8 @@ pub fn populate_ssh_key_list(
                     let (priv_name, pub_name) = ssh_dir_filenames(key_type, &key_name);
                     let ssh_dir = std::path::PathBuf::from(
                         std::env::var("HOME").unwrap_or_else(|_| "/root".into()),
-                    ).join(".ssh");
+                    )
+                    .join(".ssh");
                     let priv_path = ssh_dir.join(&priv_name);
                     let pub_path = ssh_dir.join(&pub_name);
 
@@ -434,9 +416,7 @@ pub fn populate_ssh_key_list(
                         });
                         dialog.present(Some(&window_exp));
                     } else {
-                        do_export_to_ssh_dir(
-                            key_id, priv_path, pub_path, priv_name, rt, tx,
-                        );
+                        do_export_to_ssh_dir(key_id, priv_path, pub_path, priv_name, rt, tx);
                     }
                 });
                 action_group.add_action(&action);
@@ -444,14 +424,11 @@ pub fn populate_ssh_key_list(
 
             row.insert_action_group("key-ctx", Some(&action_group));
 
-            let gesture = gtk4::GestureClick::builder()
-                .button(3)
-                .build();
+            let gesture = gtk4::GestureClick::builder().button(3).build();
             let popover_ref = popover.clone();
             gesture.connect_pressed(move |_gesture, _n, x, y| {
-                popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
-                    x as i32, y as i32, 1, 1,
-                )));
+                popover_ref
+                    .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 popover_ref.popup();
             });
             row.add_controller(gesture);
@@ -489,11 +466,7 @@ pub fn ssh_dir_filenames(key_type: SshKeyType, name: &str) -> (String, String) {
 }
 
 /// Write key content to a file with the given Unix permission mode.
-fn write_key_file(
-    path: &std::path::Path,
-    content: &str,
-    mode: u32,
-) -> std::io::Result<()> {
+fn write_key_file(path: &std::path::Path, content: &str, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     // Ensure parent directory exists.
@@ -520,15 +493,19 @@ fn do_export_to_ssh_dir(
             Ok(c) => c,
             Err(e) => {
                 tx.send(AppMsg::OperationFailed(format!(
-                    "Failed to export private key: {}", e
-                ))).ok();
+                    "Failed to export private key: {}",
+                    e
+                )))
+                .ok();
                 return;
             }
         };
         if let Err(e) = write_key_file(&priv_path, &priv_content, 0o600) {
             tx.send(AppMsg::OperationFailed(format!(
-                "Failed to write private key: {}", e
-            ))).ok();
+                "Failed to write private key: {}",
+                e
+            )))
+            .ok();
             return;
         }
 
@@ -537,21 +514,27 @@ fn do_export_to_ssh_dir(
             Ok(c) => c,
             Err(e) => {
                 tx.send(AppMsg::OperationFailed(format!(
-                    "Failed to export public key: {}", e
-                ))).ok();
+                    "Failed to export public key: {}",
+                    e
+                )))
+                .ok();
                 return;
             }
         };
         if let Err(e) = write_key_file(&pub_path, &pub_content, 0o644) {
             tx.send(AppMsg::OperationFailed(format!(
-                "Failed to write public key: {}", e
-            ))).ok();
+                "Failed to write public key: {}",
+                e
+            )))
+            .ok();
             return;
         }
 
         tx.send(AppMsg::ShowToast(format!(
-            "Exported to ~/.ssh/{}", priv_name
-        ))).ok();
+            "Exported to ~/.ssh/{}",
+            priv_name
+        )))
+        .ok();
     });
 }
 
@@ -563,9 +546,9 @@ pub fn export_all_keys_to_ssh_dir(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    let ssh_dir = std::path::PathBuf::from(
-        std::env::var("HOME").unwrap_or_else(|_| "/root".into()),
-    ).join(".ssh");
+    let ssh_dir =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
+            .join(".ssh");
 
     for key in keys {
         let (priv_name, _pub_name) = ssh_dir_filenames(key.key_type, &key.name);
