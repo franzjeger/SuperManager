@@ -53,12 +53,7 @@ pub fn build_compliance_page(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) -> ComplianceView {
-    let (scroller, content) = design::detail_body();
-
-    let title = gtk4::Label::new(Some("Compliance"));
-    title.add_css_class("title-2");
-    title.set_halign(gtk4::Align::Start);
-    content.append(&title);
+    let (scroller, content) = design::workspace_body("Compliance", "Run a supported baseline, inspect evidence and compare previous results.");
 
     let host_list = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.append(&host_list);
@@ -74,7 +69,7 @@ pub fn build_compliance_page(
     status_slot.set_child(Some(&design::empty_state(
         design::icon_name(design::icons::SHIELD),
         "No scan selected",
-        "Pick a Linux host above and run a scan, or open a previous run from its history.",
+        "Pick a supported host above to run its baseline, or open a previous Linux run from its history.",
     )));
 
     ComplianceView {
@@ -99,17 +94,17 @@ impl ComplianceView {
             let group = design::card("Hosts");
             let row = adw::ActionRow::new();
             row.set_title("No SSH hosts");
-            row.set_subtitle("Add a host in the SSH section first — compliance runs over SSH.");
+            row.set_subtitle("Add a host in the SSH section first. Linux uses SSH; FortiGate uses its API.");
             group.add(&row);
             self.host_list.append(&group);
             return;
         }
 
         let group = design::card("Hosts");
-        group.set_description(Some(
-            "Seven read-only checks over SSH: sshd config, kernel core pattern, \
-             automatic updates, journald and the host firewall.",
-        ));
+        group.set_description(Some(&format!(
+            "Linux: {} read-only SSH checks. FortiGate: configuration baseline over its API. Results apply to the checks performed.",
+            supermgr_core::ssh_compliance::check_count(),
+        )));
         for host in hosts {
             group.add(&self.host_row(host));
         }
