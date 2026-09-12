@@ -200,11 +200,16 @@ pub async fn repair() -> Result<String, String> {
     // does not perform.
     state = health().await;
     if state.daemon_running && state.backend_state == "Stopped" {
-        let out = tokio::process::Command::new("tailscale")
-            .args(["up", "--timeout=15s"])
-            .output()
-            .await
-            .map_err(|e| format!("failed to run tailscale up: {e}"))?;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("tailscale")
+                .args(["up"])
+                .kill_on_drop(true)
+                .output()
+        )
+        .await
+        .map_err(|_| "tailscale up timed out".to_owned())?
+        .map_err(|e| format!("failed to run tailscale up: {e}"))?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_owned();
             return Err(format!("tailscale up failed: {stderr}"));

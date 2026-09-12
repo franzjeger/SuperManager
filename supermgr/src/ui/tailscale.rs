@@ -273,15 +273,10 @@ impl TailscaleView {
                 "Log in to Tailscale",
                 Remedy::Login,
             ),
-            // `tailscale down`: the daemon runs but was told to carry
-            // nothing. Distinct from "not running" because the remedy the
-            // daemon applies is `tailscale up`, not systemctl.
-            Ok(h) if h.backend_state == "Stopped" => self.show_remedy(
-                "Tailscale is switched off",
-                "tailscaled is running but has been brought down. \
-                 SuperManager can bring it back up.",
-                "Bring Tailscale up",
-                Remedy::Repair,
+            Ok(h) if h.backend_state == "Stopped" => self.show_status(
+                design::icon_name(design::icons::VPN_OFF),
+                "Not connected",
+                "Connect Tailscale to view your tailnet devices.",
             ),
             // Healthy, so a node listing is on its way — whoever sent this
             // message follows it with one. Render the in-between honestly.
@@ -315,6 +310,9 @@ impl TailscaleView {
         self.status_slot
             .set_child(Some(&design::empty_state(icon, title, description)));
         self.stack.set_visible_child_name("status");
+        if let Some(parent) = self.search.parent() {
+            parent.set_visible(false);
+        }
         self.subtitle.set_text("");
     }
 
@@ -337,6 +335,9 @@ impl TailscaleView {
         page.set_child(Some(&button));
         self.status_slot.set_child(Some(&page));
         self.stack.set_visible_child_name("status");
+        if let Some(parent) = self.search.parent() {
+            parent.set_visible(false);
+        }
         self.subtitle.set_text("");
     }
 
@@ -386,6 +387,9 @@ impl TailscaleView {
     }
 
     fn show_nodes(&self, nodes: &[TailscaleNode]) {
+        if let Some(parent) = self.search.parent() {
+            parent.set_visible(true);
+        }
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }

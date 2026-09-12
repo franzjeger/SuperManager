@@ -218,7 +218,7 @@ pub async fn set_running(profile_id: &str, running: bool) -> Result<String, Stri
     let _guard = CONTROL_LOCK.lock().await;
     require_profile(profile_id).await?;
     mutate(&if running {
-        args(&["up", "--timeout=15s"])
+        args(&["up"])
     } else {
         args(&["down"])
     })
