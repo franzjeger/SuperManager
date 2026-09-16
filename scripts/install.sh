@@ -189,7 +189,7 @@ if [ "$DO_DEPS" = 1 ]; then
             say "OpenVPN 3 already installed"
         else
             say "Building OpenVPN 3 from source"
-            "$BREW" install cmake asio jsoncpp openssl@3 lz4
+            "$BREW" install cmake asio jsoncpp openssl@3 lz4 fmt
             # Use the in-tree script when this is a checkout, otherwise
             # fetch it: the documented install path is a curl pipe, which
             # has no repository to run it from.

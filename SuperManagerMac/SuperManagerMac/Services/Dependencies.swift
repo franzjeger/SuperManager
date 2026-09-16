@@ -68,7 +68,7 @@ enum Dependencies {
              manualNote: nil),
         Tool(id: "openvpn3",
              feature: "Azure VPN (Entra ID sign-in)",
-             binaries: ["openvpn3", "openvpn-patched"],
+             binaries: ["openvpn3"],
              formula: nil,
              // Microsoft's gateway rejects OpenVPN 2.x in the Entra
              // flow, and upstream ships no bottle — it has to be built.

@@ -60,6 +60,10 @@ pub struct OpenVpn {}
 pub struct OvpnConnectArgs {
     pub profile_id: String,
     pub config_file: String,
+    /// Azure Entra ID tokens require our OpenVPN 3 client path.
+    /// Never silently fall back to OpenVPN 2 for these sessions.
+    #[serde(default)]
+    pub require_openvpn3: bool,
     /// Optional credentials for `--auth-user-pass` profiles.
     #[serde(default)]
     pub username: Option<String>,
@@ -167,7 +171,7 @@ impl OpenVpn {
     /// its own and writes its PID to the file we pass via
     /// `--writepid`.
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
-        let openvpn = locate_openvpn()?;
+        let openvpn = locate_openvpn(args.require_openvpn3)?;
         tracing::info!(
             "ovpn_connect: profile={} config={} openvpn={}",
             args.profile_id,
@@ -966,7 +970,14 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// 2.x fallback paths exist for non-Azure profiles (regular
 /// OpenVPN servers don't care about 2.x vs 3.x) but should not
 /// be relied on for Azure VPN.
-fn locate_openvpn() -> anyhow::Result<PathBuf> {
+fn locate_openvpn(require_openvpn3: bool) -> anyhow::Result<PathBuf> {
+    select_openvpn(require_openvpn3, |path| path.is_file())
+}
+
+fn select_openvpn(
+    require_openvpn3: bool,
+    is_available: impl Fn(&Path) -> bool,
+) -> anyhow::Result<PathBuf> {
     // OpenVPN 3 first. Required for Azure VPN with Entra ID.
     const OVPN3_PATHS: &[&str] = &[
         "/opt/homebrew/bin/openvpn3",
@@ -974,9 +985,16 @@ fn locate_openvpn() -> anyhow::Result<PathBuf> {
         "/opt/local/bin/openvpn3",
     ];
     for path in OVPN3_PATHS {
-        if Path::new(path).exists() {
+        if is_available(Path::new(path)) {
             return Ok(PathBuf::from(path));
         }
+    }
+    if require_openvpn3 {
+        return Err(anyhow!(
+            "Azure VPN requires OpenVPN 3, which is not installed. \
+             OpenVPN 2 can fail to fit the Microsoft sign-in token in its TLS buffer. \
+             Install OpenVPN 3 using contrib/build-openvpn3-mac.sh, then try again."
+        ));
     }
     // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
     // Useful for non-Azure profiles where 2.x works fine — kept
@@ -986,17 +1004,17 @@ fn locate_openvpn() -> anyhow::Result<PathBuf> {
         "/usr/local/bin/openvpn-patched",
     ];
     for path in PATCHED_PATHS {
-        if Path::new(path).exists() {
+        if is_available(Path::new(path)) {
             return Ok(PathBuf::from(path));
         }
     }
     for prefix in BREW_PREFIXES {
         let candidate = Path::new(prefix).join("sbin/openvpn");
-        if candidate.exists() {
+        if is_available(&candidate) {
             return Ok(candidate);
         }
         let alt = Path::new(prefix).join("bin/openvpn");
-        if alt.exists() {
+        if is_available(&alt) {
             return Ok(alt);
         }
     }
@@ -1242,6 +1260,39 @@ async fn find_openvpn_pid_for(safe: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_never_falls_back_to_openvpn2() {
+        for installed in ["/opt/homebrew/sbin/openvpn", "/opt/homebrew/bin/openvpn-patched"] {
+            let err = select_openvpn(true, |path| path == Path::new(installed)).unwrap_err();
+            assert!(err.to_string().contains("Azure VPN requires OpenVPN 3"));
+        }
+    }
+
+    #[test]
+    fn azure_selects_openvpn3_when_both_versions_are_installed() {
+        let path = select_openvpn(true, |_| true).unwrap();
+        assert_eq!(path, Path::new("/opt/homebrew/bin/openvpn3"));
+    }
+
+    #[test]
+    fn ordinary_openvpn_keeps_v2_fallback() {
+        let path = select_openvpn(false, |path| path == Path::new("/opt/homebrew/sbin/openvpn"))
+            .unwrap();
+        assert_eq!(path, Path::new("/opt/homebrew/sbin/openvpn"));
+    }
+
+    #[test]
+    fn existing_connect_requests_remain_compatible() {
+        let args: OvpnConnectArgs = serde_json::from_str(
+            r#"{"profile_id":"test","config_file":"/tmp/test.ovpn"}"#,
+        ).unwrap();
+        assert!(!args.require_openvpn3);
+        let args: OvpnConnectArgs = serde_json::from_str(
+            r#"{"profile_id":"test","config_file":"/tmp/test.ovpn","require_openvpn3":true}"#,
+        ).unwrap();
+        assert!(args.require_openvpn3);
+    }
 
     #[test]
     fn sanitize_strips_unsafe_chars() {

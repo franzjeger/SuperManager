@@ -12,8 +12,8 @@
 # Homebrew has no `openvpn3` formula on macOS, and no prebuilt
 # binary ships with macOS itself, so we build the upstream
 # `ovpncli` test client from source. It's small (~3 MB), reads
-# auth-user-pass from stdin (matches our helper's invocation
-# pattern), and speaks the same protocol the gateway is expecting.
+# credentials via command-line arguments (matching our helper's
+# invocation), and speaks the protocol the gateway is expecting.
 #
 # What this script installs
 # -------------------------
@@ -25,7 +25,7 @@
 #
 # Prerequisites
 # -------------
-#   brew install cmake asio jsoncpp openssl@3 lz4
+#   brew install cmake asio jsoncpp openssl@3 lz4 fmt
 #   git, make, c++ toolchain (Xcode CLT)
 
 set -euo pipefail
@@ -57,6 +57,7 @@ cmake -B build -G "Unix Makefiles" \
     -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3 \
     -DASIO_DIR=/opt/homebrew/opt/asio \
     -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
     -DCMAKE_PREFIX_PATH=/opt/homebrew
 
 echo "→ Building ovpncli…"
@@ -77,6 +78,5 @@ echo ""
 echo "✓ OpenVPN 3 (ovpncli) installed at $INSTALL_PATH"
 "$INSTALL_PATH" --version 2>&1 | head -3 || true
 echo ""
-echo "Next: rebuild + relaunch SuperManager so the helper picks"
-echo "this up via locate_openvpn (no other code change needed —"
-echo "the openvpn3 path is already wired)."
+echo "Next: reconnect your Azure VPN in SuperManager. The helper"
+echo "automatically selects OpenVPN 3 for the next connection."

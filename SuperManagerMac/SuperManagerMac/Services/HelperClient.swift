@@ -136,11 +136,13 @@ final class HelperClient {
         profileId: String,
         configFile: String,
         username: String? = nil,
-        password: String? = nil
+        password: String? = nil,
+        requireOpenVPN3: Bool = false
     ) async throws -> [String: Any] {
         var params: [String: Any] = [
             "profile_id": profileId,
             "config_file": configFile,
+            "require_openvpn3": requireOpenVPN3,
         ]
         if let u = username { params["username"] = u }
         if let p = password { params["password"] = p }

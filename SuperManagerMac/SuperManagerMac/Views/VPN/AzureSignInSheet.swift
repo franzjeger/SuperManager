@@ -71,9 +71,14 @@ struct AzureSignInSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             case .error(let message):
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+                ScrollView {
+                    Label(message, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 300)
             }
 
             Spacer(minLength: 12)
@@ -230,7 +235,8 @@ struct AzureSignInSheet: View {
                 profileId: profileId,
                 configFile: ovpnPath.path,
                 username: token.username,
-                password: token.accessToken
+                password: token.accessToken,
+                requireOpenVPN3: true
             )
             DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?"), log_path=\(connectResult["log_path"] ?? "?")")
         } catch {

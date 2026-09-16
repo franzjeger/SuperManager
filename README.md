@@ -462,6 +462,7 @@ brew install xcodegen openssl@3 lz4
 # Microsoft's gateway rejects OpenVPN 2.x clients in the AAD flow.
 # No Homebrew formula exists; the contrib script clones upstream
 # and builds it for you.
+brew install cmake asio jsoncpp fmt
 ./contrib/build-openvpn3-mac.sh
 
 # OpenVPN 2.x — fallback for non-Azure profiles
