@@ -440,12 +440,20 @@ extension AppState {
         do {
             if backendLower.contains("wireguard") || backendLower.contains("wire_guard") {
                 backendStr = "wireguard"
-                struct Rendered: Decodable { let conf: String }
+                struct Rendered: Decodable {
+                    let conf: String
+                    let dnsServers: [String]
+                    enum CodingKeys: String, CodingKey {
+                        case conf
+                        case dnsServers = "dns_servers"
+                    }
+                }
                 let r: Rendered = try await client.call(
                     "vpn_render_wireguard_conf",
                     params: ["profile_id": profileId]
                 )
                 args["confContent"] = r.conf
+                args["dns_servers"] = r.dnsServers
             } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
                 backendStr = "openvpn"
                 // OpenVPN connect needs config_file + creds. Read
@@ -633,6 +641,11 @@ extension AppState {
         do {
             struct RenderedConf: Decodable {
                 let conf: String
+                let dnsServers: [String]
+                enum CodingKeys: String, CodingKey {
+                    case conf
+                    case dnsServers = "dns_servers"
+                }
             }
             let rendered: RenderedConf = try await client.call(
                 "vpn_render_wireguard_conf",
@@ -640,7 +653,8 @@ extension AppState {
             )
             let result = try await HelperClient.shared.wgConnect(
                 profileId: profileId,
-                confContent: rendered.conf
+                confContent: rendered.conf,
+                dnsServers: rendered.dnsServers
             )
             let success = (result["success"] as? Bool) ?? false
             let message = (result["message"] as? String)

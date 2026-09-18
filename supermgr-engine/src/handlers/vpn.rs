@@ -790,6 +790,7 @@ impl EngineServer {
         // neither extreme was correct: removing it meant falling back to
         // whatever DHCP hands out, which on a network with a
         // non-answering router resolver is no DNS at all.
+        let mut pushed_dns = Vec::new();
         if !wg.dns.is_empty() {
             if push_dns {
                 let dns = wg
@@ -798,15 +799,15 @@ impl EngineServer {
                     .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
-                let _ = writeln!(out, "DNS = {dns}");
+                pushed_dns = wg.dns.iter().map(|ip| ip.to_string()).collect();
                 tracing::info!(
                     profile = %pid_str,
-                    "wireguard render: pushing DNS ({dns}) — profile opted in"
+                    "wireguard render: extracting DNS ({dns}) for scutil — profile opted in"
                 );
             } else {
                 tracing::info!(
                     profile = %pid_str,
-                    "wireguard render: omitting DNS line — profile keeps system DNS"
+                    "wireguard render: omitting DNS — profile keeps system DNS"
                 );
             }
         }
@@ -885,6 +886,7 @@ impl EngineServer {
                 "conf": out,
                 "profile_id": profile.id.to_string(),
                 "name": profile.name,
+                "dns_servers": pushed_dns,
             }),
         )
     }

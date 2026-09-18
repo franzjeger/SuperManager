@@ -76,6 +76,9 @@ pub struct WgConnectArgs {
     /// `PublicKey`, `Endpoint`, `AllowedIPs`, optional `PresharedKey`.
     /// Daemon constructs this from the stored profile + secret store.
     pub conf_content: String,
+    
+    #[serde(default)]
+    pub dns_servers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,6 +236,10 @@ impl WireGuard {
         }
 
         let interface = detect_interface(&wg_quick, &name).await.ok();
+
+        if !args.dns_servers.is_empty() {
+            crate::dns::set_vpn_dns(&args.dns_servers);
+        }
 
         Ok(WgConnectResult {
             success: true,

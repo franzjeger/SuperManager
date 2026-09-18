@@ -108,10 +108,11 @@ final class HelperClient {
     /// `vpn_render_wireguard_conf` returned — the full file body
     /// including the spliced-in private key.
     @discardableResult
-    func wgConnect(profileId: String, confContent: String) async throws -> [String: Any] {
+    func wgConnect(profileId: String, confContent: String, dnsServers: [String]) async throws -> [String: Any] {
         try await call("wg_connect", params: [
             "profile_id": profileId,
             "conf_content": confContent,
+            "dns_servers": dnsServers,
         ])
     }
 

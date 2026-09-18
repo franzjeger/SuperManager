@@ -90,7 +90,7 @@ pub fn clear_vpn_dns() {
     // never the physical interface's, so scoping the removal to ours
     // loses nothing. `SUPERMGR_DNS_KEY` is also what the updown script
     // writes to when a gateway pushes INTERNAL_IP4_DNS.
-    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nquit\n");
+    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nremove State:/Network/Global/DNS\nquit\n");
     match std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -171,4 +171,48 @@ pub(crate) fn detect_active_network_service() -> Option<String> {
         }
     }
     None
+}
+
+/// Write VPN DNS directly to the State store via `scutil`.
+/// This avoids the persistent Setup store (`networksetup`), meaning
+/// it never leaves "manual DNS" behind if the process crashes.
+pub fn set_vpn_dns(servers: &[String]) {
+    if servers.is_empty() {
+        return;
+    }
+    tracing::info!("set_vpn_dns: setting State DNS to {:?}", servers);
+
+    let mut script = String::new();
+    script.push_str("open\n");
+    script.push_str("d.init\n");
+    script.push_str("d.add ServerAddresses *");
+    for s in servers {
+        script.push(' ');
+        script.push_str(s);
+    }
+    script.push_str("\n");
+    script.push_str(&format!("set {SUPERMGR_DNS_KEY}\n"));
+    script.push_str("set State:/Network/Global/DNS\n");
+    script.push_str("quit\n");
+
+    match std::process::Command::new("/usr/sbin/scutil")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(mut child) => {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(script.as_bytes());
+            }
+            let _ = child.wait();
+        }
+        Err(e) => tracing::warn!("set_vpn_dns: spawn scutil: {e}"),
+    }
+
+    // Flush resolver caches so apps pick up the new resolver instantly
+    let _ = Command::new("/usr/bin/dscacheutil").arg("-flushcache").output();
+    let _ = Command::new("/usr/bin/killall")
+        .args(["-HUP", "mDNSResponder"])
+        .output();
 }
