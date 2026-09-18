@@ -6473,27 +6473,38 @@ pub(crate) enum KillSwitchMode {
 /// `dns_servers` configured and the system DNS is on the local network (not
 /// routed through IPsec).
 async fn current_system_dns_ips() -> Vec<String> {
+    let mut ips: Vec<String> = Vec::new();
     let out = match tokio::process::Command::new("resolvectl")
         .args(["dns", "--no-pager"])
         .output()
         .await
     {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("could not query resolvectl dns: {e}");
-            return Vec::new();
-        }
+        Ok(o) if o.status.success() => Some(o),
+        _ => None,
     };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut ips: Vec<String> = Vec::new();
-    for line in stdout.lines() {
-        // Each line looks like: "Link 2 (enp14s0): 192.0.2.13"
-        // or "Global: 9.9.9.9"
-        if let Some(colon_pos) = line.rfind(':') {
-            for token in line[colon_pos + 1..].split_whitespace() {
-                // Validate it is a bare IP address (v4 or v6).
-                if token.parse::<std::net::IpAddr>().is_ok() && !ips.contains(&token.to_owned()) {
-                    ips.push(token.to_owned());
+    
+    if let Some(out) = out {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            if let Some(colon_pos) = line.rfind(':') {
+                for token in line[colon_pos + 1..].split_whitespace() {
+                    if token.parse::<std::net::IpAddr>().is_ok() && !ips.contains(&token.to_owned()) {
+                        ips.push(token.to_owned());
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback to /etc/resolv.conf if systemd-resolved is not active.
+        if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
+            for line in content.lines() {
+                let line = line.trim();
+                if line.starts_with("nameserver ") {
+                    if let Some(ip) = line.split_whitespace().nth(1) {
+                        if ip != "127.0.0.53" && ip.parse::<std::net::IpAddr>().is_ok() && !ips.contains(&ip.to_owned()) {
+                            ips.push(ip.to_owned());
+                        }
+                    }
                 }
             }
         }
@@ -6891,6 +6902,11 @@ async fn connect_profile_if_current(
                                 }
                             }
                         }
+                        
+                        if !profile.push_dns || wg_cfg.dns.is_empty() {
+                            endpoint_ips.extend(current_system_dns_ips().await);
+                        }
+
                         Some(KillSwitchMode::Interface {
                             iface: iface.clone(),
                             allowed_ips: endpoint_ips,
@@ -6915,7 +6931,7 @@ async fn connect_profile_if_current(
                         // holes the operator never asked for. The split below
                         // is what `current_system_dns_ips` documents itself as
                         // being for.
-                        let dns_ips = if fg.dns_servers.is_empty() {
+                        let dns_ips = if !profile.push_dns || fg.dns_servers.is_empty() {
                             current_system_dns_ips().await
                         } else {
                             fg.dns_servers.iter().map(ToString::to_string).collect()
@@ -6934,11 +6950,18 @@ async fn connect_profile_if_current(
                         _ => String::new(),
                     };
                     let mode = if profile.kill_switch {
-                        let server_ips = if let ProfileConfig::OpenVpn(cfg) = &profile.config {
+                        let mut server_ips = if let ProfileConfig::OpenVpn(cfg) = &profile.config {
                             openvpn_server_ips(&cfg.config_file).await
                         } else {
                             Vec::new()
                         };
+                        
+                        // OpenVPN doesn't have an explicit `dns` array in the config struct (it's pushed by the server).
+                        // If the user opted out of VPN DNS (push_dns = false), we must allow system DNS.
+                        if !profile.push_dns {
+                            server_ips.extend(current_system_dns_ips().await);
+                        }
+
                         if iface.is_empty() {
                             info!(
                                 "kill-switch: '{}' — no tun device (DCO mode), \
