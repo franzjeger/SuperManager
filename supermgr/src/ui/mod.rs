@@ -1423,7 +1423,7 @@ pub fn build_ui(
                 detail_stack.set_visible_child_name("detail");
             }
 
-            if let Some(r) = list.row_at_index(idx as i32) {
+            if let Some(r) = list.row_at_index(row.index()) {
                 list.select_row(Some(&r));
             }
 
