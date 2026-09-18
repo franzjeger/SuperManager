@@ -819,8 +819,12 @@ impl VpnBackend for AzureBackend {
         info!("Azure: tunnel established (interface: {:?})", interface);
 
         // ── Step 5: Configure DNS ─────────────────────────────────────────────
-        let dns_ifindex = if let Some(ref iface) = interface {
-            configure_dns_for_link(iface, &cfg.dns_servers).await
+        let dns_ifindex = if profile.push_dns {
+            if let Some(ref iface) = interface {
+                configure_dns_for_link(iface, &cfg.dns_servers).await
+            } else {
+                None
+            }
         } else {
             None
         };

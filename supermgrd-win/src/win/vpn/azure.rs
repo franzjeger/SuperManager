@@ -279,7 +279,7 @@ impl Ikev2Backend {
 
         // ── Step 5 — DNS push (best-effort) ─────────────────────────────────
         let mut dns_overridden = false;
-        if !cfg.dns_servers.is_empty() {
+        if profile.push_dns && !cfg.dns_servers.is_empty() {
             if let Some(name) = adapter_name.as_deref() {
                 match push_dns(name, &cfg.dns_servers).await {
                     Ok(()) => dns_overridden = true,

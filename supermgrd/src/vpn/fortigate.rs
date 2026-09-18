@@ -1419,7 +1419,7 @@ impl VpnBackend for FortiGateBackend {
             }
         }
 
-        let dns_configured_ifindex = if !effective_dns.is_empty() {
+        let dns_configured_ifindex = if profile.push_dns && !effective_dns.is_empty() {
             // Attach DNS to a dedicated dummy netdev so RevertLink on disconnect
             // never wipes NetworkManager's DNS on the physical interface.
             match ensure_dns_dummy().await {

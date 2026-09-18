@@ -1296,7 +1296,13 @@ impl VpnBackend for WireGuardBackend {
             self.add_routes(&iface_name, wg_cfg).await?;
 
         // 5. Configure DNS (non-fatal — returns None on failure).
-        let dns_ifindex = self.configure_dns(&iface_name, wg_cfg).await;
+        // Only configure if the profile explicitly opted in, mirroring macOS.
+        let dns_ifindex = if profile.push_dns {
+            self.configure_dns(&iface_name, wg_cfg).await
+        } else {
+            debug!("profile.push_dns is false — skipping systemd-resolved configuration");
+            None
+        };
 
         // Record active interface and all state needed for clean disconnect.
         {

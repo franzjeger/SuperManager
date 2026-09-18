@@ -299,7 +299,7 @@ impl WireGuardBackend {
         // exists in the Get-NetAdapter table. Both are best-effort — if
         // the user didn't request DNS/MTU we skip the PowerShell call.
         let mut dns_overridden = false;
-        if !wg_cfg.dns.is_empty() {
+        if profile.push_dns && !wg_cfg.dns.is_empty() {
             match set_dns_servers(&adapter_name, &wg_cfg.dns).await {
                 Ok(()) => dns_overridden = true,
                 Err(e) => warn!("DNS push failed for {adapter_name}: {e:#}"),
