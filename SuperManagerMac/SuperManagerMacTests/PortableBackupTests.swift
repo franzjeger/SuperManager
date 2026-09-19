@@ -62,12 +62,33 @@ final class PortableBackupTests: XCTestCase {
         XCTAssertTrue(result.unreadable.isEmpty)
     }
 
-    func testLockedKeychainDoesNotMakeCertificateOnlyProfileIncomplete() throws {
+    func testDeniedOptionalOpenVPNAccountsWarnAboutUnreadableLegacyCredentials() throws {
         let result = try export(config: ["backend": "open_vpn", "config_file": "/test.ovpn"],
                                 openVPN: "client\nremote vpn.example.com\n") { _ in
             throw VPNKeychain.KeychainError.osStatus(errSecAuthFailed, "denied")
         }
+        XCTAssertEqual(Set(result.unreadable), ["vpn/test/ovpn-username", "vpn/test/ovpn-password"])
+        XCTAssertEqual(result.incompleteProfiles, ["Office VPN"])
+        XCTAssertTrue(result.unverifiedProfiles.isEmpty)
+    }
+
+    func testUnavailableOpenVPNConfigWarnsWithoutInventingMissingCredentials() throws {
+        let result = try export(config: ["backend": "open_vpn", "config_file": "/missing.ovpn"]) { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecItemNotFound, "not found")
+        }
         XCTAssertTrue(result.unreadable.isEmpty)
+        XCTAssertTrue(result.incompleteProfiles.isEmpty)
+        XCTAssertEqual(result.unverifiedProfiles, ["Office VPN"])
+    }
+
+    func testUnverifiedOpenVPNProfileStillReportsKnownMissingCredential() throws {
+        let result = try export(config: ["backend": "open_vpn", "config_file": "/missing.ovpn",
+                                         "password": "vpn/test/ovpn-password"]) { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecItemNotFound, "not found")
+        }
+        XCTAssertEqual(result.unreadable, ["vpn/test/ovpn-password"])
+        XCTAssertEqual(result.incompleteProfiles, ["Office VPN"])
+        XCTAssertEqual(result.unverifiedProfiles, ["Office VPN"])
     }
 
     func testMacOpenVPNAuthDirectiveRequiresCredentialsWithoutSecretRefs() throws {
@@ -87,6 +108,7 @@ final class PortableBackupTests: XCTestCase {
         XCTAssertNotNil(secrets["vpn/test/ovpn-username"])
         XCTAssertNotNil(secrets["vpn/test/ovpn-password"])
         XCTAssertTrue(result.unreadable.isEmpty)
+        XCTAssertEqual(result.unverifiedProfiles, ["Office VPN"])
     }
 
     func testAccessDeniedWarnsAndDoesNotDropOtherCredentials() throws {

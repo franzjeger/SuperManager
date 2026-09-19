@@ -261,18 +261,27 @@ struct BackupSettingsView: View {
                     fromByteCount: Int64(result.data.count), countStyle: .file)
                 status = .idle
                 lastResult = "Exported \(size) to \(url.lastPathComponent)"
+                var warnings: [String] = []
                 if !result.unreadable.isEmpty {
                     // The file is written and otherwise valid — it just
                     // isn't a complete one. Say which credentials are
                     // missing now, rather than at connect time on the
                     // machine this gets restored to.
-                    lastWarning =
+                    warnings.append(
                         "\(result.unreadable.count) credential(s) could not be read "
                         + "from the Keychain and are NOT in this backup: "
                         + result.unreadable.joined(separator: ", ")
                         + ". Affected profiles: " + result.incompleteProfiles.joined(separator: ", ")
-                        + ". Re-enter their missing credentials, then export again."
+                        + ". Unlock the Keychain or re-enter the credentials, then export again.")
                 }
+                if !result.unverifiedProfiles.isEmpty {
+                    warnings.append(
+                        "Credential completeness could not be verified for these OpenVPN profiles "
+                        + "because their configuration files are unavailable: "
+                        + result.unverifiedProfiles.joined(separator: ", ")
+                        + ". Restore access to the configuration files, then export again.")
+                }
+                lastWarning = warnings.isEmpty ? nil : warnings.joined(separator: "\n\n")
             } catch {
                 status = .idle
                 self.error = error.localizedDescription

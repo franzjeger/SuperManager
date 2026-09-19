@@ -34,12 +34,14 @@ enum PortableBackup {
     /// A portable backup plus whatever it could not capture.
     struct ExportResult {
         let data: Data
-        /// Referenced accounts that are missing or could not be read.
-        /// Non-empty means `data` is missing
-        /// credentials it should have carried, so the caller must say so
-        /// rather than reporting a clean export.
+        /// Referenced accounts that are missing, or legacy OpenVPN
+        /// accounts whose contents could not be checked. The caller must
+        /// report these gaps rather than describing the export as complete.
         let unreadable: [String]
         let incompleteProfiles: [String]
+        /// OpenVPN profiles whose config could not be read, so we could
+        /// not determine which credentials the backup needs to contain.
+        let unverifiedProfiles: [String]
     }
 
     enum BackupError: LocalizedError {
@@ -123,8 +125,10 @@ enum PortableBackup {
         var secrets = (root["secrets"] as? [String: String]) ?? [:]
         var unreadable: Set<String> = []
         var incompleteProfiles: [String] = []
+        var unverifiedProfiles: [String] = []
         for profile in (root["profiles"] as? [[String: Any]]) ?? [] {
             guard let pid = profile["id"] as? String else { continue }
+            let name = (profile["name"] as? String) ?? pid
             let config = profile["config"] as? [String: Any]
             var expected = expectedKeychainLabels(config: config)
             let backend = config?["backend"] as? String
@@ -135,19 +139,28 @@ enum PortableBackup {
                 // slots are normal and must not warn on cert-only VPNs.
                 let ovpnAccounts: Set<String> = ["vpn/\(pid)/ovpn-username", "vpn/\(pid)/ovpn-password"]
                 accounts.formUnion(ovpnAccounts)
-                if backend == "open_vpn",
-                   let path = config?["config_file"] as? String,
-                   let content = readOpenVPNConfig(path),
-                   requiresOpenVPNKeychainCredentials(content) {
-                    expected.formUnion(ovpnAccounts)
+                if backend == "open_vpn" {
+                    if let path = config?["config_file"] as? String,
+                       let content = readOpenVPNConfig(path) {
+                        if requiresOpenVPNKeychainCredentials(content) {
+                            expected.formUnion(ovpnAccounts)
+                        }
+                    } else {
+                        unverifiedProfiles.append(name)
+                    }
                 }
             }
             var incomplete = false
             for account in accounts {
                 do {
                     secrets[account] = try readCredential(account).base64EncodedString()
+                } catch let VPNKeychain.KeychainError.osStatus(status, _)
+                    where status == errSecItemNotFound && !expected.contains(account) {
+                    // An optional account that does not exist is normal.
+                    continue
                 } catch {
-                    guard expected.contains(account) else { continue }
+                    // Locked/denied optional OpenVPN accounts may contain
+                    // real legacy credentials. Preserve that warning too.
                     // errSecItemNotFound is a real failure for a referenced
                     // credential, including an item hidden by a signing
                     // access-group change. Never call that a clean backup.
@@ -157,13 +170,14 @@ enum PortableBackup {
                     incomplete = true
                 }
             }
-            if incomplete { incompleteProfiles.append((profile["name"] as? String) ?? pid) }
+            if incomplete { incompleteProfiles.append(name) }
         }
         root["secrets"] = secrets
         let data = try JSONSerialization.data(
             withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         return ExportResult(data: data, unreadable: unreadable.sorted(),
-                            incompleteProfiles: incompleteProfiles.sorted())
+                            incompleteProfiles: incompleteProfiles.sorted(),
+                            unverifiedProfiles: unverifiedProfiles.sorted())
     }
 
     /// Restore a portable backup: the Keychain-bound secrets go to the
