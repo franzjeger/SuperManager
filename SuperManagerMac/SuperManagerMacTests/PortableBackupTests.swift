@@ -1,4 +1,5 @@
 import XCTest
+import Security
 
 @testable import SuperManagerMac
 
@@ -30,5 +31,97 @@ final class PortableBackupTests: XCTestCase {
         XCTAssertFalse(PortableBackup.isKeychainLabel("supermgr/ssh/host/abc/certificate"))
         XCTAssertFalse(PortableBackup.isKeychainLabel("unifi/controller/xyz"))
         XCTAssertFalse(PortableBackup.isKeychainLabel(""))
+    }
+
+    func testRequiredMissingCredentialMakesExportIncomplete() throws {
+        let result = try export(config: ["backend": "forti_gate",
+                                         "password": "vpn/test/password", "psk": "vpn/test/psk"]) { account in
+            if account.hasSuffix("/psk") { return Data("group-key".utf8) }
+            throw VPNKeychain.KeychainError.osStatus(errSecItemNotFound, "not found")
+        }
+        XCTAssertEqual(result.unreadable, ["vpn/test/password"])
+        XCTAssertEqual(result.incompleteProfiles, ["Office VPN"])
+        let secrets = try exportedSecrets(result)
+        XCTAssertNotNil(secrets["vpn/test/psk"])
+        XCTAssertNil(secrets["vpn/test/password"])
+    }
+
+    func testWireGuardNeverReadsKeychainSlots() throws {
+        let result = try export(config: ["backend": "wire_guard", "private_key": "vpn/test/wg-private-key"]) { _ in
+            XCTFail("WireGuard's credentials belong to the engine")
+            throw VPNKeychain.KeychainError.osStatus(errSecAuthFailed, "denied")
+        }
+        XCTAssertTrue(result.unreadable.isEmpty)
+    }
+
+    func testCertificateOnlyOpenVPNDoesNotWarnAboutUnusedSlots() throws {
+        let result = try export(config: ["backend": "open_vpn", "config_file": "/test.ovpn"],
+                                openVPN: "client\nremote vpn.example.com\n") { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecItemNotFound, "not found")
+        }
+        XCTAssertTrue(result.unreadable.isEmpty)
+    }
+
+    func testLockedKeychainDoesNotMakeCertificateOnlyProfileIncomplete() throws {
+        let result = try export(config: ["backend": "open_vpn", "config_file": "/test.ovpn"],
+                                openVPN: "client\nremote vpn.example.com\n") { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecAuthFailed, "denied")
+        }
+        XCTAssertTrue(result.unreadable.isEmpty)
+    }
+
+    func testMacOpenVPNAuthDirectiveRequiresCredentialsWithoutSecretRefs() throws {
+        let result = try export(config: ["backend": "open_vpn", "config_file": "/test.ovpn"],
+                                openVPN: "client\nauth-user-pass\n") { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecItemNotFound, "not found")
+        }
+        XCTAssertEqual(Set(result.unreadable), ["vpn/test/ovpn-username", "vpn/test/ovpn-password"])
+        XCTAssertEqual(result.incompleteProfiles, ["Office VPN"])
+    }
+
+    func testStoredLegacyOpenVPNAccountsAreStillExported() throws {
+        let result = try export(config: ["backend": "open_vpn"]) { account in
+            Data(account.utf8)
+        }
+        let secrets = try exportedSecrets(result)
+        XCTAssertNotNil(secrets["vpn/test/ovpn-username"])
+        XCTAssertNotNil(secrets["vpn/test/ovpn-password"])
+        XCTAssertTrue(result.unreadable.isEmpty)
+    }
+
+    func testAccessDeniedWarnsAndDoesNotDropOtherCredentials() throws {
+        let result = try export(config: ["backend": "forti_gate", "password": "vpn/test/password"]) { _ in
+            throw VPNKeychain.KeychainError.osStatus(errSecAuthFailed, "denied")
+        }
+        XCTAssertEqual(result.unreadable, ["vpn/test/password"])
+    }
+
+    func testExpectedLabelsUseRealSecretRefsOnly() {
+        XCTAssertEqual(PortableBackup.expectedKeychainLabels(config: [
+            "backend": "open_vpn", "username": "alice", "password": "vpn/test/ovpn-password",
+        ]), ["vpn/test/ovpn-password"])
+        XCTAssertTrue(PortableBackup.expectedKeychainLabels(config: nil).isEmpty)
+        XCTAssertTrue(PortableBackup.expectedKeychainLabels(config: ["psk": "vpn/test/wg-psk-0"]).isEmpty)
+    }
+
+    func testAuthDirectiveDoesNotMistakeCommentsOrCredentialFilesForKeychainUse() {
+        XCTAssertFalse(PortableBackup.requiresOpenVPNKeychainCredentials("# auth-user-pass\n;auth-user-pass\n"))
+        XCTAssertFalse(PortableBackup.requiresOpenVPNKeychainCredentials("auth-user-pass /etc/credentials\n"))
+        XCTAssertTrue(PortableBackup.requiresOpenVPNKeychainCredentials("  auth-user-pass # login\n"))
+    }
+
+    private func export(
+        config: [String: Any], openVPN: String? = nil,
+        read: (String) throws -> Data
+    ) throws -> PortableBackup.ExportResult {
+        try PortableBackup.completeExport(
+            root: ["version": 1, "profiles": [["id": "test", "name": "Office VPN", "config": config]],
+                   "secrets": ["vpn/test/wg-private-key": Data("key".utf8).base64EncodedString()]],
+            readCredential: read, readOpenVPNConfig: { _ in openVPN })
+    }
+
+    private func exportedSecrets(_ result: PortableBackup.ExportResult) throws -> [String: String] {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: result.data) as? [String: Any])
+        return try XCTUnwrap(root["secrets"] as? [String: String])
     }
 }

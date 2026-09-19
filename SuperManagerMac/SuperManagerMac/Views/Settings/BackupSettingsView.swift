@@ -270,6 +270,8 @@ struct BackupSettingsView: View {
                         "\(result.unreadable.count) credential(s) could not be read "
                         + "from the Keychain and are NOT in this backup: "
                         + result.unreadable.joined(separator: ", ")
+                        + ". Affected profiles: " + result.incompleteProfiles.joined(separator: ", ")
+                        + ". Re-enter their missing credentials, then export again."
                 }
             } catch {
                 status = .idle
