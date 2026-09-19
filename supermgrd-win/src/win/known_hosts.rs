@@ -1,6 +1,6 @@
 //! Persistent SSH host-key store.
 //!
-//! Replaces the trust-on-first-use behaviour of [`super::ssh_exec`] with
+//! Backs Windows SSH trust-on-first-use with
 //! a `known_hosts.json` file under `%PROGRAMDATA%\SuperManager\`. Each
 //! entry is keyed on `<host>:<port>` and stores the SHA-256 fingerprint
 //! of the server's public key alongside its algorithm name and the
@@ -27,13 +27,14 @@
 
 use std::{
     collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 /// On-disk shape of one entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,17 +87,11 @@ impl KnownHostsStore {
     /// store on first run.
     pub fn load_from(root: &Path) -> std::io::Result<Self> {
         let path = root.join("known_hosts.json");
-        let map = if path.exists() {
-            let bytes = std::fs::read(&path)?;
-            serde_json::from_slice::<HashMap<String, Known>>(&bytes)
-                .unwrap_or_else(|e| {
-                    warn!(
-                        "known_hosts.json is corrupt ({e}); starting with an empty store"
-                    );
-                    HashMap::new()
-                })
-        } else {
-            HashMap::new()
+        let map = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<HashMap<String, Known>>(&bytes)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e),
         };
         info!(entries = map.len(), "known_hosts loaded");
         Ok(Self {
@@ -136,33 +131,117 @@ impl KnownHostsStore {
                 }
             }
         }
-        // Slow path: insert + persist under the write lock.
-        let mut map = self.inner.map.write().await;
-        // Re-check in case another writer raced us to the insert.
-        if let Some(known) = map.get(&key) {
-            if known.fingerprint == fingerprint {
-                return Ok(HostKeyVerdict::Match(known.clone()));
-            } else {
-                return Ok(HostKeyVerdict::Changed {
-                    stored: known.clone(),
-                    presented,
+        // Keep verification, durable replacement and cache publication in one
+        // blocking transaction. Cancelling the async caller cannot release
+        // the lock while a background writer still has an older snapshot.
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<HostKeyVerdict> {
+            let mut map = inner.map.blocking_write();
+            if let Some(known) = map.get(&key) {
+                return Ok(if known.fingerprint == presented.fingerprint {
+                    HostKeyVerdict::Match(known.clone())
+                } else {
+                    HostKeyVerdict::Changed {
+                        stored: known.clone(),
+                        presented,
+                    }
                 });
             }
-        }
-        map.insert(key, presented.clone());
-        // Flush. The store is small (typically <100 hosts) so a full
-        // rewrite per insert is acceptable; if it grows we can switch
-        // to an append-only log.
-        let snapshot: HashMap<String, Known> = map.clone();
-        drop(map);
-        let path = self.inner.path.clone();
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut snapshot = map.clone();
+            snapshot.insert(key, presented.clone());
             let bytes = serde_json::to_vec_pretty(&snapshot)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            std::fs::write(&path, bytes)
+            let directory = inner.path.parent().expect("known-hosts path has a parent");
+            let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+            temporary.write_all(&bytes)?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(&inner.path).map_err(|e| e.error)?;
+            *map = snapshot;
+            Ok(HostKeyVerdict::FirstSeen(presented))
         })
         .await
-        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))??;
-        Ok(HostKeyVerdict::FirstSeen(presented))
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupted_trust_store_is_not_silently_reset() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("known_hosts.json"), "{broken").unwrap();
+        assert_eq!(
+            KnownHostsStore::load_from(directory.path())
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_persistence_never_trusts_an_unrecorded_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        let path = directory.path().join("known_hosts.json");
+        std::fs::create_dir(&path).unwrap();
+        assert!(store
+            .check("host", 22, "ssh-ed25519", "failed-key")
+            .await
+            .is_err());
+        std::fs::remove_dir(&path).unwrap();
+        assert!(matches!(
+            store
+                .check("host", 22, "ssh-ed25519", "real-key")
+                .await
+                .unwrap(),
+            HostKeyVerdict::FirstSeen(_)
+        ));
+        let reloaded = KnownHostsStore::load_from(directory.path()).unwrap();
+        assert!(matches!(
+            reloaded
+                .check("host", 22, "ssh-ed25519", "real-key")
+                .await
+                .unwrap(),
+            HostKeyVerdict::Match(_)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_enrollments_preserve_all_acknowledged_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        let mut tasks = Vec::new();
+        for i in 0..32 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .check(&format!("host-{i}"), 22, "ssh-ed25519", "key")
+                    .await
+                    .unwrap()
+            }));
+        }
+        for task in tasks {
+            assert!(matches!(task.await.unwrap(), HostKeyVerdict::FirstSeen(_)));
+        }
+        let reloaded = KnownHostsStore::load_from(directory.path()).unwrap();
+        assert_eq!(reloaded.inner.map.read().await.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn conflicting_first_keys_cannot_replace_the_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        let (first, second) = tokio::join!(
+            store.check("host", 22, "ssh-ed25519", "first"),
+            store.check("host", 22, "ssh-ed25519", "second")
+        );
+        assert!(matches!(
+            (first.unwrap(), second.unwrap()),
+            (HostKeyVerdict::FirstSeen(_), HostKeyVerdict::Changed { .. })
+                | (HostKeyVerdict::Changed { .. }, HostKeyVerdict::FirstSeen(_))
+        ));
     }
 }

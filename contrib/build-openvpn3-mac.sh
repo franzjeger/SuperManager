@@ -17,7 +17,7 @@
 #
 # What this script installs
 # -------------------------
-#   /opt/homebrew/bin/openvpn3       — the ovpncli binary, renamed
+#   $(brew --prefix)/bin/openvpn3   — the ovpncli binary, renamed
 #                                       so `locate_openvpn` picks
 #                                       it up automatically
 #
@@ -30,35 +30,40 @@
 
 set -euo pipefail
 
-BUILD_DIR="${TMPDIR:-/tmp}/openvpn3-build"
+if [[ "$(uname -s)" != Darwin ]]; then
+    echo "error: this build script requires macOS" >&2
+    exit 1
+fi
+if ! command -v brew >/dev/null 2>&1; then
+    echo "error: install Homebrew and the prerequisites listed in this script first" >&2
+    exit 1
+fi
+
+openvpn3_brew_prefix="$(brew --prefix)"
+openvpn3_openssl_prefix="$(brew --prefix openssl@3)"
+openvpn3_asio_prefix="$(brew --prefix asio)"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/supermanager-openvpn3.XXXXXX")"
+trap 'rm -rf "$BUILD_DIR"' EXIT
 SRC_DIR="$BUILD_DIR/openvpn3"
-INSTALL_PATH="/opt/homebrew/bin/openvpn3"
+INSTALL_PATH="$openvpn3_brew_prefix/bin/openvpn3"
 
 echo "→ Workspace: $BUILD_DIR"
-mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-if [[ ! -d "$SRC_DIR" ]]; then
-    echo "→ Cloning openvpn/openvpn3…"
-    git clone --depth 1 https://github.com/OpenVPN/openvpn3.git
-else
-    echo "→ openvpn3 source already present, fetching latest…"
-    git -C "$SRC_DIR" fetch --depth 1 origin master
-    git -C "$SRC_DIR" reset --hard origin/master
-fi
+echo "→ Cloning openvpn/openvpn3…"
+git clone --depth 1 https://github.com/OpenVPN/openvpn3.git "$SRC_DIR"
 
 cd "$SRC_DIR"
 
 # asio is header-only; openvpn3's build wants ASIO_DIR pointing
-# at the include root. Brew installs it at
-# /opt/homebrew/opt/asio/include.
+# at the include root. Resolve Homebrew's prefix for both Intel and ARM Macs.
 echo "→ Configuring (cmake)…"
 cmake -B build -G "Unix Makefiles" \
-    -DOPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3 \
-    -DASIO_DIR=/opt/homebrew/opt/asio \
+    -DOPENSSL_ROOT_DIR="$openvpn3_openssl_prefix" \
+    -DASIO_DIR="$openvpn3_asio_prefix" \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
-    -DCMAKE_PREFIX_PATH=/opt/homebrew
+    -DCMAKE_PREFIX_PATH="$openvpn3_brew_prefix"
 
 echo "→ Building ovpncli…"
 cmake --build build -j "$(sysctl -n hw.ncpu)" --target ovpncli

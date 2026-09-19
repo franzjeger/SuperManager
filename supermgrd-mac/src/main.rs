@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     info!("data directory: {}", data_dir.display());
 
     // Initialize state and load persisted data.
-    let mut state = DaemonState::new(data_dir.clone());
+    let mut state = DaemonState::new(data_dir.clone())?;
     state.load_profiles()?;
     state.load_ssh_keys()?;
     state.load_ssh_hosts()?;

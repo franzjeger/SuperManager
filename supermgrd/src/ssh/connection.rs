@@ -60,7 +60,7 @@ impl client::Handler for SshClientHandler {
         // and we only ever compare it to ourselves.
         let fingerprint = KnownHostsStore::fingerprint(&server_public_key.public_key_bytes());
 
-        match self.known_hosts.check(&self.host, self.port, &fingerprint) {
+        match self.known_hosts.check_and_enroll(&self.host, self.port, &fingerprint)? {
             HostKeyCheck::Match => Ok(true),
             HostKeyCheck::NewHost => {
                 tracing::info!(
@@ -69,9 +69,6 @@ impl client::Handler for SshClientHandler {
                     fingerprint = %fingerprint,
                     "TOFU: recording new SSH host key"
                 );
-                if let Err(e) = self.known_hosts.record(&self.host, self.port, &fingerprint) {
-                    tracing::warn!(error = %e, "could not persist new host fingerprint");
-                }
                 Ok(true)
             }
             HostKeyCheck::Mismatch { stored, current } => {

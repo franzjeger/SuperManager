@@ -22,6 +22,7 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Best-effort cleanup of `supermanager-*` swanctl configs and secrets
@@ -334,6 +335,7 @@ impl Strongswan {
     }
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
+        validate_connect_args(args)?;
         self.resolve()?;
         // The display name only ever travelled the wire to be ignored. Log
         // it: /var/log/supermanager-helper.log is where a failed connect
@@ -358,8 +360,8 @@ impl Strongswan {
 
         let etc = self.etc.as_ref().unwrap().clone();
         let swanctl_dir = etc.join("swanctl");
-        tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await.ok();
-        tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await.ok();
+        tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await?;
+        tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await?;
 
         let conf_path = swanctl_dir.join(format!("conf.d/supermanager-{}.conf", args.profile_id));
         let secrets_path = swanctl_dir.join(format!("conf.d/supermanager-{}-secrets.conf", args.profile_id));
@@ -378,11 +380,7 @@ impl Strongswan {
             .with_context(|| format!("write {}", conf_path.display()))?;
 
         let secrets = build_swanctl_secrets(args);
-        tokio::fs::write(&secrets_path, secrets)
-            .await
-            .with_context(|| format!("write {}", secrets_path.display()))?;
-        // Keep credentials private even though we are root.
-        tokio::fs::set_permissions(&secrets_path, std::fs::Permissions::from_mode(0o600)).await.ok();
+        write_private_config(&secrets_path, secrets.as_bytes()).await?;
 
         run(self.swanctl.as_ref().unwrap(), &["--load-all"]).await?;
 
@@ -418,6 +416,7 @@ impl Strongswan {
     }
 
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
+        validate_profile_id(&args.profile_id)?;
         self.resolve()?;
         let swanctl = self.swanctl.as_ref().unwrap();
         // best-effort: terminate the IKE SA. Even if it fails, also remove
@@ -774,8 +773,6 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     None
 }
 
-use std::os::unix::fs::PermissionsExt;
-
 async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let output = Command::new(bin).args(args).output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1010,7 +1007,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
         dpd_delay = 10s
         local {{
             auth = eap-mschapv2
-            eap_id = {username}{local_id_line}
+            eap_id = "{username}"{local_id_line}
         }}
         remote {{
             auth = psk
@@ -1030,7 +1027,7 @@ fn build_swanctl_conf(args: &ConnectArgs) -> String {
 "#,
         id = id,
         host = args.host,
-        username = args.username,
+        username = escape_swanctl(&args.username),
         local_id_line = local_id_line,
         local_ts = local_ts,
         remote_ts = remote_ts,
@@ -1067,6 +1064,92 @@ fn sanitize_name(s: &str) -> String {
     s.chars().filter(|c| c.is_ascii_hexdigit() || *c == '-' || *c == '_').collect()
 }
 
+/// Validate wire inputs before starting charon or touching root-owned files.
+fn validate_connect_args(args: &ConnectArgs) -> anyhow::Result<()> {
+    validate_profile_id(&args.profile_id)?;
+    validate_host(&args.host)?;
+    for route in &args.routes {
+        route
+            .parse::<ipnet::IpNet>()
+            .context("invalid split-tunnel CIDR")?;
+    }
+    for server in &args.dns_servers {
+        server
+            .parse::<std::net::IpAddr>()
+            .context("invalid DNS server IP")?;
+    }
+    for (name, value) in [
+        ("username", &args.username),
+        ("password", &args.password),
+        ("shared_secret", &args.shared_secret),
+        ("local_id", &args.local_id),
+    ] {
+        if value.chars().any(char::is_control) {
+            anyhow::bail!("invalid {name}: control characters are not supported");
+        }
+    }
+    if !args.full_tunnel && args.routes.is_empty() {
+        anyhow::bail!("split-tunnel mode requires at least one route");
+    }
+    Ok(())
+}
+
+fn validate_profile_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id.as_bytes()[0].is_ascii_hexdigit()
+        || sanitize_name(id) != id
+    {
+        anyhow::bail!("invalid profile_id: expected a hex identifier with '-' or '_'");
+    }
+    Ok(())
+}
+
+fn validate_host(host: &str) -> anyhow::Result<()> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let name = host.strip_suffix('.').unwrap_or(host);
+    let valid = !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    if !valid {
+        anyhow::bail!("invalid host: expected an IP address or DNS name");
+    }
+    Ok(())
+}
+
+/// Publish secrets atomically with mode 0600 from creation. Replacing the
+/// directory entry also avoids following an old symlink or keeping its mode.
+async fn write_private_config(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .await?;
+        file.write_all(contents).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&tmp, path).await
+    }
+    .await;
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    result.with_context(|| format!("write private config {}", path.display()))
+}
+
 /// Secrets file format per
 /// https://docs.strongswan.org/docs/latest/swanctl/swanctlConf.html#_secrets
 ///
@@ -1100,11 +1183,11 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
     if !args.password.is_empty() {
         s.push_str(&format!(
             "    eap-{id} {{\n\
-             \x20       id = {username}\n\
+             \x20       id = \"{username}\"\n\
              \x20       secret = \"{secret}\"\n\
              \x20   }}\n",
             id = id,
-            username = args.username,
+            username = escape_swanctl(&args.username),
             secret = escape_swanctl(&args.password),
         ));
     }
@@ -1590,7 +1673,83 @@ fn escape_swanctl(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
+    #[test]
+    fn wire_validation_rejects_path_and_config_injection() {
+        for invalid in [
+            "",
+            "../etc/pf.conf",
+            "abcd/../../etc",
+            "abcd\ninclude evil",
+            "--help",
+        ] {
+            assert!(validate_profile_id(invalid).is_err(), "{invalid:?}");
+        }
+        for host in [
+            "vpn.example.com",
+            "vpn.example.com.",
+            "127.0.0.1",
+            "2001:db8::1",
+        ] {
+            assert!(validate_host(host).is_ok(), "{host:?}");
+        }
+        for host in [
+            "",
+            "vpn\ninclude evil",
+            "vpn;foo",
+            "vpn..example",
+            "-vpn.example",
+            "::nope",
+        ] {
+            assert!(validate_host(host).is_err(), "{host:?}");
+        }
+        let mut a = args("vpn.example.com", "alice", "pw", "psk");
+        assert!(validate_connect_args(&a).is_ok());
+        a.routes = vec!["10.0.0.0/33".to_owned()];
+        assert!(validate_connect_args(&a).is_err());
+        a.routes.clear();
+        a.username = "alice\ninclude evil".to_owned();
+        assert!(validate_connect_args(&a).is_err());
+        a.username = "alice\0bob".to_owned();
+        assert!(validate_connect_args(&a).is_err());
+    }
+
+    #[test]
+    fn identities_are_quoted_in_config_and_secrets() {
+        let a = args("vpn.example.com", r#"DOMAIN\alice" # {}"#, "pw", "psk");
+        let quoted = r#""DOMAIN\\alice\" # {}""#;
+        assert!(build_swanctl_conf(&a).contains(&format!("eap_id = {quoted}")));
+        assert!(build_swanctl_secrets(&a).contains(&format!("id = {quoted}")));
+    }
+
+    #[tokio::test]
+    async fn secrets_replace_permissive_file_and_do_not_follow_symlink() {
+        let dir =
+            std::env::temp_dir().join(format!("supermanager-secrets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("secrets.conf");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_config(&path, b"private").await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let target = dir.join("untouched");
+        std::fs::write(&target, "original").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        write_private_config(&path, b"replacement").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert!(!std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     fn args(host: &str, username: &str, password: &str, psk: &str) -> ConnectArgs {
         ConnectArgs {
             profile_id: "abcd1234-5678-9012-3456-7890abcdef00".to_owned(),
@@ -1882,7 +2041,7 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
 
         let blank = build_swanctl_conf(&args("79.160.91.22", "alice", "pw", "secret"));
         assert!(
-            !blank.contains("id = \""),
+            !blank.contains("\n            id = \""),
             "blank Local ID must emit no quoted local.id line:\n{blank}"
         );
     }
@@ -1926,7 +2085,7 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(s.contains("id-2 = %any"));
         assert!(s.contains(r#"secret = "psk-secret""#));
         // EAP secret entry binds to the username
-        assert!(s.contains("id = alice"));
+        assert!(s.contains(r#"id = "alice""#));
         assert!(s.contains(r#"secret = "pw""#));
     }
 

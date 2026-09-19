@@ -28,7 +28,7 @@
 //! renamed over the target, so the main file is never partially written and
 //! is never world-readable.
 
-use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};

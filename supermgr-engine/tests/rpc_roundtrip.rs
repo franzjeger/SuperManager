@@ -38,7 +38,7 @@ async fn spawn_server() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("temp dir");
     let socket_path = dir.path().join("test.sock").to_string_lossy().into_owned();
 
-    let state = DaemonState::new(dir.path().to_path_buf());
+    let state = DaemonState::new(dir.path().to_path_buf()).expect("open test trust store");
     let secrets: Arc<dyn supermgr_core::keyring::SecretStore> = Arc::new(
         FileSecretStore::new(dir.path().join("secrets.json")),
     );
@@ -180,4 +180,172 @@ async fn invalid_id_zero_still_responds() {
     let (_dir, socket) = spawn_server().await;
     let resp = rpc_call(&socket, "api_version", json!({}), 0).await;
     assert_eq!(resp["id"], 0);
+}
+
+
+#[tokio::test]
+async fn mac_client_uses_engine_framing_and_reports_rpc_errors() {
+    use supermgr_core::mac::{MacClient, MacError};
+
+    let (_dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    let version = client.invoke("api_version", json!({})).await.unwrap();
+    assert!(version["major"].is_number());
+    assert_eq!(client.list_profiles().await.unwrap(), "[]");
+    assert_eq!(client.list_hosts().await.unwrap(), "[]");
+    assert_eq!(client.ssh_list_keys().await.unwrap(), "[]");
+    assert!(matches!(
+        client.invoke("this_method_does_not_exist", json!({})).await,
+        Err(MacError::Rpc { code: -32601, .. })
+    ));
+    // Parameter validation used to return id=0 instead of the request ID.
+    assert!(matches!(
+        client.get_host("not-a-uuid").await,
+        Err(MacError::Rpc { code: -32602, .. })
+    ));
+    // A complete application error leaves the framed stream usable.
+    assert_eq!(client.list_hosts().await.unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn mac_client_host_methods_preserve_names_parameters_and_results() {
+    use supermgr_core::keyring::SecretStore;
+    use supermgr_core::mac::MacClient;
+
+    let (dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    let id = client
+        .add_host(
+            &json!({
+                "label": "RPC test host", "hostname": "192.0.2.19",
+                "username": "test", "auth_method": "password", "device_type": "fortigate"
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(&id).is_ok());
+    client.ssh_set_password(&id, "fake-password").await.unwrap();
+    client
+        .ssh_set_api_token(&id, "fake-token", 8443)
+        .await
+        .unwrap();
+    let host: Value = serde_json::from_str(&client.get_host(&id).await.unwrap()).unwrap();
+    assert_eq!(host["label"], "RPC test host");
+    assert_eq!(host["api_port"], 8443);
+    assert!(host["auth_password_ref"].is_string());
+    assert!(host["api_token_ref"].is_string());
+
+    let compact_id = uuid::Uuid::parse_str(&id).unwrap().simple().to_string();
+    let pinned: Value =
+        serde_json::from_str(&client.toggle_host_pin(&compact_id).await.unwrap()).unwrap();
+    assert_eq!(pinned, json!({"host_id": compact_id, "pinned": true}));
+    let hosts: Value = serde_json::from_str(&client.list_hosts().await.unwrap()).unwrap();
+    assert_eq!(hosts.as_array().unwrap().len(), 1);
+    assert_eq!(hosts[0]["id"], id);
+    assert_eq!(hosts[0]["pinned"], true);
+
+    let secrets = FileSecretStore::new(dir.path().join("secrets.json"));
+    assert_eq!(secrets.read_all().await.unwrap().len(), 2);
+    client.delete_host(&id).await.unwrap();
+    assert_eq!(client.list_hosts().await.unwrap(), "[]");
+    assert!(secrets.read_all().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mac_client_imports_and_deletes_a_wireguard_profile() {
+    use supermgr_core::mac::MacClient;
+
+    let (_dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    let config = "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 192.0.2.1/32\n\n[Peer]\nPublicKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nEndpoint = 192.0.2.2:51820\nAllowedIPs = 10.0.0.0/8\n";
+    let id = client
+        .import_wireguard(config, "RPC test profile")
+        .await
+        .unwrap();
+    assert!(uuid::Uuid::parse_str(&id).is_ok());
+    let profiles: Value = serde_json::from_str(&client.list_profiles().await.unwrap()).unwrap();
+    assert_eq!(profiles.as_array().unwrap().len(), 1);
+    assert_eq!(profiles[0]["id"], id);
+    client.delete_profile(&id).await.unwrap();
+    assert_eq!(client.list_profiles().await.unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn mac_client_clones_correlate_concurrent_calls() {
+    use supermgr_core::mac::MacClient;
+
+    let (_dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let client = client.clone();
+        tasks.push(tokio::spawn(async move {
+            client.invoke("api_version", json!({})).await.unwrap()
+        }));
+    }
+    for task in tasks {
+        assert!(task.await.unwrap()["major"].is_number());
+    }
+}
+
+#[tokio::test]
+async fn mac_client_rejects_helper_only_operations_without_claiming_success() {
+    use supermgr_core::mac::{MacClient, MacError};
+
+    let (_dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    assert!(matches!(
+        client.connect("unused").await,
+        Err(MacError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.disconnect().await,
+        Err(MacError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.get_status().await,
+        Err(MacError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client.fortigate_backup_config("unused").await,
+        Err(MacError::Unsupported(_))
+    ));
+    assert!(matches!(
+        client
+            .import_fortigate("test", "192.0.2.1", "user", "fake", "fake")
+            .await,
+        Err(MacError::Unsupported(_))
+    ));
+    assert_eq!(client.list_profiles().await.unwrap(), "[]");
+}
+
+#[tokio::test]
+async fn mac_client_network_methods_reach_the_supported_engine_handlers() {
+    use supermgr_core::mac::{MacClient, MacError};
+
+    let (_dir, socket) = spawn_server().await;
+    let client = MacClient::open_path(&socket).await.unwrap();
+    // A missing host aborts before opening any network connection. This checks
+    // dispatch names and parameter shapes without touching managed devices.
+    let missing = uuid::Uuid::nil().to_string();
+    for result in [
+        client.ssh_execute_command(&missing, "true").await,
+        client.test_host_connection(&missing).await,
+        client
+            .fortigate_api(&missing, "GET", "/api/v2/monitor/system/status", "")
+            .await,
+        client.unifi_api(&missing, "GET", "/status", "").await,
+        client
+            .unifi_set_inform(&missing, "http://192.0.2.1/inform")
+            .await,
+    ] {
+        match result {
+            Err(MacError::Rpc { code, message, .. }) => {
+                assert_ne!(code, -32601, "method was not dispatched: {message}");
+                assert!(message.contains("host"), "unexpected error: {message}");
+            }
+            other => panic!("expected missing-host RPC failure, got {other:?}"),
+        }
+    }
 }

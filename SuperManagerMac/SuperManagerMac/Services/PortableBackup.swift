@@ -34,11 +34,14 @@ enum PortableBackup {
     /// A portable backup plus whatever it could not capture.
     struct ExportResult {
         let data: Data
-        /// Keychain accounts that exist but could not be read. Empty on
-        /// a healthy export. Non-empty means `data` is missing
-        /// credentials it should have carried, so the caller must say so
-        /// rather than reporting a clean export.
+        /// Referenced accounts that are missing, or legacy OpenVPN
+        /// accounts whose contents could not be checked. The caller must
+        /// report these gaps rather than describing the export as complete.
         let unreadable: [String]
+        let incompleteProfiles: [String]
+        /// OpenVPN profiles whose config could not be read, so we could
+        /// not determine which credentials the backup needs to contain.
+        let unverifiedProfiles: [String]
     }
 
     enum BackupError: LocalizedError {
@@ -77,48 +80,104 @@ enum PortableBackup {
 
         guard
             let obj = try? JSONSerialization.jsonObject(with: Data(resp.backup.utf8)),
-            var root = obj as? [String: Any]
+            let root = obj as? [String: Any]
         else {
             throw BackupError.malformedEngineResponse
         }
 
-        var secrets = root["secrets"] as? [String: String] ?? [:]
-        var unreadable: [String] = []
-        let profiles = root["profiles"] as? [[String: Any]] ?? []
-        for profile in profiles {
+        return try completeExport(
+            root: root,
+            readCredential: { try VPNKeychain.getData(account: $0) },
+            readOpenVPNConfig: { try? String(contentsOfFile: $0, encoding: .utf8) })
+    }
+
+    /// SecretRef fields serialized by the engine. WireGuard keys belong
+    /// to the file store, so sharing the `vpn/` prefix isn't sufficient.
+    static func expectedKeychainLabels(config: [String: Any]?) -> Set<String> {
+        guard let config else { return [] }
+        return Set(["password", "psk"].compactMap { field in
+            guard let label = config[field] as? String, isKeychainLabel(label) else { return nil }
+            return label
+        })
+    }
+
+    /// macOS OpenVPN imports keep credentials only in the Keychain, not
+    /// in config SecretRefs. A bare auth-user-pass directive references
+    /// those accounts; a supplied credential file or cert-only profile
+    /// does not require them.
+    static func requiresOpenVPNKeychainCredentials(_ content: String) -> Bool {
+        content.components(separatedBy: .newlines).contains { line in
+            let fields = line.split(whereSeparator: { $0.isWhitespace })
+            guard let directive = fields.first,
+                  directive == "auth-user-pass" || directive == "--auth-user-pass" else { return false }
+            return fields.count == 1 || fields[1].hasPrefix("#") || fields[1].hasPrefix(";")
+        }
+    }
+
+    /// Injectable reads keep missing-item and access-denied behavior
+    /// testable without altering the user's Keychain.
+    static func completeExport(
+        root: [String: Any],
+        readCredential: (String) throws -> Data,
+        readOpenVPNConfig: (String) -> String?
+    ) throws -> ExportResult {
+        var root = root
+        var secrets = (root["secrets"] as? [String: String]) ?? [:]
+        var unreadable: Set<String> = []
+        var incompleteProfiles: [String] = []
+        var unverifiedProfiles: [String] = []
+        for profile in (root["profiles"] as? [[String: Any]]) ?? [] {
             guard let pid = profile["id"] as? String else { continue }
-            for account in VPNKeychain.accounts(for: pid) {
-                do {
-                    secrets[account] = try VPNKeychain
-                        .getData(account: account)
-                        .base64EncodedString()
-                } catch let VPNKeychain.KeychainError.osStatus(status, _)
-                    where status == errSecItemNotFound
-                {
-                    // Nothing stored under this account, which is the
-                    // normal case for most of them: a WireGuard profile
-                    // has none of these, an IKEv2 one has no `ovpn-*`
-                    // pair. Not a failure.
-                    continue
-                } catch {
-                    // Anything else — keychain locked, entitlement gone,
-                    // item present but unreadable — means a credential
-                    // exists and we could not capture it. Dropping it
-                    // silently produced a backup that looked complete
-                    // and restored a profile that cannot connect, so
-                    // carry the account out to the caller.
-                    DebugLog.write(
-                        "[PortableBackup] export: cannot read \(account): "
-                        + error.localizedDescription)
-                    unreadable.append(account)
+            let name = (profile["name"] as? String) ?? pid
+            let config = profile["config"] as? [String: Any]
+            var expected = expectedKeychainLabels(config: config)
+            let backend = config?["backend"] as? String
+            var accounts = expected
+            if backend == "open_vpn" || backend == "azure_vpn" {
+                // Preserve legacy/macOS-only credentials even when the
+                // engine has no SecretRef for them. Missing optional
+                // slots are normal and must not warn on cert-only VPNs.
+                let ovpnAccounts: Set<String> = ["vpn/\(pid)/ovpn-username", "vpn/\(pid)/ovpn-password"]
+                accounts.formUnion(ovpnAccounts)
+                if backend == "open_vpn" {
+                    if let path = config?["config_file"] as? String,
+                       let content = readOpenVPNConfig(path) {
+                        if requiresOpenVPNKeychainCredentials(content) {
+                            expected.formUnion(ovpnAccounts)
+                        }
+                    } else {
+                        unverifiedProfiles.append(name)
+                    }
                 }
             }
+            var incomplete = false
+            for account in accounts {
+                do {
+                    secrets[account] = try readCredential(account).base64EncodedString()
+                } catch let VPNKeychain.KeychainError.osStatus(status, _)
+                    where status == errSecItemNotFound && !expected.contains(account) {
+                    // An optional account that does not exist is normal.
+                    continue
+                } catch {
+                    // Locked/denied optional OpenVPN accounts may contain
+                    // real legacy credentials. Preserve that warning too.
+                    // errSecItemNotFound is a real failure for a referenced
+                    // credential, including an item hidden by a signing
+                    // access-group change. Never call that a clean backup.
+                    if secrets[account] != nil { continue }
+                    DebugLog.write("[PortableBackup] export: cannot read \(account): \(error.localizedDescription)")
+                    unreadable.insert(account)
+                    incomplete = true
+                }
+            }
+            if incomplete { incompleteProfiles.append(name) }
         }
         root["secrets"] = secrets
-
         let data = try JSONSerialization.data(
             withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-        return ExportResult(data: data, unreadable: unreadable.sorted())
+        return ExportResult(data: data, unreadable: unreadable.sorted(),
+                            incompleteProfiles: incompleteProfiles.sorted(),
+                            unverifiedProfiles: unverifiedProfiles.sorted())
     }
 
     /// Restore a portable backup: the Keychain-bound secrets go to the
@@ -137,7 +196,7 @@ enum PortableBackup {
             throw BackupError.malformedFile("missing version field")
         }
 
-        var secrets = root["secrets"] as? [String: String] ?? [:]
+        var secrets = (root["secrets"] as? [String: String]) ?? [:]
         var keychainSecrets = 0
         var keychainFailures: [String] = []
         for (label, b64) in secrets where isKeychainLabel(label) {

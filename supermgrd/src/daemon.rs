@@ -6467,49 +6467,60 @@ pub(crate) enum KillSwitchMode {
     },
 }
 
-/// Return the IP addresses of the DNS servers currently configured on the
-/// system (via `resolvectl dns`).  Used to populate the FortiGate kill-switch
-/// allow-list so that DNS continues to work when the profile has no
-/// `dns_servers` configured and the system DNS is on the local network (not
-/// routed through IPsec).
-async fn current_system_dns_ips() -> Vec<String> {
-    let mut ips: Vec<String> = Vec::new();
-    let out = match tokio::process::Command::new("resolvectl")
-        .args(["dns", "--no-pager"])
-        .output()
-        .await
-    {
-        Ok(o) if o.status.success() => Some(o),
-        _ => None,
-    };
-    
-    if let Some(out) = out {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        for line in stdout.lines() {
-            if let Some(colon_pos) = line.rfind(':') {
-                for token in line[colon_pos + 1..].split_whitespace() {
-                    if token.parse::<std::net::IpAddr>().is_ok() && !ips.contains(&token.to_owned()) {
-                        ips.push(token.to_owned());
-                    }
-                }
-            }
-        }
-    } else {
-        // Fallback to /etc/resolv.conf if systemd-resolved is not active.
-        if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.starts_with("nameserver ") {
-                    if let Some(ip) = line.split_whitespace().nth(1) {
-                        if ip != "127.0.0.53" && ip.parse::<std::net::IpAddr>().is_ok() && !ips.contains(&ip.to_owned()) {
-                            ips.push(ip.to_owned());
-                        }
-                    }
+/// Parse resolvectl's `Global:` and `Link N (interface):` address lists.
+fn parse_resolvectl_dns(stdout: &str) -> Vec<String> {
+    let addresses = stdout.lines().filter_map(|line| line.split_once(':'))
+        .flat_map(|(_, addresses)| addresses.split_whitespace());
+    unique_dns_ips(addresses)
+}
+
+/// Parse nameserver directives, accepting both spaces and tabs.
+fn parse_resolv_conf(content: &str) -> Vec<String> {
+    let addresses = content.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next() == Some("nameserver")).then(|| fields.next()).flatten()
+    });
+    unique_dns_ips(addresses)
+}
+
+fn unique_dns_ips<'a>(addresses: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut ips = Vec::new();
+    for address in addresses {
+        // resolvectl may append an interface scope or a DNS-over-TLS server
+        // name. nftables needs the address itself, not either annotation.
+        let bare = address.split(['%', '#']).next().unwrap_or_default();
+        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+            // Local stub resolvers already pass through the loopback rule.
+            if !ip.is_loopback() && !ip.is_unspecified() {
+                let ip = ip.to_string();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
                 }
             }
         }
     }
     ips
+}
+
+/// Return system DNS addresses for profiles that retain their current DNS.
+/// A stalled resolver service must not hold up connection setup indefinitely.
+async fn current_system_dns_ips() -> Vec<String> {
+    let mut command = tokio::process::Command::new("resolvectl");
+    command.args(["dns", "--no-pager"]).kill_on_drop(true);
+    if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(3), command.output()).await {
+        if out.status.success() {
+            let ips = parse_resolvectl_dns(&String::from_utf8_lossy(&out.stdout));
+            if !ips.is_empty() {
+                return ips;
+            }
+        }
+    }
+
+    // Also fall back when resolvectl succeeds without reporting a server.
+    tokio::fs::read_to_string("/etc/resolv.conf")
+        .await
+        .map(|content| parse_resolv_conf(&content))
+        .unwrap_or_default()
 }
 
 /// Parse `remote <host> <port>` directives from an OpenVPN config file and
@@ -8283,6 +8294,30 @@ mod tests {
     // -----------------------------------------------------------------------
     // Kill-switch rendering
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn system_dns_preserves_ipv6_and_mixed_address_lists() {
+        assert_eq!(
+            parse_resolvectl_dns("Global: 2606:4700:4700::1111\nLink 2 (eth0): 192.0.2.53 2001:db8::53\n"),
+            ["2606:4700:4700::1111", "192.0.2.53", "2001:db8::53"]
+        );
+    }
+
+    #[test]
+    fn system_dns_normalizes_deduplicates_and_ignores_stub_resolvers() {
+        assert_eq!(
+            parse_resolvectl_dns("Global: 127.0.0.53 ::1 0.0.0.0 :: n/a\nLink 2 (eth0): 192.0.2.53#dns.example fe80::1%eth0 2001:0db8::53\nLink 3 (eth1): 192.0.2.53 2001:db8::53\n"),
+            ["192.0.2.53", "fe80::1", "2001:db8::53"]
+        );
+    }
+
+    #[test]
+    fn resolv_conf_accepts_tabs_comments_and_ipv6() {
+        assert_eq!(
+            parse_resolv_conf("# nameserver 192.0.2.1\n nameserver\t192.0.2.53 # router\nnameserver 2001:db8::53\nsearch example.com\nnameserver 127.0.0.53\nnameserver ::1\nnameserver invalid\nnameserver\nnameserver 192.0.2.53\n"),
+            ["192.0.2.53", "2001:db8::53"]
+        );
+    }
 
     #[test]
     fn kill_switch_renders_ipv4_and_ipv6_with_the_correct_nft_family() {

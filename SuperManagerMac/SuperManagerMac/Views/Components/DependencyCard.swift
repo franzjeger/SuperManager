@@ -68,6 +68,10 @@ struct DependencyCard: View {
             }
             .padding(12)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                refresh += 1
+                onInstalled?()
+            }
         }
     }
 
@@ -94,7 +98,55 @@ struct DependencyCard: View {
                 Button("Install") { install(tool) }
                     .controlSize(.small)
                     .disabled(Dependencies.brewPath == nil || installing != nil)
+            } else if Dependencies.terminalBuildCommand(for: tool.id) != nil {
+                // No brew formula: build it in Terminal, where the
+                // multi-minute compile and its sudo prompt are visible.
+                Button("Build in Terminal\u{2026}") { buildInTerminal(tool) }
+                    .controlSize(.small)
+                    .disabled(installing != nil)
             }
+        }
+    }
+
+    /// Launch the tool's build command in Terminal by opening a small
+    /// `.command` file. Deliberately not run in-process: it needs a
+    /// visible progress log and an interactive `sudo`, neither of which
+    /// the captured-output installer above can offer.
+    private func buildInTerminal(_ tool: Dependencies.Tool) {
+        guard let cmd = Dependencies.terminalBuildCommand(for: tool.id) else { return }
+        let script = """
+            #!/bin/bash
+            trap '/bin/rm -f -- "$0"; /bin/rmdir -- "$(/usr/bin/dirname -- "$0")"' EXIT
+            echo "Building \(tool.id) for SuperManager. This takes a few minutes and"
+            echo "may ask for your password to install the finished binary."
+            echo
+            \(cmd)
+            status=$?
+            echo
+            if [ $status -eq 0 ]; then
+                echo "Done — you can close this window and return to SuperManager."
+            else
+                echo "Build failed (exit $status). Leave this window open to read the error."
+            fi
+            exit "$status"
+            """
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("supermanager-build-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("install-\(tool.id).command")
+        failure = nil
+        do {
+            try FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: false,
+                attributes: [.posixPermissions: 0o700])
+            try script.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: url.path)
+            guard NSWorkspace.shared.open(url) else {
+                throw Dependencies.InstallError.failed("Terminal could not open the installer.")
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            failure = "Could not start the build: \(error.localizedDescription)"
         }
     }
 
