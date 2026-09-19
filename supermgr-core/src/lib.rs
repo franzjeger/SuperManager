@@ -21,7 +21,7 @@
 pub mod dbus;
 #[cfg(target_os = "windows")]
 pub mod pipe;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub mod mac;
 pub mod protocol;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

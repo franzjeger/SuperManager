@@ -128,7 +128,14 @@ impl EngineServer {
 
             // Parse the request.
             let response = match serde_json::from_slice::<Request>(&buf) {
-                Ok(req) => self.dispatch(req).await,
+                Ok(req) => {
+                    // Parameter validators build reusable error responses with
+                    // a placeholder ID. Correlate every parsed request here.
+                    let request_id = req.id;
+                    let mut response = self.dispatch(req).await;
+                    response.id = request_id;
+                    response
+                }
                 Err(e) => Response::err(0, protocol::PARSE_ERROR, format!("parse error: {e}")),
             };
 

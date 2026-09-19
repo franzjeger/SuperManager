@@ -1,221 +1,223 @@
-//! Windows unix-socket client for the SuperManager daemon (`supermgrd-mac`).
+//! Client for the macOS engine's length-prefixed JSON-RPC 2.0 socket.
 //!
-//! This is the Windows counterpart to [`crate::dbus::DaemonProxy`]: the GUI
-//! and the MCP server reach the daemon through this client. The wire format
-//! is the JSON-RPC envelope defined in [`crate::protocol`].
+//! The typed methods adapt the shared daemon API to the engine's method names.
+//! Operations owned by the privileged helper are explicitly unsupported here.
+//! Available on Unix so integration tests can exercise the real client and
+//! engine together on Linux as well as macOS.
 //!
-//! # Concurrency
-//!
-//! A [`MacClient`] owns a single duplex pipe handle and serialises all
-//! requests through an internal `Mutex` on the writer half. Concurrent
-//! callers see ordered request submission and correctly correlated responses
-//! via the per-request id. This mirrors how `zbus::Proxy` multiplexes calls
-//! over its single D-Bus connection on Linux.
-//!
-//! # Failure recovery
-//!
-//! If the daemon restarts (Windows Service restart, crash, upgrade), the
-//! pipe handle becomes invalid and subsequent calls return
-//! [`MacError::Disconnected`]. The caller decides whether to reconnect
-//! ([`MacClient::connect`] is cheap) or surface the failure to the user.
+//! Clones serialize exchanges on one connection. A cancelled, timed-out or
+//! malformed exchange invalidates that connection; reopen it before retrying.
+//! A lost response does not establish whether a mutating operation completed.
 
-#![cfg(target_os = "macos")]
-
+use std::path::Path;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
 };
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::UnixStream,
     sync::Mutex,
     time::{timeout, Duration},
 };
 
-use crate::protocol::{
-    PipeRequest, PipeResponse, RpcError, MAX_FRAME_BYTES, PROTOCOL_VERSION,
-};
-
-/// Per-call timeout. The daemon is expected to either respond or return an
-/// error inside this window — long-running operations (SSH key push, FortiGate
-/// import) report progress via the event stream rather than blocking the
-/// request. Sized to swallow ordinary disk I/O and TLS handshakes without
-/// hanging the GUI indefinitely if the daemon wedges.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+// Same request limit as EngineServer::handle_connection. Apply it to incoming
+// frames too, before allocating memory for a response.
+const MAX_FRAME_BYTES: usize = 10 * 1024 * 1024;
 
-/// Errors raised by the unix-socket client. Server-side application errors
-/// surface as [`MacError::Rpc`], wire-level problems as the variants below.
+/// Failures reported by the macOS engine client.
 #[derive(Debug, thiserror::Error)]
 pub enum MacError {
-    /// The named pipe could not be opened (daemon not running, ACL refusal,
-    /// or all pipe instances busy).
-    #[error("failed to connect to supermgrd named pipe: {0}")]
+    /// The engine's Unix socket could not be opened.
+    #[error("failed to connect to the macOS engine socket: {0}")]
     Connect(#[source] std::io::Error),
-    /// I/O error on an established pipe (write/read failure).
-    #[error("pipe I/O error: {0}")]
+    /// An established connection failed during an exchange.
+    #[error("engine socket I/O error: {0}")]
     Io(#[source] std::io::Error),
-    /// The pipe peer closed the handle before completing the response.
-    #[error("daemon disconnected during request")]
+    /// The peer closed, or an earlier interrupted request invalidated the socket.
+    #[error("engine connection closed; reopen before sending another request")]
     Disconnected,
-    /// The daemon's response did not arrive within [`DEFAULT_TIMEOUT`].
-    #[error("daemon did not respond within {0:?}")]
+    /// No complete response arrived before the deadline.
+    #[error("engine did not respond within {0:?}; operation outcome may be unknown")]
     Timeout(Duration),
-    /// The response frame was malformed or the daemon reported an unknown
-    /// protocol version.
+    /// A malformed frame, JSON-RPC version or response ID.
     #[error("protocol error: {0}")]
     Protocol(String),
-    /// The daemon completed the dispatch but returned a typed error.
-    #[error(transparent)]
-    Rpc(#[from] RpcError),
+    /// A JSON-RPC application error returned by the engine.
+    #[error("engine error {code}: {message}")]
+    Rpc {
+        /// JSON-RPC error code.
+        code: i32,
+        /// Engine-provided explanation.
+        message: String,
+        /// Optional structured error category and context.
+        data: Option<Value>,
+    },
+    /// The engine does not implement this shared daemon operation.
+    #[error("not supported by the macOS engine: {0}")]
+    Unsupported(&'static str),
 }
 
-/// Async client for the daemon's named-pipe interface.
+#[derive(Serialize)]
+struct Request<'a> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'a str,
+    params: Value,
+}
+
+#[derive(Deserialize)]
+struct Response {
+    jsonrpc: String,
+    id: u64,
+    result: Option<Value>,
+    error: Option<RemoteError>,
+}
+
+#[derive(Deserialize)]
+struct RemoteError {
+    code: i32,
+    message: String,
+    data: Option<Value>,
+}
+
+/// Async client for the macOS engine's Unix socket.
 #[derive(Clone)]
 pub struct MacClient {
     inner: Arc<Inner>,
 }
 
 struct Inner {
-    /// Write half + buffered read half share the same handle; the lock keeps
-    /// request frames from interleaving on the wire.
-    io: Mutex<BufReader<UnixStream>>,
+    // Take the stream while exchanging, and return it only after a complete,
+    // validated response. Cancellation drops it instead of leaving half a frame
+    // for the next caller to interpret.
+    io: Mutex<Option<UnixStream>>,
     next_id: AtomicU64,
 }
 
 impl MacClient {
-    /// Open a connection to the daemon's well-known pipe.
-    ///
-    /// Returns [`MacError::Connect`] if the daemon is not running. On a
-    /// fresh install the caller should surface a "Start SuperManager
-    /// service" hint pointing at `services.msc` or `sc start supermgrd`.
-    ///
-    /// Named `open` (not `connect`) so the verb does not collide with the
-    /// VPN `connect()` method below — that lets the GUI/MCP call
-    /// `client.connect(profile_id)` with identical syntax on both Linux
-    /// and Windows.
+    /// Connect to the socket used by the installed macOS engine.
     pub async fn open() -> Result<Self, MacError> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-        let socket_path = format!("{home}/Library/Application Support/SuperManager/supermgrd.sock");
-        let pipe = UnixStream::connect(socket_path)
-            .await
-            .map_err(MacError::Connect)?;
+        Self::open_path(crate::paths::default_data_dir().join("supermgrd.sock")).await
+    }
+
+    /// Connect to an explicit engine socket, including isolated test instances.
+    pub async fn open_path(path: impl AsRef<Path>) -> Result<Self, MacError> {
+        let stream = UnixStream::connect(path).await.map_err(MacError::Connect)?;
         Ok(Self {
             inner: Arc::new(Inner {
-                io: Mutex::new(BufReader::new(pipe)),
+                io: Mutex::new(Some(stream)),
                 next_id: AtomicU64::new(1),
             }),
         })
     }
 
-    /// Send a request and await a single matching response.
-    ///
-    /// `args` should be a JSON object whose field names match the daemon's
-    /// expected positional arguments for `method`. The named-pipe dispatcher
-    /// rejects unknown methods with [`RpcError::Protocol`].
-    pub async fn invoke(
-        &self,
-        method: &str,
-        args: serde_json::Value,
-    ) -> Result<serde_json::Value, MacError> {
+    /// Invoke an engine method using its JSON-RPC name and named parameters.
+    pub async fn invoke(&self, method: &str, params: Value) -> Result<Value, MacError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let req = PipeRequest {
-            v: PROTOCOL_VERSION,
+        let request = Request {
+            jsonrpc: "2.0",
             id,
-            method: method.to_owned(),
-            args,
+            method,
+            params,
         };
-        let mut frame = serde_json::to_vec(&req)
+        let frame = serde_json::to_vec(&request)
             .map_err(|e| MacError::Protocol(format!("request serialise: {e}")))?;
         if frame.len() > MAX_FRAME_BYTES {
             return Err(MacError::Protocol(format!(
-                "request frame {} bytes exceeds limit {}",
-                frame.len(),
-                MAX_FRAME_BYTES
+                "request exceeds {MAX_FRAME_BYTES} bytes"
             )));
         }
-        frame.push(b'\n');
-
-        let resp = timeout(DEFAULT_TIMEOUT, self.exchange(&frame, id))
+        let response = timeout(DEFAULT_TIMEOUT, self.exchange(&frame, id))
             .await
             .map_err(|_| MacError::Timeout(DEFAULT_TIMEOUT))??;
-        if let Some(err) = resp.error {
-            return Err(MacError::Rpc(err));
+        if let Some(error) = response.error {
+            return Err(MacError::Rpc {
+                code: error.code,
+                message: error.message,
+                data: error.data,
+            });
         }
-        Ok(resp.result.unwrap_or(serde_json::Value::Null))
+        Ok(response.result.unwrap_or(Value::Null))
     }
 
-    /// Convenience wrapper for methods that the D-Bus contract returns as
-    /// a JSON-encoded string (`list_hosts`, `ssh_list_keys`, etc.). Strips
-    /// the outer string wrapper if the daemon returned one, otherwise
-    /// re-serialises the JSON value.
+    /// Return a string result verbatim, or serialize a structured JSON result.
     pub async fn invoke_json_string(
         &self,
         method: &str,
-        args: serde_json::Value,
+        params: Value,
     ) -> Result<String, MacError> {
-        let v = self.invoke(method, args).await?;
-        match v {
-            serde_json::Value::String(s) => Ok(s),
+        let value = self.invoke(method, params).await?;
+        match value {
+            Value::String(text) => Ok(text),
             other => serde_json::to_string(&other)
-                .map_err(|e| MacError::Protocol(format!("response reserialise: {e}"))),
+                .map_err(|e| MacError::Protocol(format!("response serialise: {e}"))),
         }
     }
 
-    /// Convenience wrapper for void methods that return `null` on success.
-    pub async fn invoke_unit(
-        &self,
-        method: &str,
-        args: serde_json::Value,
-    ) -> Result<(), MacError> {
-        let _ = self.invoke(method, args).await?;
+    /// Invoke an engine method whose successful response needs no result data.
+    pub async fn invoke_unit(&self, method: &str, params: Value) -> Result<(), MacError> {
+        self.invoke(method, params).await?;
         Ok(())
     }
 
-    /// Write the framed request and read response frames until one matches
-    /// the request id. Out-of-order responses (which the current daemon
-    /// doesn't produce, but the protocol permits) are discarded — the
-    /// per-request `Mutex` lock prevents the queue from being polluted by
-    /// other in-flight callers.
-    async fn exchange(&self, frame: &[u8], want_id: u64) -> Result<PipeResponse, MacError> {
+    async fn exchange(&self, frame: &[u8], want_id: u64) -> Result<Response, MacError> {
         let mut guard = self.inner.io.lock().await;
-        guard
-            .get_mut()
-            .write_all(frame)
+        let mut stream = guard.take().ok_or(MacError::Disconnected)?;
+        stream
+            .write_all(&(frame.len() as u32).to_be_bytes())
             .await
             .map_err(MacError::Io)?;
-        guard.get_mut().flush().await.map_err(MacError::Io)?;
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = guard.read_line(&mut line).await.map_err(MacError::Io)?;
-            if n == 0 {
-                return Err(MacError::Disconnected);
-            }
-            let resp: PipeResponse = serde_json::from_str(line.trim_end())
-                .map_err(|e| MacError::Protocol(format!("response parse: {e}")))?;
-            if resp.v != PROTOCOL_VERSION {
-                return Err(MacError::Protocol(format!(
-                    "daemon protocol version {} != client {}",
-                    resp.v, PROTOCOL_VERSION
-                )));
-            }
-            if resp.id == want_id {
-                return Ok(resp);
-            }
-            // Different id — stale or out-of-order; keep reading.
+        stream.write_all(frame).await.map_err(MacError::Io)?;
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).await.map_err(read_error)?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length > MAX_FRAME_BYTES {
+            return Err(MacError::Protocol(format!(
+                "response exceeds {MAX_FRAME_BYTES} bytes"
+            )));
         }
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.map_err(read_error)?;
+        let value: Value = serde_json::from_slice(&body)
+            .map_err(|e| MacError::Protocol(format!("response parse: {e}")))?;
+        if value.get("result").is_some() == value.get("error").is_some()
+            || value.get("error").is_some_and(Value::is_null)
+        {
+            return Err(MacError::Protocol(
+                "response must contain one result or error".into(),
+            ));
+        }
+        let response: Response = serde_json::from_value(value)
+            .map_err(|e| MacError::Protocol(format!("response parse: {e}")))?;
+        if response.jsonrpc != "2.0" || response.id != want_id {
+            return Err(MacError::Protocol(
+                "unexpected JSON-RPC version or response ID".into(),
+            ));
+        }
+        *guard = Some(stream);
+        Ok(response)
+    }
+}
+
+fn read_error(error: std::io::Error) -> MacError {
+    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        MacError::Disconnected
+    } else {
+        MacError::Io(error)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Typed method surface — mirrors `DaemonProxy` on Linux.
 //
-// Each method serialises its positional args as a JSON object and forwards
-// to `invoke`. Adding a method here means: pick the same name as the D-Bus
-// method, write the args object, choose `invoke_json_string` for JSON-typed
-// returns or `invoke_unit` for void.
+// Adapt method names, parameter keys and return values to the engine contract.
+// The shared surface also includes operations the macOS engine cannot perform;
+// those return Unsupported without sending a request.
 // ---------------------------------------------------------------------------
 
 impl MacClient {
@@ -223,103 +225,92 @@ impl MacClient {
 
     /// List all VPN profiles as a JSON array.
     pub async fn list_profiles(&self) -> Result<String, MacError> {
-        self.invoke_json_string("list_profiles", serde_json::json!({})).await
+        self.invoke_json_string("list_profiles", serde_json::json!({}))
+            .await
     }
 
     /// Connect to the named profile.
-    pub async fn connect(&self, profile_id: &str) -> Result<(), MacError> {
-        self.invoke_unit("connect", serde_json::json!({ "profile_id": profile_id })).await
+    /// Requires the macOS app/helper; this engine client returns Unsupported.
+    pub async fn connect(&self, _profile_id: &str) -> Result<(), MacError> {
+        Err(MacError::Unsupported(
+            "VPN connection is managed by the SuperManager app and privileged helper",
+        ))
     }
 
     /// Disconnect the active profile.
+    /// Requires the macOS app/helper; this engine client returns Unsupported.
     pub async fn disconnect(&self) -> Result<(), MacError> {
-        self.invoke_unit("disconnect", serde_json::json!({})).await
+        Err(MacError::Unsupported(
+            "VPN disconnection is managed by the SuperManager app and privileged helper",
+        ))
     }
 
     /// Current VPN status JSON.
+    /// Requires the macOS app/helper; this engine client returns Unsupported.
     pub async fn get_status(&self) -> Result<String, MacError> {
-        self.invoke_json_string("get_status", serde_json::json!({})).await
+        Err(MacError::Unsupported(
+            "live VPN status is managed by the SuperManager app and privileged helper",
+        ))
     }
 
     /// Delete a profile by id.
     pub async fn delete_profile(&self, profile_id: &str) -> Result<(), MacError> {
-        self.invoke_unit("delete_profile", serde_json::json!({ "profile_id": profile_id })).await
+        self.invoke_unit(
+            "vpn_delete_profile",
+            serde_json::json!({ "id": profile_id }),
+        )
+        .await
     }
 
     /// Import a WireGuard `wg-quick` config. Returns the new profile id.
-    pub async fn import_wireguard(
-        &self,
-        conf_text: &str,
-        name: &str,
-    ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "import_wireguard",
-            serde_json::json!({ "conf_text": conf_text, "name": name }),
-        )
-        .await
+    pub async fn import_wireguard(&self, conf_text: &str, name: &str) -> Result<String, MacError> {
+        let profile = self
+            .invoke(
+                "vpn_import_wireguard",
+                serde_json::json!({ "content": conf_text, "name": name }),
+            )
+            .await?;
+        profile
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| MacError::Protocol("import response has no profile ID".into()))
     }
 
-    /// Import a FortiGate IKEv2 IPsec profile (Windows RAS / strongSwan).
-    /// Returns the new profile id. Password + PSK are sent in cleartext
-    /// over the local pipe; the daemon stores them in the platform
-    /// secret store before responding.
+    /// IKEv2 credential import requires the macOS app's Keychain workflow.
+    /// Returns an explicit unsupported error; no profile or secret is created.
     pub async fn import_fortigate(
         &self,
-        name: &str,
-        host: &str,
-        username: &str,
-        password: &str,
-        psk: &str,
+        _name: &str,
+        _host: &str,
+        _username: &str,
+        _password: &str,
+        _psk: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "import_fortigate",
-            serde_json::json!({
-                "name": name,
-                "host": host,
-                "username": username,
-                "password": password,
-                "psk": psk,
-            }),
-        )
-        .await
+        Err(MacError::Unsupported(
+            "IKEv2 credentials must be imported through the SuperManager app",
+        ))
     }
 
-    /// Import a FortiGate SSL VPN profile. Returns the new profile id.
-    ///
-    /// `dns_servers_json` and `routes_json` are JSON-encoded arrays
-    /// (`"[\"1.1.1.1\"]"`, `"[\"10.0.0.0/8\"]"`); the daemon parses them
-    /// into typed `IpAddr`/`IpNet` values before persisting.
+    /// FortiGate SSL VPN import is not implemented by the macOS engine.
     #[allow(clippy::too_many_arguments)]
     pub async fn import_forticlient_sslvpn(
         &self,
-        name: &str,
-        host: &str,
-        port: u16,
-        username: &str,
-        password: &str,
-        trusted_cert: Option<&str>,
-        dns_servers_json: &str,
-        routes_json: &str,
+        _name: &str,
+        _host: &str,
+        _port: u16,
+        _username: &str,
+        _password: &str,
+        _trusted_cert: Option<&str>,
+        _dns_servers_json: &str,
+        _routes_json: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "import_forticlient_sslvpn",
-            serde_json::json!({
-                "name": name,
-                "host": host,
-                "port": port,
-                "username": username,
-                "password": password,
-                "trusted_cert": trusted_cert.unwrap_or(""),
-                "dns_servers_json": dns_servers_json,
-                "routes_json": routes_json,
-            }),
-        )
-        .await
+        Err(MacError::Unsupported("FortiGate SSL VPN import"))
     }
 
     // ----- SSH keys -----
 
-    /// Generate a new SSH key. Returns the key JSON.
+    /// Generate a new SSH key. Returns its assigned ID.
     pub async fn ssh_generate_key(
         &self,
         key_type: &str,
@@ -341,12 +332,14 @@ impl MacClient {
 
     /// List all managed SSH keys as a JSON array.
     pub async fn ssh_list_keys(&self) -> Result<String, MacError> {
-        self.invoke_json_string("ssh_list_keys", serde_json::json!({})).await
+        self.invoke_json_string("ssh_list_keys", serde_json::json!({}))
+            .await
     }
 
     /// Delete an SSH key by id.
     pub async fn ssh_delete_key(&self, key_id: &str) -> Result<(), MacError> {
-        self.invoke_unit("ssh_delete_key", serde_json::json!({ "key_id": key_id })).await
+        self.invoke_unit("ssh_delete_key", serde_json::json!({ "key_id": key_id }))
+            .await
     }
 
     /// Export the public half of a key in OpenSSH `authorized_keys` format.
@@ -362,22 +355,29 @@ impl MacClient {
 
     /// List all managed hosts as a JSON array.
     pub async fn list_hosts(&self) -> Result<String, MacError> {
-        self.invoke_json_string("list_hosts", serde_json::json!({})).await
+        self.invoke_json_string("ssh_list_hosts", serde_json::json!({}))
+            .await
     }
 
     /// Get a single host's JSON.
     pub async fn get_host(&self, host_id: &str) -> Result<String, MacError> {
-        self.invoke_json_string("get_host", serde_json::json!({ "host_id": host_id })).await
+        self.invoke_json_string("ssh_get_host", serde_json::json!({ "host_id": host_id }))
+            .await
     }
 
     /// Add a new host from its JSON serialisation. Returns the assigned id.
     pub async fn add_host(&self, host_json: &str) -> Result<String, MacError> {
-        self.invoke_json_string("add_host", serde_json::json!({ "host_json": host_json })).await
+        self.invoke_json_string(
+            "ssh_add_host",
+            serde_json::json!({ "host_json": host_json }),
+        )
+        .await
     }
 
     /// Delete a host by id.
     pub async fn delete_host(&self, host_id: &str) -> Result<(), MacError> {
-        self.invoke_unit("delete_host", serde_json::json!({ "host_id": host_id })).await
+        self.invoke_unit("ssh_delete_host", serde_json::json!({ "host_id": host_id }))
+            .await
     }
 
     /// Execute a shell command on a remote host via SSH. Returns JSON
@@ -397,7 +397,7 @@ impl MacClient {
     /// Probe a host's reachability and credentials. Returns a JSON report.
     pub async fn test_host_connection(&self, host_id: &str) -> Result<String, MacError> {
         self.invoke_json_string(
-            "test_host_connection",
+            "ssh_test_connection",
             serde_json::json!({ "host_id": host_id }),
         )
         .await
@@ -405,19 +405,33 @@ impl MacClient {
 
     /// Toggle the favourite/pin flag for a host. Returns the new state.
     pub async fn toggle_host_pin(&self, host_id: &str) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "toggle_host_pin",
-            serde_json::json!({ "host_id": host_id }),
-        )
-        .await
+        let hosts = self
+            .invoke("ssh_toggle_pin", serde_json::json!({ "host_id": host_id }))
+            .await?;
+        let host_uuid = uuid::Uuid::parse_str(host_id)
+            .map_err(|_| MacError::Protocol("invalid host UUID".into()))?;
+        let host = hosts
+            .as_array()
+            .and_then(|hosts| {
+                hosts.iter().find(|host| {
+                    host.get("id")
+                        .and_then(Value::as_str)
+                        .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                        == Some(host_uuid)
+                })
+            })
+            .ok_or_else(|| {
+                MacError::Protocol("toggle response does not contain the host".into())
+            })?;
+        let pinned = host
+            .get("pinned")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| MacError::Protocol("toggle response has no pinned state".into()))?;
+        Ok(serde_json::json!({ "host_id": host_id, "pinned": pinned }).to_string())
     }
 
     /// Store a host's SSH password in the credential store.
-    pub async fn ssh_set_password(
-        &self,
-        host_id: &str,
-        password: &str,
-    ) -> Result<(), MacError> {
+    pub async fn ssh_set_password(&self, host_id: &str, password: &str) -> Result<(), MacError> {
         self.invoke_unit(
             "ssh_set_password",
             serde_json::json!({ "host_id": host_id, "password": password }),
@@ -434,7 +448,7 @@ impl MacClient {
     ) -> Result<(), MacError> {
         self.invoke_unit(
             "ssh_set_api_token",
-            serde_json::json!({ "host_id": host_id, "token": token, "port": port }),
+            serde_json::json!({ "host_id": host_id, "token": token, "api_port": if port == 0 { 443 } else { port } }),
         )
         .await
     }
@@ -493,73 +507,153 @@ impl MacClient {
     }
 
     /// Push an SSH key to a FortiGate's admin user.
+    /// This operation is not implemented by the macOS engine.
     pub async fn fortigate_push_ssh_key(
         &self,
-        host_id: &str,
-        key_id: &str,
-        admin_user: &str,
+        _host_id: &str,
+        _key_id: &str,
+        _admin_user: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "fortigate_push_ssh_key",
-            serde_json::json!({
-                "host_id": host_id,
-                "key_id": key_id,
-                "admin_user": admin_user,
-            }),
-        )
-        .await
+        Err(MacError::Unsupported(
+            "FortiGate administrator key deployment",
+        ))
     }
 
     /// Snapshot a FortiGate config. Returns the filename of the stored backup.
-    pub async fn fortigate_backup_config(&self, host_id: &str) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "fortigate_backup_config",
-            serde_json::json!({ "host_id": host_id }),
-        )
-        .await
+    /// This operation is not implemented by the macOS engine.
+    pub async fn fortigate_backup_config(&self, _host_id: &str) -> Result<String, MacError> {
+        Err(MacError::Unsupported("FortiGate configuration backup"))
     }
 
     /// Proxy an OPNsense REST API call.
+    /// This operation is not implemented by the macOS engine.
     pub async fn opnsense_api(
         &self,
-        host_id: &str,
-        method: &str,
-        path: &str,
-        body: &str,
+        _host_id: &str,
+        _method: &str,
+        _path: &str,
+        _body: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "opnsense_api",
-            serde_json::json!({
-                "host_id": host_id,
-                "method": method,
-                "path": path,
-                "body": body,
-            }),
-        )
-        .await
+        Err(MacError::Unsupported("OPNsense API proxy"))
     }
 
     /// Snapshot an OPNsense config. Returns the saved filename.
-    pub async fn opnsense_backup_config(&self, host_id: &str) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "opnsense_backup_config",
-            serde_json::json!({ "host_id": host_id }),
-        )
-        .await
+    /// This operation is not implemented by the macOS engine.
+    pub async fn opnsense_backup_config(&self, _host_id: &str) -> Result<String, MacError> {
+        Err(MacError::Unsupported("OPNsense configuration backup"))
     }
 
     /// Send a Sophos WebAdmin XML Configuration API operation. `inner_xml`
     /// is the body fragment between `</Login>` and `</Request>`; the
     /// daemon wraps it in the envelope and attaches credentials.
+    /// This operation is not implemented by the macOS engine.
     pub async fn sophos_xml_api(
         &self,
-        host_id: &str,
-        inner_xml: &str,
+        _host_id: &str,
+        _inner_xml: &str,
     ) -> Result<String, MacError> {
-        self.invoke_json_string(
-            "sophos_xml_api",
-            serde_json::json!({ "host_id": host_id, "inner_xml": inner_xml }),
-        )
-        .await
+        Err(MacError::Unsupported("Sophos XML API proxy"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::net::UnixListener;
+
+    async fn client_with_reply(
+        reply: Vec<u8>,
+    ) -> (tempfile::TempDir, MacClient, tokio::task::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut body = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut body).await.unwrap();
+            let request: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(request["jsonrpc"], "2.0");
+            assert_eq!(request["params"], json!({}));
+            assert!(request.get("args").is_none());
+            stream.write_all(&reply).await.unwrap();
+        });
+        let client = MacClient::open_path(path).await.unwrap();
+        (dir, client, peer)
+    }
+
+    fn frame(value: Value) -> Vec<u8> {
+        let body = serde_json::to_vec(&value).unwrap();
+        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        frame.extend(body);
+        frame
+    }
+
+    #[tokio::test]
+    async fn oversized_response_is_rejected_before_reading_a_body() {
+        let (_dir, client, peer) = client_with_reply(u32::MAX.to_be_bytes().to_vec()).await;
+        assert!(matches!(
+            client.invoke("api_version", json!({})).await,
+            Err(MacError::Protocol(_))
+        ));
+        assert!(matches!(
+            client.list_hosts().await,
+            Err(MacError::Disconnected)
+        ));
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_envelopes_and_wrong_ids_invalidate_the_connection() {
+        for response in [
+            json!({"jsonrpc": "2.0", "id": 99, "result": null}),
+            json!({"jsonrpc": "1.0", "id": 1, "result": null}),
+            json!({"jsonrpc": "2.0", "id": 1}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": null, "error": {"code": -1, "message": "bad"}}),
+            json!({"jsonrpc": "2.0", "id": 1, "error": null}),
+        ] {
+            let (_dir, client, peer) = client_with_reply(frame(response)).await;
+            assert!(matches!(
+                client.invoke("api_version", json!({})).await,
+                Err(MacError::Protocol(_))
+            ));
+            assert!(matches!(
+                client.list_hosts().await,
+                Err(MacError::Disconnected)
+            ));
+            peer.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_partial_response_does_not_reuse_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("engine.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (started, response_started) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).await.unwrap();
+            let mut request = vec![0; u32::from_be_bytes(length) as usize];
+            stream.read_exact(&mut request).await.unwrap();
+            stream.write_all(&100u32.to_be_bytes()).await.unwrap();
+            stream.write_all(b"{").await.unwrap();
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let client = MacClient::open_path(path).await.unwrap();
+        let caller = client.clone();
+        let request = tokio::spawn(async move { caller.invoke("api_version", json!({})).await });
+        response_started.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            client.list_hosts().await,
+            Err(MacError::Disconnected)
+        ));
+        peer.abort();
     }
 }
