@@ -53,6 +53,10 @@ pub enum VpnError {
     /// [`supermgr_core::protocol::RpcError::PermissionDenied`].
     #[error("authentication rejected: {0}")]
     PermissionDenied(&'static str),
+    /// Server presented a certificate we don't trust, but provided a fingerprint
+    /// that can be pinned for TOFU (Trust On First Use).
+    #[error("certificate pinning required: {0}")]
+    TofuCertificateRequired(String),
     /// Catch-all for unexpected I/O or system errors.
     #[error(transparent)]
     Io(#[from] std::io::Error),

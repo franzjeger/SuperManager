@@ -306,8 +306,6 @@ impl Ikev2Backend {
 
 async fn tear_down(mut active: AzActive) {
     info!(profile_id = %active.profile_id, "Azure: tearing down tunnel");
-    let _ = active.child.kill().await;
-    let _ = active.child.wait().await;
     if active.dns_overridden {
         if let Some(name) = active.adapter_name.as_deref() {
             if let Err(e) = reset_dns(name).await {
@@ -315,6 +313,8 @@ async fn tear_down(mut active: AzActive) {
             }
         }
     }
+    let _ = active.child.kill().await;
+    let _ = active.child.wait().await;
     drop(active.tmp_dir);
 }
 

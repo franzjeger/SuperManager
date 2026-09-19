@@ -32,9 +32,7 @@
 //!
 //! # TODO
 //!
-//! - **DNS-revert race**: Set-DnsClientServerAddress with `-ResetServerAddresses`
-//!   on the now-vanished interface ifindex prints a warning. Harmless but
-//!   noisy; suppress by snapshotting+restoring instead.
+//! (No pending tasks for WireGuard backend at this time.)
 
 use std::sync::{Arc, OnceLock};
 
@@ -360,15 +358,15 @@ async fn tear_down(active: WgActive) {
     // `Result<()>`, and a failed `down()` means the interface may still be
     // carrying traffic, which is worth saying out loud even though `drop`
     // below gets a second attempt at it.
+    if dns_overridden {
+        if let Err(e) = reset_dns_servers(&name).await {
+            warn!("DNS reset on {name} failed: {e:#}");
+        }
+    }
     if let Err(e) = active.adapter.down() {
         warn!(adapter_name = %name, "WireGuard down() failed, relying on drop: {e}");
     }
     drop(active.adapter);
-    if dns_overridden {
-        if let Err(e) = reset_dns_servers(&name).await {
-            warn!("DNS reset on {name} failed (interface may already be gone): {e:#}");
-        }
-    }
 }
 
 #[async_trait]

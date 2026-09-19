@@ -195,12 +195,24 @@ async fn handle_connect(state: &Arc<DaemonState>, args: &Value) -> Result<Value,
             .connect(&profile_json)
             .await
             .map_err(map_vpn_err)?,
-        ProfileConfig::ForticlientSslvpn(_) => state
-            .vpn
-            .forticlient
-            .connect(&profile_json)
-            .await
-            .map_err(map_vpn_err)?,
+        ProfileConfig::ForticlientSslvpn(_) => {
+            match state.vpn.forticlient.connect(&profile_json).await {
+                Ok(()) => {}
+                Err(super::vpn::VpnError::TofuCertificateRequired(fp)) => {
+                    tracing::info!(profile_id = %profile.id, fp = %fp, "TOFU: trusting gateway certificate on first use");
+                    let mut p = profile.clone();
+                    if let ProfileConfig::ForticlientSslvpn(cfg) = &mut p.config {
+                        cfg.trusted_cert = Some(fp);
+                    }
+                    if let Err(e) = state.profile_store.save(p.clone()).await {
+                        tracing::warn!("failed to persist TOFU certificate: {}", e);
+                    }
+                    let p_json = serde_json::to_string(&p).unwrap_or(profile_json);
+                    state.vpn.forticlient.connect(&p_json).await.map_err(map_vpn_err)?
+                }
+                Err(e) => return Err(map_vpn_err(e)),
+            }
+        }
         ProfileConfig::Generic(_) => {
             return Err(RpcError::Backend(
                 "Generic VPN profiles have no Windows backend".into(),

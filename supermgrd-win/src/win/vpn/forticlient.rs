@@ -30,9 +30,7 @@
 //!
 //! # TODO
 //!
-//! - Persistent gateway-cert handling: capture the gateway's cert
-//!   fingerprint on first sight, store it on the profile, pass
-//!   `--trusted-cert` on subsequent connects to harden TLS verification.
+//! (No pending tasks for FortiClient backend at this time.)
 
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
@@ -269,6 +267,20 @@ impl ForticlientBackend {
             for marker in FATAL_MARKERS {
                 if line.contains(marker) {
                     last_err = Some(line.clone());
+                }
+            }
+            if line.contains("Gateway certificate validation failed") {
+                last_err = Some(line.clone());
+            }
+            if line.contains("--trusted-cert") {
+                if let Some(fp) = line.split("--trusted-cert").nth(1) {
+                    let fp = fp.trim();
+                    if !fp.is_empty() {
+                        let _ = child.kill().await;
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        return Err(VpnError::TofuCertificateRequired(fp.to_string()));
+                    }
                 }
             }
         }
