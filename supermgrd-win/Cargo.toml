@@ -51,6 +51,7 @@ directories = "5"
 # we don't gate it because using `which` in non-Windows builds is harmless
 # (the OpenVPN backend is Windows-gated at the module level anyway).
 which = "8"
+tempfile = "3"
 
 # Windows-only deps live behind a target gate so `cargo check`/`cargo metadata`
 # can resolve this crate on Linux/macOS without pulling Win32 crates that

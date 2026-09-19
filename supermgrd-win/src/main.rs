@@ -16,6 +16,11 @@ mod win;
 #[cfg(any(target_os = "windows", test))]
 mod rpc_args;
 
+// Exercise the Windows trust-store implementation on every CI host too.
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "win/known_hosts.rs"]
+mod windows_known_hosts;
+
 fn main() {
     #[cfg(target_os = "windows")]
     {
