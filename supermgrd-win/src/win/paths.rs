@@ -51,20 +51,27 @@ pub const PROGRAM_DATA_SUBPATH: &str = "SuperManager";
 /// Create and secure the state tree before loading any data. ACL failures,
 /// reparse points and directories planted by an unprivileged owner stop startup.
 pub fn ensure_root() -> io::Result<PathBuf> {
-    let base = std::env::var_os("PROGRAMDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-    ensure_root_at(&base)
+    ensure_root_at(&program_data_dir())
 }
 
-fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
+fn program_data_dir() -> PathBuf {
+    std::env::var_os("PROGRAMDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+fn root_path_at(base: &Path) -> io::Result<PathBuf> {
     if !base.is_absolute() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "ProgramData must be absolute",
         ));
     }
-    let root = base.join(PROGRAM_DATA_SUBPATH);
+    Ok(base.join(PROGRAM_DATA_SUBPATH))
+}
+
+fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
+    let root = root_path_at(base)?;
     let _root_handle = secure_directory(&root, ROOT_SDDL, true)?;
     for sub in [
         "profiles",
@@ -91,7 +98,7 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
 /// handles left by an earlier client. The secret DACL is supplied to creation,
 /// so there is no create-before-lock window. Retain the guard until teardown.
 pub fn create_private_runtime_dir(profile_id: &uuid::Uuid) -> io::Result<PrivateRuntimeDir> {
-    let root = ensure_root()?;
+    let root = root_path_at(&program_data_dir())?;
     create_private_runtime_dir_at(&root, profile_id)
 }
 
@@ -99,6 +106,10 @@ fn create_private_runtime_dir_at(
     root: &Path,
     profile_id: &uuid::Uuid,
 ) -> io::Result<PrivateRuntimeDir> {
+    // The full state-tree migration runs once, before daemon startup. Pin and
+    // secure only the ancestors of this new session during a connection, so
+    // legitimate writers elsewhere in the running service remain independent.
+    let _root_handle = secure_directory(root, ROOT_SDDL, true)?;
     let runtime = root.join("runtime");
     let _runtime_handle = secure_directory(&runtime, SECRET_SDDL, true)?;
     let path = runtime.join(format!(
@@ -320,7 +331,7 @@ mod tests {
         BuildTrusteeWithSidW, GetEffectiveRightsFromAclW, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::{
-        CreateWellKnownSid, WinAuthenticatedUserSid, WELL_KNOWN_SID_TYPE,
+        CheckTokenMembership, CreateWellKnownSid, WinAuthenticatedUserSid, WELL_KNOWN_SID_TYPE,
     };
     use windows_sys::Win32::Storage::FileSystem::{FILE_READ_DATA, FILE_WRITE_DATA};
 
@@ -396,19 +407,39 @@ mod tests {
 
     #[test]
     fn temporary_runtime_files_inherit_private_acl_and_are_cleaned_on_drop() {
-        // No test accesses the real ProgramData. On a non-elevated runner,
-        // refusing to assign the Administrators owner is the expected result.
+        // Service filesystem tests require an elevated runner and use only
+        // temporary paths. No security setup error is accepted as a test pass.
+        let mut admins_sid = [0u32; 17];
+        let mut length = std::mem::size_of_val(&admins_sid) as u32;
+        assert_ne!(
+            unsafe {
+                CreateWellKnownSid(
+                    WinBuiltinAdministratorsSid,
+                    ptr::null_mut(),
+                    admins_sid.as_mut_ptr().cast(),
+                    &mut length,
+                )
+            },
+            0
+        );
+        let mut is_admin = 0;
+        assert_ne!(
+            unsafe {
+                CheckTokenMembership(
+                    ptr::null_mut(),
+                    admins_sid.as_mut_ptr().cast(),
+                    &mut is_admin,
+                )
+            },
+            0
+        );
+        assert_ne!(
+            is_admin, 0,
+            "ACL filesystem tests require an elevated Windows runner"
+        );
         let base = std::env::temp_dir().join(format!("supermanager-acl-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&base).unwrap();
-        let root = match ensure_root_at(&base) {
-            Ok(root) => root,
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                std::fs::remove_dir_all(base).unwrap();
-                eprintln!("ACL filesystem test requires an elevated Windows runner: {error}");
-                return;
-            }
-            Err(error) => panic!("create secure temporary tree: {error}"),
-        };
+        let root = ensure_root_at(&base).expect("create secure temporary state tree");
         let profile = uuid::Uuid::new_v4();
         let first = create_private_runtime_dir_at(&root, &profile).unwrap();
         let second = create_private_runtime_dir_at(&root, &profile).unwrap();
@@ -434,6 +465,15 @@ mod tests {
         let config = root.join("profiles").join("open.json");
         let writer = std::fs::File::create(&config).unwrap();
         assert!(ensure_root_at(&base).is_err());
+        let unrelated_session = create_private_runtime_dir_at(&root, &profile)
+            .expect("live profile writer must not block a new private VPN session");
+        let unrelated_token = unrelated_session.path().join("auth.txt");
+        std::fs::write(&unrelated_token, "test-token").unwrap();
+        assert_eq!(
+            effective_rights(&file_descriptor(&unrelated_token), WinAuthenticatedUserSid),
+            0
+        );
+        drop(unrelated_session);
         drop(writer);
         ensure_root_at(&base).unwrap();
 
