@@ -10,14 +10,14 @@ use libadwaita as adw;
 use libadwaita::prelude::*;
 use tracing::error;
 
-use supermgr_core::ssh::key::SshKeySummary;
 use supermgr_core::host::HostSummary;
+use supermgr_core::ssh::key::SshKeySummary;
 use supermgr_core::vpn::profile::ProfileSummary;
 
 use crate::app::AppMsg;
 use crate::dbus_client::{
-    dbus_ssh_generate_key, dbus_ssh_add_host, dbus_ssh_import_scan,
-    dbus_ssh_import_key, dbus_ssh_push_key, dbus_ssh_revoke_key,
+    dbus_ssh_add_host, dbus_ssh_generate_key, dbus_ssh_import_key, dbus_ssh_import_scan,
+    dbus_ssh_push_key, dbus_ssh_revoke_key,
 };
 
 /// The canonical device-type picker order: each entry pairs the
@@ -146,7 +146,9 @@ pub fn show_generate_key_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     {
@@ -176,9 +178,7 @@ pub fn show_generate_key_dialog(
             let tx = tx.clone();
             rt.spawn(async move {
                 let msg = match dbus_ssh_generate_key(name, key_type, description, tags).await {
-                    Ok((keys, _uuid)) => {
-                        AppMsg::SshKeysRefreshed(keys)
-                    }
+                    Ok((keys, _uuid)) => AppMsg::SshKeysRefreshed(keys),
                     Err(e) => {
                         error!("generate SSH key: {e:#}");
                         AppMsg::OperationFailed(e.to_string())
@@ -236,9 +236,7 @@ pub fn show_add_host_dialog_prefilled(
         .text(initial_port.to_string())
         .build();
     let username_row = adw::EntryRow::builder().title("Username").build();
-    let group_row = adw::EntryRow::builder()
-        .title("Group (optional)")
-        .build();
+    let group_row = adw::EntryRow::builder().title("Group (optional)").build();
 
     let device_row = adw::ComboRow::builder()
         .title("Device type")
@@ -282,14 +280,12 @@ pub fn show_add_host_dialog_prefilled(
         auth_row.connect_selected_notify(move |row| {
             let sel = row.selected();
             key_row.set_visible(sel == 0 || sel == 2); // key or certificate
-            pass_row.set_visible(sel == 1);             // password
-            cert_row.set_visible(sel == 2);             // certificate
+            pass_row.set_visible(sel == 1); // password
+            cert_row.set_visible(sel == 2); // certificate
         });
     }
 
-    let conn_group = adw::PreferencesGroup::builder()
-        .title("Connection")
-        .build();
+    let conn_group = adw::PreferencesGroup::builder().title("Connection").build();
     conn_group.add(&label_row);
     conn_group.add(&hostname_row);
     conn_group.add(&port_row);
@@ -363,7 +359,9 @@ pub fn show_add_host_dialog_prefilled(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     // Collect key IDs for referencing by index.
@@ -395,7 +393,8 @@ pub fn show_add_host_dialog_prefilled(
                 1 => "password",
                 2 => "certificate",
                 _ => "key",
-            }.to_owned();
+            }
+            .to_owned();
             let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
                 key_ids.get(key_row.selected() as usize).cloned()
             } else {
@@ -408,7 +407,11 @@ pub fn show_add_host_dialog_prefilled(
             };
             let certificate = if auth_row.selected() == 2 {
                 let c = cert_row.text().to_string();
-                if c.is_empty() { None } else { Some(c) }
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
             } else {
                 None
             };
@@ -430,13 +433,18 @@ pub fn show_add_host_dialog_prefilled(
                     Ok((hosts, uuid)) => {
                         if let Some(pw) = password {
                             if !pw.is_empty() {
-                                if let Err(e) = crate::dbus_client::dbus_ssh_set_password(uuid.clone(), pw).await {
+                                if let Err(e) =
+                                    crate::dbus_client::dbus_ssh_set_password(uuid.clone(), pw)
+                                        .await
+                                {
                                     error!("store SSH password: {e:#}");
                                 }
                             }
                         }
                         if let Some(cert) = certificate {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(uuid, cert).await {
+                            if let Err(e) =
+                                crate::dbus_client::dbus_ssh_set_certificate(uuid, cert).await
+                            {
                                 error!("store SSH certificate: {e:#}");
                             }
                         }
@@ -466,8 +474,8 @@ pub fn show_import_keys_dialog(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
-    use std::rc::Rc;
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     let dialog = adw::Dialog::builder()
         .title("Import SSH Keys")
@@ -525,7 +533,9 @@ pub fn show_import_keys_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     // Kick off the scan.
@@ -547,7 +557,8 @@ pub fn show_import_keys_dialog(
                     spinner.set_spinning(false);
                     spinner.set_visible(false);
 
-                    let found_keys: Vec<String> = serde_json::from_str(&json_str).unwrap_or_default();
+                    let found_keys: Vec<String> =
+                        serde_json::from_str(&json_str).unwrap_or_default();
                     if found_keys.is_empty() {
                         status_label.set_label("No importable SSH keys found in ~/.ssh/");
                     } else {
@@ -621,7 +632,9 @@ pub fn show_import_keys_dialog(
                         .unwrap_or_else(|| path.clone());
                     // Read public and private key files.
                     let pub_path = format!("{path}.pub");
-                    let public_key = tokio::fs::read_to_string(&pub_path).await.unwrap_or_default();
+                    let public_key = tokio::fs::read_to_string(&pub_path)
+                        .await
+                        .unwrap_or_default();
                     let private_key = tokio::fs::read_to_string(path).await.unwrap_or_default();
                     // Infer key type from name.
                     let key_type = if name.contains("rsa") {
@@ -763,7 +776,9 @@ pub fn show_push_key_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     let key_ids: Vec<String> = keys.iter().map(|k| k.id.to_string()).collect();
@@ -794,14 +809,13 @@ pub fn show_push_key_dialog(
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
-                let msg =
-                    match dbus_ssh_push_key(selected_key, selected_hosts, use_sudo).await {
-                        Ok(_op_id) => AppMsg::ShowToast("Key push initiated".to_string()),
-                        Err(e) => {
-                            error!("push SSH key: {e:#}");
-                            AppMsg::OperationFailed(e.to_string())
-                        }
-                    };
+                let msg = match dbus_ssh_push_key(selected_key, selected_hosts, use_sudo).await {
+                    Ok(_op_id) => AppMsg::ShowToast("Key push initiated".to_string()),
+                    Err(e) => {
+                        error!("push SSH key: {e:#}");
+                        AppMsg::OperationFailed(e.to_string())
+                    }
+                };
                 let _ = tx.send(msg);
             });
         });
@@ -907,7 +921,9 @@ pub fn show_revoke_key_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     let key_ids: Vec<String> = keys.iter().map(|k| k.id.to_string()).collect();
@@ -938,14 +954,13 @@ pub fn show_revoke_key_dialog(
             dialog.close();
             let tx = tx.clone();
             rt.spawn(async move {
-                let msg =
-                    match dbus_ssh_revoke_key(selected_key, selected_hosts, use_sudo).await {
-                        Ok(_op_id) => AppMsg::ShowToast("Key revocation initiated".to_string()),
-                        Err(e) => {
-                            error!("revoke SSH key: {e:#}");
-                            AppMsg::OperationFailed(e.to_string())
-                        }
-                    };
+                let msg = match dbus_ssh_revoke_key(selected_key, selected_hosts, use_sudo).await {
+                    Ok(_op_id) => AppMsg::ShowToast("Key revocation initiated".to_string()),
+                    Err(e) => {
+                        error!("revoke SSH key: {e:#}");
+                        AppMsg::OperationFailed(e.to_string())
+                    }
+                };
                 let _ = tx.send(msg);
             });
         });
@@ -975,11 +990,26 @@ pub fn show_edit_host_dialog(
         .content_width(420)
         .build();
 
-    let label_row = adw::EntryRow::builder().title("Label").text(&host.label).build();
-    let hostname_row = adw::EntryRow::builder().title("Hostname").text(&host.hostname).build();
-    let port_row = adw::EntryRow::builder().title("Port").text(host.port.to_string()).build();
-    let username_row = adw::EntryRow::builder().title("Username").text(&host.username).build();
-    let group_row = adw::EntryRow::builder().title("Group (optional)").text(&host.group).build();
+    let label_row = adw::EntryRow::builder()
+        .title("Label")
+        .text(&host.label)
+        .build();
+    let hostname_row = adw::EntryRow::builder()
+        .title("Hostname")
+        .text(&host.hostname)
+        .build();
+    let port_row = adw::EntryRow::builder()
+        .title("Port")
+        .text(host.port.to_string())
+        .build();
+    let username_row = adw::EntryRow::builder()
+        .title("Username")
+        .text(&host.username)
+        .build();
+    let group_row = adw::EntryRow::builder()
+        .title("Group (optional)")
+        .text(&host.group)
+        .build();
 
     let device_row = adw::ComboRow::builder()
         .title("Device type")
@@ -1003,25 +1033,46 @@ pub fn show_edit_host_dialog(
     key_names.extend(keys.iter().map(|key| key.name.clone()));
     let mut key_ids: Vec<Option<String>> = vec![None];
     key_ids.extend(keys.iter().map(|key| Some(key.id.to_string())));
-    let missing_key = host.auth_key_id.is_some_and(|id| !keys.iter().any(|key| key.id == id));
+    let missing_key = host
+        .auth_key_id
+        .is_some_and(|id| !keys.iter().any(|key| key.id == id));
     let missing_index = if missing_key {
         key_names.push("Missing assigned key — choose a replacement".into());
         key_ids.push(host.auth_key_id.map(|id| id.to_string()));
         Some((key_names.len() - 1) as u32)
-    } else { None };
-    let current_key_idx = host.auth_key_id.and_then(|id| keys.iter().position(|key| key.id == id))
-        .map(|index| index as u32 + 1).or(missing_index).unwrap_or(0);
-    let key_model = gtk4::StringList::new(&key_names.iter().map(String::as_str).collect::<Vec<_>>());
-    let key_row = adw::ComboRow::builder().title("SSH Key").model(&key_model)
-        .selected(current_key_idx).visible(auth_idx == 0 || auth_idx == 2).build();
+    } else {
+        None
+    };
+    let current_key_idx = host
+        .auth_key_id
+        .and_then(|id| keys.iter().position(|key| key.id == id))
+        .map(|index| index as u32 + 1)
+        .or(missing_index)
+        .unwrap_or(0);
+    let key_model =
+        gtk4::StringList::new(&key_names.iter().map(String::as_str).collect::<Vec<_>>());
+    let key_row = adw::ComboRow::builder()
+        .title("SSH Key")
+        .model(&key_model)
+        .selected(current_key_idx)
+        .visible(auth_idx == 0 || auth_idx == 2)
+        .build();
 
-    let pass_title = if host.has_password { "Password (configured — leave empty to keep)" } else { "Password" };
+    let pass_title = if host.has_password {
+        "Password (configured — leave empty to keep)"
+    } else {
+        "Password"
+    };
     let pass_row = adw::PasswordEntryRow::builder()
         .title(pass_title)
         .visible(auth_idx == 1)
         .build();
 
-    let cert_title = if host.has_certificate { "Certificate (configured — leave empty to keep)" } else { "Certificate (paste OpenSSH cert)" };
+    let cert_title = if host.has_certificate {
+        "Certificate (configured — leave empty to keep)"
+    } else {
+        "Certificate (paste OpenSSH cert)"
+    };
     let cert_row = adw::EntryRow::builder()
         .title(cert_title)
         .visible(auth_idx == 2)
@@ -1043,7 +1094,8 @@ pub fn show_edit_host_dialog(
     let mut vpn_names: Vec<&str> = vec!["None"];
     vpn_names.extend(vpn_profiles.iter().map(|p| p.name.as_str()));
     let vpn_model = gtk4::StringList::new(&vpn_names);
-    let vpn_idx = host.vpn_profile_id
+    let vpn_idx = host
+        .vpn_profile_id
         .and_then(|vid| vpn_profiles.iter().position(|p| p.id == vid))
         .map(|i| (i + 1) as u32) // +1 because index 0 is "None"
         .unwrap_or(0);
@@ -1055,14 +1107,17 @@ pub fn show_edit_host_dialog(
         .build();
 
     // Jump Host (ProxyJump) combo — "None / Direct" plus all other SSH hosts.
-    let other_hosts: Vec<&HostSummary> = all_hosts.iter()
-        .filter(|h| h.id != host.id)
-        .collect();
+    let other_hosts: Vec<&HostSummary> = all_hosts.iter().filter(|h| h.id != host.id).collect();
     let mut jump_names: Vec<String> = vec!["None / Direct".to_string()];
-    jump_names.extend(other_hosts.iter().map(|h| format!("{} ({})", h.label, h.hostname)));
+    jump_names.extend(
+        other_hosts
+            .iter()
+            .map(|h| format!("{} ({})", h.label, h.hostname)),
+    );
     let jump_name_refs: Vec<&str> = jump_names.iter().map(|s| s.as_str()).collect();
     let jump_model = gtk4::StringList::new(&jump_name_refs);
-    let jump_idx = host.proxy_jump
+    let jump_idx = host
+        .proxy_jump
         .and_then(|jid| other_hosts.iter().position(|h| h.id == jid))
         .map(|i| (i + 1) as u32)
         .unwrap_or(0);
@@ -1082,7 +1137,10 @@ pub fn show_edit_host_dialog(
     conn_group.add(&device_row);
     conn_group.add(&jump_row);
 
-    let auth_group = adw::PreferencesGroup::builder().title("Authentication").margin_top(12).build();
+    let auth_group = adw::PreferencesGroup::builder()
+        .title("Authentication")
+        .margin_top(12)
+        .build();
     auth_group.add(&auth_row);
     auth_group.add(&key_row);
     auth_group.add(&pass_row);
@@ -1095,10 +1153,12 @@ pub fn show_edit_host_dialog(
         .margin_top(12)
         .visible(host.device_type == supermgr_core::DeviceType::Fortigate)
         .build();
-    let token_title = if host.has_api { "API Token (configured — leave empty to keep)" } else { "API Token" };
-    let api_token_row = adw::PasswordEntryRow::builder()
-        .title(token_title)
-        .build();
+    let token_title = if host.has_api {
+        "API Token (configured — leave empty to keep)"
+    } else {
+        "API Token"
+    };
+    let api_token_row = adw::PasswordEntryRow::builder().title(token_title).build();
     let api_port_row = adw::EntryRow::builder()
         .title("HTTPS Port")
         .text(host.api_port.unwrap_or(443).to_string())
@@ -1116,11 +1176,13 @@ pub fn show_edit_host_dialog(
         .title("Controller URL")
         .text(host.unifi_controller_url.as_deref().unwrap_or(""))
         .build();
-    let unifi_user_row = adw::EntryRow::builder()
-        .title("Username")
-        .build();
+    let unifi_user_row = adw::EntryRow::builder().title("Username").build();
     let unifi_pass_row = adw::PasswordEntryRow::builder()
-        .title(if host.has_unifi_controller { "Password (configured — leave empty to keep)" } else { "Password" })
+        .title(if host.has_unifi_controller {
+            "Password (configured — leave empty to keep)"
+        } else {
+            "Password"
+        })
         .build();
     unifi_group.add(&unifi_url_row);
     unifi_group.add(&unifi_user_row);
@@ -1130,7 +1192,7 @@ pub fn show_edit_host_dialog(
         let api_group = api_group.clone();
         let unifi_group = unifi_group.clone();
         device_row.connect_selected_notify(move |row| {
-            api_group.set_visible(row.selected() == 4);   // index 4 = fortigate
+            api_group.set_visible(row.selected() == 4); // index 4 = fortigate
             unifi_group.set_visible(row.selected() == 1); // index 1 = unifi
         });
     }
@@ -1150,7 +1212,10 @@ pub fn show_edit_host_dialog(
 
     let content_box = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
-        .margin_top(12).margin_bottom(24).margin_start(24).margin_end(24)
+        .margin_top(12)
+        .margin_bottom(24)
+        .margin_start(24)
+        .margin_end(24)
         .spacing(0)
         .build();
     content_box.append(&conn_group);
@@ -1204,25 +1269,51 @@ pub fn show_edit_host_dialog(
                 && !username_row.text().is_empty();
             let auth_ok = match auth_row.selected() {
                 0 => Some(key_row.selected()) != missing_index,
-                1 => has_password || !pass_row.text().is_empty(),    // password
-                2 => (has_certificate || !cert_row.text().is_empty()) && Some(key_row.selected()) != missing_index,
+                1 => has_password || !pass_row.text().is_empty(), // password
+                2 => {
+                    (has_certificate || !cert_row.text().is_empty())
+                        && Some(key_row.selected()) != missing_index
+                }
                 _ => true,
             };
             save_btn.set_sensitive(basic_ok && auth_ok);
         })
     };
-    { let v = Rc::clone(&validate); label_row.connect_changed(move |_| v()); }
-    { let v = Rc::clone(&validate); hostname_row.connect_changed(move |_| v()); }
-    { let v = Rc::clone(&validate); username_row.connect_changed(move |_| v()); }
-    { let v = Rc::clone(&validate); pass_row.connect_changed(move |_| v()); }
-    { let v = Rc::clone(&validate); cert_row.connect_changed(move |_| v()); }
-    { let v = Rc::clone(&validate); auth_row.connect_selected_notify(move |_| v()); }
-    { let v = Rc::clone(&validate); key_row.connect_selected_notify(move |_| v()); }
+    {
+        let v = Rc::clone(&validate);
+        label_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        hostname_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        username_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        pass_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        cert_row.connect_changed(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        auth_row.connect_selected_notify(move |_| v());
+    }
+    {
+        let v = Rc::clone(&validate);
+        key_row.connect_selected_notify(move |_| v());
+    }
     validate();
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     let vpn_profile_ids: Vec<String> = vpn_profiles.iter().map(|p| p.id.to_string()).collect();
@@ -1241,8 +1332,11 @@ pub fn show_edit_host_dialog(
             let group = group_row.text().to_string();
             let device_type = selected_device_type_slug(&device_row);
             let auth_method = match auth_row.selected() {
-                1 => "password", 2 => "certificate", _ => "key",
-            }.to_owned();
+                1 => "password",
+                2 => "certificate",
+                _ => "key",
+            }
+            .to_owned();
             let key_id = if auth_row.selected() == 0 || auth_row.selected() == 2 {
                 key_ids.get(key_row.selected() as usize).cloned().flatten()
             } else {
@@ -1262,13 +1356,21 @@ pub fn show_edit_host_dialog(
             // VPN profile: index 0 = None, 1.. = vpn_profile_ids[i-1]
             let vpn_id = {
                 let sel = vpn_row.selected() as usize;
-                if sel > 0 { vpn_profile_ids.get(sel - 1).cloned() } else { None }
+                if sel > 0 {
+                    vpn_profile_ids.get(sel - 1).cloned()
+                } else {
+                    None
+                }
             };
 
             // Jump host: index 0 = None, 1.. = jump_host_ids[i-1]
             let jump_id = {
                 let sel = jump_row.selected() as usize;
-                if sel > 0 { jump_host_ids.get(sel - 1).cloned() } else { None }
+                if sel > 0 {
+                    jump_host_ids.get(sel - 1).cloned()
+                } else {
+                    None
+                }
             };
 
             dialog.close();
@@ -1289,31 +1391,53 @@ pub fn show_edit_host_dialog(
                     "rdp_port": rdp_port.unwrap_or(0),
                     "vnc_port": vnc_port.unwrap_or(0),
                 });
-                let msg = match crate::dbus_client::dbus_ssh_update_host(host_id.clone(), host_data.to_string()).await {
+                let msg = match crate::dbus_client::dbus_ssh_update_host(
+                    host_id.clone(),
+                    host_data.to_string(),
+                )
+                .await
+                {
                     Ok(()) => {
                         // Store SSH password if provided.
                         if !password.is_empty() {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_password(host_id.clone(), password).await {
+                            if let Err(e) =
+                                crate::dbus_client::dbus_ssh_set_password(host_id.clone(), password)
+                                    .await
+                            {
                                 error!("store SSH password: {e:#}");
                             }
                         }
                         // Store certificate if provided.
                         if !certificate.is_empty() {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(host_id.clone(), certificate).await {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_certificate(
+                                host_id.clone(),
+                                certificate,
+                            )
+                            .await
+                            {
                                 error!("store SSH certificate: {e:#}");
                             }
                         }
                         // Store FortiGate API token and port if token is provided.
                         if !api_token.is_empty() {
-                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(host_id.clone(), api_token, api_port).await {
+                            if let Err(e) = crate::dbus_client::dbus_ssh_set_api_token(
+                                host_id.clone(),
+                                api_token,
+                                api_port,
+                            )
+                            .await
+                            {
                                 error!("store API token/port: {e:#}");
                             }
                         }
                         // Store UniFi Controller config if URL and credentials provided.
-                        if !unifi_url.is_empty() && !unifi_user.is_empty() && !unifi_pass.is_empty() {
+                        if !unifi_url.is_empty() && !unifi_user.is_empty() && !unifi_pass.is_empty()
+                        {
                             if let Err(e) = crate::dbus_client::dbus_ssh_set_unifi_controller(
                                 host_id, unifi_url, unifi_user, unifi_pass,
-                            ).await {
+                            )
+                            .await
+                            {
                                 error!("store UniFi controller: {e:#}");
                             }
                         }
@@ -1340,10 +1464,7 @@ pub fn show_edit_host_dialog(
 // ---------------------------------------------------------------------------
 
 /// Show the SSH audit log viewer.
-pub fn show_audit_log_dialog(
-    window: &adw::ApplicationWindow,
-    rt: &tokio::runtime::Handle,
-) {
+pub fn show_audit_log_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Handle) {
     let dialog = adw::Dialog::builder()
         .title("SSH Audit Log")
         .content_width(700)
@@ -1374,14 +1495,18 @@ pub fn show_audit_log_dialog(
 
     {
         let dialog = dialog.clone();
-        close_btn.connect_clicked(move |_| { dialog.close(); });
+        close_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     let text_view_clone = text_view.clone();
     let (log_tx, log_rx) = std::sync::mpsc::channel::<Vec<String>>();
     rt.spawn(async move {
         match crate::dbus_client::dbus_ssh_get_audit_log(200).await {
-            Ok(lines) => { let _ = log_tx.send(lines); }
+            Ok(lines) => {
+                let _ = log_tx.send(lines);
+            }
             Err(e) => {
                 tracing::error!("fetch audit log: {e}");
                 let _ = log_tx.send(vec![format!("Error loading audit log: {e}")]);
@@ -1428,24 +1553,23 @@ pub fn show_batch_command_dialog(
         .title("Select Hosts")
         .build();
 
-    let checks: Vec<(String, String, gtk4::CheckButton)> = hosts.iter().map(|h| {
-        let check = gtk4::CheckButton::builder().active(true).build();
-        let row = adw::ActionRow::builder()
-            .title(&h.label)
-            .subtitle(&h.hostname)
-            .activatable_widget(&check)
-            .build();
-        row.add_prefix(&check);
-        host_group.add(&row);
-        (h.id.to_string(), h.label.clone(), check)
-    }).collect();
+    let checks: Vec<(String, String, gtk4::CheckButton)> = hosts
+        .iter()
+        .map(|h| {
+            let check = gtk4::CheckButton::builder().active(true).build();
+            let row = adw::ActionRow::builder()
+                .title(&h.label)
+                .subtitle(&h.hostname)
+                .activatable_widget(&check)
+                .build();
+            row.add_prefix(&check);
+            host_group.add(&row);
+            (h.id.to_string(), h.label.clone(), check)
+        })
+        .collect();
 
-    let cmd_row = adw::EntryRow::builder()
-        .title("Command")
-        .build();
-    let cmd_group = adw::PreferencesGroup::builder()
-        .title("Command")
-        .build();
+    let cmd_row = adw::EntryRow::builder().title("Command").build();
+    let cmd_group = adw::PreferencesGroup::builder().title("Command").build();
     cmd_group.add(&cmd_row);
 
     let run_btn = gtk4::Button::builder()
@@ -1459,9 +1583,7 @@ pub fn show_batch_command_dialog(
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(["boxed-list"])
         .build();
-    let results_group = adw::PreferencesGroup::builder()
-        .title("Results")
-        .build();
+    let results_group = adw::PreferencesGroup::builder().title("Results").build();
     results_group.add(&results_list);
 
     let scroll = gtk4::ScrolledWindow::builder()
@@ -1495,14 +1617,17 @@ pub fn show_batch_command_dialog(
         let results_list = results_list.clone();
         run_btn.connect_clicked(move |btn| {
             let command = cmd_row.text().to_string();
-            if command.is_empty() { return; }
+            if command.is_empty() {
+                return;
+            }
             btn.set_sensitive(false);
 
             while let Some(child) = results_list.first_child() {
                 results_list.remove(&child);
             }
 
-            let selected: Vec<(String, String)> = checks.iter()
+            let selected: Vec<(String, String)> = checks
+                .iter()
                 .filter(|(_, _, check)| check.is_active())
                 .map(|(id, label, _)| (id.clone(), label.clone()))
                 .collect();
@@ -1525,9 +1650,8 @@ pub fn show_batch_command_dialog(
                 let command = command.clone();
                 let tx = tx.clone();
                 rt.spawn(async move {
-                    let result = crate::dbus_client::dbus_ssh_execute_command(
-                        host_id, command,
-                    ).await;
+                    let result =
+                        crate::dbus_client::dbus_ssh_execute_command(host_id, command).await;
                     let _ = tx.send((label, result.map_err(|e| e.to_string())));
                 });
             }

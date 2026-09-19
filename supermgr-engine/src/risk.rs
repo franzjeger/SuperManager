@@ -52,32 +52,32 @@ pub struct HostRisk {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RiskBand {
-    Critical,  // 80-100
-    Elevated,  // 50-79
-    Moderate,  // 20-49
-    Low,       // 1-19
-    Clean,     // 0
+    Critical, // 80-100
+    Elevated, // 50-79
+    Moderate, // 20-49
+    Low,      // 1-19
+    Clean,    // 0
 }
 
 impl RiskBand {
-    #[must_use] 
+    #[must_use]
     pub fn from_score(score: u8) -> Self {
         match score {
-            0       => Self::Clean,
-            1..=19  => Self::Low,
+            0 => Self::Clean,
+            1..=19 => Self::Low,
             20..=49 => Self::Moderate,
             50..=79 => Self::Elevated,
-            _       => Self::Critical,
+            _ => Self::Critical,
         }
     }
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Critical => "Critical",
             Self::Elevated => "Elevated",
             Self::Moderate => "Moderate",
-            Self::Low      => "Low",
-            Self::Clean    => "Clean",
+            Self::Low => "Low",
+            Self::Clean => "Clean",
         }
     }
 }
@@ -85,7 +85,7 @@ impl RiskBand {
 /// Compute risk per host across the whole findings store of a
 /// scope. `host_zones` is optional context from `asset_enrich`:
 /// when provided, public-zone hosts get a 1.5× exposure multiplier.
-#[must_use] 
+#[must_use]
 pub fn score_hosts(
     findings: &[PersistedFinding],
     host_zones: &HashMap<String, String>,
@@ -93,7 +93,10 @@ pub fn score_hosts(
     let mut by_host: HashMap<String, Vec<&PersistedFinding>> = HashMap::new();
     for f in findings {
         if matches!(f.disposition, Disposition::Open) {
-            by_host.entry(f.finding.host_ip.clone()).or_default().push(f);
+            by_host
+                .entry(f.finding.host_ip.clone())
+                .or_default()
+                .push(f);
         }
     }
     let now = chrono::Utc::now();
@@ -108,10 +111,10 @@ pub fn score_hosts(
         for f in &fs {
             match f.finding.severity {
                 Severity::Critical => crit += 1,
-                Severity::High     => high += 1,
-                Severity::Medium   => med += 1,
-                Severity::Low      => low_ += 1,
-                Severity::Info     => {}
+                Severity::High => high += 1,
+                Severity::Medium => med += 1,
+                Severity::Low => low_ += 1,
+                Severity::Info => {}
             }
             let base = base_weight(f.finding.severity);
             let days = (now - f.first_seen).num_days().max(0);
@@ -123,8 +126,16 @@ pub fn score_hosts(
         let band = RiskBand::from_score(score);
         let hint = format!(
             "{}{} open · oldest {}d",
-            if crit > 0 { format!("{crit} crit, ") } else { String::new() },
-            if high > 0 { format!("{high} high") } else { format!("{} total", fs.len()) },
+            if crit > 0 {
+                format!("{crit} crit, ")
+            } else {
+                String::new()
+            },
+            if high > 0 {
+                format!("{high} high")
+            } else {
+                format!("{} total", fs.len())
+            },
             oldest_days,
         );
         out.push(HostRisk {
@@ -146,10 +157,10 @@ pub fn score_hosts(
 fn base_weight(s: Severity) -> f32 {
     match s {
         Severity::Critical => 100.0,
-        Severity::High     => 60.0,
-        Severity::Medium   => 30.0,
-        Severity::Low      => 10.0,
-        Severity::Info     => 0.0,
+        Severity::High => 60.0,
+        Severity::Medium => 30.0,
+        Severity::Low => 10.0,
+        Severity::Info => 0.0,
     }
 }
 

@@ -154,8 +154,8 @@ pub fn needs_upgrade() -> bool {
 /// The caller must have just verified the password — this routine trusts
 /// its argument and replaces the stored hash unconditionally.
 pub fn upgrade_legacy(password: &str) {
-    if let Ok(phc) = Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+    if let Ok(phc) =
+        Argon2::default().hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
     {
         if let Err(e) = write_raw(&phc.to_string()) {
             warn!("master_password::upgrade_legacy: write: {e}");
@@ -179,7 +179,11 @@ fn verify_legacy_sha256(password: &str, salt_hex: &str, expected_hex: &str) -> b
     // Byte-by-byte hex: sha2 0.11's finalize output dropped the `LowerHex`
     // impl. Identical lowercase-hex string as `{:x}` gave — this verifies a
     // stored legacy hash, so the encoding must match exactly.
-    let computed: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let computed: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     computed.len() == expected_hex.len()
         && computed
             .bytes()

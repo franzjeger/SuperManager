@@ -33,8 +33,7 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        slint_build::compile("ui/main.slint")
-            .expect("slint UI compile failed");
+        slint_build::compile("ui/main.slint").expect("slint UI compile failed");
 
         let mut res = winres::WindowsResource::new();
         res.set("ProductName", "SuperManager");

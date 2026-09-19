@@ -34,7 +34,11 @@ pub fn import_wireguard(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
+    if !app_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .daemon_available
+    {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -110,7 +114,11 @@ pub fn import_toml_config(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
+    if !app_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .daemon_available
+    {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -165,7 +173,8 @@ pub fn import_toml_config(
                                 tx.send(AppMsg::ImportSucceeded {
                                     profiles,
                                     toast: Some("VPN profile imported"),
-                                }).ok();
+                                })
+                                .ok();
                             }
                         }
                         "ssh_key" => {
@@ -206,7 +215,11 @@ pub fn import_openvpn(
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
-    if !app_state.lock().unwrap_or_else(|e| e.into_inner()).daemon_available {
+    if !app_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .daemon_available
+    {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
         return;
     }
@@ -292,7 +305,9 @@ pub fn import_openvpn(
 
         {
             let d = creds_dialog.clone();
-            cancel_btn.connect_clicked(move |_| { d.close(); });
+            cancel_btn.connect_clicked(move |_| {
+                d.close();
+            });
         }
 
         {
@@ -444,7 +459,11 @@ pub fn show_azure_import_dialog(
             fd.open(Some(&window), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
-                let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
+                let label = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_owned();
                 azure_row.set_subtitle(&label);
                 *azure_path.borrow_mut() = Some(path);
                 validate();
@@ -473,7 +492,11 @@ pub fn show_azure_import_dialog(
             fd.open(Some(&window), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
-                let label = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_owned();
+                let label = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_owned();
                 settings_row.set_subtitle(&label);
                 *settings_path.borrow_mut() = Some(path);
                 validate();
@@ -483,7 +506,9 @@ pub fn show_azure_import_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     {
@@ -623,7 +648,9 @@ pub fn show_fortigate_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     {
@@ -649,7 +676,13 @@ pub fn show_fortigate_dialog(
             let tx = tx.clone();
             rt.spawn(async move {
                 let msg = match dbus_import_fortigate(
-                    name, host, username, password, psk, dns_servers, local_id,
+                    name,
+                    host,
+                    username,
+                    password,
+                    psk,
+                    dns_servers,
+                    local_id,
                 )
                 .await
                 {
@@ -781,7 +814,9 @@ pub fn show_edit_fortigate_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     {
@@ -808,7 +843,14 @@ pub fn show_edit_fortigate_dialog(
             let tx = tx.clone();
             rt.spawn(async move {
                 let msg = match dbus_update_fortigate(
-                    pid, name, host, username, password, psk, dns_servers, local_id,
+                    pid,
+                    name,
+                    host,
+                    username,
+                    password,
+                    psk,
+                    dns_servers,
+                    local_id,
                 )
                 .await
                 {
@@ -884,7 +926,9 @@ pub fn show_edit_openvpn_dialog(
 
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     {
@@ -908,9 +952,7 @@ pub fn show_edit_openvpn_dialog(
                         },
                         Err(e) => AppMsg::OperationFailed(e.to_string()),
                     },
-                    Err(e) => {
-                        AppMsg::OperationFailed(format!("update OpenVPN credentials: {e}"))
-                    }
+                    Err(e) => AppMsg::OperationFailed(format!("update OpenVPN credentials: {e}")),
                 };
                 let _ = tx.send(msg);
             });
@@ -1074,7 +1116,12 @@ pub fn show_logs_dialog(
         .default_height(600)
         .transient_for(window)
         .build();
-    log_window.set_opacity(app_settings.lock().unwrap_or_else(|e| e.into_inner()).opacity);
+    log_window.set_opacity(
+        app_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .opacity,
+    );
 
     let text_view = gtk4::TextView::builder()
         .editable(false)
@@ -1095,11 +1142,26 @@ pub fn show_logs_dialog(
         .child(&text_view)
         .build();
 
-    let toggle_all = gtk4::ToggleButton::builder().label("All").active(true).build();
-    let toggle_vpn = gtk4::ToggleButton::builder().label("VPN").group(&toggle_all).build();
-    let toggle_ssh = gtk4::ToggleButton::builder().label("SSH").group(&toggle_all).build();
-    let toggle_backup = gtk4::ToggleButton::builder().label("Backup").group(&toggle_all).build();
-    let toggle_err = gtk4::ToggleButton::builder().label("Errors").group(&toggle_all).build();
+    let toggle_all = gtk4::ToggleButton::builder()
+        .label("All")
+        .active(true)
+        .build();
+    let toggle_vpn = gtk4::ToggleButton::builder()
+        .label("VPN")
+        .group(&toggle_all)
+        .build();
+    let toggle_ssh = gtk4::ToggleButton::builder()
+        .label("SSH")
+        .group(&toggle_all)
+        .build();
+    let toggle_backup = gtk4::ToggleButton::builder()
+        .label("Backup")
+        .group(&toggle_all)
+        .build();
+    let toggle_err = gtk4::ToggleButton::builder()
+        .label("Errors")
+        .group(&toggle_all)
+        .build();
 
     // Search entry for free-text filter.
     let log_search = gtk4::SearchEntry::builder()
@@ -1223,21 +1285,35 @@ pub fn show_logs_dialog(
                     Err(e) => vec![format!("[error] task failed: {e}")],
                 };
 
-                let filtered: Vec<&str> = lines.iter()
+                let filtered: Vec<&str> = lines
+                    .iter()
                     .map(|l| l.as_str())
                     .filter(|line| {
                         let lower = line.to_lowercase();
                         // Category filter.
                         let cat_ok = match mode.as_str() {
-                            "vpn" => lower.contains("vpn") || lower.contains("connect")
-                                || lower.contains("tunnel") || lower.contains("wireguard")
-                                || lower.contains("fortigate") || lower.contains("openvpn")
-                                || lower.contains("azure") || lower.contains("ipsec"),
-                            "ssh" => lower.contains("ssh") || lower.contains("host")
-                                || lower.contains("key") || lower.contains("push"),
+                            "vpn" => {
+                                lower.contains("vpn")
+                                    || lower.contains("connect")
+                                    || lower.contains("tunnel")
+                                    || lower.contains("wireguard")
+                                    || lower.contains("fortigate")
+                                    || lower.contains("openvpn")
+                                    || lower.contains("azure")
+                                    || lower.contains("ipsec")
+                            }
+                            "ssh" => {
+                                lower.contains("ssh")
+                                    || lower.contains("host")
+                                    || lower.contains("key")
+                                    || lower.contains("push")
+                            }
                             "backup" => lower.contains("backup") || lower.contains("config"),
-                            "err" => lower.contains("error") || lower.contains("fail")
-                                || lower.contains("warn"),
+                            "err" => {
+                                lower.contains("error")
+                                    || lower.contains("fail")
+                                    || lower.contains("warn")
+                            }
                             _ => true, // "all"
                         };
                         // Free-text search.
@@ -1293,16 +1369,17 @@ pub fn show_logs_dialog(
     {
         let load_logs = load_logs.clone();
         let log_window_weak = log_window.downgrade();
-        glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-            match log_window_weak.upgrade() {
+        glib::timeout_add_local(
+            std::time::Duration::from_secs(2),
+            move || match log_window_weak.upgrade() {
                 Some(w) if w.is_visible() => {
                     load_logs();
                     glib::ControlFlow::Continue
                 }
                 Some(_) => glib::ControlFlow::Continue,
                 None => glib::ControlFlow::Break,
-            }
-        });
+            },
+        );
     }
 
     log_window.present();

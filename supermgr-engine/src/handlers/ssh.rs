@@ -17,9 +17,7 @@ use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::keygen;
 
 use crate::protocol::{self, Response};
-use crate::server::{
-    connect_to_host_owned, get_uuid_param, merge_host_update, EngineServer,
-};
+use crate::server::{connect_to_host_owned, get_uuid_param, merge_host_update, EngineServer};
 
 /// Two operations share fan-out plumbing in `handle_ssh_fanout_key_op`.
 /// Encoded as an enum so we can branch the inner SSH call without
@@ -39,12 +37,14 @@ pub(crate) enum FanoutOp {
 /// carries a CA signature. `from_openssh` rejects the plain key because
 /// its algorithm name lacks the `-cert-v01@openssh.com` suffix.
 fn validate_openssh_certificate(cert: &str) -> Result<(), String> {
-    ssh_key::Certificate::from_openssh(cert.trim()).map(|_| ()).map_err(|e| {
-        format!(
-            "not a valid OpenSSH certificate ({e}). Expected the contents of a \
+    ssh_key::Certificate::from_openssh(cert.trim())
+        .map(|_| ())
+        .map_err(|e| {
+            format!(
+                "not a valid OpenSSH certificate ({e}). Expected the contents of a \
              `*-cert.pub` file — the CA-signed certificate, not the public key."
-        )
-    })
+            )
+        })
 }
 
 /// Audit line for a key-lifecycle event. These have no target host, so
@@ -63,11 +63,27 @@ fn audit_key_event(action: AuditAction, key_name: &str, fingerprint: &str) {
 }
 
 impl EngineServer {
-    pub(crate) async fn handle_ssh_generate_key(&self, id: u64, params: serde_json::Value) -> Response {
-        let key_type_str = params.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519");
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed");
-        let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let tags_json = params.get("tags_json").and_then(|v| v.as_str()).unwrap_or("[]");
+    pub(crate) async fn handle_ssh_generate_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let key_type_str = params
+            .get("key_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ed25519");
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unnamed");
+        let description = params
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let tags_json = params
+            .get("tags_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or("[]");
 
         let key_type = match key_type_str {
             "rsa2048" | "rsa" => SshKeyType::Rsa2048,
@@ -83,7 +99,11 @@ impl EngineServer {
         // Store private key in secret store.
         let key_id = uuid::Uuid::new_v4();
         let secret_label = format!("supermgr/ssh/{key_id}/privkey");
-        if let Err(e) = self.secrets.store(&secret_label, generated.private_key_pem.as_bytes()).await {
+        if let Err(e) = self
+            .secrets
+            .store(&secret_label, generated.private_key_pem.as_bytes())
+            .await
+        {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
 
@@ -116,7 +136,8 @@ impl EngineServer {
 
     pub(crate) async fn handle_ssh_list_keys(&self, id: u64) -> Response {
         let state = self.state.lock().await;
-        let summaries: Vec<SshKeySummary> = state.ssh_keys.values().map(SshKeySummary::from).collect();
+        let summaries: Vec<SshKeySummary> =
+            state.ssh_keys.values().map(SshKeySummary::from).collect();
         match serde_json::to_value(&summaries) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -134,11 +155,19 @@ impl EngineServer {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
-            None => Response::err(id, protocol::INVALID_PARAMS, format!("key not found: {key_id}")),
+            None => Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("key not found: {key_id}"),
+            ),
         }
     }
 
-    pub(crate) async fn handle_ssh_delete_key(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_delete_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let key_id = match get_uuid_param(&params, "key_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -171,7 +200,11 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(null))
     }
 
-    pub(crate) async fn handle_ssh_export_public_key(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_export_public_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let key_id = match get_uuid_param(&params, "key_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -179,12 +212,23 @@ impl EngineServer {
         let state = self.state.lock().await;
         match state.ssh_keys.get(&key_id) {
             Some(key) => Response::ok(id, serde_json::json!(key.public_key)),
-            None => Response::err(id, protocol::INVALID_PARAMS, format!("key not found: {key_id}")),
+            None => Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("key not found: {key_id}"),
+            ),
         }
     }
 
-    pub(crate) async fn handle_ssh_import_key(&self, id: u64, params: serde_json::Value) -> Response {
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("Imported");
+    pub(crate) async fn handle_ssh_import_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Imported");
         let public_key = match params.get("public_key").and_then(|v| v.as_str()) {
             Some(pk) => pk,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing public_key"),
@@ -193,7 +237,10 @@ impl EngineServer {
             Some(pk) => pk,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing private_key_pem"),
         };
-        let key_type_str = params.get("key_type").and_then(|v| v.as_str()).unwrap_or("ed25519");
+        let key_type_str = params
+            .get("key_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ed25519");
 
         let key_type = match key_type_str {
             "rsa2048" | "rsa" => SshKeyType::Rsa2048,
@@ -208,7 +255,11 @@ impl EngineServer {
 
         let key_id = uuid::Uuid::new_v4();
         let secret_label = format!("supermgr/ssh/{key_id}/privkey");
-        if let Err(e) = self.secrets.store(&secret_label, private_key_pem.as_bytes()).await {
+        if let Err(e) = self
+            .secrets
+            .store(&secret_label, private_key_pem.as_bytes())
+            .await
+        {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
 
@@ -237,15 +288,23 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
 
-    pub(crate) async fn handle_ssh_import_keys_scan(&self, id: u64, params: serde_json::Value) -> Response {
-        let directory = params.get("directory").and_then(|v| v.as_str()).unwrap_or("~/.ssh");
+    pub(crate) async fn handle_ssh_import_keys_scan(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        let directory = params
+            .get("directory")
+            .and_then(|v| v.as_str())
+            .unwrap_or("~/.ssh");
         let expanded = if directory.starts_with("~/") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
             format!("{}/{}", home, &directory[2..])
         } else {
             directory.to_owned()
         };
-        let candidates = supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(&expanded));
+        let candidates =
+            supermgr_core::ssh::import::scan_ssh_directory(std::path::Path::new(&expanded));
         match serde_json::to_value(&candidates) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -264,20 +323,32 @@ impl EngineServer {
                         host.updated_at = chrono::Utc::now();
                         let mut state = self.state.lock().await;
                         if let Err(e) = state.save_ssh_host(&host) {
-                            return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
+                            return Response::err(
+                                id,
+                                protocol::INTERNAL_ERROR,
+                                format!("save host: {e}"),
+                            );
                         }
                         let host_id = host.id;
                         state.ssh_hosts.insert(host.id, host);
                         return Response::ok(id, serde_json::json!(host_id.to_string()));
                     }
-                    Err(_) => return Response::err(id, protocol::INVALID_PARAMS, "missing host_json"),
+                    Err(_) => {
+                        return Response::err(id, protocol::INVALID_PARAMS, "missing host_json")
+                    }
                 }
             }
         };
 
         let mut host: Host = match serde_json::from_str(host_json) {
             Ok(h) => h,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("invalid host JSON: {e}")),
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid host JSON: {e}"),
+                )
+            }
         };
 
         host.id = uuid::Uuid::new_v4();
@@ -289,7 +360,11 @@ impl EngineServer {
             if !password.is_empty() {
                 let secret_label = format!("supermgr/ssh/host/{}/password", host.id);
                 if let Err(e) = self.secrets.store(&secret_label, password.as_bytes()).await {
-                    return Response::err(id, protocol::INTERNAL_ERROR, format!("store password: {e}"));
+                    return Response::err(
+                        id,
+                        protocol::INTERNAL_ERROR,
+                        format!("store password: {e}"),
+                    );
                 }
                 host.auth_password_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             }
@@ -326,7 +401,11 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(host_id.to_string()))
     }
 
-    pub(crate) async fn handle_ssh_update_host(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_update_host(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         // First step in the typed-RPC migration. The wire format is
         // unchanged — the param dict is the same — but we deserialise
         // it via `protocol::rpc::SshUpdateHostParams` up front. Future
@@ -335,7 +414,9 @@ impl EngineServer {
         // with a useful error message.
         let p: protocol::rpc::SshUpdateHostParams = match serde_json::from_value(params) {
             Ok(p) => p,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}")),
+            Err(e) => {
+                return Response::err(id, protocol::INVALID_PARAMS, format!("bad params: {e}"))
+            }
         };
 
         // Parse the incoming JSON as an arbitrary object so we can MERGE the
@@ -346,13 +427,25 @@ impl EngineServer {
         // …), destroying stored secrets and pin state on every edit.
         let incoming: serde_json::Value = match serde_json::from_str(&p.host_json) {
             Ok(v) => v,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("invalid host JSON: {e}")),
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid host JSON: {e}"),
+                )
+            }
         };
 
         let mut state = self.state.lock().await;
         let mut host = match state.ssh_hosts.get(&p.host_id).cloned() {
             Some(h) => h,
-            None => return Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {}", p.host_id)),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("host not found: {}", p.host_id),
+                )
+            }
         };
 
         merge_host_update(&mut host, &incoming);
@@ -386,11 +479,19 @@ impl EngineServer {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
-            None => Response::err(id, protocol::INVALID_PARAMS, format!("host not found: {host_id}")),
+            None => Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("host not found: {host_id}"),
+            ),
         }
     }
 
-    pub(crate) async fn handle_ssh_delete_host(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_delete_host(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -416,7 +517,11 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(null))
     }
 
-    pub(crate) async fn handle_ssh_toggle_pin(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_toggle_pin(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -435,7 +540,11 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_ssh_set_password(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_set_password(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -500,7 +609,11 @@ impl EngineServer {
         if !state.ssh_hosts.contains_key(&host_id) {
             return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned());
         }
-        if let Err(e) = self.secrets.store(&secret_label, certificate.as_bytes()).await {
+        if let Err(e) = self
+            .secrets
+            .store(&secret_label, certificate.as_bytes())
+            .await
+        {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("store secret: {e}"));
         }
         if let Some(host) = state.ssh_hosts.get_mut(&host_id) {
@@ -513,7 +626,11 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(null))
     }
 
-    pub(crate) async fn handle_ssh_execute_command(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_execute_command(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -531,17 +648,24 @@ impl EngineServer {
         match session.exec(&command).await {
             Ok((exit_code, stdout, stderr)) => {
                 let _ = session.disconnect().await;
-                Response::ok(id, serde_json::json!({
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "exit_code": exit_code,
-                }))
+                Response::ok(
+                    id,
+                    serde_json::json!({
+                        "stdout": stdout,
+                        "stderr": stderr,
+                        "exit_code": exit_code,
+                    }),
+                )
             }
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
     }
 
-    pub(crate) async fn handle_ssh_test_connection(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_test_connection(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -567,7 +691,11 @@ impl EngineServer {
     /// pastes it into the GUI. The token is stored in the keychain
     /// under a label keyed by host id; the host record gains a
     /// `SecretRef` pointing at it.
-    pub(crate) async fn handle_ssh_set_api_token(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_set_api_token(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -600,10 +728,11 @@ impl EngineServer {
         }
         let host = match state.ssh_hosts.get_mut(&host_id) {
             Some(h) => h,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned())
+            }
         };
-        host.api_token_ref =
-            Some(supermgr_core::vpn::profile::SecretRef::new(label.clone()));
+        host.api_token_ref = Some(supermgr_core::vpn::profile::SecretRef::new(label.clone()));
         host.api_port = Some(api_port);
         host.updated_at = chrono::Utc::now();
         let snapshot = host.clone();
@@ -625,7 +754,11 @@ impl EngineServer {
     /// is deleted (best-effort — a leftover entry is harmless and
     /// will be overwritten by the next set/generate call) and the
     /// host record's `api_token_ref` is cleared.
-    pub(crate) async fn handle_ssh_clear_api_token(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_ssh_clear_api_token(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -635,11 +768,9 @@ impl EngineServer {
             let state = self.state.lock().await;
             let host = match state.ssh_hosts.get(&host_id) {
                 Some(h) => h,
-                None => return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "host not found".to_owned(),
-                ),
+                None => {
+                    return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned())
+                }
             };
             host.api_token_ref.as_ref().map(|r| r.0.clone())
         };
@@ -654,7 +785,9 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         let host = match state.ssh_hosts.get_mut(&host_id) {
             Some(h) => h,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "host not found".to_owned())
+            }
         };
         host.api_token_ref = None;
         host.updated_at = chrono::Utc::now();
@@ -667,11 +800,17 @@ impl EngineServer {
     }
 
     pub(crate) async fn handle_ssh_push_key(&self, id: u64, params: serde_json::Value) -> Response {
-        self.handle_ssh_fanout_key_op(id, params, FanoutOp::Push).await
+        self.handle_ssh_fanout_key_op(id, params, FanoutOp::Push)
+            .await
     }
 
-    pub(crate) async fn handle_ssh_revoke_key(&self, id: u64, params: serde_json::Value) -> Response {
-        self.handle_ssh_fanout_key_op(id, params, FanoutOp::Revoke).await
+    pub(crate) async fn handle_ssh_revoke_key(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
+        self.handle_ssh_fanout_key_op(id, params, FanoutOp::Revoke)
+            .await
     }
 
     /// Shared fan-out implementation for `ssh_push_key` and `ssh_revoke_key`.
@@ -704,12 +843,24 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let host_ids_json = params.get("host_ids_json").and_then(|v| v.as_str()).unwrap_or("[]");
-        let use_sudo = params.get("use_sudo").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let host_ids_json = params
+            .get("host_ids_json")
+            .and_then(|v| v.as_str())
+            .unwrap_or("[]");
+        let use_sudo = params
+            .get("use_sudo")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
 
         let host_ids: Vec<uuid::Uuid> = match serde_json::from_str(host_ids_json) {
             Ok(ids) => ids,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("invalid host_ids: {e}")),
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    format!("invalid host_ids: {e}"),
+                )
+            }
         };
 
         // Name and fingerprint travel with the public key so each spawned
@@ -722,7 +873,13 @@ impl EngineServer {
                     key.name.clone(),
                     key.fingerprint.clone(),
                 ),
-                None => return Response::err(id, protocol::INVALID_PARAMS, format!("key not found: {key_id}")),
+                None => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!("key not found: {key_id}"),
+                    )
+                }
             }
         };
 
@@ -747,8 +904,12 @@ impl EngineServer {
                 match connect_to_host_owned(&state, &secrets, hid).await {
                     Ok((host, session)) => {
                         let outcome = match op {
-                            FanoutOp::Push => push_public_key(&session, &public_key, use_sudo).await,
-                            FanoutOp::Revoke => revoke_public_key(&session, &public_key, use_sudo).await,
+                            FanoutOp::Push => {
+                                push_public_key(&session, &public_key, use_sudo).await
+                            }
+                            FanoutOp::Revoke => {
+                                revoke_public_key(&session, &public_key, use_sudo).await
+                            }
                         };
                         let result = match outcome {
                             Ok(()) => PushResult {
@@ -1035,7 +1196,12 @@ mod tests {
 
     #[test]
     fn rejects_empty_and_garbage() {
-        for bad in ["", "   ", "not a cert", "ssh-ed25519-cert-v01@openssh.com !!!"] {
+        for bad in [
+            "",
+            "   ",
+            "not a cert",
+            "ssh-ed25519-cert-v01@openssh.com !!!",
+        ] {
             assert!(
                 validate_openssh_certificate(bad).is_err(),
                 "should have rejected {bad:?}"

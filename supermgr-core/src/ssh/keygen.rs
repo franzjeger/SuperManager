@@ -4,10 +4,10 @@
 //! RSA keys are generated via `ssh_key::private::RsaKeypair::random` which
 //! allows specifying the bit size (2048 or 4096).
 
-use ssh_key::private::{KeypairData, RsaKeypair};
-use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 use crate::error::SshError;
 use crate::ssh::key::SshKeyType;
+use ssh_key::private::{KeypairData, RsaKeypair};
+use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 
 /// Generated key material returned by [`generate_key`].
 pub struct GeneratedKey {
@@ -32,10 +32,8 @@ pub fn generate_key(key_type: SshKeyType, comment: &str) -> Result<GeneratedKey,
     let mut rng = ssh_key::rand_core::OsRng;
 
     let private_key = match key_type {
-        SshKeyType::Ed25519 => {
-            PrivateKey::random(&mut rng, Algorithm::Ed25519)
-                .map_err(|e| SshError::KeyGenFailed(format!("Ed25519: {e}")))?
-        }
+        SshKeyType::Ed25519 => PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .map_err(|e| SshError::KeyGenFailed(format!("Ed25519: {e}")))?,
         SshKeyType::Rsa2048 => {
             let keypair = RsaKeypair::random(&mut rng, 2048)
                 .map_err(|e| SshError::KeyGenFailed(format!("RSA-2048: {e}")))?;

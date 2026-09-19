@@ -22,16 +22,16 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Zone {
-    Loopback,        // 127.0.0.0/8
-    LinkLocal,       // 169.254.0.0/16
-    Internal,        // RFC 1918 (10/8, 172.16/12, 192.168/16)
-    Cgnat,           // 100.64.0.0/10 (RFC 6598)
-    Multicast,       // 224.0.0.0/4
-    Public,          // everything else (incl. routable internet)
+    Loopback,  // 127.0.0.0/8
+    LinkLocal, // 169.254.0.0/16
+    Internal,  // RFC 1918 (10/8, 172.16/12, 192.168/16)
+    Cgnat,     // 100.64.0.0/10 (RFC 6598)
+    Multicast, // 224.0.0.0/4
+    Public,    // everything else (incl. routable internet)
 }
 
 impl Zone {
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Loopback => "loopback",
@@ -43,7 +43,7 @@ impl Zone {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn is_routable_externally(self) -> bool {
         matches!(self, Self::Public)
     }
@@ -60,7 +60,7 @@ pub struct AssetEnrichment {
 /// Defaults to `Public` for anything that doesn't match a known
 /// reserved range. IPv6 is treated as `Public` for now (we don't
 /// run IPv6-specific scanning paths yet).
-#[must_use] 
+#[must_use]
 pub fn classify(ip: &str) -> Zone {
     let Ok(addr) = ip.parse::<IpAddr>() else {
         return Zone::Public;
@@ -74,19 +74,33 @@ pub fn classify(ip: &str) -> Zone {
 fn classify_v4(addr: Ipv4Addr) -> Zone {
     let o = addr.octets();
     // 127.0.0.0/8 — loopback
-    if o[0] == 127 { return Zone::Loopback; }
+    if o[0] == 127 {
+        return Zone::Loopback;
+    }
     // 169.254.0.0/16 — link-local
-    if o[0] == 169 && o[1] == 254 { return Zone::LinkLocal; }
+    if o[0] == 169 && o[1] == 254 {
+        return Zone::LinkLocal;
+    }
     // 10.0.0.0/8 — private
-    if o[0] == 10 { return Zone::Internal; }
+    if o[0] == 10 {
+        return Zone::Internal;
+    }
     // 172.16.0.0/12 — private
-    if o[0] == 172 && (16..=31).contains(&o[1]) { return Zone::Internal; }
+    if o[0] == 172 && (16..=31).contains(&o[1]) {
+        return Zone::Internal;
+    }
     // 192.168.0.0/16 — private
-    if o[0] == 192 && o[1] == 168 { return Zone::Internal; }
+    if o[0] == 192 && o[1] == 168 {
+        return Zone::Internal;
+    }
     // 100.64.0.0/10 — RFC 6598 carrier-grade NAT
-    if o[0] == 100 && (64..=127).contains(&o[1]) { return Zone::Cgnat; }
+    if o[0] == 100 && (64..=127).contains(&o[1]) {
+        return Zone::Cgnat;
+    }
     // 224.0.0.0/4 — multicast
-    if (224..=239).contains(&o[0]) { return Zone::Multicast; }
+    if (224..=239).contains(&o[0]) {
+        return Zone::Multicast;
+    }
     Zone::Public
 }
 
@@ -104,7 +118,9 @@ pub async fn reverse_dns(ip: &str) -> Option<String> {
                 .arg(parsed.to_string())
                 .output()
                 .ok()?;
-            if !out.status.success() { return None; }
+            if !out.status.success() {
+                return None;
+            }
             let s = String::from_utf8_lossy(&out.stdout);
             // Output: "1.0.168.192.in-addr.arpa domain name pointer foo.local."
             for line in s.lines() {
@@ -138,12 +154,18 @@ pub async fn enrich_many(ips: &[String]) -> Vec<AssetEnrichment> {
             let _permit = sema.acquire_owned().await.ok();
             let zone = classify(&ip);
             let reverse = reverse_dns(&ip).await;
-            AssetEnrichment { ip, reverse_dns: reverse, zone }
+            AssetEnrichment {
+                ip,
+                reverse_dns: reverse,
+                zone,
+            }
         }));
     }
     let mut out = Vec::with_capacity(ips.len());
     for f in futs {
-        if let Ok(r) = f.await { out.push(r); }
+        if let Ok(r) = f.await {
+            out.push(r);
+        }
     }
     out
 }

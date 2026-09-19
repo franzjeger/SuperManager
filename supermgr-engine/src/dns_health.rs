@@ -36,17 +36,17 @@ pub struct DnsHealthReport {
 pub enum SpfState {
     Missing,
     Multiple { records: Vec<String> },
-    Soft { record: String },        // ends with ~all
-    Strict { record: String },      // ends with -all
-    Permissive { record: String },  // ends with +all (very bad)
-    Neutral { record: String },     // ?all
+    Soft { record: String },       // ends with ~all
+    Strict { record: String },     // ends with -all
+    Permissive { record: String }, // ends with +all (very bad)
+    Neutral { record: String },    // ?all
     NoTerminator { record: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DmarcState {
     Missing,
-    None { record: String },         // p=none
+    None { record: String }, // p=none
     Quarantine { record: String },
     Reject { record: String },
 }
@@ -54,7 +54,7 @@ pub enum DmarcState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MtaStsState {
     Missing,
-    Present { mode: String },        // enforce / testing / none
+    Present { mode: String }, // enforce / testing / none
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +76,15 @@ pub async fn audit(domain: &str) -> DnsHealthReport {
     );
 
     let mut findings: Vec<Finding> = Vec::new();
-    derive_findings(domain, &spf, &dmarc, &mta_sts, &dnssec, &dkim, &mut findings);
+    derive_findings(
+        domain,
+        &spf,
+        &dmarc,
+        &mta_sts,
+        &dnssec,
+        &dkim,
+        &mut findings,
+    );
 
     DnsHealthReport {
         domain: domain.to_owned(),
@@ -145,7 +153,9 @@ async fn check_dmarc(domain: &str) -> DmarcState {
 async fn check_mta_sts(domain: &str) -> MtaStsState {
     let target = format!("_mta-sts.{domain}");
     let records: Vec<String> = dig_txt(&target).await;
-    let mta = records.iter().find(|r| r.to_lowercase().contains("v=stsv1"));
+    let mta = records
+        .iter()
+        .find(|r| r.to_lowercase().contains("v=stsv1"));
     match mta {
         None => MtaStsState::Missing,
         Some(r) => {
@@ -153,7 +163,9 @@ async fn check_mta_sts(domain: &str) -> MtaStsState {
             // but the TXT record only confirms the policy version + ID.
             // We surface the TXT presence; mode would need an HTTP fetch.
             let _ = r;
-            MtaStsState::Present { mode: "TXT-published".into() }
+            MtaStsState::Present {
+                mode: "TXT-published".into(),
+            }
         }
     }
 }
@@ -180,15 +192,20 @@ async fn find_dkim_selectors(domain: &str) -> Vec<String> {
     // source. This catches Microsoft 365, Google Workspace, Mailchimp,
     // SendGrid, plus typical per-org defaults.
     const SELECTORS: &[&str] = &[
-        "selector1", "selector2",            // Microsoft 365
-        "google",                            // Google Workspace
-        "k1", "k2", "k3",                    // Mailchimp / Mandrill
-        "s1", "s2",                          // SendGrid
-        "default", "dkim",                   // DIY
+        "selector1",
+        "selector2", // Microsoft 365
+        "google",    // Google Workspace
+        "k1",
+        "k2",
+        "k3", // Mailchimp / Mandrill
+        "s1",
+        "s2", // SendGrid
+        "default",
+        "dkim", // DIY
         "smtp",
-        "mxvault",                           // Cloudmark
-        "pf2014",                            // Pardot
-        "ml",                                // MailerLite
+        "mxvault", // Cloudmark
+        "pf2014",  // Pardot
+        "ml",      // MailerLite
     ];
     let mut found: Vec<String> = Vec::new();
     for sel in SELECTORS {
@@ -214,18 +231,19 @@ fn derive_findings(
     dkim: &[String],
     out: &mut Vec<Finding>,
 ) {
-    let mk = |id: &str, sev: Severity, cvss: f32, title: String, detail: String, rec: String| Finding {
-        id: id.to_owned(),
-        host_ip: domain.to_owned(),  // Use domain as the "host" for keying.
-        port: None,
-        service: Some("dns".into()),
-        severity: sev,
-        title,
-        detail,
-        recommendation: rec,
-        cve: None,
-        cvss: Some(cvss),
-    };
+    let mk =
+        |id: &str, sev: Severity, cvss: f32, title: String, detail: String, rec: String| Finding {
+            id: id.to_owned(),
+            host_ip: domain.to_owned(), // Use domain as the "host" for keying.
+            port: None,
+            service: Some("dns".into()),
+            severity: sev,
+            title,
+            detail,
+            recommendation: rec,
+            cve: None,
+            cvss: Some(cvss),
+        };
 
     // --- SPF ---
     match spf {
@@ -391,15 +409,25 @@ mod tests {
         // Mirror the classification in `check_spf` minus the dig.
         let lower = record.to_lowercase();
         if lower.contains(" -all") || lower.ends_with("-all") {
-            SpfState::Strict { record: record.into() }
+            SpfState::Strict {
+                record: record.into(),
+            }
         } else if lower.contains(" ~all") || lower.ends_with("~all") {
-            SpfState::Soft { record: record.into() }
+            SpfState::Soft {
+                record: record.into(),
+            }
         } else if lower.contains(" +all") || lower.ends_with("+all") {
-            SpfState::Permissive { record: record.into() }
+            SpfState::Permissive {
+                record: record.into(),
+            }
         } else if lower.contains(" ?all") || lower.ends_with("?all") {
-            SpfState::Neutral { record: record.into() }
+            SpfState::Neutral {
+                record: record.into(),
+            }
         } else {
-            SpfState::NoTerminator { record: record.into() }
+            SpfState::NoTerminator {
+                record: record.into(),
+            }
         }
     }
 
@@ -454,9 +482,15 @@ mod tests {
         // happens in check_dmarc which is dig-bound.
         let states = vec![
             DmarcState::Missing,
-            DmarcState::None { record: "v=DMARC1;p=none".into() },
-            DmarcState::Quarantine { record: "p=quarantine".into() },
-            DmarcState::Reject { record: "p=reject".into() },
+            DmarcState::None {
+                record: "v=DMARC1;p=none".into(),
+            },
+            DmarcState::Quarantine {
+                record: "p=quarantine".into(),
+            },
+            DmarcState::Reject {
+                record: "p=reject".into(),
+            },
         ];
         for s in &states {
             // Each state must be JSON-serializable round-trip.
@@ -471,7 +505,9 @@ mod tests {
         derive_findings(
             "example.com",
             &SpfState::Missing,
-            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &DmarcState::Reject {
+                record: "v=DMARC1;p=reject".into(),
+            },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &["selector1".into()],
@@ -487,8 +523,12 @@ mod tests {
         let mut out = Vec::new();
         derive_findings(
             "example.com",
-            &SpfState::Permissive { record: "v=spf1 +all".into() },
-            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &SpfState::Permissive {
+                record: "v=spf1 +all".into(),
+            },
+            &DmarcState::Reject {
+                record: "v=DMARC1;p=reject".into(),
+            },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &["selector1".into()],
@@ -503,14 +543,21 @@ mod tests {
         let mut out = Vec::new();
         derive_findings(
             "example.com",
-            &SpfState::Strict { record: "v=spf1 -all".into() },
-            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &SpfState::Strict {
+                record: "v=spf1 -all".into(),
+            },
+            &DmarcState::Reject {
+                record: "v=DMARC1;p=reject".into(),
+            },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
             &["selector1".into()],
             &mut out,
         );
-        assert!(out.is_empty(), "fully-locked-down DNS should produce no findings");
+        assert!(
+            out.is_empty(),
+            "fully-locked-down DNS should produce no findings"
+        );
     }
 
     #[test]
@@ -518,11 +565,15 @@ mod tests {
         let mut out = Vec::new();
         derive_findings(
             "example.com",
-            &SpfState::Strict { record: "v=spf1 -all".into() },
-            &DmarcState::Reject { record: "v=DMARC1;p=reject".into() },
+            &SpfState::Strict {
+                record: "v=spf1 -all".into(),
+            },
+            &DmarcState::Reject {
+                record: "v=DMARC1;p=reject".into(),
+            },
             &MtaStsState::Present { mode: "TXT".into() },
             &DnssecState::Enabled { ds_count: 1 },
-            &[],  // no DKIM selectors
+            &[], // no DKIM selectors
             &mut out,
         );
         assert!(out.iter().any(|f| f.id == "dns.dkim-missing"));

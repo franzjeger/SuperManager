@@ -25,8 +25,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use supermgr_core::{
-    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     error::BackendError,
+    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     vpn::profile::{Profile, ProfileConfig},
     vpn::state::TunnelStats,
 };
@@ -110,10 +110,8 @@ async fn iface_routes(iface: &str) -> Vec<String> {
 
 /// Run an `openvpn3` subcommand and return (stdout, stderr, success).
 async fn run_openvpn3(args: &[&str]) -> Result<(String, String, bool), BackendError> {
-    let out_future = tokio::process::Command::new("openvpn3")
-        .args(args)
-        .output();
-        
+    let out_future = tokio::process::Command::new("openvpn3").args(args).output();
+
     let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
         .await
         .map_err(|_| BackendError::Interface("openvpn3 command timed out after 15 seconds".into()))?
@@ -208,39 +206,37 @@ impl VpnBackend for OpenVpnBackend {
             }
         };
 
-        let (temp_path, temp_file) = if let (Some(user), Some(pw_ref)) =
-            (&cfg.username, &cfg.password)
-        {
-            match secrets::retrieve_secret(pw_ref.label()).await {
-                Ok(pw_bytes) => {
-                    let pw = String::from_utf8_lossy(&pw_bytes);
-                    let base = tokio::fs::read_to_string(&cfg.config_file)
-                        .await
-                        .map_err(BackendError::Io)?;
-                    let base = apply_full_tunnel_override(&base);
-                    let with_creds = format!(
-                        "{base}\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n"
-                    );
-                    let id_prefix = profile.id.simple().to_string();
-                    let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
-                    // `with_creds` is the .ovpn plus an inline
-                    // <auth-user-pass> block holding the username and
-                    // password in clear. It was written at the umask, so on
-                    // the non-root path — where the directory is under /tmp —
-                    // it was a world-readable VPN password.
-                    crate::secure_file::write_private(&tmp, with_creds.as_bytes(), None)
-                        .map_err(BackendError::Io)?;
-                    (tmp.to_string_lossy().into_owned(), Some(tmp))
+        let (temp_path, temp_file) =
+            if let (Some(user), Some(pw_ref)) = (&cfg.username, &cfg.password) {
+                match secrets::retrieve_secret(pw_ref.label()).await {
+                    Ok(pw_bytes) => {
+                        let pw = String::from_utf8_lossy(&pw_bytes);
+                        let base = tokio::fs::read_to_string(&cfg.config_file)
+                            .await
+                            .map_err(BackendError::Io)?;
+                        let base = apply_full_tunnel_override(&base);
+                        let with_creds =
+                            format!("{base}\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n");
+                        let id_prefix = profile.id.simple().to_string();
+                        let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
+                        // `with_creds` is the .ovpn plus an inline
+                        // <auth-user-pass> block holding the username and
+                        // password in clear. It was written at the umask, so on
+                        // the non-root path — where the directory is under /tmp —
+                        // it was a world-readable VPN password.
+                        crate::secure_file::write_private(&tmp, with_creds.as_bytes(), None)
+                            .map_err(BackendError::Io)?;
+                        (tmp.to_string_lossy().into_owned(), Some(tmp))
+                    }
+                    Err(e) => {
+                        warn!("OpenVPN3: could not retrieve password from keyring: {e}");
+                        // Fall through to the no-credentials path for the override.
+                        ("".to_owned(), None)
+                    }
                 }
-                Err(e) => {
-                    warn!("OpenVPN3: could not retrieve password from keyring: {e}");
-                    // Fall through to the no-credentials path for the override.
-                    ("".to_owned(), None)
-                }
-            }
-        } else {
-            ("".to_owned(), None)
-        };
+            } else {
+                ("".to_owned(), None)
+            };
 
         // If no temp file was created yet (no credentials or keyring error),
         // still write one if the full_tunnel override needs to change the config.
@@ -290,7 +286,8 @@ impl VpnBackend for OpenVpnBackend {
                 " — a config with this name already exists; try disconnecting first"
             } else if stderr_str.contains("No such file") || stderr_str.contains("not found") {
                 " — the .ovpn config file is missing or unreadable"
-            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed") {
+            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed")
+            {
                 " — permission denied; ensure the daemon has access to the openvpn3 config manager"
             } else {
                 ""
@@ -299,7 +296,11 @@ impl VpnBackend for OpenVpnBackend {
                 "openvpn3 config-import failed: {stderr_str}{hint}",
             )));
         }
-        info!("OpenVPN3: config imported as '{}': {}", config_name, stdout.trim());
+        info!(
+            "OpenVPN3: config imported as '{}': {}",
+            config_name,
+            stdout.trim()
+        );
 
         // Step 2 — allow server-pushed compression (asym = safe, no VORACLE risk).
         let (_, stderr, ok) = run_openvpn3(&[
@@ -312,7 +313,10 @@ impl VpnBackend for OpenVpnBackend {
         .await?;
 
         if !ok {
-            warn!("OpenVPN3: config-manage --allow-compression asym failed: {}", stderr.trim());
+            warn!(
+                "OpenVPN3: config-manage --allow-compression asym failed: {}",
+                stderr.trim()
+            );
             // Non-fatal — proceed; server may not use compression.
         } else {
             info!("OpenVPN3: allow-compression asym set for '{}'", config_name);
@@ -324,12 +328,13 @@ impl VpnBackend for OpenVpnBackend {
 
         if !ok {
             // Best-effort cleanup of the imported config.
-            let _ =
-                run_openvpn3(&["config-remove", "--config", &config_name, "--force"]).await;
+            let _ = run_openvpn3(&["config-remove", "--config", &config_name, "--force"]).await;
             let stderr_str = stderr.trim();
-            let hint = if stderr_str.contains("AUTH_FAILED") || stderr_str.contains("auth-failure") {
+            let hint = if stderr_str.contains("AUTH_FAILED") || stderr_str.contains("auth-failure")
+            {
                 "authentication failed — check your username and password"
-            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed") {
+            } else if stderr_str.contains("Permission denied") || stderr_str.contains("not allowed")
+            {
                 "permission denied — ensure the daemon has access to the openvpn3 session bus"
             } else if stderr_str.contains("TLS") || stderr_str.contains("certificate") {
                 "TLS/certificate error — verify the server certificate and CA configuration"
@@ -481,7 +486,9 @@ impl VpnBackend for OpenVpnBackend {
             let _ = self.disconnect().await;
             let hint = if poll_last_status.contains("AUTH_FAILED") {
                 "authentication failed — check your credentials (username/password or certificate)"
-            } else if poll_last_status.contains("DISCONNECTED") || poll_last_status.contains("FAILED") {
+            } else if poll_last_status.contains("DISCONNECTED")
+                || poll_last_status.contains("FAILED")
+            {
                 "connection was rejected by the server — check VPN server logs for details"
             } else {
                 "connection timed out after 60 s — the server may be unreachable or \
@@ -527,13 +534,8 @@ impl VpnBackend for OpenVpnBackend {
             info!("OpenVPN3: disconnecting session {path}");
 
             // First try a clean disconnect.
-            let (_, stderr, ok) = run_openvpn3(&[
-                "session-manage",
-                "--session-path",
-                path,
-                "--disconnect",
-            ])
-            .await?;
+            let (_, stderr, ok) =
+                run_openvpn3(&["session-manage", "--session-path", path, "--disconnect"]).await?;
             if !ok {
                 warn!("openvpn3 session-manage disconnect: {}", stderr.trim());
             }
@@ -544,13 +546,8 @@ impl VpnBackend for OpenVpnBackend {
             let (list_out, _, _) = run_openvpn3(&["sessions-list"]).await.unwrap_or_default();
             if list_out.contains(path.as_str()) {
                 info!("OpenVPN3: session still present after disconnect; sending --abort");
-                let (_, stderr, ok) = run_openvpn3(&[
-                    "session-manage",
-                    "--session-path",
-                    path,
-                    "--abort",
-                ])
-                .await?;
+                let (_, stderr, ok) =
+                    run_openvpn3(&["session-manage", "--session-path", path, "--abort"]).await?;
                 if !ok {
                     warn!("openvpn3 session-manage abort: {}", stderr.trim());
                 }

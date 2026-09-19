@@ -90,7 +90,8 @@ pub fn clear_vpn_dns() {
     // never the physical interface's, so scoping the removal to ours
     // loses nothing. `SUPERMGR_DNS_KEY` is also what the updown script
     // writes to when a gateway pushes INTERNAL_IP4_DNS.
-    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nremove State:/Network/Global/DNS\nquit\n");
+    let script =
+        format!("open\nremove {SUPERMGR_DNS_KEY}\nremove State:/Network/Global/DNS\nquit\n");
     match std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -109,7 +110,9 @@ pub fn clear_vpn_dns() {
 
     // ── Step 3: flush resolver caches ────────────────────────────────
     // Without this, apps keep using the old resolver for up to 60 s.
-    let _ = Command::new("/usr/bin/dscacheutil").arg("-flushcache").output();
+    let _ = Command::new("/usr/bin/dscacheutil")
+        .arg("-flushcache")
+        .output();
     let _ = Command::new("/usr/bin/killall")
         .args(["-HUP", "mDNSResponder"])
         .output();
@@ -211,7 +214,9 @@ pub fn set_vpn_dns(servers: &[String]) {
     }
 
     // Flush resolver caches so apps pick up the new resolver instantly
-    let _ = Command::new("/usr/bin/dscacheutil").arg("-flushcache").output();
+    let _ = Command::new("/usr/bin/dscacheutil")
+        .arg("-flushcache")
+        .output();
     let _ = Command::new("/usr/bin/killall")
         .args(["-HUP", "mDNSResponder"])
         .output();

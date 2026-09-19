@@ -7,16 +7,16 @@ use anyhow::Context as _;
 use tracing::{error, info};
 
 use supermgr_core::{
+    compliance::{CheckDefinition, ComplianceRun, RunSummary},
     customer::Customer,
     dbus::DaemonProxy,
+    findings_store::{Disposition, PersistedFinding, StoreSummary},
+    host::HostSummary,
+    recon::ReconScanResult,
+    ssh::key::SshKeySummary,
+    tailscale::{TailscaleHealth, TailscaleNode},
     vpn::profile::ProfileSummary,
     vpn::state::{state_from_json, VpnState},
-    ssh::key::SshKeySummary,
-    host::HostSummary,
-    tailscale::{TailscaleHealth, TailscaleNode},
-    compliance::{CheckDefinition, ComplianceRun, RunSummary},
-    findings_store::{Disposition, PersistedFinding, StoreSummary},
-    recon::ReconScanResult,
 };
 
 use crate::app::{AppMsg, AppState};
@@ -64,7 +64,10 @@ pub async fn ensure_daemon_running() -> bool {
     };
 
     if !daemon_path.exists() {
-        error!("supermgrd not found at {} — cannot auto-start", daemon_path.display());
+        error!(
+            "supermgrd not found at {} — cannot auto-start",
+            daemon_path.display()
+        );
         return false;
     }
 
@@ -134,9 +137,16 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
     // so the UI starts from a clean Disconnected state.
     if vpn_state.is_connected() {
         info!("found stale tunnel on startup, disconnecting");
-        proxy.disconnect().await.context("Disconnect stale tunnel")?;
-        let status_json = proxy.get_status().await.context("GetStatus after stale disconnect")?;
-        vpn_state = state_from_json(&status_json).context("deserialise VpnState after stale disconnect")?;
+        proxy
+            .disconnect()
+            .await
+            .context("Disconnect stale tunnel")?;
+        let status_json = proxy
+            .get_status()
+            .await
+            .context("GetStatus after stale disconnect")?;
+        vpn_state =
+            state_from_json(&status_json).context("deserialise VpnState after stale disconnect")?;
         info!("state after stale disconnect: {:?}", vpn_state);
     }
 
@@ -149,7 +159,9 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
 
 /// Fetch SSH keys and hosts from the daemon.
 pub async fn fetch_initial_ssh_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
 
     let keys_json = proxy.ssh_list_keys().await.context("SshListKeys")?;
@@ -186,14 +198,18 @@ pub async fn dbus_customer_data(
 }
 
 pub async fn dbus_customer_save(customer: &Customer) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = serde_json::to_string(customer).context("serialise customer")?;
     proxy.customer_save(&json).await.context("CustomerSave")
 }
 
 pub async fn dbus_customer_delete(slug: &str) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.customer_delete(slug).await.context("CustomerDelete")
 }
@@ -203,7 +219,9 @@ pub async fn dbus_customer_assign_host(
     site_id: &str,
     host_id: &str,
 ) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .customer_assign_host(customer_slug, site_id, host_id)
@@ -215,7 +233,9 @@ pub async fn dbus_customer_assign_profile(
     customer_slug: &str,
     profile_id: &str,
 ) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .customer_assign_profile(customer_slug, profile_id)
@@ -224,7 +244,9 @@ pub async fn dbus_customer_assign_profile(
 }
 
 pub async fn dbus_export_customer_docs(customer_slug: &str) -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .export_customer_docs(customer_slug)
@@ -233,7 +255,9 @@ pub async fn dbus_export_customer_docs(customer_slug: &str) -> anyhow::Result<St
 }
 
 pub async fn dbus_fortigate_compliance(host_id: &str) -> anyhow::Result<serde_json::Value> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy
         .fortigate_compliance_check(host_id)
@@ -243,7 +267,9 @@ pub async fn dbus_fortigate_compliance(host_id: &str) -> anyhow::Result<serde_js
 }
 
 pub async fn dbus_recon_scan(target_cidr: &str, ports: &[u16]) -> anyhow::Result<ReconScanResult> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let ports_json = serde_json::to_string(ports).context("serialise recon ports")?;
     let json = proxy
@@ -273,17 +299,16 @@ pub async fn dbus_import_wireguard(
         name
     );
 
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
 
     let new_uuid = proxy
         .import_wireguard(&contents, &name)
         .await
         .with_context(|| {
-            error!(
-                "import_wireguard D-Bus call failed for profile '{}'",
-                name
-            );
+            error!("import_wireguard D-Bus call failed for profile '{}'", name);
             format!("ImportWireGuard D-Bus call failed for '{name}'")
         })?;
 
@@ -307,16 +332,18 @@ pub async fn dbus_import_wireguard(
 /// Import a TOML configuration file via the daemon.
 ///
 /// Returns a JSON object `{ "type": "...", "id": "..." }`.
-pub async fn dbus_import_toml(
-    path: std::path::PathBuf,
-) -> anyhow::Result<String> {
+pub async fn dbus_import_toml(path: std::path::PathBuf) -> anyhow::Result<String> {
     let contents = tokio::fs::read_to_string(&path)
         .await
         .with_context(|| format!("read {}", path.display()))?;
 
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    let result = proxy.import_toml(&contents).await
+    let result = proxy
+        .import_toml(&contents)
+        .await
         .with_context(|| format!("ImportToml D-Bus call failed for '{}'", path.display()))?;
 
     info!("dbus_import_toml: imported {} → {}", path.display(), result);
@@ -347,7 +374,9 @@ pub async fn dbus_import_toml_string(
         }
     }
 
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.import_toml(&text).await.context("ImportToml")?;
     let json = proxy.list_profiles().await.context("ListProfiles")?;
@@ -357,7 +386,9 @@ pub async fn dbus_import_toml_string(
 
 /// Open a fresh system-bus connection and issue `Connect(profile_id)`.
 pub async fn dbus_connect(profile_id: String) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.connect(&profile_id).await.context("Connect")?;
     Ok(())
@@ -365,7 +396,9 @@ pub async fn dbus_connect(profile_id: String) -> anyhow::Result<()> {
 
 /// Open a fresh system-bus connection and issue `Disconnect()`.
 pub async fn dbus_disconnect() -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.disconnect().await.context("Disconnect")?;
     Ok(())
@@ -373,7 +406,9 @@ pub async fn dbus_disconnect() -> anyhow::Result<()> {
 
 /// Fetch only the current [`VpnState`] from the daemon via the system bus.
 pub async fn dbus_get_state() -> anyhow::Result<VpnState> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy.get_status().await.context("GetStatus")?;
     state_from_json(&json).context("deserialise VpnState")
@@ -381,25 +416,40 @@ pub async fn dbus_get_state() -> anyhow::Result<VpnState> {
 
 /// Call `DeleteProfile(profile_id)` on the daemon.
 pub async fn dbus_delete_profile(profile_id: String) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.delete_profile(&profile_id).await.context("DeleteProfile")?;
+    proxy
+        .delete_profile(&profile_id)
+        .await
+        .context("DeleteProfile")?;
     Ok(())
 }
 
 /// Call `RenameProfile(profile_id, new_name)` on the daemon.
 pub async fn dbus_rename_profile(profile_id: String, new_name: String) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.rename_profile(&profile_id, &new_name).await.context("RenameProfile")?;
+    proxy
+        .rename_profile(&profile_id, &new_name)
+        .await
+        .context("RenameProfile")?;
     Ok(())
 }
 
 /// Call `SetAutoConnect(profile_id, auto_connect)` on the daemon.
 pub async fn dbus_set_auto_connect(profile_id: String, auto_connect: bool) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.set_auto_connect(&profile_id, auto_connect).await.context("SetAutoConnect")?;
+    proxy
+        .set_auto_connect(&profile_id, auto_connect)
+        .await
+        .context("SetAutoConnect")?;
     Ok(())
 }
 
@@ -422,7 +472,9 @@ pub async fn dbus_update_fortigate(
     dns_servers: String,
     local_id: String,
 ) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .update_fortigate(
@@ -446,7 +498,9 @@ pub async fn dbus_update_openvpn_credentials(
     username: String,
     password: String,
 ) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .update_openvpn_credentials(&profile_id, &username, &password)
@@ -457,33 +511,44 @@ pub async fn dbus_update_openvpn_credentials(
 
 /// Call `SetFullTunnel(profile_id, full_tunnel)` on the daemon.
 pub async fn dbus_set_full_tunnel(profile_id: String, full_tunnel: bool) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.set_full_tunnel(&profile_id, full_tunnel).await.context("SetFullTunnel")?;
+    proxy
+        .set_full_tunnel(&profile_id, full_tunnel)
+        .await
+        .context("SetFullTunnel")?;
     Ok(())
 }
 
 /// Call `SetSplitRoutes(profile_id, routes)` on the daemon.
-pub async fn dbus_set_split_routes(
-    profile_id: String,
-    routes: Vec<String>,
-) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+pub async fn dbus_set_split_routes(profile_id: String, routes: Vec<String>) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.set_split_routes(&profile_id, routes).await.context("SetSplitRoutes")?;
+    proxy
+        .set_split_routes(&profile_id, routes)
+        .await
+        .context("SetSplitRoutes")?;
     Ok(())
 }
 
 /// Call `GetLogs` on the daemon and return the log lines.
 pub async fn dbus_get_logs() -> anyhow::Result<Vec<String>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.get_logs().await.context("GetLogs")
 }
 
 /// Dynamically change the daemon's tracing log level at runtime.
 pub async fn dbus_set_log_level(level: String) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.set_log_level(&level).await.context("SetLogLevel")
 }
@@ -498,7 +563,9 @@ pub async fn dbus_compliance_run_linux(
     host_id: &str,
     triggered_by: &str,
 ) -> anyhow::Result<ComplianceRun> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy
         .compliance_run_linux(host_id, triggered_by)
@@ -508,11 +575,10 @@ pub async fn dbus_compliance_run_linux(
 }
 
 /// Run summaries for a host, newest first.
-pub async fn dbus_compliance_history(
-    host_id: &str,
-    limit: u32,
-) -> anyhow::Result<Vec<RunSummary>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+pub async fn dbus_compliance_history(host_id: &str, limit: u32) -> anyhow::Result<Vec<RunSummary>> {
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy
         .compliance_history(host_id, limit)
@@ -522,11 +588,10 @@ pub async fn dbus_compliance_history(
 }
 
 /// One stored run in full.
-pub async fn dbus_compliance_get_run(
-    host_id: &str,
-    run_id: &str,
-) -> anyhow::Result<ComplianceRun> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+pub async fn dbus_compliance_get_run(host_id: &str, run_id: &str) -> anyhow::Result<ComplianceRun> {
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy
         .compliance_get_run(host_id, run_id)
@@ -538,7 +603,9 @@ pub async fn dbus_compliance_get_run(
 /// The check library. Resolved once per page load, not per row: a run carries
 /// its own titles, but description, CIS reference and remediation live here.
 pub async fn dbus_compliance_list_checks() -> anyhow::Result<Vec<CheckDefinition>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy
         .compliance_list_checks()
@@ -559,7 +626,9 @@ pub async fn dbus_findings_scopes() -> anyhow::Result<Vec<String>> {
 /// which is what the daemon files compliance findings under, so it is what the
 /// Security page has to ask for.
 pub async fn dbus_findings_list(scope: &str) -> anyhow::Result<Vec<PersistedFinding>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy.findings_list(scope).await.context("FindingsList")?;
     serde_json::from_str(&json).context("parse findings")
@@ -567,9 +636,14 @@ pub async fn dbus_findings_list(scope: &str) -> anyhow::Result<Vec<PersistedFind
 
 /// Call `FindingsSummary` on the daemon.
 pub async fn dbus_findings_summary(scope: &str) -> anyhow::Result<StoreSummary> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    let json = proxy.findings_summary(scope).await.context("FindingsSummary")?;
+    let json = proxy
+        .findings_summary(scope)
+        .await
+        .context("FindingsSummary")?;
     serde_json::from_str(&json).context("parse findings summary")
 }
 
@@ -584,7 +658,9 @@ pub async fn dbus_findings_set_disposition(
     disposition: &Disposition,
     note: &str,
 ) -> anyhow::Result<PersistedFinding> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let payload = serde_json::to_string(disposition).context("serialise disposition")?;
     let json = proxy
@@ -602,65 +678,111 @@ pub async fn dbus_findings_set_disposition(
 /// meant for the operator, and the page renders it rather than an empty list —
 /// "no devices" and "tailscale isn't installed" are different facts.
 pub async fn dbus_tailscale_list_nodes() -> anyhow::Result<Vec<TailscaleNode>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    let json = proxy.tailscale_list_nodes().await.context("TailscaleListNodes")?;
+    let json = proxy
+        .tailscale_list_nodes()
+        .await
+        .context("TailscaleListNodes")?;
     serde_json::from_str(&json).context("parse tailscale nodes")
 }
 
-pub async fn dbus_tailscale_management() -> anyhow::Result<supermgr_core::tailscale::TailscaleManagement> {
+pub async fn dbus_tailscale_management(
+) -> anyhow::Result<supermgr_core::tailscale::TailscaleManagement> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     Ok(serde_json::from_str(&proxy.tailscale_management().await?)?)
 }
 
-pub async fn dbus_tailscale_apply_preferences(patch: &supermgr_core::tailscale::TailscalePreferencesPatch) -> anyhow::Result<String> {
+pub async fn dbus_tailscale_apply_preferences(
+    patch: &supermgr_core::tailscale::TailscalePreferencesPatch,
+) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    Ok(proxy.tailscale_apply_preferences(&serde_json::to_string(patch)?).await?)
+    Ok(proxy
+        .tailscale_apply_preferences(&serde_json::to_string(patch)?)
+        .await?)
 }
 
 pub async fn dbus_tailscale_set_running(profile: &str, running: bool) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
-    Ok(DaemonProxy::new(&conn).await?.tailscale_set_running(profile, running).await?)
+    Ok(DaemonProxy::new(&conn)
+        .await?
+        .tailscale_set_running(profile, running)
+        .await?)
 }
 
 pub async fn dbus_tailscale_switch_profile(profile: &str) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
-    Ok(DaemonProxy::new(&conn).await?.tailscale_switch_profile(profile).await?)
+    Ok(DaemonProxy::new(&conn)
+        .await?
+        .tailscale_switch_profile(profile)
+        .await?)
 }
 
 pub async fn dbus_tailscale_logout(profile: &str) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
-    Ok(DaemonProxy::new(&conn).await?.tailscale_logout(profile).await?)
+    Ok(DaemonProxy::new(&conn)
+        .await?
+        .tailscale_logout(profile)
+        .await?)
 }
 
-pub async fn dbus_tailscale_begin_login(profile: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
+pub async fn dbus_tailscale_begin_login(
+    profile: &str,
+) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
     let conn = zbus::Connection::system().await?;
-    Ok(serde_json::from_str(&DaemonProxy::new(&conn).await?.tailscale_begin_login(profile).await?)?)
+    Ok(serde_json::from_str(
+        &DaemonProxy::new(&conn)
+            .await?
+            .tailscale_begin_login(profile)
+            .await?,
+    )?)
 }
 
-pub async fn dbus_tailscale_login_status(attempt: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
+pub async fn dbus_tailscale_login_status(
+    attempt: &str,
+) -> anyhow::Result<supermgr_core::tailscale::TailscaleLoginAttempt> {
     let conn = zbus::Connection::system().await?;
-    Ok(serde_json::from_str(&DaemonProxy::new(&conn).await?.tailscale_login_status(attempt).await?)?)
+    Ok(serde_json::from_str(
+        &DaemonProxy::new(&conn)
+            .await?
+            .tailscale_login_status(attempt)
+            .await?,
+    )?)
 }
 
 pub async fn dbus_tailscale_cancel_login(attempt: &str) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
-    Ok(DaemonProxy::new(&conn).await?.tailscale_cancel_login(attempt).await?)
+    Ok(DaemonProxy::new(&conn)
+        .await?
+        .tailscale_cancel_login(attempt)
+        .await?)
 }
 
-pub async fn dbus_tailscale_dns_diagnostics(profile: &str) -> anyhow::Result<supermgr_core::tailscale::TailscaleDnsReport> {
+pub async fn dbus_tailscale_dns_diagnostics(
+    profile: &str,
+) -> anyhow::Result<supermgr_core::tailscale::TailscaleDnsReport> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    let reply = tokio::time::timeout(std::time::Duration::from_secs(90), proxy.tailscale_dns_diagnostics(profile)).await??;
+    let reply = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        proxy.tailscale_dns_diagnostics(profile),
+    )
+    .await??;
     Ok(serde_json::from_str(&reply)?)
 }
 
 pub async fn dbus_tailscale_change_exit_node(profile: &str, node: &str) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    Ok(tokio::time::timeout(std::time::Duration::from_secs(180), proxy.tailscale_change_exit_node(profile, node)).await??)
+    Ok(tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        proxy.tailscale_change_exit_node(profile, node),
+    )
+    .await??)
 }
 
 pub async fn dbus_tailscale_ping(node: &str) -> anyhow::Result<String> {
@@ -675,7 +797,9 @@ pub async fn dbus_tailscale_ping(node: &str) -> anyhow::Result<String> {
 /// remedy encoded in the fields. Keeping that distinction is the point: the
 /// page offers a fix for Tailscale states and shows an error for bus ones.
 pub async fn dbus_tailscale_health() -> anyhow::Result<TailscaleHealth> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy.tailscale_health().await.context("TailscaleHealth")?;
     serde_json::from_str(&json).context("parse tailscale health")
@@ -686,7 +810,9 @@ pub async fn dbus_tailscale_health() -> anyhow::Result<TailscaleHealth> {
 ///
 /// Polkit-gated on the daemon side; a dismissed prompt arrives as an error.
 pub async fn dbus_tailscale_repair() -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.tailscale_repair().await.map_err(|e| {
         anyhow::anyhow!(describe_daemon_error(
@@ -703,7 +829,9 @@ pub async fn dbus_tailscale_repair() -> anyhow::Result<String> {
 /// polls during a login anyway.
 #[allow(dead_code)] // Compatibility adapter; new GUI uses owned login attempts.
 pub async fn dbus_tailscale_login() -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.tailscale_login().await.map_err(|e| {
         anyhow::anyhow!(describe_daemon_error(
@@ -720,7 +848,9 @@ pub async fn dbus_tailscale_login() -> anyhow::Result<String> {
 /// prompt" rather than "you lack permission".
 #[allow(dead_code)] // Compatibility adapter; new GUI supplies the expected account.
 pub async fn dbus_tailscale_set_exit_node(value: &str) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.tailscale_set_exit_node(value).await.map_err(|e| {
         let doing = if value.is_empty() {
@@ -733,7 +863,9 @@ pub async fn dbus_tailscale_set_exit_node(value: &str) -> anyhow::Result<()> {
 }
 
 pub async fn dbus_list_profiles() -> anyhow::Result<Vec<ProfileSummary>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let json = proxy.list_profiles().await.context("ListProfiles")?;
     serde_json::from_str(&json).context("parse profiles")
@@ -753,15 +885,24 @@ pub async fn dbus_import_fortigate(
     dns_servers: String,
     local_id: String,
 ) -> anyhow::Result<Vec<ProfileSummary>> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     let _uuid = proxy
-        .import_fortigate(&name, &host, &username, &password, &psk, &dns_servers, &local_id)
+        .import_fortigate(
+            &name,
+            &host,
+            &username,
+            &password,
+            &psk,
+            &dns_servers,
+            &local_id,
+        )
         .await
         .context("ImportFortigate")?;
     let json = proxy.list_profiles().await.context("ListProfiles")?;
-    let profiles: Vec<ProfileSummary> =
-        serde_json::from_str(&json).context("parse profiles")?;
+    let profiles: Vec<ProfileSummary> = serde_json::from_str(&json).context("parse profiles")?;
     Ok(profiles)
 }
 
@@ -785,7 +926,9 @@ pub async fn dbus_import_azure_vpn(
         .await
         .with_context(|| format!("read {}", vpn_settings_path.display()))?;
 
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
 
     proxy
@@ -811,7 +954,9 @@ pub(crate) async fn dbus_import_openvpn(
         .await
         .with_context(|| format!("read {}", path.display()))?;
 
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy
         .import_openvpn(&contents, &name, &username, &password)
@@ -824,26 +969,41 @@ pub(crate) async fn dbus_import_openvpn(
 
 /// Call `SetKillSwitch(profile_id, enabled)` on the daemon.
 pub async fn dbus_set_kill_switch(profile_id: String, enabled: bool) -> anyhow::Result<()> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.set_kill_switch(&profile_id, enabled).await.context("SetKillSwitch")?;
+    proxy
+        .set_kill_switch(&profile_id, enabled)
+        .await
+        .context("SetKillSwitch")?;
     Ok(())
 }
 
 /// Call `RotateWireguardKey(profile_id)` on the daemon.
 /// Returns the new base64-encoded public key.
 pub async fn dbus_rotate_wireguard_key(profile_id: String) -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.rotate_wireguard_key(&profile_id).await.context("RotateWireguardKey")
+    proxy
+        .rotate_wireguard_key(&profile_id)
+        .await
+        .context("RotateWireguardKey")
 }
 
 /// Call `ExportProfile(profile_id)` on the daemon.
 /// Returns the profile as a TOML string.
 pub async fn dbus_export_profile(profile_id: String) -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
-    proxy.export_profile(&profile_id).await.context("ExportProfile")
+    proxy
+        .export_profile(&profile_id)
+        .await
+        .context("ExportProfile")
 }
 
 // ---------------------------------------------------------------------------
@@ -852,7 +1012,9 @@ pub async fn dbus_export_profile(profile_id: String) -> anyhow::Result<String> {
 
 /// Call `ExportAll` on the daemon.  Returns the full backup JSON string.
 pub async fn dbus_export_all() -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.export_all().await.context("ExportAll")
 }
@@ -860,7 +1022,9 @@ pub async fn dbus_export_all() -> anyhow::Result<String> {
 /// Call `ImportAll(data)` on the daemon.  Returns the summary JSON string
 /// (e.g. `{"profiles": 2, "ssh_keys": 1, "hosts": 3}`).
 pub async fn dbus_import_all(data: String) -> anyhow::Result<String> {
-    let conn = zbus::Connection::system().await.context("D-Bus system connection")?;
+    let conn = zbus::Connection::system()
+        .await
+        .context("D-Bus system connection")?;
     let proxy = DaemonProxy::new(&conn).await.context("proxy")?;
     proxy.import_all(&data).await.context("ImportAll")
 }
@@ -870,12 +1034,17 @@ pub async fn dbus_import_all(data: String) -> anyhow::Result<String> {
 // ---------------------------------------------------------------------------
 
 pub async fn dbus_ssh_generate_key(
-    name: String, key_type: String, description: String, tags: Vec<String>,
+    name: String,
+    key_type: String,
+    description: String,
+    tags: Vec<String>,
 ) -> anyhow::Result<(Vec<SshKeySummary>, String)> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     let tags_json = serde_json::to_string(&tags)?;
-    let uuid = proxy.ssh_generate_key(&key_type, &name, &description, &tags_json).await?;
+    let uuid = proxy
+        .ssh_generate_key(&key_type, &name, &description, &tags_json)
+        .await?;
     let json = proxy.ssh_list_keys().await?;
     let keys: Vec<SshKeySummary> = serde_json::from_str(&json)?;
     Ok((keys, uuid))
@@ -926,7 +1095,9 @@ pub async fn dbus_ssh_add_host(host_json: String) -> anyhow::Result<(Vec<HostSum
 }
 
 pub async fn dbus_ssh_push_key(
-    key_id: String, host_ids: Vec<String>, use_sudo: bool,
+    key_id: String,
+    host_ids: Vec<String>,
+    use_sudo: bool,
 ) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
@@ -936,7 +1107,9 @@ pub async fn dbus_ssh_push_key(
 
 #[allow(dead_code)]
 pub async fn dbus_ssh_revoke_key(
-    key_id: String, host_ids: Vec<String>, use_sudo: bool,
+    key_id: String,
+    host_ids: Vec<String>,
+    use_sudo: bool,
 ) -> anyhow::Result<String> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
@@ -1031,7 +1204,11 @@ pub async fn dbus_ssh_set_certificate(host_id: String, certificate: String) -> a
     Ok(())
 }
 
-pub async fn dbus_ssh_set_api_token(host_id: String, token: String, port: u16) -> anyhow::Result<()> {
+pub async fn dbus_ssh_set_api_token(
+    host_id: String,
+    token: String,
+    port: u16,
+) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
     proxy.ssh_set_api_token(&host_id, &token, port).await?;
@@ -1039,11 +1216,16 @@ pub async fn dbus_ssh_set_api_token(host_id: String, token: String, port: u16) -
 }
 
 pub async fn dbus_ssh_set_unifi_controller(
-    host_id: String, url: String, username: String, password: String,
+    host_id: String,
+    url: String,
+    username: String,
+    password: String,
 ) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    proxy.unifi_set_controller(&host_id, &url, &username, &password).await?;
+    proxy
+        .unifi_set_controller(&host_id, &url, &username, &password)
+        .await?;
     Ok(())
 }
 
@@ -1054,11 +1236,16 @@ pub async fn dbus_ssh_import_scan(directory: String) -> anyhow::Result<String> {
 }
 
 pub async fn dbus_ssh_import_key(
-    name: String, public_key: String, private_key_pem: String, key_type: String,
+    name: String,
+    public_key: String,
+    private_key_pem: String,
+    key_type: String,
 ) -> anyhow::Result<Vec<SshKeySummary>> {
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    proxy.ssh_import_key(&name, &public_key, &private_key_pem, &key_type).await?;
+    proxy
+        .ssh_import_key(&name, &public_key, &private_key_pem, &key_type)
+        .await?;
     let json = proxy.ssh_list_keys().await?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -1369,7 +1556,10 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                 }
             }
             Err(e) => {
-                error!("signal listener: fetch_initial_state after reconnect: {:#}", e);
+                error!(
+                    "signal listener: fetch_initial_state after reconnect: {:#}",
+                    e
+                );
                 // Loop back to re-subscribe; will fail and keep retrying.
             }
         }
@@ -1387,23 +1577,26 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
 /// or `YYYY-MM-DDTHH:MM:SS[.f]+HH:MM`.  Returns `None` on malformed input.
 fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     // Minimum: "2006-01-02T15:04:05Z" = 20 chars
-    if s.len() < 20 { return None; }
+    if s.len() < 20 {
+        return None;
+    }
     let (date, rest) = s.split_once('T')?;
     let mut parts = date.splitn(3, '-');
-    let year:  u64 = parts.next()?.parse().ok()?;
+    let year: u64 = parts.next()?.parse().ok()?;
     let month: u64 = parts.next()?.parse().ok()?;
-    let day:   u64 = parts.next()?.parse().ok()?;
+    let day: u64 = parts.next()?.parse().ok()?;
 
     // Strip timezone suffix (Z or ±HH:MM) and optional fractional seconds.
     let time_part = rest
-        .split_once('Z').map(|(t, _)| t)
+        .split_once('Z')
+        .map(|(t, _)| t)
         .or_else(|| rest.split_once('+').map(|(t, _)| t))
         .or_else(|| rest.rfind('-').map(|i| &rest[..i]))
         .unwrap_or(rest);
     let time_part = time_part.split('.').next().unwrap_or(time_part);
 
     let mut tparts = time_part.splitn(3, ':');
-    let hour:   u64 = tparts.next()?.parse().ok()?;
+    let hour: u64 = tparts.next()?.parse().ok()?;
     let minute: u64 = tparts.next()?.parse().ok()?;
     let second: u64 = tparts.next()?.parse().ok()?;
 
@@ -1422,7 +1615,9 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
 
     const EPOCH_DAYS: u64 = 719_162; // days from year 0 to 1970-01-01
     let days = days_to_year(year) + day_of_year;
-    if days < EPOCH_DAYS { return None; }
+    if days < EPOCH_DAYS {
+        return None;
+    }
     Some((days - EPOCH_DAYS) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
@@ -1441,19 +1636,29 @@ pub async fn generate_ssh_config() -> anyhow::Result<usize> {
     let config_path = ssh_dir.join("config");
 
     // Read existing config to preserve non-managed entries.
-    let existing = tokio::fs::read_to_string(&config_path).await.unwrap_or_default();
+    let existing = tokio::fs::read_to_string(&config_path)
+        .await
+        .unwrap_or_default();
 
     let marker_start = "# ── SuperManager managed hosts (do not edit) ──";
     let marker_end = "# ── End SuperManager managed hosts ──";
 
     // Split: keep everything before our block and after it.
     let (before, after) = if let Some(start) = existing.find(marker_start) {
-        let end_pos = existing.find(marker_end)
+        let end_pos = existing
+            .find(marker_end)
             .map(|p| p + marker_end.len())
             .unwrap_or(existing.len());
         // Trim trailing newline after marker.
-        let after_pos = if existing[end_pos..].starts_with('\n') { end_pos + 1 } else { end_pos };
-        (existing[..start].to_owned(), existing[after_pos..].to_owned())
+        let after_pos = if existing[end_pos..].starts_with('\n') {
+            end_pos + 1
+        } else {
+            end_pos
+        };
+        (
+            existing[..start].to_owned(),
+            existing[after_pos..].to_owned(),
+        )
     } else {
         (existing.clone(), String::new())
     };
@@ -1465,8 +1670,16 @@ pub async fn generate_ssh_config() -> anyhow::Result<usize> {
     let mut count = 0usize;
     for host in &hosts {
         // Sanitize label for SSH config Host alias.
-        let alias: String = host.label.chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+        let alias: String = host
+            .label
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '.' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect();
 
         block.push_str(&format!("Host {alias}\n"));
@@ -1491,8 +1704,16 @@ pub async fn generate_ssh_config() -> anyhow::Result<usize> {
         if let Some(ref jump) = host.proxy_jump {
             let jump_str = jump.to_string();
             if let Some(jump_host) = hosts.iter().find(|h| h.id.to_string() == jump_str) {
-                let jump_alias: String = jump_host.label.chars()
-                    .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '-' })
+                let jump_alias: String = jump_host
+                    .label
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '-' || c == '.' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
                     .collect();
                 block.push_str(&format!("    ProxyJump {jump_alias}\n"));
             }
@@ -1527,9 +1748,7 @@ mod tests {
     /// The exact text zbus produces for a denial from `polkit::authorize`,
     /// which is what the operator sees if this mapping is wrong.
     fn denial(reason: &str) -> anyhow::Error {
-        anyhow::anyhow!(
-            "org.freedesktop.DBus.Error.AccessDenied: {reason}"
-        )
+        anyhow::anyhow!("org.freedesktop.DBus.Error.AccessDenied: {reason}")
     }
 
     #[test]

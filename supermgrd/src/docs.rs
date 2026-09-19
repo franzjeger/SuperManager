@@ -15,9 +15,7 @@ use std::fmt::Write as _;
 
 use chrono::Utc;
 
-use supermgr_core::{
-    host::Host, vpn::profile::Profile, vpn::profile::ProfileConfig,
-};
+use supermgr_core::{host::Host, vpn::profile::Profile, vpn::profile::ProfileConfig};
 
 /// Render a Markdown document for `customer` summarising every profile and
 /// SSH host tagged with that customer name. The match is case-insensitive
@@ -29,11 +27,7 @@ use supermgr_core::{
 ///
 /// The output is plain Markdown; no external rendering deps. Field
 /// ordering is stable so consecutive exports diff cleanly.
-pub fn render_customer_doc(
-    customer: &str,
-    profiles: &[Profile],
-    hosts: &[Host],
-) -> String {
+pub fn render_customer_doc(customer: &str, profiles: &[Profile], hosts: &[Host]) -> String {
     let needle = customer.trim().to_lowercase();
     let title = if needle.is_empty() {
         "Ungrouped".to_owned()
@@ -127,7 +121,11 @@ pub fn render_customer_doc(
             "|-------|----------|------|------|------|-------|-----|--------|"
         );
         for h in &matched_hosts {
-            let api = if h.api_token_ref.is_some() { "yes" } else { "—" };
+            let api = if h.api_token_ref.is_some() {
+                "yes"
+            } else {
+                "—"
+            };
             let _ = writeln!(
                 out,
                 "| {label} | {host} | {port} | {user} | {dt} | {grp} | {api} | {pin} |",
@@ -213,7 +211,8 @@ mod tests {
     use chrono::Utc;
     use std::net::IpAddr;
     use supermgr_core::{
-        host::AuthMethod, ssh::DeviceType,
+        host::AuthMethod,
+        ssh::DeviceType,
         vpn::profile::{FortiGateConfig, SecretRef},
     };
     use uuid::Uuid;

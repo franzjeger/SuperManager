@@ -45,7 +45,9 @@ pub fn build() -> LockPage {
         .build();
 
     let fields = design::card("");
-    let password_row = adw::PasswordEntryRow::builder().title("Master password").build();
+    let password_row = adw::PasswordEntryRow::builder()
+        .title("Master password")
+        .build();
     fields.add(&password_row);
 
     // One primary action, in one place, as everywhere else in the
@@ -55,7 +57,10 @@ pub fn build() -> LockPage {
         .label("Unlock")
         .css_classes(["suggested-action", "pill"])
         .build();
-    let quit_btn = gtk4::Button::builder().label("Quit").css_classes(["flat"]).build();
+    let quit_btn = gtk4::Button::builder()
+        .label("Quit")
+        .css_classes(["flat"])
+        .build();
 
     let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     actions.set_halign(gtk4::Align::Center);
@@ -76,7 +81,13 @@ pub fn build() -> LockPage {
     let page = design::empty_state("system-lock-screen-symbolic", "SuperManager", "");
     page.set_child(Some(&column));
 
-    LockPage { container: page.upcast(), password_row, unlock_btn, quit_btn, status_label }
+    LockPage {
+        container: page.upcast(),
+        password_row,
+        unlock_btn,
+        quit_btn,
+        status_label,
+    }
 }
 
 /// Shown when the window opens locked.

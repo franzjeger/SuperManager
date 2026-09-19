@@ -42,7 +42,7 @@ pub use supermgr_core::severity::Severity;
 
 /// Run all detection rules against a single host's probe results.
 /// Returns a flat list of findings — host-level + sub-probe extras.
-#[must_use] 
+#[must_use]
 pub fn analyse_host(host_ip: &str, probes: &[PortProbe]) -> Vec<Finding> {
     let mut findings: Vec<Finding> = Vec::new();
     for p in probes {
@@ -74,10 +74,20 @@ pub fn analyse_host(host_ip: &str, probes: &[PortProbe]) -> Vec<Finding> {
 
 fn banner_string(p: &PortProbe) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(ref s) = p.banner { parts.push(s.clone()); }
-    if let Some(ref s) = p.server_header { parts.push(s.clone()); }
-    if let Some(ref s) = p.powered_by { parts.push(s.clone()); }
-    if parts.is_empty() { None } else { Some(parts.join(" ")) }
+    if let Some(ref s) = p.banner {
+        parts.push(s.clone());
+    }
+    if let Some(ref s) = p.server_header {
+        parts.push(s.clone());
+    }
+    if let Some(ref s) = p.powered_by {
+        parts.push(s.clone());
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
 }
 
 fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
@@ -107,7 +117,8 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
             severity: Severity::High,
             title: "FTP service open (cleartext)".into(),
             detail: "FTP transfers credentials and data in plaintext. Use SFTP or FTPS.".into(),
-            recommendation: "Disable FTP. Use SFTP (port 22 over SSH) or FTPS (port 990) instead.".into(),
+            recommendation: "Disable FTP. Use SFTP (port 22 over SSH) or FTPS (port 990) instead."
+                .into(),
             cve: None,
             cvss: Some(7.5),
         });
@@ -143,23 +154,24 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
     if p.service == "rdp" {
         let zone = crate::asset_enrich::classify(host_ip);
         let internal = !zone.is_routable_externally();
-        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) = if internal {
-            (
+        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) =
+            if internal {
+                (
                 Severity::Low,
                 3.0,
                 "RDP open (internal host)",
                 "RDP enabled on an internal host. Routine for MSP-managed environments. The concrete risks are unrestricted lateral movement once an attacker is inside the LAN, and credential-stuffing from compromised endpoints — not the listener itself.",
                 "Verify Network Level Authentication (NLA) is enforced. Restrict to MGMT VLAN if not needed by general endpoints. Enable account-lockout policy + Windows Defender Credential Guard. Audit `gpresult /scope:computer` for the RDP-NLA setting.",
             )
-        } else {
-            (
+            } else {
+                (
                 Severity::High,
                 7.0,
                 "RDP open (public-facing)",
                 "RDP is a primary lateral-movement vector. Direct internet exposure invites credential-stuffing + BlueKeep-style exploits. Common ransomware entry point.",
                 "Remove from public exposure IMMEDIATELY. Restrict RDP to MGMT VLAN or behind a VPN. Enable Network Level Authentication (NLA) + account-lockout. Consider Azure Bastion / AWS SSM Session Manager for managed remote access.",
             )
-        };
+            };
         out.push(Finding {
             id: "config.rdp-exposed".into(),
             host_ip: host_ip.to_owned(),
@@ -223,7 +235,10 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
     }
 
     // Database servers exposed
-    if matches!(p.service.as_str(), "mssql" | "mysql" | "postgres" | "mongodb" | "redis") {
+    if matches!(
+        p.service.as_str(),
+        "mssql" | "mysql" | "postgres" | "mongodb" | "redis"
+    ) {
         out.push(Finding {
             id: format!("config.{}-exposed", p.service),
             host_ip: host_ip.to_owned(),
@@ -239,7 +254,10 @@ fn configuration_checks(host_ip: &str, p: &PortProbe, out: &mut Vec<Finding>) {
     }
 
     // Docker / Kubernetes API exposed
-    if matches!(p.service.as_str(), "docker" | "kubernetes" | "tcp/2375" | "tcp/6443") {
+    if matches!(
+        p.service.as_str(),
+        "docker" | "kubernetes" | "tcp/2375" | "tcp/6443"
+    ) {
         out.push(Finding {
             id: format!("config.{}-exposed", p.service),
             host_ip: host_ip.to_owned(),
@@ -276,7 +294,12 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
             cve: Some("CVE-2014-3566".into()),
             cvss: Some(9.0),
         });
-    } else if v.contains("tlsv1.0") || v.contains("tlsv1") && !v.contains("tlsv1.1") && !v.contains("tlsv1.2") && !v.contains("tlsv1.3") {
+    } else if v.contains("tlsv1.0")
+        || v.contains("tlsv1")
+            && !v.contains("tlsv1.1")
+            && !v.contains("tlsv1.2")
+            && !v.contains("tlsv1.3")
+    {
         let (sev, cvss) = deprecated_tls_severity("TLSv1.0", host_ip);
         let title = if cvss < 6.0 {
             "Deprecated TLS 1.0 (internal host — compliance issue)"
@@ -326,23 +349,24 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
     if tls.self_signed {
         let zone = crate::asset_enrich::classify(host_ip);
         let internal = !zone.is_routable_externally();
-        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) = if internal {
-            (
+        let (sev, cvss, title, detail, recommendation): (Severity, f32, &str, &str, &str) =
+            if internal {
+                (
                 Severity::Low,
                 2.0,
                 "Self-signed TLS certificate (internal host)",
                 "Self-signed certs on internal hosts are routine for appliances + management UIs. Risk is limited to internal users seeing browser warnings — fine for known infrastructure, but a real risk for shared/multi-tenant environments where warning fatigue trains users to click through.",
                 "Acceptable for single-tenant internal infrastructure. For shared management planes (RMM, identity, mail) issue an internal CA-signed cert: stand up a private CA (smallstep, AD-CS) or use Let's Encrypt with DNS-01 challenge for internal-only DNS names.",
             )
-        } else {
-            (
+            } else {
+                (
                 Severity::Medium,
                 4.0,
                 "Self-signed TLS certificate (public-facing)",
                 "Public host serving a self-signed cert. Modern browsers refuse the connection by default; users who click through are vulnerable to MITM. Often a sign of a forgotten dev/test deployment exposed to the internet.",
                 "Replace with a Let's Encrypt or commercial CA-signed certificate. Use cert-manager / acme.sh / Caddy for auto-renewal. If this host isn't supposed to be internet-facing, restrict via firewall.",
             )
-        };
+            };
         out.push(Finding {
             id: "tls.self-signed".into(),
             host_ip: host_ip.to_owned(),
@@ -444,10 +468,10 @@ fn tls_findings(host_ip: &str, port: u16, tls: &TlsInfo, out: &mut Vec<Finding>)
     for family in &tls.weak_ciphers_accepted {
         let (sev, cvss): (Severity, f32) = match family.as_str() {
             "NULL" | "ANONYMOUS" => (Severity::Critical, 9.0),
-            "EXPORT"             => (Severity::Critical, 8.5),
-            "RC4"                => (Severity::High, 7.0),
-            "3DES"               => (Severity::High, 6.5),
-            _                    => (Severity::Medium, 5.0),
+            "EXPORT" => (Severity::Critical, 8.5),
+            "RC4" => (Severity::High, 7.0),
+            "3DES" => (Severity::High, 6.5),
+            _ => (Severity::Medium, 5.0),
         };
         out.push(Finding {
             id: format!("tls.cipher-{}", family.to_lowercase()),
@@ -512,32 +536,34 @@ fn deprecated_tls_severity(proto: &str, host_ip: &str) -> (Severity, f32) {
     match (proto, internal) {
         ("SSLv2" | "SSLv3", _) => (Severity::Critical, 9.0),
         ("TLSv1.0", false) => (Severity::High, 6.5),
-        ("TLSv1.0", true)  => (Severity::Medium, 4.5),
+        ("TLSv1.0", true) => (Severity::Medium, 4.5),
         ("TLSv1.1", false) => (Severity::High, 5.5),
-        ("TLSv1.1", true)  => (Severity::Medium, 3.5),
+        ("TLSv1.1", true) => (Severity::Medium, 3.5),
         _ => (Severity::Medium, 4.0),
     }
 }
 
 fn cipher_family_detail(family: &str) -> &'static str {
     match family {
-        "NULL"      => "NULL ciphers transmit data in plaintext after the TLS handshake.",
+        "NULL" => "NULL ciphers transmit data in plaintext after the TLS handshake.",
         "ANONYMOUS" => "Anonymous DH skips server authentication — vulnerable to active MITM.",
-        "EXPORT"    => "EXPORT ciphers use ≤56-bit keys; cracked in minutes by FREAK.",
-        "RC4"       => "RC4 has known biases that recover plaintext after enough captures.",
-        "3DES"      => "3DES is vulnerable to SWEET32 birthday attacks at long-lived sessions.",
-        _           => "Family is broken or weakened by published cryptanalysis.",
+        "EXPORT" => "EXPORT ciphers use ≤56-bit keys; cracked in minutes by FREAK.",
+        "RC4" => "RC4 has known biases that recover plaintext after enough captures.",
+        "3DES" => "3DES is vulnerable to SWEET32 birthday attacks at long-lived sessions.",
+        _ => "Family is broken or weakened by published cryptanalysis.",
     }
 }
 
 fn cipher_family_recommendation(family: &str) -> &'static str {
     match family {
-        "NULL"      => "Remove NULL from the cipher list. Force authenticated, encrypted handshakes only.",
+        "NULL" => {
+            "Remove NULL from the cipher list. Force authenticated, encrypted handshakes only."
+        }
         "ANONYMOUS" => "Remove anonymous DH (aNULL) from cipher list.",
-        "EXPORT"    => "Remove EXPORT-grade ciphers immediately.",
-        "RC4"       => "Disable RC4. Prefer AES-GCM or ChaCha20-Poly1305.",
-        "3DES"      => "Disable 3DES (DES-CBC3-SHA). Limit session lifetime if temporarily needed.",
-        _           => "Remove this cipher family from the server's allowed list.",
+        "EXPORT" => "Remove EXPORT-grade ciphers immediately.",
+        "RC4" => "Disable RC4. Prefer AES-GCM or ChaCha20-Poly1305.",
+        "3DES" => "Disable 3DES (DES-CBC3-SHA). Limit session lifetime if temporarily needed.",
+        _ => "Remove this cipher family from the server's allowed list.",
     }
 }
 
@@ -559,7 +585,7 @@ fn days_until_expiry(expires_iso: &str) -> Option<i64> {
 #[derive(Debug, Clone)]
 struct CveEntry {
     pub id: &'static str,
-    pub product_match: &'static str,    // case-insensitive substring
+    pub product_match: &'static str, // case-insensitive substring
     pub version_constraint: VersionPredicate,
     pub severity: Severity,
     pub cvss: f32,
@@ -1009,7 +1035,8 @@ mod tests {
         let hits = match_cves("1.1.1.1", &p, "SSH-2.0-OpenSSH_5.5p1");
         let hits = hits.unwrap_or_default();
         assert!(
-            hits.iter().any(|f| f.cve.as_deref() == Some("CVE-2023-38408")),
+            hits.iter()
+                .any(|f| f.cve.as_deref() == Some("CVE-2023-38408")),
             "OpenSSH 5.5p1 should match CVE-2023-38408 (any pre-9.3p2)"
         );
     }
@@ -1023,7 +1050,9 @@ mod tests {
         // for OpenSSH < 9.3p2). Catches a regression where the
         // version-substring list might accidentally include "10".
         assert!(
-            !hits.iter().any(|f| f.cve.as_deref() == Some("CVE-2023-38408")),
+            !hits
+                .iter()
+                .any(|f| f.cve.as_deref() == Some("CVE-2023-38408")),
             "OpenSSH 10.0 should not match CVE-2023-38408 (pre-9.3p2 only)"
         );
     }
@@ -1043,7 +1072,10 @@ mod tests {
         let p = probe(3389, "rdp");
         let mut findings = vec![];
         configuration_checks("203.0.113.5", &p, &mut findings);
-        let f = findings.iter().find(|f| f.id == "config.rdp-exposed").expect("must fire");
+        let f = findings
+            .iter()
+            .find(|f| f.id == "config.rdp-exposed")
+            .expect("must fire");
         assert_eq!(f.severity, Severity::High, "public RDP → high");
         assert!(f.title.contains("public-facing"), "title got {}", f.title);
     }
@@ -1054,7 +1086,9 @@ mod tests {
         for ip in &["10.1.0.5", "192.168.10.20", "172.16.5.5"] {
             let mut findings = vec![];
             configuration_checks(ip, &p, &mut findings);
-            let f = findings.iter().find(|f| f.id == "config.rdp-exposed")
+            let f = findings
+                .iter()
+                .find(|f| f.id == "config.rdp-exposed")
                 .unwrap_or_else(|| panic!("{ip}: RDP finding must fire"));
             assert_eq!(f.severity, Severity::Low, "{ip} → low (internal)");
             assert!(f.title.contains("internal"), "{ip}: title got {}", f.title);
@@ -1066,7 +1100,10 @@ mod tests {
         let p = probe(445, "smb");
         let mut findings = vec![];
         configuration_checks("10.1.0.5", &p, &mut findings);
-        let f = findings.iter().find(|f| f.id == "config.smb-open").expect("must fire");
+        let f = findings
+            .iter()
+            .find(|f| f.id == "config.smb-open")
+            .expect("must fire");
         assert!(f.title.contains("direct TCP"), "title got {}", f.title);
         assert!(f.title.contains("445"), "title got {}", f.title);
     }
@@ -1076,7 +1113,10 @@ mod tests {
         let p = probe(139, "smb");
         let mut findings = vec![];
         configuration_checks("10.1.0.5", &p, &mut findings);
-        let f = findings.iter().find(|f| f.id == "config.smb-open").expect("must fire");
+        let f = findings
+            .iter()
+            .find(|f| f.id == "config.smb-open")
+            .expect("must fire");
         assert!(f.title.contains("NetBIOS"), "title got {}", f.title);
         assert!(f.title.contains("139"), "title got {}", f.title);
     }
@@ -1089,9 +1129,15 @@ mod tests {
         let mut findings = vec![];
         configuration_checks("10.1.0.5", &probe(445, "smb"), &mut findings);
         configuration_checks("10.1.0.5", &probe(139, "smb"), &mut findings);
-        let smb: Vec<&Finding> = findings.iter().filter(|f| f.id == "config.smb-open").collect();
+        let smb: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.id == "config.smb-open")
+            .collect();
         assert_eq!(smb.len(), 2, "both ports should fire");
-        assert_ne!(smb[0].title, smb[1].title, "titles must differ for UI clarity");
+        assert_ne!(
+            smb[0].title, smb[1].title,
+            "titles must differ for UI clarity"
+        );
     }
 
     #[test]
@@ -1101,7 +1147,9 @@ mod tests {
             let mut findings = vec![];
             configuration_checks("1.1.1.1", &p, &mut findings);
             assert!(
-                findings.iter().any(|f| f.id.starts_with("config.") && f.id.ends_with("-exposed")),
+                findings
+                    .iter()
+                    .any(|f| f.id.starts_with("config.") && f.id.ends_with("-exposed")),
                 "{service} should produce a *-exposed config finding"
             );
         }
@@ -1125,7 +1173,11 @@ mod tests {
         for proto in ["tls.proto-tlsv10", "tls.proto-tlsv11"] {
             let f = out.iter().find(|f| f.id == proto).expect("must fire");
             assert_eq!(f.severity, Severity::High, "{proto} on public → high");
-            assert!(!f.title.contains("internal"), "public title got {}", f.title);
+            assert!(
+                !f.title.contains("internal"),
+                "public title got {}",
+                f.title
+            );
         }
     }
 
@@ -1147,7 +1199,11 @@ mod tests {
         for proto in ["tls.proto-tlsv10", "tls.proto-tlsv11"] {
             let f = out.iter().find(|f| f.id == proto).expect("must fire");
             assert_eq!(f.severity, Severity::Medium, "{proto} on internal → medium");
-            assert!(f.title.contains("internal"), "internal title got {}", f.title);
+            assert!(
+                f.title.contains("internal"),
+                "internal title got {}",
+                f.title
+            );
         }
     }
 
@@ -1166,8 +1222,15 @@ mod tests {
         };
         let mut out = vec![];
         tls_findings("10.1.0.5", 443, &tls, &mut out);
-        let f = out.iter().find(|f| f.id == "tls.proto-sslv3").expect("must fire");
-        assert_eq!(f.severity, Severity::Critical, "SSLv3 stays Critical even on internal — POODLE works on LANs");
+        let f = out
+            .iter()
+            .find(|f| f.id == "tls.proto-sslv3")
+            .expect("must fire");
+        assert_eq!(
+            f.severity,
+            Severity::Critical,
+            "SSLv3 stays Critical even on internal — POODLE works on LANs"
+        );
     }
 
     #[test]
@@ -1190,7 +1253,10 @@ mod tests {
         };
         let mut out = vec![];
         tls_findings("203.0.113.5", 443, &tls, &mut out);
-        let f = out.iter().find(|f| f.id == "tls.cert-expired").expect("must fire");
+        let f = out
+            .iter()
+            .find(|f| f.id == "tls.cert-expired")
+            .expect("must fire");
         assert_eq!(f.severity, Severity::High);
         assert!(f.title.contains("public-facing"), "title got {}", f.title);
     }
@@ -1213,7 +1279,10 @@ mod tests {
         };
         let mut out = vec![];
         tls_findings("10.0.0.159", 443, &tls, &mut out);
-        let f = out.iter().find(|f| f.id == "tls.cert-expired").expect("must fire");
+        let f = out
+            .iter()
+            .find(|f| f.id == "tls.cert-expired")
+            .expect("must fire");
         assert_eq!(f.severity, Severity::Medium);
         assert!(f.title.contains("internal"), "title got {}", f.title);
     }
@@ -1233,7 +1302,10 @@ mod tests {
         };
         let mut out = vec![];
         tls_findings("1.1.1.1", 443, &tls, &mut out);
-        let f = out.iter().find(|f| f.id == "tls.self-signed").expect("must fire");
+        let f = out
+            .iter()
+            .find(|f| f.id == "tls.self-signed")
+            .expect("must fire");
         assert_eq!(f.severity, Severity::Medium, "public IP → medium");
         assert!(
             f.title.contains("public-facing"),
@@ -1259,7 +1331,9 @@ mod tests {
         for ip in &["192.168.1.10", "10.0.0.5", "172.20.5.7"] {
             let mut out = vec![];
             tls_findings(ip, 443, &tls, &mut out);
-            let f = out.iter().find(|f| f.id == "tls.self-signed")
+            let f = out
+                .iter()
+                .find(|f| f.id == "tls.self-signed")
                 .unwrap_or_else(|| panic!("{ip}: self-signed finding must fire"));
             assert_eq!(f.severity, Severity::Low, "{ip} → low (internal)");
             assert!(

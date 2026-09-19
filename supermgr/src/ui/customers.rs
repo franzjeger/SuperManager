@@ -147,7 +147,8 @@ impl CustomerView {
     ) {
         clear_box(&self.body);
 
-        let catalog = adw::PreferencesGroup::builder().css_classes(["supermgr-card"])
+        let catalog = adw::PreferencesGroup::builder()
+            .css_classes(["supermgr-card"])
             .title("Customer catalog")
             .description("Stable customer and site records used by every operational view")
             .build();
@@ -289,7 +290,8 @@ impl CustomerView {
         customers: &[Customer],
         hosts: &[HostSummary],
     ) -> adw::PreferencesGroup {
-        let group = adw::PreferencesGroup::builder().css_classes(["supermgr-card"])
+        let group = adw::PreferencesGroup::builder()
+            .css_classes(["supermgr-card"])
             .title("Device assignments")
             .description("A device can belong to exactly one customer and one site")
             .build();
@@ -397,7 +399,8 @@ impl CustomerView {
         customers: &[Customer],
         profiles: &[ProfileSummary],
     ) -> adw::PreferencesGroup {
-        let group = adw::PreferencesGroup::builder().css_classes(["supermgr-card"])
+        let group = adw::PreferencesGroup::builder()
+            .css_classes(["supermgr-card"])
             .title("VPN assignments")
             .description("Customer ownership shared by VPN, Fleet, Compliance and Security")
             .build();
@@ -490,7 +493,10 @@ impl CustomerView {
             .margin_start(18)
             .margin_end(18)
             .build();
-        let identity = adw::PreferencesGroup::builder().css_classes(["supermgr-card"]).title("Customer").build();
+        let identity = adw::PreferencesGroup::builder()
+            .css_classes(["supermgr-card"])
+            .title("Customer")
+            .build();
         let name = adw::EntryRow::builder()
             .title("Display name")
             .text(&customer.display_name)
@@ -521,7 +527,8 @@ impl CustomerView {
         }
         form.append(&identity);
 
-        let sites_group = adw::PreferencesGroup::builder().css_classes(["supermgr-card"])
+        let sites_group = adw::PreferencesGroup::builder()
+            .css_classes(["supermgr-card"])
             .title("Sites")
             .description("Site IDs remain stable when a site is renamed")
             .build();

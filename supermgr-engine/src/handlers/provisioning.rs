@@ -60,14 +60,11 @@ impl EngineServer {
                 )
             }
         };
-        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value)
-        {
+        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value) {
             Ok(r) => r,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
-        match crate::provisioning::diff_preview(&self.state, &self.secrets, host_id, &req)
-            .await
-        {
+        match crate::provisioning::diff_preview(&self.state, &self.secrets, host_id, &req).await {
             Ok(result) => match serde_json::to_value(&result) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -85,8 +82,7 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        match crate::provisioning::pre_deploy_backup(&self.state, &self.secrets, host_id).await
-        {
+        match crate::provisioning::pre_deploy_backup(&self.state, &self.secrets, host_id).await {
             Ok(path) => Response::ok(id, serde_json::json!({ "backup_path": path })),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
@@ -111,8 +107,7 @@ impl EngineServer {
                 )
             }
         };
-        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value)
-        {
+        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value) {
             Ok(r) => r,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
@@ -138,10 +133,7 @@ impl EngineServer {
             .get("limit")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(50) as usize;
-        match crate::provisioning::list_deployments(
-            &host_id.simple().to_string(),
-            limit,
-        ) {
+        match crate::provisioning::list_deployments(&host_id.simple().to_string(), limit) {
             Ok(list) => match serde_json::to_value(&list) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -169,8 +161,7 @@ impl EngineServer {
                 )
             }
         };
-        match crate::provisioning::rollback(&self.state, &self.secrets, host_id, &backup_path)
-            .await
+        match crate::provisioning::rollback(&self.state, &self.secrets, host_id, &backup_path).await
         {
             Ok(record) => match serde_json::to_value(&record) {
                 Ok(v) => Response::ok(id, v),

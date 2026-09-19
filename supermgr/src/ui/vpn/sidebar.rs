@@ -56,7 +56,9 @@ pub struct RowView {
 pub fn row_view(profile: &ProfileSummary, vpn: &VpnState, now_secs: u64) -> RowView {
     let id = profile.id;
     let (status, timing) = match vpn {
-        VpnState::Connected { profile_id, since, .. } if *profile_id == id => {
+        VpnState::Connected {
+            profile_id, since, ..
+        } if *profile_id == id => {
             // A clock that has gone backwards — or a `since` from the
             // future after an NTP step — must not produce a nonsense
             // duration, so the difference is clamped rather than wrapped.
@@ -70,18 +72,24 @@ pub fn row_view(profile: &ProfileSummary, vpn: &VpnState, now_secs: u64) -> RowV
             };
             (Status::Connected, text)
         }
-        VpnState::Connecting { profile_id, phase, .. } if *profile_id == id => {
+        VpnState::Connecting {
+            profile_id, phase, ..
+        } if *profile_id == id => {
             let phase = phase.trim();
-            let text =
-                if phase.is_empty() { String::new() } else { phase.to_owned() };
+            let text = if phase.is_empty() {
+                String::new()
+            } else {
+                phase.to_owned()
+            };
             (Status::Connecting, text)
         }
         VpnState::Disconnecting { profile_id } if *profile_id == id => {
             (Status::Connecting, "Disconnecting\u{2026}".to_owned())
         }
-        VpnState::Error { profile_id: Some(failed), .. } if *failed == id => {
-            (Status::Error, last_connected(profile, now_secs))
-        }
+        VpnState::Error {
+            profile_id: Some(failed),
+            ..
+        } if *failed == id => (Status::Error, last_connected(profile, now_secs)),
         // Everything else — including a tunnel or a failure belonging to some
         // *other* profile — leaves this row idle. A profile that has never
         // been connected is `Unknown` rather than `Disconnected`: nothing has
@@ -112,7 +120,10 @@ pub fn row_view(profile: &ProfileSummary, vpn: &VpnState, now_secs: u64) -> RowV
 
 fn last_connected(profile: &ProfileSummary, now_secs: u64) -> String {
     match profile.last_connected_secs {
-        Some(ts) => format!("Last {}", crate::ui::format_ago(now_secs.saturating_sub(ts))),
+        Some(ts) => format!(
+            "Last {}",
+            crate::ui::format_ago(now_secs.saturating_sub(ts))
+        ),
         None => "Never connected".to_owned(),
     }
 }
@@ -350,7 +361,8 @@ pub fn populate_vpn_sidebar(
                     let tx = tx.clone();
                     rt.spawn(async move {
                         if let Err(e) = dbus_connect(profile_id).await {
-                            tx.send(AppMsg::OperationFailed(format!("Connect failed: {e}"))).ok();
+                            tx.send(AppMsg::OperationFailed(format!("Connect failed: {e}")))
+                                .ok();
                         }
                     });
                 });
@@ -366,7 +378,8 @@ pub fn populate_vpn_sidebar(
                     let tx = tx.clone();
                     rt.spawn(async move {
                         if let Err(e) = dbus_disconnect().await {
-                            tx.send(AppMsg::OperationFailed(format!("Disconnect failed: {e}"))).ok();
+                            tx.send(AppMsg::OperationFailed(format!("Disconnect failed: {e}")))
+                                .ok();
                         }
                     });
                 });
@@ -412,10 +425,7 @@ pub fn populate_vpn_sidebar(
                     );
                     dialog.add_response("cancel", "Cancel");
                     dialog.add_response("delete", "Delete");
-                    dialog.set_response_appearance(
-                        "delete",
-                        adw::ResponseAppearance::Destructive,
-                    );
+                    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
                     dialog.set_default_response(Some("cancel"));
                     dialog.set_close_response("cancel");
 
@@ -458,14 +468,11 @@ pub fn populate_vpn_sidebar(
 
             // Preserve the existing right-click shortcut, pointing the same
             // menu at the pointer rather than maintaining a second menu.
-            let gesture = gtk4::GestureClick::builder()
-                .button(3)
-                .build();
+            let gesture = gtk4::GestureClick::builder().button(3).build();
             let popover_ref = popover.clone();
             gesture.connect_pressed(move |_gesture, _n, x, y| {
-                popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
-                    x as i32, y as i32, 1, 1,
-                )));
+                popover_ref
+                    .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 popover_ref.popup();
             });
             row.add_controller(gesture);
@@ -559,16 +566,18 @@ mod tests {
         p.last_connected_secs = Some(NOW - 60);
 
         assert!(row_view(&p, &connected(id, 60), NOW).show_pill);
-        assert!(row_view(
-            &p,
-            &VpnState::Error {
-                profile_id: Some(id),
-                code: ErrorCode::Internal,
-                message: "boom".into()
-            },
-            NOW
-        )
-        .show_pill);
+        assert!(
+            row_view(
+                &p,
+                &VpnState::Error {
+                    profile_id: Some(id),
+                    code: ErrorCode::Internal,
+                    message: "boom".into()
+                },
+                NOW
+            )
+            .show_pill
+        );
         assert!(row_view(&p, &VpnState::Disconnecting { profile_id: id }, NOW).show_pill);
 
         assert!(!row_view(&p, &VpnState::Disconnected, NOW).show_pill);
@@ -658,10 +667,16 @@ mod tests {
             since,
             phase: "IKE_SA_INIT".into(),
         };
-        assert_eq!(row_view(&p, &with_phase, NOW).meta, "IKE_SA_INIT \u{b7} Auto");
+        assert_eq!(
+            row_view(&p, &with_phase, NOW).meta,
+            "IKE_SA_INIT \u{b7} Auto"
+        );
 
-        let no_phase =
-            VpnState::Connecting { profile_id: id, since, phase: "  ".into() };
+        let no_phase = VpnState::Connecting {
+            profile_id: id,
+            since,
+            phase: "  ".into(),
+        };
         assert_eq!(row_view(&p, &no_phase, NOW).meta, "Auto");
     }
 

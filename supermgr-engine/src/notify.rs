@@ -48,7 +48,7 @@ fn config_path() -> PathBuf {
     p
 }
 
-#[must_use] 
+#[must_use]
 pub fn load_config() -> NotifyConfig {
     let path = config_path();
     if !path.exists() {
@@ -79,13 +79,18 @@ pub async fn notify_scan_diff(customer_slug: &str, diff: &ScanDiff) -> Result<bo
 
     // Identify the alarming subset early — we use it for both
     // Slack digest + PagerDuty/OpsGenie escalation routing.
-    let critical_or_high = |f: &PersistedFinding| {
-        matches!(f.finding.severity, Severity::Critical | Severity::High)
-    };
-    let alarming_new: Vec<&PersistedFinding> =
-        diff.new_findings.iter().filter(|f| critical_or_high(f)).collect();
-    let alarming_regressed: Vec<&PersistedFinding> =
-        diff.regressed.iter().filter(|f| critical_or_high(f)).collect();
+    let critical_or_high =
+        |f: &PersistedFinding| matches!(f.finding.severity, Severity::Critical | Severity::High);
+    let alarming_new: Vec<&PersistedFinding> = diff
+        .new_findings
+        .iter()
+        .filter(|f| critical_or_high(f))
+        .collect();
+    let alarming_regressed: Vec<&PersistedFinding> = diff
+        .regressed
+        .iter()
+        .filter(|f| critical_or_high(f))
+        .collect();
 
     if alarming_new.is_empty() && alarming_regressed.is_empty() {
         return Ok(false);
@@ -176,10 +181,7 @@ fn build_payload(
             text.push_str(&format!(
                 "\n• `{}` {}{} — {}",
                 f.finding.host_ip,
-                f.finding
-                    .port
-                    .map(|p| format!(":{p} "))
-                    .unwrap_or_default(),
+                f.finding.port.map(|p| format!(":{p} ")).unwrap_or_default(),
                 severity_emoji(&f.finding.severity),
                 f.finding.title
             ));

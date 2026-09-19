@@ -46,7 +46,7 @@ fn customers_dir() -> PathBuf {
 /// Convert a display name to a URL-safe slug. Lowercase, ASCII
 /// alphanumerics + hyphens only, collapsing runs of separators.
 /// Stable across re-runs: same input always produces same slug.
-#[must_use] 
+#[must_use]
 pub fn slugify(name: &str) -> String {
     supermgr_core::customer::slugify(name)
 }
@@ -180,18 +180,19 @@ pub async fn render_customer_report(
     let customer = load(customer_slug)?;
     let host_lookup: std::collections::HashMap<uuid::Uuid, supermgr_core::host::Host> = {
         let st = state.lock().await;
-        st.ssh_hosts
-            .values()
-            .cloned()
-            .map(|h| (h.id, h))
-            .collect()
+        st.ssh_hosts.values().cloned().map(|h| (h.id, h)).collect()
     };
 
     let mut out = String::with_capacity(8192);
     use std::fmt::Write;
 
     // ============= Cover =============
-    writeln!(out, "# {} — Network Operations Report", customer.display_name).unwrap();
+    writeln!(
+        out,
+        "# {} — Network Operations Report",
+        customer.display_name
+    )
+    .unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
@@ -202,8 +203,12 @@ pub async fn render_customer_report(
     writeln!(out).unwrap();
 
     if !customer.contact_name.is_empty() || !customer.contact_email.is_empty() {
-        writeln!(out, "**Contact:** {} ({})", customer.contact_name, customer.contact_email)
-            .unwrap();
+        writeln!(
+            out,
+            "**Contact:** {} ({})",
+            customer.contact_name, customer.contact_email
+        )
+        .unwrap();
         writeln!(out).unwrap();
     }
     if !customer.notes.is_empty() {
@@ -251,7 +256,11 @@ pub async fn render_customer_report(
     writeln!(out, "|---|---|").unwrap();
     writeln!(out, "| Sites managed | {} |", customer.sites.len()).unwrap();
     writeln!(out, "| Devices | {total_hosts} |").unwrap();
-    writeln!(out, "| Devices currently CIS-L1 compliant (score ≥ 90) | {total_compliant} of {total_hosts} |").unwrap();
+    writeln!(
+        out,
+        "| Devices currently CIS-L1 compliant (score ≥ 90) | {total_compliant} of {total_hosts} |"
+    )
+    .unwrap();
     writeln!(out, "| Total compliance scans recorded | {total_runs} |").unwrap();
     if score_count > 0 {
         writeln!(
@@ -272,11 +281,22 @@ pub async fn render_customer_report(
             writeln!(out, "**Address:** {}", site.address).unwrap();
             writeln!(out).unwrap();
         }
-        writeln!(out, "**WAN:** {} · **LAN base:** {} · **VLANs:** {}",
-            if site.wan_type.is_empty() { "unknown" } else { &site.wan_type },
-            if site.lan_base.is_empty() { "—" } else { &site.lan_base },
+        writeln!(
+            out,
+            "**WAN:** {} · **LAN base:** {} · **VLANs:** {}",
+            if site.wan_type.is_empty() {
+                "unknown"
+            } else {
+                &site.wan_type
+            },
+            if site.lan_base.is_empty() {
+                "—"
+            } else {
+                &site.lan_base
+            },
             site.vlans.len()
-        ).unwrap();
+        )
+        .unwrap();
         writeln!(out).unwrap();
 
         if !site.vlans.is_empty() {
@@ -285,12 +305,19 @@ pub async fn render_customer_report(
             writeln!(out, "| VLAN ID | Name | Subnet | Purpose |").unwrap();
             writeln!(out, "|---|---|---|---|").unwrap();
             for vlan in &site.vlans {
-                writeln!(out, "| {} | {} | `{}` | {} |",
+                writeln!(
+                    out,
+                    "| {} | {} | `{}` | {} |",
                     vlan.id,
                     vlan.name,
                     vlan.subnet,
-                    if vlan.purpose.is_empty() { "—" } else { &vlan.purpose }
-                ).unwrap();
+                    if vlan.purpose.is_empty() {
+                        "—"
+                    } else {
+                        &vlan.purpose
+                    }
+                )
+                .unwrap();
             }
             writeln!(out).unwrap();
         }
@@ -306,14 +333,36 @@ pub async fn render_customer_report(
                     Ok(id) => id,
                     Err(_) => continue,
                 };
-                let host = if let Some(h) = host_lookup.get(&host_id) { h } else {
-                    writeln!(out, "- _(host {host_id_str} no longer exists in inventory)_").unwrap();
+                let host = if let Some(h) = host_lookup.get(&host_id) {
+                    h
+                } else {
+                    writeln!(
+                        out,
+                        "- _(host {host_id_str} no longer exists in inventory)_"
+                    )
+                    .unwrap();
                     continue;
                 };
-                writeln!(out, "#### {} ({})", host.label, format_device_type(host.device_type)).unwrap();
+                writeln!(
+                    out,
+                    "#### {} ({})",
+                    host.label,
+                    format_device_type(host.device_type)
+                )
+                .unwrap();
                 writeln!(out).unwrap();
-                writeln!(out, "- **SSH endpoint:** `{}@{}:{}`", host.username, host.hostname, host.port).unwrap();
-                writeln!(out, "- **Auth method:** {}", format_auth_method(host.auth_method)).unwrap();
+                writeln!(
+                    out,
+                    "- **SSH endpoint:** `{}@{}:{}`",
+                    host.username, host.hostname, host.port
+                )
+                .unwrap();
+                writeln!(
+                    out,
+                    "- **Auth method:** {}",
+                    format_auth_method(host.auth_method)
+                )
+                .unwrap();
                 writeln!(out).unwrap();
 
                 // Latest compliance run.
@@ -332,10 +381,18 @@ pub async fn render_customer_report(
                         ).unwrap();
                         writeln!(out).unwrap();
                         if history.len() > 1 {
-                            writeln!(out, "**Score history (most recent {} runs):** {}",
+                            writeln!(
+                                out,
+                                "**Score history (most recent {} runs):** {}",
                                 history.len(),
-                                history.iter().take(10).map(|r| r.score.to_string()).collect::<Vec<_>>().join(" → ")
-                            ).unwrap();
+                                history
+                                    .iter()
+                                    .take(10)
+                                    .map(|r| r.score.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" → ")
+                            )
+                            .unwrap();
                             writeln!(out).unwrap();
                         }
                     } else {
@@ -353,7 +410,9 @@ pub async fn render_customer_report(
                             let status = match dep.status {
                                 crate::provisioning::DeploymentStatus::Succeeded => "✅ succeeded",
                                 crate::provisioning::DeploymentStatus::Failed => "❌ failed",
-                                crate::provisioning::DeploymentStatus::RolledBack => "↩ rolled back",
+                                crate::provisioning::DeploymentStatus::RolledBack => {
+                                    "↩ rolled back"
+                                }
                                 crate::provisioning::DeploymentStatus::Running => "⏱ running",
                             };
                             writeln!(
@@ -363,7 +422,8 @@ pub async fn render_customer_report(
                                 dep.template_id,
                                 status,
                                 dep.lines_pushed
-                            ).unwrap();
+                            )
+                            .unwrap();
                         }
                         writeln!(out).unwrap();
                     }

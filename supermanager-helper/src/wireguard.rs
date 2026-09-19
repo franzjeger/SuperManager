@@ -76,7 +76,7 @@ pub struct WgConnectArgs {
     /// `PublicKey`, `Endpoint`, `AllowedIPs`, optional `PresharedKey`.
     /// Daemon constructs this from the stored profile + secret store.
     pub conf_content: String,
-    
+
     #[serde(default)]
     pub dns_servers: Vec<String>,
 }
@@ -189,8 +189,7 @@ impl WireGuard {
         }
 
         // Make sure the parent dir exists with restrictive mode.
-        std::fs::create_dir_all(WG_CONF_DIR)
-            .with_context(|| format!("create {WG_CONF_DIR}"))?;
+        std::fs::create_dir_all(WG_CONF_DIR).with_context(|| format!("create {WG_CONF_DIR}"))?;
         std::fs::set_permissions(
             WG_CONF_DIR,
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
@@ -517,7 +516,10 @@ fn wg_binary_from(wg_quick: &Path) -> anyhow::Result<PathBuf> {
 /// `networksetup`, etc — all of which live in `/usr/sbin` and `/sbin`,
 /// neither of which launchd hands us by default.
 fn path_for_wg_quick(wg_quick: &Path) -> String {
-    let bin = wg_quick.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let bin = wg_quick
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     format!("{bin}:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin")
 }
 
@@ -531,11 +533,7 @@ fn interface_name(profile_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
     let digest = hasher.finalize();
-    let hex: String = digest
-        .iter()
-        .take(4)
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
     format!("smwg{hex}")
 }
 
@@ -575,16 +573,13 @@ fn interface_exists(name: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-    }
+}
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from
 /// the mapping file rather than re-deriving it via `wg show`.
 async fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
-    read_name_mapping(name).ok_or_else(|| {
-        anyhow!(
-            "no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"
-        )
-    })
+    read_name_mapping(name)
+        .ok_or_else(|| anyhow!("no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"))
 }
 
 #[cfg(test)]

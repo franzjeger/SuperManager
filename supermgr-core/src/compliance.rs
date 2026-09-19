@@ -42,7 +42,6 @@ use serde::{Deserialize, Serialize};
 use crate::findings::Finding;
 use tracing::warn;
 
-
 // ---------------------------------------------------------------------------
 // Check definitions
 // ---------------------------------------------------------------------------
@@ -353,17 +352,13 @@ pub struct RunSummary {
 // Runner
 // ---------------------------------------------------------------------------
 
-
-
-
-
 /// Apply a definition's [`Expectation`] to a raw value read off the device.
 ///
 /// Returns the status, the operator-facing detail, and the raw value kept for
 /// "what we saw". Public because the `FortiGate` runner lives in the engine and
 /// evaluates through this — the comparison logic stays in one place so the two
 /// baselines cannot grade the same value differently.
-#[must_use] 
+#[must_use]
 pub fn evaluate(def: &CheckDefinition, value: &str) -> (Status, String, Option<String>) {
     let raw = Some(value.to_owned());
     let pass_detail = || (Status::Pass, format_pass_detail(def, value), raw.clone());
@@ -432,7 +427,7 @@ fn format_pass_detail(def: &CheckDefinition, value: &str) -> String {
 /// runner and the Linux runner share a single counting path —
 /// avoids the "two implementations drift" risk and gives the
 /// aggregation a direct test target.
-#[must_use] 
+#[must_use]
 pub fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
     let mut passed = 0u32;
     let mut failed = 0u32;
@@ -453,7 +448,7 @@ pub fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
 /// failed check, ignore skips. Errors count as 1.5× their severity
 /// penalty (an unknown is worse than a known-good but better than
 /// a known-bad — they need investigation). Clamped to [0, 100].
-#[must_use] 
+#[must_use]
 pub fn score(results: &[CheckResult]) -> u8 {
     let mut s: f64 = 100.0;
     for r in results {
@@ -481,10 +476,10 @@ pub fn score(results: &[CheckResult]) -> u8 {
 ///
 /// Linux baseline rows live in `ssh_compliance::linux_default_checks()`
 /// and are merged into `list_checks()` alongside this set since 1.12c.
-#[must_use] 
+#[must_use]
 pub fn fortigate_default_checks() -> Vec<CheckDefinition> {
     use Channel::Api;
-    use Severity::{Medium, Critical, High, Low, Info};
+    use Severity::{Critical, High, Info, Low, Medium};
 
     vec![
         CheckDefinition {
@@ -1380,17 +1375,15 @@ pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
 /// rows is impossible by construction: both use
 /// `ssh_compliance::{category_for, map_severity}` as the single
 /// source of truth.
-#[must_use] 
+#[must_use]
 pub fn list_checks() -> Vec<CheckDefinition> {
     let mut checks = fortigate_default_checks();
     checks.extend(crate::ssh_compliance::linux_default_checks());
     if let Ok(user_checks) = load_user_checks() {
         // User-supplied checks override built-ins by id, and
         // append novel ones to the end. Last write wins per id.
-        let mut by_id: std::collections::HashMap<String, CheckDefinition> = checks
-            .into_iter()
-            .map(|c| (c.id.clone(), c))
-            .collect();
+        let mut by_id: std::collections::HashMap<String, CheckDefinition> =
+            checks.into_iter().map(|c| (c.id.clone(), c)).collect();
         for c in user_checks {
             by_id.insert(c.id.clone(), c);
         }
@@ -1486,7 +1479,6 @@ pub struct ScanAllResult {
     pub error: Option<String>,
 }
 
-
 // ---------------------------------------------------------------------------
 // Drift detection
 // ---------------------------------------------------------------------------
@@ -1579,7 +1571,7 @@ pub struct DriftReport {
 /// RPC for the common case of "compare to immediately previous
 /// run", so the GUI doesn't have to fetch and process two full
 /// runs just to render the drift summary.
-#[must_use] 
+#[must_use]
 pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> DriftReport {
     let mut newly_failing: Vec<DriftEntry> = Vec::new();
     let mut newly_passing: Vec<DriftEntry> = Vec::new();
@@ -1587,12 +1579,7 @@ pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> Dri
     let mut errored: Vec<DriftEntry> = Vec::new();
 
     let prev_lookup: std::collections::HashMap<&str, &CheckResult> = previous
-        .map(|p| {
-            p.checks
-                .iter()
-                .map(|c| (c.check_id.as_str(), c))
-                .collect()
-        })
+        .map(|p| p.checks.iter().map(|c| (c.check_id.as_str(), c)).collect())
         .unwrap_or_default();
 
     for cur in &current.checks {
@@ -1644,8 +1631,7 @@ pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> Dri
     errored.sort_by(by_severity);
 
     let previous_score = previous.map(|p| p.score);
-    let score_delta = previous_score
-        .map_or(0, |p| i32::from(current.score) - i32::from(p));
+    let score_delta = previous_score.map_or(0, |p| i32::from(current.score) - i32::from(p));
 
     DriftReport {
         current_run_id: current.id.clone(),
@@ -1709,7 +1695,7 @@ pub fn drift_against_previous(host_id: &str, current_run_id: &str) -> Result<Dri
 /// GUI side can print-to-PDF on macOS (`NSPrintOperation` handles
 /// HTML/Markdown rendering with the user's chosen page style)
 /// without the daemon shipping its own PDF stack.
-#[must_use] 
+#[must_use]
 pub fn render_markdown_report(
     run: &ComplianceRun,
     drift: Option<&DriftReport>,
@@ -1740,12 +1726,7 @@ pub fn render_markdown_report(
         run.started_at.format("%Y-%m-%d %H:%M:%S UTC")
     )
     .unwrap();
-    writeln!(
-        s,
-        "| Triggered by | {:?} |",
-        run.triggered_by
-    )
-    .unwrap();
+    writeln!(s, "| Triggered by | {:?} |", run.triggered_by).unwrap();
     writeln!(s).unwrap();
 
     // Score summary
@@ -1785,7 +1766,14 @@ pub fn render_markdown_report(
         if !d.newly_failing.is_empty() {
             writeln!(s, "### Newly failing").unwrap();
             for e in &d.newly_failing {
-                writeln!(s, "- **{}** ({:?}) — {}", e.title, e.severity, e.current_detail.as_deref().unwrap_or("")).unwrap();
+                writeln!(
+                    s,
+                    "- **{}** ({:?}) — {}",
+                    e.title,
+                    e.severity,
+                    e.current_detail.as_deref().unwrap_or("")
+                )
+                .unwrap();
             }
             writeln!(s).unwrap();
         }
@@ -1834,12 +1822,7 @@ pub fn render_markdown_report(
             Status::Error => "⚠️",
             Status::Skip => "⏭",
         };
-        writeln!(
-            s,
-            "### {icon} {} ({:?})",
-            c.title, c.severity
-        )
-        .unwrap();
+        writeln!(s, "### {icon} {} ({:?})", c.title, c.severity).unwrap();
         writeln!(s, "*Category:* {}", c.category).unwrap();
         if let Some(def) = lib_lookup.get(c.check_id.as_str()) {
             if let Some(cis) = &def.cis_reference {
@@ -1941,10 +1924,7 @@ const EVIDENCE_LIMIT: usize = 160;
 /// only the remediation text.
 #[must_use]
 pub fn failures_as_findings(run: &ComplianceRun, library: &[CheckDefinition]) -> Vec<Finding> {
-    let host = run
-        .hostname
-        .clone()
-        .unwrap_or_else(|| run.host_id.clone());
+    let host = run.hostname.clone().unwrap_or_else(|| run.host_id.clone());
 
     run.checks
         .iter()
@@ -2018,7 +1998,6 @@ pub fn failures_as_findings(run: &ComplianceRun, library: &[CheckDefinition]) ->
 mod tests {
     use super::*;
 
-
     // -- failures_as_findings -------------------------------------------
     //
     // The rule these exist to protect: only a Fail becomes a finding. An Error
@@ -2064,7 +2043,11 @@ mod tests {
         // What makes first_seen, scan_count and an accepted-risk disposition
         // survive the next scan. If the key moved, every run would file the
         // same problem again as new and accepted risks would un-accept.
-        let checks = vec![result("linux.ssh.root-login-disabled", Severity::High, Status::Fail)];
+        let checks = vec![result(
+            "linux.ssh.root-login-disabled",
+            Severity::High,
+            Status::Fail,
+        )];
         let a = failures_as_findings(&run_fixture("r1", 50, checks.clone()), &[]);
         let b = failures_as_findings(&run_fixture("r2", 50, checks), &[]);
         assert_eq!(
@@ -2076,9 +2059,19 @@ mod tests {
 
     #[test]
     fn remediation_comes_from_the_library() {
-        let mut d = def("c.fail", Severity::High, Expectation::Contains { needle: "x".to_owned() });
+        let mut d = def(
+            "c.fail",
+            Severity::High,
+            Expectation::Contains {
+                needle: "x".to_owned(),
+            },
+        );
         d.remediation = Some("Set PermitRootLogin no.".to_owned());
-        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let run = run_fixture(
+            "r1",
+            50,
+            vec![result("c.fail", Severity::High, Status::Fail)],
+        );
         let f = failures_as_findings(&run, &[d]);
         assert_eq!(f[0].recommendation, "Set PermitRootLogin no.");
     }
@@ -2086,7 +2079,11 @@ mod tests {
     #[test]
     fn a_missing_remediation_says_so_rather_than_rendering_blank() {
         // An empty recommendation field reads as "nothing to do".
-        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let run = run_fixture(
+            "r1",
+            50,
+            vec![result("c.fail", Severity::High, Status::Fail)],
+        );
         let f = failures_as_findings(&run, &[]);
         assert!(!f[0].recommendation.is_empty());
         assert!(f[0].recommendation.contains("c.fail"), "name the check");
@@ -2103,7 +2100,10 @@ mod tests {
         let f = failures_as_findings(&run, &[]);
         assert!(f[0].detail.contains("Root SSH login is not disabled."));
         assert!(f[0].detail.contains("PermitRootLogin prohibit-password"));
-        assert!(!f[0].detail.contains('\n'), "must stay one line for a table row");
+        assert!(
+            !f[0].detail.contains('\n'),
+            "must stay one line for a table row"
+        );
     }
 
     #[test]
@@ -2139,7 +2139,11 @@ mod tests {
     fn a_compliance_finding_claims_no_cve_or_cvss() {
         // The scanner's findings carry both. Inventing them for a control
         // would put fabricated numbers beside real ones in the same table.
-        let run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let run = run_fixture(
+            "r1",
+            50,
+            vec![result("c.fail", Severity::High, Status::Fail)],
+        );
         let f = failures_as_findings(&run, &[]);
         assert!(f[0].cve.is_none());
         assert!(f[0].cvss.is_none());
@@ -2147,10 +2151,17 @@ mod tests {
 
     #[test]
     fn the_host_falls_back_to_its_id_when_unnamed() {
-        let mut run = run_fixture("r1", 50, vec![result("c.fail", Severity::High, Status::Fail)]);
+        let mut run = run_fixture(
+            "r1",
+            50,
+            vec![result("c.fail", Severity::High, Status::Fail)],
+        );
         run.hostname = None;
         let f = failures_as_findings(&run, &[]);
-        assert_eq!(f[0].host_ip, run.host_id, "a blank host makes the row useless");
+        assert_eq!(
+            f[0].host_ip, run.host_id,
+            "a blank host makes the row useless"
+        );
     }
 
     // -- Test fixtures --------------------------------------------------
@@ -2187,10 +2198,22 @@ mod tests {
     }
 
     fn run_fixture(id: &str, score_val: u8, checks: Vec<CheckResult>) -> ComplianceRun {
-        let passed = checks.iter().filter(|c| matches!(c.status, Status::Pass)).count() as u32;
-        let failed = checks.iter().filter(|c| matches!(c.status, Status::Fail)).count() as u32;
-        let errored = checks.iter().filter(|c| matches!(c.status, Status::Error)).count() as u32;
-        let skipped = checks.iter().filter(|c| matches!(c.status, Status::Skip)).count() as u32;
+        let passed = checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Pass))
+            .count() as u32;
+        let failed = checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Fail))
+            .count() as u32;
+        let errored = checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Error))
+            .count() as u32;
+        let skipped = checks
+            .iter()
+            .filter(|c| matches!(c.status, Status::Skip))
+            .count() as u32;
         ComplianceRun {
             id: id.to_owned(),
             host_id: "00000000-0000-0000-0000-000000000000".to_owned(),
@@ -2228,8 +2251,13 @@ mod tests {
 
     #[test]
     fn evaluate_not_contains_passes_when_needle_absent() {
-        let d = def("admin-port", Severity::High,
-            Expectation::NotContains { needle: "https".into() });
+        let d = def(
+            "admin-port",
+            Severity::High,
+            Expectation::NotContains {
+                needle: "https".into(),
+            },
+        );
         let (status, _, _) = evaluate(&d, "ssh ping");
         assert_eq!(status, Status::Pass);
     }
@@ -2239,8 +2267,13 @@ mod tests {
         // The 'allowaccess HTTPS PING' regression — uppercase
         // needle in haystack used to slip through because the
         // first cut compared raw strings.
-        let d = def("admin-port", Severity::High,
-            Expectation::NotContains { needle: "https".into() });
+        let d = def(
+            "admin-port",
+            Severity::High,
+            Expectation::NotContains {
+                needle: "https".into(),
+            },
+        );
         let (status, detail, _) = evaluate(&d, "HTTPS PING");
         assert_eq!(status, Status::Fail);
         assert!(detail.contains("https"), "detail should name the needle");
@@ -2248,39 +2281,58 @@ mod tests {
 
     #[test]
     fn evaluate_contains_passes_when_present() {
-        let d = def("strong-crypto", Severity::High,
-            Expectation::Contains { needle: "enable".into() });
+        let d = def(
+            "strong-crypto",
+            Severity::High,
+            Expectation::Contains {
+                needle: "enable".into(),
+            },
+        );
         let (status, _, _) = evaluate(&d, "strong-crypto enable");
         assert_eq!(status, Status::Pass);
     }
 
     #[test]
     fn evaluate_contains_fails_when_missing() {
-        let d = def("strong-crypto", Severity::High,
-            Expectation::Contains { needle: "enable".into() });
+        let d = def(
+            "strong-crypto",
+            Severity::High,
+            Expectation::Contains {
+                needle: "enable".into(),
+            },
+        );
         let (status, _, _) = evaluate(&d, "strong-crypto disable");
         assert_eq!(status, Status::Fail);
     }
 
     #[test]
     fn evaluate_greater_equal_passes_at_threshold() {
-        let d = def("pw-min", Severity::Medium,
-            Expectation::GreaterEqual { threshold: 14 });
+        let d = def(
+            "pw-min",
+            Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 },
+        );
         let (status, _, _) = evaluate(&d, "14");
         assert_eq!(status, Status::Pass, "exactly at threshold should pass");
     }
 
     #[test]
     fn evaluate_greater_equal_passes_above_threshold() {
-        let d = def("pw-min", Severity::Medium,
-            Expectation::GreaterEqual { threshold: 14 });
+        let d = def(
+            "pw-min",
+            Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 },
+        );
         assert_eq!(evaluate(&d, "20").0, Status::Pass);
     }
 
     #[test]
     fn evaluate_greater_equal_fails_below_threshold() {
-        let d = def("pw-min", Severity::Medium,
-            Expectation::GreaterEqual { threshold: 14 });
+        let d = def(
+            "pw-min",
+            Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 },
+        );
         let (status, detail, _) = evaluate(&d, "8");
         assert_eq!(status, Status::Fail);
         assert!(detail.contains('8') && detail.contains("14"));
@@ -2291,39 +2343,56 @@ mod tests {
         // Important: a parse failure must NOT be silently treated
         // as "pass" — the previous matcher tried this and let
         // misparsed CLI output through as passing.
-        let d = def("pw-min", Severity::Medium,
-            Expectation::GreaterEqual { threshold: 14 });
+        let d = def(
+            "pw-min",
+            Severity::Medium,
+            Expectation::GreaterEqual { threshold: 14 },
+        );
         let (status, _, _) = evaluate(&d, "(empty)");
         assert_eq!(status, Status::Error);
     }
 
     #[test]
     fn evaluate_less_equal_passes_at_threshold() {
-        let d = def("admin-timeout", Severity::Medium,
-            Expectation::LessEqual { threshold: 5 });
+        let d = def(
+            "admin-timeout",
+            Severity::Medium,
+            Expectation::LessEqual { threshold: 5 },
+        );
         assert_eq!(evaluate(&d, "5").0, Status::Pass);
     }
 
     #[test]
     fn evaluate_less_equal_fails_above_threshold() {
-        let d = def("admin-timeout", Severity::Medium,
-            Expectation::LessEqual { threshold: 5 });
+        let d = def(
+            "admin-timeout",
+            Severity::Medium,
+            Expectation::LessEqual { threshold: 5 },
+        );
         let (status, _, _) = evaluate(&d, "60");
         assert_eq!(status, Status::Fail);
     }
 
     #[test]
     fn evaluate_less_equal_errors_on_non_numeric() {
-        let d = def("admin-timeout", Severity::Medium,
-            Expectation::LessEqual { threshold: 5 });
+        let d = def(
+            "admin-timeout",
+            Severity::Medium,
+            Expectation::LessEqual { threshold: 5 },
+        );
         let (status, _, _) = evaluate(&d, "nope");
         assert_eq!(status, Status::Error);
     }
 
     #[test]
     fn evaluate_not_equal_fails_on_forbidden() {
-        let d = def("admin-port", Severity::High,
-            Expectation::NotEqual { value: "443".into() });
+        let d = def(
+            "admin-port",
+            Severity::High,
+            Expectation::NotEqual {
+                value: "443".into(),
+            },
+        );
         let (status, _, _) = evaluate(&d, "443");
         assert_eq!(status, Status::Fail);
     }
@@ -2332,30 +2401,50 @@ mod tests {
     fn evaluate_not_equal_is_case_insensitive() {
         // "ENABLE" vs "enable" must compare equal here — FortiGate
         // CLI sometimes emits uppercase labels.
-        let d = def("force-https", Severity::High,
-            Expectation::NotEqual { value: "disable".into() });
+        let d = def(
+            "force-https",
+            Severity::High,
+            Expectation::NotEqual {
+                value: "disable".into(),
+            },
+        );
         let (status, _, _) = evaluate(&d, "DISABLE");
         assert_eq!(status, Status::Fail);
     }
 
     #[test]
     fn evaluate_equal_passes_on_match() {
-        let d = def("set-mode", Severity::Low,
-            Expectation::Equal { value: "enable".into() });
+        let d = def(
+            "set-mode",
+            Severity::Low,
+            Expectation::Equal {
+                value: "enable".into(),
+            },
+        );
         assert_eq!(evaluate(&d, "enable").0, Status::Pass);
     }
 
     #[test]
     fn evaluate_equal_fails_on_mismatch() {
-        let d = def("set-mode", Severity::Low,
-            Expectation::Equal { value: "enable".into() });
+        let d = def(
+            "set-mode",
+            Severity::Low,
+            Expectation::Equal {
+                value: "enable".into(),
+            },
+        );
         assert_eq!(evaluate(&d, "disable").0, Status::Fail);
     }
 
     #[test]
     fn evaluate_equal_is_case_insensitive() {
-        let d = def("set-mode", Severity::Low,
-            Expectation::Equal { value: "Enable".into() });
+        let d = def(
+            "set-mode",
+            Severity::Low,
+            Expectation::Equal {
+                value: "Enable".into(),
+            },
+        );
         assert_eq!(evaluate(&d, "ENABLE").0, Status::Pass);
     }
 
@@ -2442,7 +2531,7 @@ mod tests {
             result("b", Severity::High, Status::Fail),     // -5
             result("c", Severity::Medium, Status::Fail),   // -2
             result("d", Severity::Low, Status::Fail),      // -0.5
-            // Total: -17.5 → 83 (rounds from 82.5)
+                                                           // Total: -17.5 → 83 (rounds from 82.5)
         ];
         let s = score(&results);
         // 82.5 → 83 with round-half-away-from-zero
@@ -2523,8 +2612,11 @@ mod tests {
 
     #[test]
     fn compare_first_run_has_no_previous() {
-        let current = run_fixture("r1", 90,
-            vec![result("a", Severity::Critical, Status::Fail)]);
+        let current = run_fixture(
+            "r1",
+            90,
+            vec![result("a", Severity::Critical, Status::Fail)],
+        );
         let d = compare(&current, None);
         assert_eq!(d.current_run_id, "r1");
         assert_eq!(d.previous_run_id, None);
@@ -2533,16 +2625,24 @@ mod tests {
         // First-run failures classify as Added → silent bucket;
         // they don't appear in any drift list. (UI shows them
         // via the run's own checks, not via drift.)
-        assert!(d.newly_failing.is_empty(),
-                "first run has no drift baseline, so nothing is newly_failing");
+        assert!(
+            d.newly_failing.is_empty(),
+            "first run has no drift baseline, so nothing is newly_failing"
+        );
     }
 
     #[test]
     fn compare_newly_failing_surfaces_one_check() {
-        let previous = run_fixture("r0", 100,
-            vec![result("a", Severity::Critical, Status::Pass)]);
-        let current = run_fixture("r1", 90,
-            vec![result("a", Severity::Critical, Status::Fail)]);
+        let previous = run_fixture(
+            "r0",
+            100,
+            vec![result("a", Severity::Critical, Status::Pass)],
+        );
+        let current = run_fixture(
+            "r1",
+            90,
+            vec![result("a", Severity::Critical, Status::Fail)],
+        );
         let d = compare(&current, Some(&previous));
         assert_eq!(d.newly_failing.len(), 1);
         assert_eq!(d.newly_failing[0].check_id, "a");
@@ -2552,10 +2652,16 @@ mod tests {
 
     #[test]
     fn compare_newly_passing_surfaces_one_check() {
-        let previous = run_fixture("r0", 90,
-            vec![result("a", Severity::Critical, Status::Fail)]);
-        let current = run_fixture("r1", 100,
-            vec![result("a", Severity::Critical, Status::Pass)]);
+        let previous = run_fixture(
+            "r0",
+            90,
+            vec![result("a", Severity::Critical, Status::Fail)],
+        );
+        let current = run_fixture(
+            "r1",
+            100,
+            vec![result("a", Severity::Critical, Status::Pass)],
+        );
         let d = compare(&current, Some(&previous));
         assert_eq!(d.newly_passing.len(), 1);
         assert_eq!(d.newly_passing[0].check_id, "a");
@@ -2564,10 +2670,8 @@ mod tests {
 
     #[test]
     fn compare_still_failing_carries_over() {
-        let previous = run_fixture("r0", 90,
-            vec![result("a", Severity::High, Status::Fail)]);
-        let current = run_fixture("r1", 90,
-            vec![result("a", Severity::High, Status::Fail)]);
+        let previous = run_fixture("r0", 90, vec![result("a", Severity::High, Status::Fail)]);
+        let current = run_fixture("r1", 90, vec![result("a", Severity::High, Status::Fail)]);
         let d = compare(&current, Some(&previous));
         assert_eq!(d.still_failing.len(), 1);
         assert!(d.newly_failing.is_empty());
@@ -2577,34 +2681,40 @@ mod tests {
     #[test]
     fn compare_buckets_sorted_by_severity() {
         // Critical at the top, alphabetical ID tiebreaker inside.
-        let previous = run_fixture("r0", 100,
+        let previous = run_fixture(
+            "r0",
+            100,
             vec![
-                result("a-low",      Severity::Low,      Status::Pass),
+                result("a-low", Severity::Low, Status::Pass),
                 result("b-critical", Severity::Critical, Status::Pass),
-                result("c-medium",   Severity::Medium,   Status::Pass),
-            ]);
-        let current = run_fixture("r1", 88,
+                result("c-medium", Severity::Medium, Status::Pass),
+            ],
+        );
+        let current = run_fixture(
+            "r1",
+            88,
             vec![
-                result("a-low",      Severity::Low,      Status::Fail),
+                result("a-low", Severity::Low, Status::Fail),
                 result("b-critical", Severity::Critical, Status::Fail),
-                result("c-medium",   Severity::Medium,   Status::Fail),
-            ]);
+                result("c-medium", Severity::Medium, Status::Fail),
+            ],
+        );
         let d = compare(&current, Some(&previous));
         assert_eq!(d.newly_failing.len(), 3);
         assert_eq!(d.newly_failing[0].check_id, "b-critical", "Critical first");
-        assert_eq!(d.newly_failing[1].check_id, "c-medium",   "Medium next");
-        assert_eq!(d.newly_failing[2].check_id, "a-low",      "Low last");
+        assert_eq!(d.newly_failing[1].check_id, "c-medium", "Medium next");
+        assert_eq!(d.newly_failing[2].check_id, "a-low", "Low last");
     }
 
     #[test]
     fn compare_errored_bucket_distinct_from_failing() {
-        let previous = run_fixture("r0", 95,
-            vec![result("a", Severity::High, Status::Pass)]);
-        let current = run_fixture("r1", 90,
-            vec![result("a", Severity::High, Status::Error)]);
+        let previous = run_fixture("r0", 95, vec![result("a", Severity::High, Status::Pass)]);
+        let current = run_fixture("r1", 90, vec![result("a", Severity::High, Status::Error)]);
         let d = compare(&current, Some(&previous));
-        assert!(d.newly_failing.is_empty(),
-                "an error is NOT a fail — operator action different");
+        assert!(
+            d.newly_failing.is_empty(),
+            "an error is NOT a fail — operator action different"
+        );
         assert_eq!(d.errored.len(), 1);
     }
 
@@ -2616,7 +2726,10 @@ mod tests {
         // returns empty, the GUI panel hides the entire library —
         // canary against a copy-paste regression.
         let checks = list_checks();
-        assert!(!checks.is_empty(), "default check library must not be empty");
+        assert!(
+            !checks.is_empty(),
+            "default check library must not be empty"
+        );
     }
 
     #[test]
@@ -2626,8 +2739,7 @@ mod tests {
         let checks = list_checks();
         let mut seen = std::collections::HashSet::new();
         for c in &checks {
-            assert!(seen.insert(c.id.clone()),
-                    "duplicate check id {}", c.id);
+            assert!(seen.insert(c.id.clone()), "duplicate check id {}", c.id);
         }
     }
 
@@ -2666,16 +2778,21 @@ mod tests {
             .iter()
             .filter(|c| c.framework == crate::ssh_compliance::LINUX_FRAMEWORK)
             .collect();
-        assert!(!linux_rows.is_empty(),
+        assert!(
+            !linux_rows.is_empty(),
             "Linux library rows must appear in list_checks() — \
-             merge from ssh_compliance::linux_default_checks() is missing");
+             merge from ssh_compliance::linux_default_checks() is missing"
+        );
         // Count parity with the runner's authored set — drift here
         // would mean the library and the runner have different
         // numbers of Linux checks.
-        assert_eq!(linux_rows.len(), crate::ssh_compliance::check_count(),
+        assert_eq!(
+            linux_rows.len(),
+            crate::ssh_compliance::check_count(),
             "library Linux row count ({}) must equal runner LINUX_CHECKS count ({})",
             linux_rows.len(),
-            crate::ssh_compliance::check_count());
+            crate::ssh_compliance::check_count()
+        );
     }
 
     #[test]
@@ -2687,14 +2804,18 @@ mod tests {
         // failure mode 1.12 was gated to prevent.
         let checks = list_checks();
         for c in checks.iter().filter(|c| c.id.starts_with("linux.")) {
-            assert!(c.remediation.is_some(),
+            assert!(
+                c.remediation.is_some(),
                 "linux check `{}` must carry a remediation snippet — \
                  missing remediation re-opens the 1.12b tracked defect",
-                c.id);
+                c.id
+            );
             let r = c.remediation.as_ref().unwrap();
-            assert!(!r.is_empty(),
+            assert!(
+                !r.is_empty(),
                 "linux check `{}` has Some(remediation) but the string is empty",
-                c.id);
+                c.id
+            );
         }
     }
 
@@ -2713,11 +2834,13 @@ mod tests {
             crate::ssh_compliance::linux_default_checks();
         for row in &library {
             let runner_category = crate::ssh_compliance::category_for_id(&row.id);
-            assert_eq!(row.category, runner_category,
+            assert_eq!(
+                row.category, runner_category,
                 "DRIFT: library category for `{}` is `{}` but \
                  runner would stamp `{}` — parallel string sources \
                  reintroduced, breaks Option A invariant",
-                row.id, row.category, runner_category);
+                row.id, row.category, runner_category
+            );
         }
         // Cross-check: stage a fake CheckResult through the runner's
         // helper for one specific id and confirm the library agrees
@@ -2726,16 +2849,21 @@ mod tests {
         // satisfying the loop above (e.g. if both helpers diverged
         // in lockstep — unlikely but the explicit single-id assertion
         // anchors the regression test in human-readable values).
-        let runner_says_for_ssh = crate::ssh_compliance::category_for_id(
-            "linux.ssh.password-auth-disabled");
-        assert_eq!(runner_says_for_ssh, "SSH",
-            "category_for_id has drifted from the documented 1.12a mapping");
-        let library_row = library.iter()
+        let runner_says_for_ssh =
+            crate::ssh_compliance::category_for_id("linux.ssh.password-auth-disabled");
+        assert_eq!(
+            runner_says_for_ssh, "SSH",
+            "category_for_id has drifted from the documented 1.12a mapping"
+        );
+        let library_row = library
+            .iter()
             .find(|c| c.id == "linux.ssh.password-auth-disabled")
             .expect("library must contain linux.ssh.password-auth-disabled");
-        assert_eq!(library_row.category, "SSH",
+        assert_eq!(
+            library_row.category, "SSH",
             "library row category for linux.ssh.* must be `SSH`, got `{}`",
-            library_row.category);
+            library_row.category
+        );
     }
 
     #[test]
@@ -2757,8 +2885,7 @@ mod tests {
             title: "sshd PasswordAuthentication disabled".to_owned(),
             // Same string the runner would stamp — see the test
             // above for the byte-identity assertion.
-            category: ssh_compliance::category_for_id(
-                "linux.ssh.password-auth-disabled"),
+            category: ssh_compliance::category_for_id("linux.ssh.password-auth-disabled"),
         };
         let run = ComplianceRun {
             id: uuid::Uuid::new_v4().simple().to_string(),
@@ -2778,13 +2905,17 @@ mod tests {
             checks: vec![failed],
         };
         let md = render_markdown_report(&run, None, &library);
-        assert!(md.contains("**Remediation:**"),
+        assert!(
+            md.contains("**Remediation:**"),
             "Linux runs must produce a Remediation block in the report — \
              1.12b tracked defect; if this regresses, the report is \
-             wrong-by-omission again. Rendered:\n{md}");
+             wrong-by-omission again. Rendered:\n{md}"
+        );
         // And the actual remediation text from LINUX_CHECKS:
-        assert!(md.contains("PasswordAuthentication no"),
-            "remediation text from ssh_compliance must appear in the rendered report");
+        assert!(
+            md.contains("PasswordAuthentication no"),
+            "remediation text from ssh_compliance must appear in the rendered report"
+        );
     }
 
     // -- render_markdown_report() — smoke tests -------------------------
@@ -2803,23 +2934,28 @@ mod tests {
         let run = run_fixture("r1", 100, vec![]);
         let drift = compare(&run, None);
         let md = render_markdown_report(&run, Some(&drift), &[]);
-        assert!(md.contains("First scan"),
-                "should explicitly call out that there's no baseline");
+        assert!(
+            md.contains("First scan"),
+            "should explicitly call out that there's no baseline"
+        );
     }
 
     #[test]
     fn render_report_drift_block_shows_arrow() {
         let previous = run_fixture("r0", 95, vec![result("a", Severity::High, Status::Pass)]);
-        let current  = run_fixture("r1", 90, vec![result("a", Severity::High, Status::Fail)]);
+        let current = run_fixture("r1", 90, vec![result("a", Severity::High, Status::Fail)]);
         let drift = compare(&current, Some(&previous));
         let md = render_markdown_report(&current, Some(&drift), &[]);
         assert!(md.contains("## Changes Since Previous Run"));
-        assert!(md.contains("95"),
-                "previous score must appear in the drift line");
-        assert!(md.contains("-5"),
-                "score delta must appear with sign");
-        assert!(md.contains("Newly failing"),
-                "newly-failing section must appear");
+        assert!(
+            md.contains("95"),
+            "previous score must appear in the drift line"
+        );
+        assert!(md.contains("-5"), "score delta must appear with sign");
+        assert!(
+            md.contains("Newly failing"),
+            "newly-failing section must appear"
+        );
     }
 
     #[test]
@@ -2873,10 +3009,13 @@ mod tests {
             "skipped": 0,
             "checks": []
         }"#;
-        let run: ComplianceRun = serde_json::from_str(json)
-            .expect("legacy run with no baseline_kind must decode");
-        assert_eq!(run.baseline_kind, BaselineKind::Fortigate,
-            "missing baseline_kind must default to Fortigate, not Linux");
+        let run: ComplianceRun =
+            serde_json::from_str(json).expect("legacy run with no baseline_kind must decode");
+        assert_eq!(
+            run.baseline_kind,
+            BaselineKind::Fortigate,
+            "missing baseline_kind must default to Fortigate, not Linux"
+        );
         assert_eq!(run.id, "legacy-row-1");
         assert_eq!(run.score, 88);
     }
@@ -2895,8 +3034,8 @@ mod tests {
             "firmware": "7.4.1",
             "triggered_by": "manual"
         }"#;
-        let summary: RunSummary = serde_json::from_str(json)
-            .expect("legacy summary with no baseline_kind must decode");
+        let summary: RunSummary =
+            serde_json::from_str(json).expect("legacy summary with no baseline_kind must decode");
         assert_eq!(summary.baseline_kind, BaselineKind::Fortigate);
     }
 }

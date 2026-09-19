@@ -31,8 +31,12 @@ async fn extract_cli(
     def: &CheckDefinition,
     ssh_session: Option<&crate::ssh::connection::SshSession>,
 ) -> Result<String> {
-    let session = ssh_session
-        .ok_or_else(|| anyhow!("CLI check {} requires SSH but no session was provided", def.id))?;
+    let session = ssh_session.ok_or_else(|| {
+        anyhow!(
+            "CLI check {} requires SSH but no session was provided",
+            def.id
+        )
+    })?;
     let command = def
         .cli_command
         .as_deref()
@@ -87,10 +91,7 @@ pub async fn run(
         if resp.status < 400 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
                 let r = v.get("results").unwrap_or(&v);
-                firmware = r
-                    .get("version")
-                    .and_then(|x| x.as_str())
-                    .map(str::to_owned);
+                firmware = r.get("version").and_then(|x| x.as_str()).map(str::to_owned);
                 model = r.get("model").and_then(|x| x.as_str()).map(str::to_owned);
                 hostname = r
                     .get("hostname")
@@ -165,11 +166,7 @@ async fn run_one(
 
     let (status, detail, raw_value) = match raw {
         Ok(value) => evaluate(def, &value),
-        Err(e) => (
-            Status::Error,
-            format!("could not extract value: {e}"),
-            None,
-        ),
+        Err(e) => (Status::Error, format!("could not extract value: {e}"), None),
     };
 
     CheckResult {
@@ -205,8 +202,7 @@ async fn extract_api(
             resp.body.chars().take(200).collect::<String>()
         ));
     }
-    let v: serde_json::Value =
-        serde_json::from_str(&resp.body).context("response is not JSON")?;
+    let v: serde_json::Value = serde_json::from_str(&resp.body).context("response is not JSON")?;
     let pointed = v
         .pointer(pointer)
         .ok_or_else(|| anyhow!("pointer {pointer} not found in response"))?;
@@ -269,9 +265,7 @@ pub async fn scan_all(
                 .and_then(|v| v.into_iter().next())
                 .map(|s| s.started_at);
             if let Some(last) = last_run {
-                let age = chrono::Utc::now()
-                    .signed_duration_since(last)
-                    .num_hours();
+                let age = chrono::Utc::now().signed_duration_since(last).num_hours();
                 if age < min_h {
                     info!(
                         "compliance scan_all: skipping {host_id} (last run {age}h ago, threshold {min_h}h)"

@@ -215,7 +215,7 @@ fn store_file(customer_slug: &str) -> PathBuf {
 }
 
 /// Keep legacy valid customer scopes; invalid labels fall back to a stable host ID.
-#[must_use] 
+#[must_use]
 pub fn scope_for_customer(customer: &str, host_id: &uuid::Uuid) -> String {
     let customer = customer.trim();
     if crate::findings::validate_slug(customer).is_ok() {

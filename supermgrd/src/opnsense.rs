@@ -156,26 +156,26 @@ pub async fn request(
 
 /// Compose a dashboard-friendly status snapshot. Each underlying endpoint
 /// failure is logged as a warning but does not fail the whole call.
-pub async fn get_status(
-    hostname: &str,
-    port: u16,
-    creds: &Credentials,
-) -> OpnSenseStatus {
+pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSenseStatus {
     let mut s = OpnSenseStatus::default();
 
-    if let Ok(resp) = request(hostname, port, creds, "GET", "/api/diagnostics/system/system_information", "").await {
+    if let Ok(resp) = request(
+        hostname,
+        port,
+        creds,
+        "GET",
+        "/api/diagnostics/system/system_information",
+        "",
+    )
+    .await
+    {
         if resp.status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
                 s.hostname = v.get("name").and_then(|n| n.as_str()).map(str::to_owned);
                 if let Some(versions) = v.get("versions").and_then(|x| x.as_array()) {
-                    s.opnsense_version = versions
-                        .first()
-                        .and_then(|x| x.as_str())
-                        .map(str::to_owned);
-                    s.freebsd_version = versions
-                        .get(1)
-                        .and_then(|x| x.as_str())
-                        .map(str::to_owned);
+                    s.opnsense_version =
+                        versions.first().and_then(|x| x.as_str()).map(str::to_owned);
+                    s.freebsd_version = versions.get(1).and_then(|x| x.as_str()).map(str::to_owned);
                 }
             }
         } else {
@@ -183,13 +183,28 @@ pub async fn get_status(
         }
     }
 
-    if let Ok(resp) = request(hostname, port, creds, "GET", "/api/core/firmware/status", "").await {
+    if let Ok(resp) = request(
+        hostname,
+        port,
+        creds,
+        "GET",
+        "/api/core/firmware/status",
+        "",
+    )
+    .await
+    {
         if resp.status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
                 // OPNsense reports new packages and upgrade packages separately;
                 // any non-empty list means an update is available.
-                let new_pkgs = v.get("new_packages").and_then(|x| x.as_array()).map(|a| !a.is_empty());
-                let upg_pkgs = v.get("upgrade_packages").and_then(|x| x.as_array()).map(|a| !a.is_empty());
+                let new_pkgs = v
+                    .get("new_packages")
+                    .and_then(|x| x.as_array())
+                    .map(|a| !a.is_empty());
+                let upg_pkgs = v
+                    .get("upgrade_packages")
+                    .and_then(|x| x.as_array())
+                    .map(|a| !a.is_empty());
                 s.updates_available = match (new_pkgs, upg_pkgs) {
                     (Some(a), Some(b)) => Some(a || b),
                     (Some(a), None) | (None, Some(a)) => Some(a),
@@ -203,23 +218,41 @@ pub async fn get_status(
         }
     }
 
-    if let Ok(resp) = request(hostname, port, creds, "GET", "/api/diagnostics/system/system_resources", "").await {
+    if let Ok(resp) = request(
+        hostname,
+        port,
+        creds,
+        "GET",
+        "/api/diagnostics/system/system_resources",
+        "",
+    )
+    .await
+    {
         if resp.status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
                 s.memory_total_bytes = v
                     .pointer("/memory/total")
                     .and_then(|x| x.as_str())
                     .and_then(|s| s.parse().ok());
-                s.memory_used_bytes = v
-                    .pointer("/memory/used")
-                    .and_then(|x| x.as_u64());
+                s.memory_used_bytes = v.pointer("/memory/used").and_then(|x| x.as_u64());
             }
         }
     }
 
-    if let Ok(resp) = request(hostname, port, creds, "GET", "/api/diagnostics/interface/getInterfaceNames", "").await {
+    if let Ok(resp) = request(
+        hostname,
+        port,
+        creds,
+        "GET",
+        "/api/diagnostics/interface/getInterfaceNames",
+        "",
+    )
+    .await
+    {
         if resp.status == 200 {
-            if let Ok(map) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&resp.body) {
+            if let Ok(map) =
+                serde_json::from_str::<std::collections::BTreeMap<String, String>>(&resp.body)
+            {
                 s.interfaces = map
                     .into_iter()
                     .map(|(device, label)| InterfaceSummary { device, label })
@@ -228,7 +261,16 @@ pub async fn get_status(
         }
     }
 
-    if let Ok(resp) = request(hostname, port, creds, "GET", "/api/wireguard/general/get", "").await {
+    if let Ok(resp) = request(
+        hostname,
+        port,
+        creds,
+        "GET",
+        "/api/wireguard/general/get",
+        "",
+    )
+    .await
+    {
         if resp.status == 200 {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp.body) {
                 s.wireguard_enabled = v
@@ -286,8 +328,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires OPNSENSE_HOST/KEY/SECRET env vars"]
     async fn live_status() {
-        let host = std::env::var("OPNSENSE_HOST")
-            .expect("set OPNSENSE_HOST to a reachable OPNsense box");
+        let host =
+            std::env::var("OPNSENSE_HOST").expect("set OPNSENSE_HOST to a reachable OPNsense box");
         let port: u16 = std::env::var("OPNSENSE_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -303,7 +345,10 @@ mod tests {
             "no fields populated — check credentials/connectivity"
         );
         if let Some(ref v) = status.opnsense_version {
-            assert!(v.contains("OPNsense"), "version field has unexpected shape: {v:?}");
+            assert!(
+                v.contains("OPNsense"),
+                "version field has unexpected shape: {v:?}"
+            );
         }
     }
 }

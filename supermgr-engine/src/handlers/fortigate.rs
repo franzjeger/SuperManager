@@ -13,7 +13,11 @@ impl EngineServer {
     /// token and forwards the request. Returns the raw response body
     /// (JSON for `FortiOS` APIs) along with the HTTP status code so
     /// the GUI can branch on 4xx/5xx without a separate error field.
-    pub(crate) async fn handle_fortigate_api(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_fortigate_api(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -25,13 +29,7 @@ impl EngineServer {
             .to_owned();
         let path = match params.get("path").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing path".to_owned(),
-                )
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing path".to_owned()),
         };
         let body = params
             .get("body")

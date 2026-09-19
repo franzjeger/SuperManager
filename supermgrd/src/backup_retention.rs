@@ -71,7 +71,11 @@ pub struct BackupFile {
 /// files that match but whose timestamp segment is unparseable.
 pub fn parse_backup_filename(name: &str) -> Option<(String, DateTime<Utc>, bool)> {
     let compressed = name.ends_with(".gz");
-    let stripped = if compressed { &name[..name.len() - 3] } else { name };
+    let stripped = if compressed {
+        &name[..name.len() - 3]
+    } else {
+        name
+    };
     BackupExt::recognise(stripped)?;
 
     // Strip the recognised extension to leave `<host>_<YYYYMMDD>_<HHMMSS>`.
@@ -95,7 +99,9 @@ pub fn parse_backup_filename(name: &str) -> Option<(String, DateTime<Utc>, bool)
     }
     let date_str = &tail[1..9];
     let time_str = &tail[10..];
-    if !date_str.bytes().all(|c| c.is_ascii_digit()) || !time_str.bytes().all(|c| c.is_ascii_digit()) {
+    if !date_str.bytes().all(|c| c.is_ascii_digit())
+        || !time_str.bytes().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     let host = core[..core.len() - 16].to_owned();
@@ -136,16 +142,16 @@ pub fn scan_backups(dir: &Path) -> Vec<BackupFile> {
             });
         }
     }
-    out.sort_by(|a, b| {
-        a.host.cmp(&b.host).then(a.timestamp.cmp(&b.timestamp))
-    });
+    out.sort_by(|a, b| a.host.cmp(&b.host).then(a.timestamp.cmp(&b.timestamp)));
     out
 }
 
 /// Group backups by host (sorted oldest-first within each group).
 ///
 /// This is the input shape the retention/compression helpers expect.
-pub fn group_by_host(files: Vec<BackupFile>) -> std::collections::BTreeMap<String, Vec<BackupFile>> {
+pub fn group_by_host(
+    files: Vec<BackupFile>,
+) -> std::collections::BTreeMap<String, Vec<BackupFile>> {
     let mut groups = std::collections::BTreeMap::<String, Vec<BackupFile>>::new();
     for f in files {
         groups.entry(f.host.clone()).or_default().push(f);
@@ -326,8 +332,7 @@ mod tests {
 
     #[test]
     fn parse_recognises_fortigate_conf() {
-        let (host, ts, compressed) =
-            parse_backup_filename("fw-edge_20260427_140530.conf").unwrap();
+        let (host, ts, compressed) = parse_backup_filename("fw-edge_20260427_140530.conf").unwrap();
         assert_eq!(host, "fw-edge");
         assert!(!compressed);
         assert_eq!(ts, Utc.with_ymd_and_hms(2026, 4, 27, 14, 5, 30).unwrap());
@@ -372,9 +377,7 @@ mod tests {
 
     fn synthetic(host: &str, year: i32, month: u32, day: u32) -> BackupFile {
         BackupFile {
-            path: PathBuf::from(format!(
-                "/tmp/{host}_{year}{month:02}{day:02}_120000.conf"
-            )),
+            path: PathBuf::from(format!("/tmp/{host}_{year}{month:02}{day:02}_120000.conf")),
             host: host.into(),
             timestamp: Utc.with_ymd_and_hms(year, month, day, 12, 0, 0).unwrap(),
             compressed: false,
@@ -500,16 +503,8 @@ mod tests {
     fn housekeep_no_diff_when_content_identical() {
         let dir = tempfile::tempdir().unwrap();
         let now = Utc.with_ymd_and_hms(2026, 1, 30, 0, 0, 0).unwrap();
-        std::fs::write(
-            dir.path().join("fw_20260128_120000.conf"),
-            b"unchanged",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("fw_20260129_120000.conf"),
-            b"unchanged",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("fw_20260128_120000.conf"), b"unchanged").unwrap();
+        std::fs::write(dir.path().join("fw_20260129_120000.conf"), b"unchanged").unwrap();
         let report = housekeep(dir.path(), 30, chrono::Duration::days(7), now);
         assert!(
             report.diffed_hosts.is_empty(),

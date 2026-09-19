@@ -61,7 +61,10 @@ pub async fn check() -> CheckOutcome {
 
     let url =
         format!("https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...main");
-    let resp = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default()
+    let resp = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default()
         .get(&url)
         .header("User-Agent", "SuperManager-Update-Check")
         .header("Accept", "application/vnd.github+json")

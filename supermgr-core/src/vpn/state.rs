@@ -112,7 +112,6 @@ impl VpnState {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Error codes
 // ---------------------------------------------------------------------------
@@ -163,9 +162,9 @@ impl From<&crate::error::BackendError> for ErrorCode {
             BackendError::Permission(_) => Self::PermissionDenied,
             BackendError::Prerequisite(_) => Self::PrerequisiteMissing,
             BackendError::Timeout { .. } => Self::Timeout,
-            BackendError::NotConnected
-            | BackendError::AlreadyConnected
-            | BackendError::Io(_) => Self::Internal,
+            BackendError::NotConnected | BackendError::AlreadyConnected | BackendError::Io(_) => {
+                Self::Internal
+            }
         }
     }
 }
@@ -186,7 +185,10 @@ mod error_code_tests {
                 BackendError::Permission("CAP_NET_ADMIN is missing".into()),
                 ErrorCode::PermissionDenied,
             ),
-            (BackendError::Config("bad profile".into()), ErrorCode::ConfigError),
+            (
+                BackendError::Config("bad profile".into()),
+                ErrorCode::ConfigError,
+            ),
             (BackendError::Timeout { seconds: 30 }, ErrorCode::Timeout),
         ];
 

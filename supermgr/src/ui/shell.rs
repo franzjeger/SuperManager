@@ -60,21 +60,76 @@ pub struct Section {
 /// run against them. The split is not decoration — it is what keeps a list
 /// of ten from reading as a list of ten.
 pub const MANAGE: &[Section] = &[
-    Section { id: "fleet",     title: "Fleet",     icon: design::icons::GRID,              built: true },
-    Section { id: "customers", title: "Customers", icon: &["system-users-symbolic", "avatar-default-symbolic"], built: true },
-    Section { id: "hosts",     title: "SSH",       icon: design::icons::HOST,               built: true },
-    Section { id: "keys",      title: "Keys",      icon: design::icons::KEY,        built: true },
-    Section { id: "vpn",       title: "VPN",       icon: design::icons::VPN,            built: true },
-    Section { id: "tailscale", title: "Tailscale", icon: design::icons::MESH,      built: true },
+    Section {
+        id: "fleet",
+        title: "Fleet",
+        icon: design::icons::GRID,
+        built: true,
+    },
+    Section {
+        id: "customers",
+        title: "Customers",
+        icon: &["system-users-symbolic", "avatar-default-symbolic"],
+        built: true,
+    },
+    Section {
+        id: "hosts",
+        title: "SSH",
+        icon: design::icons::HOST,
+        built: true,
+    },
+    Section {
+        id: "keys",
+        title: "Keys",
+        icon: design::icons::KEY,
+        built: true,
+    },
+    Section {
+        id: "vpn",
+        title: "VPN",
+        icon: design::icons::VPN,
+        built: true,
+    },
+    Section {
+        id: "tailscale",
+        title: "Tailscale",
+        icon: design::icons::MESH,
+        built: true,
+    },
 ];
 
 /// The operational group.
 pub const OPERATE: &[Section] = &[
-    Section { id: "provisioning", title: "Provisioning", icon: &["document-edit-symbolic", "document-edit"],     built: true },
-    Section { id: "console",      title: "Console",      icon: design::icons::TERMINAL, built: true },
-    Section { id: "compliance",   title: "Compliance",   icon: &["emblem-ok-symbolic", "dialog-ok"],         built: true },
-    Section { id: "security",     title: "Security",     icon: design::icons::SHIELD,     built: true },
-    Section { id: "recon",        title: "Recon",        icon: design::icons::SEARCH,     built: true },
+    Section {
+        id: "provisioning",
+        title: "Provisioning",
+        icon: &["document-edit-symbolic", "document-edit"],
+        built: true,
+    },
+    Section {
+        id: "console",
+        title: "Console",
+        icon: design::icons::TERMINAL,
+        built: true,
+    },
+    Section {
+        id: "compliance",
+        title: "Compliance",
+        icon: &["emblem-ok-symbolic", "dialog-ok"],
+        built: true,
+    },
+    Section {
+        id: "security",
+        title: "Security",
+        icon: design::icons::SHIELD,
+        built: true,
+    },
+    Section {
+        id: "recon",
+        title: "Recon",
+        icon: design::icons::SEARCH,
+        built: true,
+    },
 ];
 
 /// Every section, both groups.
@@ -157,7 +212,9 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
         let group: &'static [Section] = group;
         list.connect_row_activated(move |_, row| {
             let index = usize::try_from(row.index()).unwrap_or(usize::MAX);
-            let Some(section) = group.get(index) else { return };
+            let Some(section) = group.get(index) else {
+                return;
+            };
             if stack.child_by_name(section.id).is_some() {
                 stack.set_visible_child_name(section.id);
             }
@@ -170,12 +227,17 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
     {
         let rows = rows.clone();
         stack.connect_visible_child_name_notify(move |stack| {
-            let Some(name) = stack.visible_child_name() else { return };
+            let Some(name) = stack.visible_child_name() else {
+                return;
+            };
             for (list, group) in &rows {
                 for (index, section) in group.iter().enumerate() {
                     if let Some(row) = list.row_at_index(index as i32) {
-                        if section.id == name { row.add_css_class("active"); }
-                        else { row.remove_css_class("active"); }
+                        if section.id == name {
+                            row.add_css_class("active");
+                        } else {
+                            row.remove_css_class("active");
+                        }
                     }
                 }
             }
@@ -191,14 +253,22 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
                 section = section.id,
                 "navigation section has no page in the view stack; the row will do nothing"
             );
-            debug_assert!(false, "section '{}' has no page in the view stack", section.id);
+            debug_assert!(
+                false,
+                "section '{}' has no page in the view stack",
+                section.id
+            );
         }
     }
 
     stack.set_visible_child_name("vpn");
     for (list, group) in &rows {
         for (index, section) in group.iter().enumerate() {
-            if section.id == "vpn" { if let Some(row) = list.row_at_index(index as i32) { row.add_css_class("active"); } }
+            if section.id == "vpn" {
+                if let Some(row) = list.row_at_index(index as i32) {
+                    row.add_css_class("active");
+                }
+            }
         }
     }
 
@@ -251,16 +321,29 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
     split.set_sidebar(Some(&sidebar_page));
     split.set_content(Some(&content_page));
 
-    let toggle = gtk4::ToggleButton::builder().icon_name("sidebar-show-symbolic")
-        .tooltip_text("Show or hide navigation").active(true).build();
+    let toggle = gtk4::ToggleButton::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text("Show or hide navigation")
+        .active(true)
+        .build();
     content_header.pack_start(&toggle);
-    split.bind_property("show-sidebar", &toggle, "active").bidirectional().sync_create().build();
+    split
+        .bind_property("show-sidebar", &toggle, "active")
+        .bidirectional()
+        .sync_create()
+        .build();
     let sidebar_control = split.clone();
     stack.connect_visible_child_name_notify(move |_| {
-        if sidebar_control.is_collapsed() { sidebar_control.set_show_sidebar(false); }
+        if sidebar_control.is_collapsed() {
+            sidebar_control.set_show_sidebar(false);
+        }
     });
 
-    Shell { widget: split, header_end, vpn_status }
+    Shell {
+        widget: split,
+        header_end,
+        vpn_status,
+    }
 }
 
 /// A page for a section that has no implementation yet.
@@ -290,7 +373,11 @@ mod tests {
         // page.
         let mut seen = std::collections::HashSet::new();
         for section in all_sections() {
-            assert!(seen.insert(section.id), "duplicate section id: {}", section.id);
+            assert!(
+                seen.insert(section.id),
+                "duplicate section id: {}",
+                section.id
+            );
         }
     }
 
@@ -309,7 +396,10 @@ mod tests {
             "security",
             "recon",
         ] {
-            assert!(ids.contains(&expected), "the brief's '{expected}' section is missing");
+            assert!(
+                ids.contains(&expected),
+                "the brief's '{expected}' section is missing"
+            );
         }
     }
 
@@ -338,8 +428,17 @@ mod tests {
             .map(|s| s.id)
             .collect();
         for id in [
-            "fleet", "customers", "hosts", "keys", "vpn", "tailscale", "compliance", "provisioning",
-            "console", "security", "recon",
+            "fleet",
+            "customers",
+            "hosts",
+            "keys",
+            "vpn",
+            "tailscale",
+            "compliance",
+            "provisioning",
+            "console",
+            "security",
+            "recon",
         ] {
             assert!(built.contains(&id), "'{id}' exists but is marked unbuilt");
         }
@@ -380,6 +479,9 @@ mod tests {
             .filter(|s| !s.built)
             .map(|s| s.id)
             .collect();
-        assert!(unbuilt.is_empty(), "all navigation sections now have implementations");
+        assert!(
+            unbuilt.is_empty(),
+            "all navigation sections now have implementations"
+        );
     }
 }

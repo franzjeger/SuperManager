@@ -62,10 +62,7 @@ pub async fn detect() -> NetworkDetect {
                     // "inet 192.0.2.42 netmask 0xffffff00 broadcast 192.0.2.255"
                     let parts: Vec<&str> = rest.split_whitespace().collect();
                     if let Some(ip) = parts.first() {
-                        let mask_idx = parts
-                            .iter()
-                            .position(|p| *p == "netmask")
-                            .map(|i| i + 1);
+                        let mask_idx = parts.iter().position(|p| *p == "netmask").map(|i| i + 1);
                         let mask = mask_idx.and_then(|i| parts.get(i)).copied();
                         let prefix = mask.and_then(parse_hex_mask).unwrap_or(24);
                         out.primary_cidr = Some(format!("{ip}/{prefix}"));
@@ -149,7 +146,11 @@ fn network_address(ip: &str, prefix: u8) -> Option<String> {
         return None;
     }
     let ip_u32: u32 = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-    let mask: u32 = if prefix == 0 { 0 } else { (!0u32) << (32 - prefix) };
+    let mask: u32 = if prefix == 0 {
+        0
+    } else {
+        (!0u32) << (32 - prefix)
+    };
     let net = ip_u32 & mask;
     Some(format!(
         "{}.{}.{}.{}",

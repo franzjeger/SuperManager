@@ -27,7 +27,6 @@ pub mod netdetect;
 pub mod notify;
 pub mod operations;
 pub mod pcap_binary;
-pub mod tools;
 pub mod probes;
 pub mod protocol;
 pub mod provisioning;
@@ -35,13 +34,14 @@ pub mod remediation;
 pub mod report;
 pub mod risk;
 pub mod scheduler;
-pub mod subdomain_enum;
 pub mod secrets;
-pub mod traffic_sniff;
 pub mod server;
 pub mod smb_enum;
 pub mod snmp_walk;
 pub mod ssh;
+pub mod subdomain_enum;
+pub mod tools;
+pub mod traffic_sniff;
 /// The Linux CIS baseline, which lives in core now — nothing about running
 /// `sshd -T` over a closure is macOS-specific, and the Linux daemon needs the
 /// same check definitions rather than a second set. Re-exported so existing

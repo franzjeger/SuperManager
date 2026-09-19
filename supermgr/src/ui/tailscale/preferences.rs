@@ -98,9 +98,18 @@ pub(super) fn show(
         .xalign(0.0)
         .visible(false)
         .build();
-    result.bind_property("label", &result, "tooltip-text").sync_create().build();
-    let footer = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical).spacing(10)
-        .margin_start(24).margin_end(24).margin_top(12).margin_bottom(16).build();
+    result
+        .bind_property("label", &result, "tooltip-text")
+        .sync_create()
+        .build();
+    let footer = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(10)
+        .margin_start(24)
+        .margin_end(24)
+        .margin_top(12)
+        .margin_bottom(16)
+        .build();
     footer.append(&result);
     let apply = gtk4::Button::builder()
         .label("Apply changes")

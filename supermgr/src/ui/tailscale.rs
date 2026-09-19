@@ -9,10 +9,10 @@
 use std::sync::{mpsc, Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
-mod controls;
-mod preferences;
 mod accounts;
+mod controls;
 mod diagnostics;
+mod preferences;
 
 use gtk4::prelude::*;
 use libadwaita as adw;
@@ -43,15 +43,30 @@ static REFRESH_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub async fn refresh(tx: &mpsc::Sender<AppMsg>) {
     use std::sync::atomic::Ordering;
     let generation = REFRESH_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    let health = crate::dbus_client::dbus_tailscale_health().await.map_err(|e| format!("{e:#}"));
+    let health = crate::dbus_client::dbus_tailscale_health()
+        .await
+        .map_err(|e| format!("{e:#}"));
     let nodes = if health.as_ref().is_ok_and(|health| health.is_running()) {
-        Some(crate::dbus_client::dbus_tailscale_list_nodes().await.map_err(|e| format!("{e:#}")))
-    } else { None };
-    let management = crate::dbus_client::dbus_tailscale_management().await.map_err(|e| format!("{e:#}"));
-    if generation != REFRESH_GENERATION.load(Ordering::SeqCst) { return; }
+        Some(
+            crate::dbus_client::dbus_tailscale_list_nodes()
+                .await
+                .map_err(|e| format!("{e:#}")),
+        )
+    } else {
+        None
+    };
+    let management = crate::dbus_client::dbus_tailscale_management()
+        .await
+        .map_err(|e| format!("{e:#}"));
+    if generation != REFRESH_GENERATION.load(Ordering::SeqCst) {
+        return;
+    }
     tx.send(AppMsg::TailscaleManagementUpdated(management)).ok();
-    if let Some(nodes) = nodes { tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok(); }
-    else { tx.send(AppMsg::TailscaleHealthUpdated(health)).ok(); }
+    if let Some(nodes) = nodes {
+        tx.send(AppMsg::TailscaleNodesUpdated(nodes)).ok();
+    } else {
+        tx.send(AppMsg::TailscaleHealthUpdated(health)).ok();
+    }
 }
 
 /// Refresh on network changes and resume, without reconnecting or changing routes.
@@ -63,11 +78,28 @@ pub fn watch_environment(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>)
     let tx = tx.clone();
     rt.spawn(async move {
         use futures_util::StreamExt;
-        let Ok(conn) = zbus::Connection::system().await else { return };
-        let Ok(proxy) = zbus::Proxy::new(&conn, "org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager").await else { return };
-        let Ok(mut signals) = proxy.receive_signal("PrepareForSleep").await else { return };
+        let Ok(conn) = zbus::Connection::system().await else {
+            return;
+        };
+        let Ok(proxy) = zbus::Proxy::new(
+            &conn,
+            "org.freedesktop.login1",
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await
+        else {
+            return;
+        };
+        let Ok(mut signals) = proxy.receive_signal("PrepareForSleep").await else {
+            return;
+        };
         while let Some(message) = signals.next().await {
-            if message.body().deserialize::<(bool,)>().is_ok_and(|(sleeping,)| !sleeping) {
+            if message
+                .body()
+                .deserialize::<(bool,)>()
+                .is_ok_and(|(sleeping,)| !sleeping)
+            {
                 tx.send(AppMsg::TailscaleEnvironmentChanged).ok();
             }
         }
@@ -138,7 +170,11 @@ pub fn build_tailscale_page(
     }
     heading.append(&reload);
     content.append(&heading);
-    let operation_status = gtk4::Label::builder().wrap(true).xalign(0.0).visible(false).build();
+    let operation_status = gtk4::Label::builder()
+        .wrap(true)
+        .xalign(0.0)
+        .visible(false)
+        .build();
     content.append(&operation_status);
 
     let controls = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
@@ -213,7 +249,11 @@ impl TailscaleView {
         &self,
         result: &Result<supermgr_core::tailscale::TailscaleManagement, String>,
     ) {
-        *self.profile_id.borrow_mut() = result.as_ref().ok().and_then(|management| management.preferences.as_ref()).and_then(|preferences| preferences.profile_id.clone());
+        *self.profile_id.borrow_mut() = result
+            .as_ref()
+            .ok()
+            .and_then(|management| management.preferences.as_ref())
+            .and_then(|preferences| preferences.profile_id.clone());
         controls::render_management(self, result);
     }
     /// Render the outcome of a `TailscaleListNodes` call.
@@ -381,9 +421,13 @@ impl TailscaleView {
     /// finishing the browser flow ends with the page saying the machine is
     /// still logged out, which it is.
     fn wire_login_button(&self, button: &gtk4::Button) {
-        let rt = self.rt.clone(); let tx = self.tx.clone(); let window = self.window.clone();
+        let rt = self.rt.clone();
+        let tx = self.tx.clone();
+        let window = self.window.clone();
         let profile = Rc::clone(&self.profile_id);
-        button.connect_clicked(move |_| accounts::show(&window, &rt, &tx, profile.borrow().as_deref().unwrap_or("")));
+        button.connect_clicked(move |_| {
+            accounts::show(&window, &rt, &tx, profile.borrow().as_deref().unwrap_or(""))
+        });
     }
 
     fn show_nodes(&self, nodes: &[TailscaleNode]) {
@@ -453,7 +497,14 @@ impl TailscaleView {
             let row = adw::ActionRow::new();
             row.set_title(node.display_name());
             row.set_subtitle("Selected for internet traffic");
-            row.add_prefix(&design::status_pill(if node.online { Status::Connected } else { Status::Error }, if node.online { "Selected" } else { "Offline" }));
+            row.add_prefix(&design::status_pill(
+                if node.online {
+                    Status::Connected
+                } else {
+                    Status::Error
+                },
+                if node.online { "Selected" } else { "Offline" },
+            ));
             let stop = gtk4::Button::with_label("Stop using");
             stop.add_css_class("destructive-action");
             stop.set_valign(gtk4::Align::Center);
@@ -507,29 +558,62 @@ impl TailscaleView {
     /// `set` that reported success and a peer that then refused traffic would
     /// otherwise leave the page claiming something untrue.
     fn wire_exit_node_button(&self, button: &gtk4::Button, value: String) {
-        let rt = self.rt.clone(); let tx = self.tx.clone();
-        let profile = Rc::clone(&self.profile_id); let pending = Rc::clone(&self.operation_pending);
-        let status = self.operation_status.clone(); let controls = self.controls.clone(); let list = self.list.clone();
+        let rt = self.rt.clone();
+        let tx = self.tx.clone();
+        let profile = Rc::clone(&self.profile_id);
+        let pending = Rc::clone(&self.operation_pending);
+        let status = self.operation_status.clone();
+        let controls = self.controls.clone();
+        let list = self.list.clone();
         button.connect_clicked(move |_| {
-            if pending.replace(true) { return; }
+            if pending.replace(true) {
+                return;
+            }
             let Some(profile) = profile.borrow().clone() else {
-                pending.set(false); tx.send(AppMsg::OperationFailed("Account settings are not available yet. Refresh Tailscale first.".into())).ok(); return;
+                pending.set(false);
+                tx.send(AppMsg::OperationFailed(
+                    "Account settings are not available yet. Refresh Tailscale first.".into(),
+                ))
+                .ok();
+                return;
             };
-            controls.set_sensitive(false); list.set_sensitive(false);
-            status.set_visible(true); status.remove_css_class("error"); status.set_label("Updating exit node and checking connectivity…");
+            controls.set_sensitive(false);
+            list.set_sensitive(false);
+            status.set_visible(true);
+            status.remove_css_class("error");
+            status.set_label("Updating exit node and checking connectivity…");
             let value = value.clone();
-            let controls = controls.clone(); let list = list.clone(); let status = status.clone(); let pending = Rc::clone(&pending);
-            let rt = rt.clone(); let tx = tx.clone();
+            let controls = controls.clone();
+            let list = list.clone();
+            let status = status.clone();
+            let pending = Rc::clone(&pending);
+            let rt = rt.clone();
+            let tx = tx.clone();
             // The D-Bus call runs on the tokio runtime; the widget updates
             // await it back on the GTK main thread.
             gtk4::glib::spawn_future_local(async move {
-                match rt.spawn(async move { crate::dbus_client::dbus_tailscale_change_exit_node(&profile, &value).await }).await {
+                match rt
+                    .spawn(async move {
+                        crate::dbus_client::dbus_tailscale_change_exit_node(&profile, &value).await
+                    })
+                    .await
+                {
                     Ok(Ok(message)) => status.set_label(&message),
-                    Ok(Err(error)) => { status.set_label(&format!("{error}")); status.add_css_class("error"); },
-                    Err(error) => { status.set_label(&format!("Exit-node task stopped: {error}")); status.add_css_class("error"); },
+                    Ok(Err(error)) => {
+                        status.set_label(&format!("{error}"));
+                        status.add_css_class("error");
+                    }
+                    Err(error) => {
+                        status.set_label(&format!("Exit-node task stopped: {error}"));
+                        status.add_css_class("error");
+                    }
                 }
-                pending.set(false); controls.set_sensitive(true); list.set_sensitive(true);
-                rt.spawn(async move { refresh(&tx).await; });
+                pending.set(false);
+                controls.set_sensitive(true);
+                list.set_sensitive(true);
+                rt.spawn(async move {
+                    refresh(&tx).await;
+                });
             });
         });
     }
@@ -582,7 +666,10 @@ mod tests {
     fn online_peers_precede_offline_ones() {
         let mut nodes = [node("alpha", false, false), node("zeta", true, false)];
         nodes.sort_by_key(sort_key);
-        assert_eq!(nodes[0].hostname, "zeta", "offline peer sorted above online");
+        assert_eq!(
+            nodes[0].hostname, "zeta",
+            "offline peer sorted above online"
+        );
     }
 
     #[test]

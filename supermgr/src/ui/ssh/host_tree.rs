@@ -188,7 +188,8 @@ pub fn populate_ssh_host_list(
     let filtered: Vec<&HostSummary> = if filter.is_empty() {
         hosts.iter().collect()
     } else {
-        hosts.iter()
+        hosts
+            .iter()
             .filter(|h| {
                 h.label.to_lowercase().contains(&filter_lower)
                     || h.hostname.to_lowercase().contains(&filter_lower)
@@ -201,7 +202,11 @@ pub fn populate_ssh_host_list(
 
     if filtered.is_empty() {
         let placeholder = adw::ActionRow::builder()
-            .title(if filter.is_empty() { "No SSH hosts" } else { "No matching hosts" })
+            .title(if filter.is_empty() {
+                "No SSH hosts"
+            } else {
+                "No matching hosts"
+            })
             .subtitle(if filter.is_empty() {
                 "Add a host to get started"
             } else {
@@ -230,7 +235,8 @@ pub fn populate_ssh_host_list(
     // Sort hosts within each group: pinned first, then alphabetically by label.
     for hosts_in_group in groups.values_mut() {
         hosts_in_group.sort_by(|a, b| {
-            b.pinned.cmp(&a.pinned)
+            b.pinned
+                .cmp(&a.pinned)
                 .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
         });
     }
@@ -261,7 +267,8 @@ pub fn populate_ssh_host_list(
             let row = adw::ActionRow::builder()
                 .title(&host.label)
                 .subtitle(&view.meta)
-                .title_lines(1).subtitle_lines(1)
+                .title_lines(1)
+                .subtitle_lines(1)
                 .activatable(true)
                 .build();
             row.set_widget_name(&host.id.to_string());
@@ -340,7 +347,9 @@ pub fn populate_ssh_host_list(
                         let msg = match dbus_ssh_delete_host(host_id.clone()).await {
                             Ok(()) => {
                                 info!("deleted SSH host {}", host_id);
-                                let hosts = crate::dbus_client::dbus_ssh_list_hosts().await.unwrap_or_default();
+                                let hosts = crate::dbus_client::dbus_ssh_list_hosts()
+                                    .await
+                                    .unwrap_or_default();
                                 AppMsg::SshHostsRefreshed(hosts)
                             }
                             Err(e) => {
@@ -433,18 +442,14 @@ pub fn populate_ssh_host_list(
                         tx.send(AppMsg::ShowToast("Testing connection\u{2026}".to_string()))
                             .ok();
                         rt.spawn(async move {
-                            let msg = match crate::dbus_client::dbus_ssh_test_connection(
-                                host_id,
-                            )
-                            .await
+                            let msg = match crate::dbus_client::dbus_ssh_test_connection(host_id)
+                                .await
                             {
                                 Ok(json) => {
                                     let v: serde_json::Value =
                                         serde_json::from_str(&json).unwrap_or_default();
-                                    let ssh_status = v
-                                        .get("ssh")
-                                        .and_then(|s| s.as_str())
-                                        .unwrap_or("unknown");
+                                    let ssh_status =
+                                        v.get("ssh").and_then(|s| s.as_str()).unwrap_or("unknown");
                                     if ssh_status == "ok" {
                                         AppMsg::ShowToast("Connection test passed".to_string())
                                     } else {
@@ -453,9 +458,9 @@ pub fn populate_ssh_host_list(
                                         ))
                                     }
                                 }
-                                Err(e) => AppMsg::OperationFailed(format!(
-                                    "Connection test failed: {e}"
-                                )),
+                                Err(e) => {
+                                    AppMsg::OperationFailed(format!("Connection test failed: {e}"))
+                                }
                             };
                             tx.send(msg).ok();
                         });
@@ -489,12 +494,8 @@ pub fn populate_ssh_host_list(
                             let username = username.clone();
                             let tx = tx.clone();
                             glib::idle_add_once(move || {
-                                match super::host_detail::launch_rdp(
-                                    &hostname,
-                                    p,
-                                    &username,
-                                    None,
-                                ) {
+                                match super::host_detail::launch_rdp(&hostname, p, &username, None)
+                                {
                                     Ok(_) => {}
                                     Err(e) => {
                                         let _ = tx.send(AppMsg::OperationFailed(format!(
@@ -519,9 +520,7 @@ pub fn populate_ssh_host_list(
                             let hostname = hostname.clone();
                             let tx = tx.clone();
                             glib::idle_add_once(move || {
-                                if let Err(e) =
-                                    super::host_detail::launch_vnc(&hostname, p)
-                                {
+                                if let Err(e) = super::host_detail::launch_vnc(&hostname, p) {
                                     let _ = tx.send(AppMsg::OperationFailed(format!(
                                         "VNC launch failed: {e}"
                                     )));

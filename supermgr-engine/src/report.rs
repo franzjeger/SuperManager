@@ -81,7 +81,11 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
         // anyhow::Error::new() wraps the EngineError so the handler
         // can `downcast_ref::<EngineError>()` to recognise this
         // specific case structurally — not by error-message regex.
-        None => return Err(anyhow::Error::new(crate::error::EngineError::PdfEngineMissing)),
+        None => {
+            return Err(anyhow::Error::new(
+                crate::error::EngineError::PdfEngineMissing,
+            ))
+        }
     };
 
     // Markdown input — written + closed before invoking pandoc.
@@ -92,9 +96,7 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
         .suffix(".md")
         .tempfile()
         .context("create temp md")?;
-    in_file
-        .write_all(markdown.as_bytes())
-        .context("write md")?;
+    in_file.write_all(markdown.as_bytes()).context("write md")?;
     in_file.flush().ok();
     let in_path = in_file.path().to_path_buf();
 
@@ -137,8 +139,8 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
         anyhow::bail!("pandoc ({engine}) failed: {stderr}");
     }
 
-    let bytes = std::fs::read(&out_path)
-        .with_context(|| format!("read pdf output {out_path:?}"))?;
+    let bytes =
+        std::fs::read(&out_path).with_context(|| format!("read pdf output {out_path:?}"))?;
     let _ = std::fs::remove_file(&out_path);
     // `in_file` (still held) drops here and unlinks the markdown.
     Ok(bytes)
@@ -271,10 +273,7 @@ fn title_block(out: &mut String, input: &ReportInput<'_>) {
             out.push_str(&format!("| Customer | `{slug}` |\n"));
         }
     }
-    out.push_str(&format!(
-        "| Engagement ID | `{}` |\n",
-        e.id
-    ));
+    out.push_str(&format!("| Engagement ID | `{}` |\n", e.id));
     out.push_str(&format!(
         "| Started | {} |\n",
         e.started_at.format("%Y-%m-%d")
@@ -366,7 +365,10 @@ fn scope_methodology(out: &mut String, input: &ReportInput<'_>) {
 }
 
 fn technique_label(t: &crate::engagement::Technique) -> &'static str {
-    use crate::engagement::Technique::{Recon, Discovery, VulnScan, TlsAudit, CredTest, WebExploit, SmbEnum, SnmpRead, Wireless, DosTest};
+    use crate::engagement::Technique::{
+        CredTest, Discovery, DosTest, Recon, SmbEnum, SnmpRead, TlsAudit, VulnScan, WebExploit,
+        Wireless,
+    };
     match t {
         Recon => "Reconnaissance (passive discovery, ARP, mDNS)",
         Discovery => "Active discovery (TCP sweep, banner-grab)",
@@ -394,7 +396,10 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
     }
     let mut by_sev: std::collections::BTreeMap<u8, Vec<&PersistedFinding>> = Default::default();
     for f in &open {
-        by_sev.entry(sev_rank(&f.finding.severity)).or_default().push(f);
+        by_sev
+            .entry(sev_rank(&f.finding.severity))
+            .or_default()
+            .push(f);
     }
     for (rank, group) in by_sev {
         out.push_str(&format!("### {}\n\n", sev_heading(rank)));
@@ -446,10 +451,7 @@ fn render_finding(out: &mut String, f: &PersistedFinding) {
         .cvss
         .map(|c| format!(" (CVSS {c:.1})"))
         .unwrap_or_default();
-    out.push_str(&format!(
-        "#### {}{}{}\n\n",
-        f.finding.title, cve, cvss
-    ));
+    out.push_str(&format!("#### {}{}{}\n\n", f.finding.title, cve, cvss));
     out.push_str(&format!(
         "- Host: `{}`{}\n",
         f.finding.host_ip,

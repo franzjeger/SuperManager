@@ -95,7 +95,11 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
     // configuration tree's read permission for authenticated users.
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
-        let sddl = if entry.file_name().to_string_lossy().eq_ignore_ascii_case("runtime") {
+        let sddl = if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("runtime")
+        {
             SECRET_SDDL
         } else {
             ROOT_SDDL
@@ -506,7 +510,10 @@ mod tests {
 
         let known_hosts = root.join("known_hosts.json");
         let writer = std::fs::File::create(&known_hosts).unwrap();
-        assert!(ensure_root_at(&base).is_err(), "top-level writers must be rejected");
+        assert!(
+            ensure_root_at(&base).is_err(),
+            "top-level writers must be rejected"
+        );
         drop(writer);
         ensure_root_at(&base).unwrap();
         std::fs::remove_file(&known_hosts).unwrap();
@@ -518,7 +525,10 @@ mod tests {
         let external_token = external.join("token.txt");
         std::fs::write(&external_token, "fixture-secret").unwrap();
         std::fs::hard_link(&external_token, &known_hosts).unwrap();
-        assert!(ensure_root_at(&base).is_err(), "top-level hardlinks must be rejected");
+        assert!(
+            ensure_root_at(&base).is_err(),
+            "top-level hardlinks must be rejected"
+        );
         std::fs::remove_file(&known_hosts).unwrap();
         assert_eq!(
             effective_rights(&file_descriptor(&external_token), WinAuthenticatedUserSid),

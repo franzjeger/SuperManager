@@ -62,7 +62,7 @@ pub enum WafKind {
 ///   - `headers`: header pairs from the HTTP response. Keys are
 ///     case-insensitive — the matcher lowercases them.
 ///   - `cookies`: parsed `Set-Cookie` names (not full values).
-#[must_use] 
+#[must_use]
 pub fn detect(headers: &[(String, String)], cookies: &[String]) -> Vec<WafInfo> {
     let mut hits: Vec<WafInfo> = Vec::new();
     let mut seen_vendors: HashSet<String> = HashSet::new();
@@ -130,10 +130,7 @@ const SIGNATURES: &[Signature] = &[
         vendor: "Cloudflare",
         kind: WafKind::Cdn,
         header_keys: &["cf-ray", "cf-cache-status", "cf-request-id"],
-        header_value_contains: &[
-            ("server", "cloudflare"),
-            ("via", "cloudflare"),
-        ],
+        header_value_contains: &[("server", "cloudflare"), ("via", "cloudflare")],
         cookie_prefixes: &["__cfduid", "__cf_bm", "__cflb", "cf_clearance"],
     },
     // --- AWS CloudFront ------------------------------------------------------
@@ -141,10 +138,7 @@ const SIGNATURES: &[Signature] = &[
         vendor: "AWS CloudFront",
         kind: WafKind::Cdn,
         header_keys: &["x-amz-cf-id", "x-amz-cf-pop"],
-        header_value_contains: &[
-            ("via", "cloudfront"),
-            ("server", "cloudfront"),
-        ],
+        header_value_contains: &[("via", "cloudfront"), ("server", "cloudfront")],
         cookie_prefixes: &[],
     },
     // --- AWS ALB / ELB -------------------------------------------------------
@@ -152,10 +146,7 @@ const SIGNATURES: &[Signature] = &[
         vendor: "AWS ELB/ALB",
         kind: WafKind::LoadBalancer,
         header_keys: &[],
-        header_value_contains: &[
-            ("server", "awselb"),
-            ("server", "awsalb"),
-        ],
+        header_value_contains: &[("server", "awselb"), ("server", "awsalb")],
         cookie_prefixes: &["awselb", "awsalb", "awsalbcors"],
     },
     // --- AWS WAF -------------------------------------------------------------
@@ -170,15 +161,8 @@ const SIGNATURES: &[Signature] = &[
     Signature {
         vendor: "Akamai",
         kind: WafKind::Cdn,
-        header_keys: &[
-            "x-akamai-transformed",
-            "akamai-grn",
-            "x-akamai-staging",
-        ],
-        header_value_contains: &[
-            ("server", "akamaighost"),
-            ("via", "akamai"),
-        ],
+        header_keys: &["x-akamai-transformed", "akamai-grn", "x-akamai-staging"],
+        header_value_contains: &[("server", "akamaighost"), ("via", "akamai")],
         cookie_prefixes: &["akamai-ldns-test"],
     },
     // --- Fastly --------------------------------------------------------------
@@ -187,7 +171,7 @@ const SIGNATURES: &[Signature] = &[
         kind: WafKind::Cdn,
         header_keys: &["fastly-debug-digest", "x-fastly-request-id", "x-served-by"],
         header_value_contains: &[
-            ("via", "varnish"),  // not specific to fastly but common
+            ("via", "varnish"), // not specific to fastly but common
             ("server", "fastly"),
         ],
         cookie_prefixes: &[],
@@ -240,10 +224,7 @@ const SIGNATURES: &[Signature] = &[
         vendor: "ModSecurity",
         kind: WafKind::Waf,
         header_keys: &[],
-        header_value_contains: &[
-            ("server", "mod_security"),
-            ("server", "modsecurity"),
-        ],
+        header_value_contains: &[("server", "mod_security"), ("server", "modsecurity")],
         cookie_prefixes: &[],
     },
     // --- nginx + Lua / OpenResty (often used to host WAFs) ------------------
@@ -261,7 +242,10 @@ mod tests {
     use super::*;
 
     fn h(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
     fn c(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| (*s).to_owned()).collect()
@@ -269,7 +253,10 @@ mod tests {
 
     #[test]
     fn detects_cloudflare_via_cf_ray_header() {
-        let hits = detect(&h(&[("CF-RAY", "8123abc-AMS"), ("Server", "cloudflare")]), &[]);
+        let hits = detect(
+            &h(&[("CF-RAY", "8123abc-AMS"), ("Server", "cloudflare")]),
+            &[],
+        );
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].vendor, "Cloudflare");
         assert_eq!(hits[0].kind, WafKind::Cdn);
@@ -285,7 +272,10 @@ mod tests {
 
     #[test]
     fn detects_cloudfront_via_amz_header() {
-        let hits = detect(&h(&[("X-Amz-Cf-Id", "abc"), ("Via", "1.1 abc.cloudfront.net")]), &[]);
+        let hits = detect(
+            &h(&[("X-Amz-Cf-Id", "abc"), ("Via", "1.1 abc.cloudfront.net")]),
+            &[],
+        );
         assert!(hits.iter().any(|w| w.vendor == "AWS CloudFront"));
     }
 
@@ -327,7 +317,10 @@ mod tests {
 
     #[test]
     fn no_signatures_clean_server_returns_empty() {
-        let hits = detect(&h(&[("Server", "nginx/1.25.0"), ("Content-Type", "text/html")]), &[]);
+        let hits = detect(
+            &h(&[("Server", "nginx/1.25.0"), ("Content-Type", "text/html")]),
+            &[],
+        );
         assert!(hits.is_empty());
     }
 
@@ -343,10 +336,7 @@ mod tests {
     fn multiple_vendors_simultaneously() {
         // Real example: an ALB fronting a CloudFront-fronted origin.
         let hits = detect(
-            &h(&[
-                ("X-Amz-Cf-Id", "abc"),
-                ("Via", "1.1 cloudfront.net"),
-            ]),
+            &h(&[("X-Amz-Cf-Id", "abc"), ("Via", "1.1 cloudfront.net")]),
             &c(&["AWSALB=xyz"]),
         );
         let vendors: Vec<&str> = hits.iter().map(|w| w.vendor.as_str()).collect();

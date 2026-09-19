@@ -45,8 +45,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Resolve a host's JSON metadata to (hostname, port, username, auth).
 fn read_host_meta(root: &std::path::Path, host_id: &str) -> Result<Value, RpcError> {
     let path = root.join("hosts").join(format!("{host_id}.json"));
-    let bytes = std::fs::read(&path)
-        .map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+    let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
     serde_json::from_slice::<Value>(&bytes)
         .map_err(|e| RpcError::Other(format!("parse host json: {e}")))
 }
@@ -71,10 +70,7 @@ pub async fn execute(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname' field".into()))?;
-    let port = meta
-        .get("port")
-        .and_then(Value::as_u64)
-        .unwrap_or(22) as u16;
+    let port = meta.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
     let username = meta
         .get("username")
         .and_then(Value::as_str)
@@ -85,7 +81,10 @@ pub async fn execute(
         .unwrap_or("password");
     let auth_key_id = meta.get("auth_key_id").and_then(Value::as_str);
 
-    debug!(host_id, hostname, port, username, auth_method, "ssh_exec start");
+    debug!(
+        host_id,
+        hostname, port, username, auth_method, "ssh_exec start"
+    );
 
     // Resolve credentials from Credential Manager up front so the connect
     // path can stay linear.
@@ -131,17 +130,17 @@ pub async fn execute(
     // Hand the handler a clone of the known-hosts store so the host-key
     // check can record / verify fingerprints synchronously while russh
     // is mid-handshake.
-    let handler = KnownHostsHandler::new(
-        known_hosts.clone(),
-        hostname.to_owned(),
-        port,
-    );
+    let handler = KnownHostsHandler::new(known_hosts.clone(), hostname.to_owned(), port);
     let mut session = timeout(
         CONNECT_TIMEOUT,
         client::connect(config, addr.clone(), handler),
     )
     .await
-    .map_err(|_| RpcError::Backend(format!("connect timeout after {CONNECT_TIMEOUT:?} to {addr}")))?
+    .map_err(|_| {
+        RpcError::Backend(format!(
+            "connect timeout after {CONNECT_TIMEOUT:?} to {addr}"
+        ))
+    })?
     .map_err(|e| {
         // Surface our own typed error when russh closed the connection
         // because we rejected the host key.
@@ -166,9 +165,8 @@ pub async fn execute(
             }
         }
         AuthMethod::Key(pem) => {
-            let keypair = russh_keys::decode_secret_key(&pem, None).map_err(|e| {
-                RpcError::Other(format!("decode stored SSH key: {e}"))
-            })?;
+            let keypair = russh_keys::decode_secret_key(&pem, None)
+                .map_err(|e| RpcError::Other(format!("decode stored SSH key: {e}")))?;
             let ok = session
                 .authenticate_publickey(username, Arc::new(keypair))
                 .await
@@ -263,7 +261,11 @@ impl client::Handler for KnownHostsHandler {
     ) -> Result<bool, Self::Error> {
         let algo = server_public_key.name();
         let fingerprint = server_public_key.fingerprint();
-        match self.store.check(&self.host, self.port, algo, &fingerprint).await {
+        match self
+            .store
+            .check(&self.host, self.port, algo, &fingerprint)
+            .await
+        {
             Ok(HostKeyVerdict::FirstSeen(_)) => {
                 info!(host = %self.host, %algo, "recorded new SSH host key");
                 Ok(true)

@@ -147,7 +147,9 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
             // Only a utun-borne split-default can be a dead-tunnel orphan (a
             // physical iface or the lo0 IPv6 leak-block is handled elsewhere),
             // and only if no live VPN backend owns that utun.
-            Some(iface) => iface.starts_with("utun") && !crate::tailscale::utun_has_live_owner(&iface),
+            Some(iface) => {
+                iface.starts_with("utun") && !crate::tailscale::utun_has_live_owner(&iface)
+            }
             None => false,
         };
         if !orphaned {
@@ -271,7 +273,9 @@ fn watchdog_loop() {
                             "{}s no internet with uplink UP — exit peer appears dead, failing open (panic_reset)",
                             consecutive_failures * 2
                         );
-                        match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
+                        match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
+                            clear_pref: false,
+                        }) {
                             Ok(_) => {
                                 tracing::info!("panic_reset complete (exit peer dead, failed open to local uplink)");
                                 already_panic_reset = true;
@@ -289,7 +293,9 @@ fn watchdog_loop() {
                     // routes (no-op if none) and DHCP-renews; clear_pref=false
                     // keeps any intent. Fires once per outage.
                     tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
-                    match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs { clear_pref: false }) {
+                    match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
+                        clear_pref: false,
+                    }) {
                         Ok(_) => {
                             tracing::info!("panic_reset complete");
                             already_panic_reset = true;
@@ -325,7 +331,11 @@ fn watchdog_loop() {
 /// genuinely dead peer still fails at 8s and escalates, so this never hides a
 /// real outage.
 fn probe_internet() -> bool {
-    let budget = if crate::tailscale_state::load().desired { "8" } else { "1" };
+    let budget = if crate::tailscale_state::load().desired {
+        "8"
+    } else {
+        "1"
+    };
     let out = Command::new("/usr/bin/nc")
         .args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"])
         .output();

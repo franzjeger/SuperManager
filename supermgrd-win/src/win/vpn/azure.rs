@@ -191,8 +191,8 @@ impl Ikev2Backend {
         info!(upn, "Azure: authenticated");
 
         // ── Step 2 — Tempfiles ──────────────────────────────────────────────
-        let tmp_dir = crate::win::paths::create_private_runtime_dir(&profile.id)
-            .map_err(VpnError::Io)?;
+        let tmp_dir =
+            crate::win::paths::create_private_runtime_dir(&profile.id).map_err(VpnError::Io)?;
 
         let key_path = tmp_dir.path().join("tls-auth.key");
         let auth_path = tmp_dir.path().join("auth.txt");
@@ -247,7 +247,7 @@ impl Ikev2Backend {
             let line = match timeout(remaining, watcher.recv()).await {
                 Ok(Some(line)) => line,
                 Ok(None) => break, // stdout closed → process exited
-                Err(_) => break,    // timeout
+                Err(_) => break,   // timeout
             };
             if line.contains("Initialization Sequence Completed") {
                 connected = true;
@@ -391,7 +391,10 @@ async fn refresh_access_token(
         .json()
         .await
         .map_err(|e| VpnError::MissingDependency(format!("token refresh parse: {e}")))?;
-    match (body["access_token"].as_str(), body["refresh_token"].as_str()) {
+    match (
+        body["access_token"].as_str(),
+        body["refresh_token"].as_str(),
+    ) {
         (Some(a), Some(r)) => Ok((a.to_owned(), r.to_owned())),
         _ => {
             let desc = body["error_description"]
@@ -416,8 +419,7 @@ async fn pkce_browser_flow(
     verifier_bytes[..16].copy_from_slice(u1.as_bytes());
     verifier_bytes[16..].copy_from_slice(u2.as_bytes());
     let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-    let code_challenge =
-        URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(code_verifier.as_bytes()));
+    let code_challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(code_verifier.as_bytes()));
     let state = uuid::Uuid::new_v4().to_string();
     let scope = format!("{audience}/.default openid offline_access profile");
 
@@ -450,9 +452,7 @@ async fn pkce_browser_flow(
         .await
         .map_err(|_| VpnError::Subprocess {
             code: -1,
-            stderr: format!(
-                "Entra ID browser authentication timed out after {AUTH_TIMEOUT:?}"
-            ),
+            stderr: format!("Entra ID browser authentication timed out after {AUTH_TIMEOUT:?}"),
         })?
         .map_err(|e| VpnError::Subprocess {
             code: -1,

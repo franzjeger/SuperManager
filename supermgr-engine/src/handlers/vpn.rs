@@ -22,18 +22,19 @@ use crate::server::{parse_ip_list, parse_ipnet_list, EngineServer};
 impl EngineServer {
     pub(crate) async fn handle_list_profiles(&self, id: u64) -> Response {
         let state = self.state.lock().await;
-        let summaries: Vec<ProfileSummary> = state
-            .profiles
-            .values()
-            .map(ProfileSummary::from)
-            .collect();
+        let summaries: Vec<ProfileSummary> =
+            state.profiles.values().map(ProfileSummary::from).collect();
         match serde_json::to_value(&summaries) {
             Ok(v) => Response::ok(id, v),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
     }
 
-    pub(crate) async fn handle_vpn_get_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_get_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
@@ -58,7 +59,11 @@ impl EngineServer {
     /// Secrets (password, PSK) are owned by the app via the OS Keychain on Mac;
     /// the profile only carries `SecretRef` labels so cross-platform serialization
     /// stays consistent.
-    pub(crate) async fn handle_vpn_add_ikev2_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_add_ikev2_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing name".to_owned());
         };
@@ -68,8 +73,14 @@ impl EngineServer {
         let Some(username) = params.get("username").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing username".to_owned());
         };
-        let full_tunnel = params.get("full_tunnel").and_then(serde_json::Value::as_bool).unwrap_or(true);
-        let kill_switch = params.get("kill_switch").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let full_tunnel = params
+            .get("full_tunnel")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        let kill_switch = params
+            .get("kill_switch")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let dns_servers = parse_ip_list(params.get("dns_servers"));
         let routes = parse_ipnet_list(params.get("routes"));
         // Optional IKE identity (IDi). Trim only — strongSwan auto-detects
@@ -115,7 +126,11 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_vpn_update_ikev2_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_update_ikev2_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
@@ -130,10 +145,18 @@ impl EngineServer {
             return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
         let ProfileConfig::FortiGate(mut cfg) = existing.config.clone() else {
-            return Response::err(id, protocol::INVALID_PARAMS, "profile is not IKEv2".to_owned());
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "profile is not IKEv2".to_owned(),
+            );
         };
 
-        let name = params.get("name").and_then(|v| v.as_str()).unwrap_or(&existing.name).to_owned();
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&existing.name)
+            .to_owned();
         if let Some(h) = params.get("host").and_then(|v| v.as_str()) {
             cfg.host = h.to_owned();
         }
@@ -183,7 +206,11 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_vpn_delete_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_delete_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
@@ -227,7 +254,11 @@ impl EngineServer {
     /// `ProfileConfig::WireGuard`. Idempotent only by `name`: re-importing
     /// the same file with the same name will create a second profile
     /// (the daemon doesn't dedupe on content — that's the GUI's job).
-    pub(crate) async fn handle_vpn_import_wireguard(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_import_wireguard(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         use supermgr_core::vpn::profile::{import_wireguard_conf, ProfileConfig};
 
         let name = match params.get("name").and_then(|v| v.as_str()) {
@@ -305,7 +336,11 @@ impl EngineServer {
     ///
     /// Connecting is out of scope for this RPC — it's handled by a
     /// separate (yet-to-be-implemented) daemon backend.
-    pub(crate) async fn handle_vpn_import_openvpn(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_import_openvpn(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         use std::io::Write as _;
         use supermgr_core::vpn::profile::{OpenVpnConfig, ProfileConfig};
 
@@ -410,7 +445,11 @@ impl EngineServer {
     /// tenant. Microsoft's own app uses its first-party broker
     /// integration; the cheapest faithful replication is to defer
     /// to that app.
-    pub(crate) async fn handle_vpn_import_azure(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_import_azure(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
         let name = match params.get("name").and_then(|v| v.as_str()) {
@@ -511,7 +550,13 @@ impl EngineServer {
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -520,7 +565,9 @@ impl EngineServer {
         let state = self.state.lock().await;
         let profile = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         drop(state);
         let cfg = match profile.config {
@@ -559,7 +606,13 @@ impl EngineServer {
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -567,13 +620,21 @@ impl EngineServer {
         };
         let device_code = match params.get("device_code").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing device_code".to_owned()),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing device_code".to_owned(),
+                )
+            }
         };
 
         let state = self.state.lock().await;
         let profile = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         drop(state);
         let cfg = match profile.config.clone() {
@@ -588,7 +649,11 @@ impl EngineServer {
         };
 
         match crate::azure_oauth::poll_token(&cfg.tenant_id, &device_code).await {
-            Ok(crate::azure_oauth::DeviceCodePoll::Authorized { access_token, username, expires_in }) => {
+            Ok(crate::azure_oauth::DeviceCodePoll::Authorized {
+                access_token,
+                username,
+                expires_in,
+            }) => {
                 // Materialize the rendered .ovpn to disk so the
                 // helper can `--config` it. Same dir convention as
                 // the OpenVPN import path: <data_dir>/ovpn/<id>.ovpn.
@@ -600,11 +665,11 @@ impl EngineServer {
                 let mut path = dir;
                 path.push(format!("{}.ovpn", profile.id));
                 // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
-        // the VNet routes at connect, and forcing redirect-gateway on an
-        // internal-only gateway black-holes all public internet + DNS (froze the
-        // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
-        // internal access while public traffic stays on the local uplink.
-        let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
+                // the VNet routes at connect, and forcing redirect-gateway on an
+                // internal-only gateway black-holes all public internet + DNS (froze the
+                // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
+                // internal access while public traffic stays on the local uplink.
+                let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
                 if let Err(e) = std::fs::write(&path, body.as_bytes()) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("write ovpn: {e}"));
                 }
@@ -614,13 +679,16 @@ impl EngineServer {
                     use std::os::unix::fs::PermissionsExt;
                     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
-                Response::ok(id, serde_json::json!({
-                    "state": "authorized",
-                    "config_file": path.to_string_lossy(),
-                    "username": username,
-                    "access_token": access_token,
-                    "expires_in": expires_in,
-                }))
+                Response::ok(
+                    id,
+                    serde_json::json!({
+                        "state": "authorized",
+                        "config_file": path.to_string_lossy(),
+                        "username": username,
+                        "access_token": access_token,
+                        "expires_in": expires_in,
+                    }),
+                )
             }
             Ok(crate::azure_oauth::DeviceCodePoll::Pending) => {
                 Response::ok(id, serde_json::json!({ "state": "pending" }))
@@ -628,12 +696,13 @@ impl EngineServer {
             Ok(crate::azure_oauth::DeviceCodePoll::Expired) => {
                 Response::ok(id, serde_json::json!({ "state": "expired" }))
             }
-            Ok(crate::azure_oauth::DeviceCodePoll::Denied { description }) => {
-                Response::ok(id, serde_json::json!({
+            Ok(crate::azure_oauth::DeviceCodePoll::Denied { description }) => Response::ok(
+                id,
+                serde_json::json!({
                     "state": "denied",
                     "description": description,
-                }))
-            }
+                }),
+            ),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }
@@ -653,7 +722,13 @@ impl EngineServer {
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -662,7 +737,9 @@ impl EngineServer {
         let state = self.state.lock().await;
         let profile = match state.profiles.get(&pid) {
             Some(p) => p.clone(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         drop(state);
 
@@ -693,12 +770,15 @@ impl EngineServer {
             cfg.dns_servers.len(),
             profile.full_tunnel,
         );
-        Response::ok(id, serde_json::json!({
-            "ovpn_body": body,
-            "gateway_fqdn": cfg.gateway_fqdn,
-            "tenant_id": cfg.tenant_id,
-            "client_id": cfg.client_id,
-        }))
+        Response::ok(
+            id,
+            serde_json::json!({
+                "ovpn_body": body,
+                "gateway_fqdn": cfg.gateway_fqdn,
+                "tenant_id": cfg.tenant_id,
+                "client_id": cfg.client_id,
+            }),
+        )
     }
 
     /// Render a complete `WireGuard` `.conf` body for a stored profile,
@@ -717,7 +797,13 @@ impl EngineServer {
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -727,7 +813,9 @@ impl EngineServer {
         let state = self.state.lock().await;
         let profile = match state.profiles.get(&pid) {
             Some(p) => p.clone(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         drop(state);
 
@@ -829,8 +917,7 @@ impl EngineServer {
         // profiles overwhelmingly have exactly one peer.
         let mut peer_allowed: Vec<Vec<ipnet::IpNet>> = Vec::with_capacity(wg.peers.len());
         for peer in &wg.peers {
-            match effective_allowed_ips(&peer.allowed_ips, &wg.split_routes, full_tunnel, pid_str)
-            {
+            match effective_allowed_ips(&peer.allowed_ips, &wg.split_routes, full_tunnel, pid_str) {
                 Ok(v) => peer_allowed.push(v),
                 Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
             }
@@ -911,20 +998,39 @@ impl EngineServer {
     /// the caller has to disconnect and reconnect. We don't initiate
     /// that ourselves because it's a user-visible interruption.
     /// Persists immediately to disk via `state.save_profile`.
-    pub(crate) async fn handle_vpn_set_routing(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_set_routing(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let full_tunnel = match params.get("full_tunnel").and_then(serde_json::Value::as_bool) {
+        let full_tunnel = match params
+            .get("full_tunnel")
+            .and_then(serde_json::Value::as_bool)
+        {
             Some(b) => b,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing full_tunnel".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing full_tunnel".to_owned(),
+                )
+            }
         };
         let routes = parse_ipnet_list(params.get("routes"));
 
@@ -942,7 +1048,9 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         let mut profile = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
 
         // Splice the new routing into the backend-specific config.
@@ -956,9 +1064,7 @@ impl EngineServer {
             ProfileConfig::ForticlientSslvpn(fc) => {
                 fc.routes = if full_tunnel { Vec::new() } else { routes };
             }
-            ProfileConfig::OpenVpn(_)
-            | ProfileConfig::AzureVpn(_)
-            | ProfileConfig::Generic(_) => {
+            ProfileConfig::OpenVpn(_) | ProfileConfig::AzureVpn(_) | ProfileConfig::Generic(_) => {
                 return Response::err(
                     id,
                     protocol::INVALID_PARAMS,
@@ -985,10 +1091,20 @@ impl EngineServer {
     /// Rename a profile. Persisted to the profile's TOML.
     /// The new name is trimmed of surrounding whitespace and
     /// rejected if empty.
-    pub(crate) async fn handle_vpn_rename_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_rename_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -999,12 +1115,18 @@ impl EngineServer {
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing name".to_owned()),
         };
         if new_name.is_empty() {
-            return Response::err(id, protocol::INVALID_PARAMS, "name cannot be empty".to_owned());
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "name cannot be empty".to_owned(),
+            );
         }
         let mut state = self.state.lock().await;
         let mut profile = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         profile.name = new_name;
         profile.updated_at = chrono::Utc::now();
@@ -1033,12 +1155,22 @@ impl EngineServer {
     /// it on the duplicate explicitly. Routing-mode (full vs
     /// split tunnel) is preserved since that's an intrinsic
     /// part of how the user wants the profile to behave.
-    pub(crate) async fn handle_vpn_duplicate_profile(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_duplicate_profile(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         use supermgr_core::vpn::profile::{ProfileConfig, SecretRef};
 
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1048,7 +1180,9 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         let source = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
 
         // Walk the backend-specific config and clone secrets +
@@ -1189,10 +1323,20 @@ impl EngineServer {
     ///
     /// Takes effect on the next connect: the conf is re-rendered each
     /// time, so an already-up tunnel keeps whatever it was started with.
-    pub(crate) async fn handle_vpn_set_push_dns(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_set_push_dns(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1200,7 +1344,9 @@ impl EngineServer {
         };
         let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
             Some(b) => b,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned())
+            }
         };
         let mut state = self.state.lock().await;
         let Some(mut profile) = state.profiles.get(&pid).cloned() else {
@@ -1221,10 +1367,20 @@ impl EngineServer {
     /// Set the `kill_switch` flag on a profile. Persisted in the
     /// profile's TOML; the GUI's connect path reads it and asks
     /// the helper to install pf rules accordingly.
-    pub(crate) async fn handle_vpn_set_kill_switch(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_vpn_set_kill_switch(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
             Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing profile_id".to_owned()),
+            None => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing profile_id".to_owned(),
+                )
+            }
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1232,12 +1388,16 @@ impl EngineServer {
         };
         let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
             Some(b) => b,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned())
+            }
         };
         let mut state = self.state.lock().await;
         let mut profile = match state.profiles.get(&pid).cloned() {
             Some(p) => p,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
+            }
         };
         profile.kill_switch = enabled;
         profile.updated_at = chrono::Utc::now();
@@ -1250,8 +1410,4 @@ impl EngineServer {
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
         }
     }
-
 }
-
-
-

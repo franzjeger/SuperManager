@@ -3,14 +3,14 @@
 
 use serde_json::Value;
 use supermgr_core::{
+    compliance::{CheckDefinition, ComplianceRun, RunSummary},
     customer::Customer,
+    host::HostSummary,
+    recon::ReconScanResult,
+    ssh::key::SshKeySummary,
+    tailscale::TailscaleNode,
     vpn::profile::ProfileSummary,
     vpn::state::VpnState,
-    ssh::key::SshKeySummary,
-    host::HostSummary,
-    tailscale::TailscaleNode,
-    compliance::{CheckDefinition, ComplianceRun, RunSummary},
-    recon::ReconScanResult,
 };
 
 /// Which top-level section is active in the UI.
@@ -85,11 +85,14 @@ pub struct Notification {
 impl AppState {
     /// Push a notification into the store (max 100, newest first).
     pub fn push_notification(&mut self, icon: &'static str, message: impl Into<String>) {
-        self.notifications.insert(0, Notification {
-            timestamp: chrono::Utc::now(),
-            icon,
-            message: message.into(),
-        });
+        self.notifications.insert(
+            0,
+            Notification {
+                timestamp: chrono::Utc::now(),
+                icon,
+                message: message.into(),
+            },
+        );
         self.notifications.truncate(NOTIFICATION_HISTORY_LIMIT);
     }
 
@@ -245,7 +248,13 @@ pub enum AppMsg {
         /// Scope they belong to.
         scope: String,
         /// The summary and the findings, or why neither arrived.
-        result: Result<(supermgr_core::findings_store::StoreSummary, Vec<supermgr_core::findings_store::PersistedFinding>), String>,
+        result: Result<
+            (
+                supermgr_core::findings_store::StoreSummary,
+                Vec<supermgr_core::findings_store::PersistedFinding>,
+            ),
+            String,
+        >,
     },
     /// A triage action finished. The page reloads the scope rather than patching
     /// the row, so what is on screen is what the daemon stored.
@@ -297,7 +306,10 @@ pub enum AppMsg {
     },
     // SSH messages
     /// The public key text for the currently selected SSH key was fetched.
-    SshPublicKeyFetched { key_id: String, text: String },
+    SshPublicKeyFetched {
+        key_id: String,
+        text: String,
+    },
     /// Open an assigned host from the key usage panel.
     SelectSshHost(String),
     /// SSH key list was refreshed from the daemon.

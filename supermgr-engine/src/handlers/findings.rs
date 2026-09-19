@@ -14,9 +14,7 @@ impl EngineServer {
     // Boxing `Response` here would ripple through every `?` in the
     // handler layer for an unmeasured stack-size win.
     #[allow(clippy::result_large_err)]
-    pub(crate) fn resolve_findings_scope(
-        params: &serde_json::Value,
-    ) -> Result<String, Response> {
+    pub(crate) fn resolve_findings_scope(params: &serde_json::Value) -> Result<String, Response> {
         if let Some(s) = params.get("scope").and_then(|v| v.as_str()) {
             if !s.is_empty() {
                 return Ok(s.to_owned());
@@ -42,7 +40,11 @@ impl EngineServer {
         ))
     }
 
-    pub(crate) async fn handle_findings_list(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_findings_list(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let scope = match Self::resolve_findings_scope(&params) {
             Ok(s) => s,
             Err(mut r) => {
@@ -59,7 +61,11 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_findings_summary(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_findings_summary(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let scope = match Self::resolve_findings_scope(&params) {
             Ok(s) => s,
             Err(mut r) => {
@@ -90,20 +96,14 @@ impl EngineServer {
         };
         let key = match params.get("key").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing key".to_owned())
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing key".to_owned()),
         };
         let disposition_raw = params.get("disposition").cloned().unwrap_or_default();
         let new_disposition: crate::findings_store::Disposition =
             match serde_json::from_value(disposition_raw) {
                 Ok(d) => d,
                 Err(e) => {
-                    return Response::err(
-                        id,
-                        protocol::INVALID_PARAMS,
-                        format!("disposition: {e}"),
-                    )
+                    return Response::err(id, protocol::INVALID_PARAMS, format!("disposition: {e}"))
                 }
             };
         let by = params

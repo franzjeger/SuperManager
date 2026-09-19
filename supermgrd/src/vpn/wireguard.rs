@@ -56,8 +56,8 @@ use tracing::{debug, error, info, instrument, warn};
 use wireguard_control::{Backend, DeviceUpdate, InterfaceName, Key, PeerConfigBuilder};
 
 use supermgr_core::{
-    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     error::BackendError,
+    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     vpn::profile::{Profile, ProfileConfig, SecretRef, WireGuardConfig},
     vpn::state::TunnelStats,
 };
@@ -171,7 +171,11 @@ async fn ifindex_to_name(idx: u32) -> Option<String> {
     let link = links.try_next().await.ok()??;
     use netlink_packet_route::link::LinkAttribute;
     link.attributes.iter().find_map(|a| {
-        if let LinkAttribute::IfName(name) = a { Some(name.clone()) } else { None }
+        if let LinkAttribute::IfName(name) = a {
+            Some(name.clone())
+        } else {
+            None
+        }
     })
 }
 
@@ -180,7 +184,11 @@ async fn ifindex_to_name(idx: u32) -> Option<String> {
 /// Returns `None` if no default route exists. Only the first (lowest metric)
 /// default is captured; ECMP setups will have the primary restored.
 async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, BackendError> {
-    let family = if ipv6 { rtnetlink::IpVersion::V6 } else { rtnetlink::IpVersion::V4 };
+    let family = if ipv6 {
+        rtnetlink::IpVersion::V6
+    } else {
+        rtnetlink::IpVersion::V4
+    };
     let (conn, handle, _) = rtnetlink::new_connection()
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
@@ -198,12 +206,15 @@ async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, Backe
             continue;
         }
         // Only consider unicast routes in the main table.
-        use netlink_packet_route::route::{RouteType, RouteHeader};
+        use netlink_packet_route::route::{RouteHeader, RouteType};
         if route.header.kind != RouteType::Unicast {
             continue;
         }
         if route.header.table != RouteHeader::RT_TABLE_MAIN
-            && !route.attributes.iter().any(|a| matches!(a, RouteAttribute::Table(254)))
+            && !route
+                .attributes
+                .iter()
+                .any(|a| matches!(a, RouteAttribute::Table(254)))
         {
             continue;
         }
@@ -211,8 +222,15 @@ async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, Backe
         if best.is_none() {
             let gw_info = route_gateway_and_oif(&route);
             if let Some((gw, oif)) = gw_info {
-                let dev_name = ifindex_to_name(oif).await.unwrap_or_else(|| format!("ifindex:{oif}"));
-                info!("captured {} default route: via {} dev {}", if ipv6 { "IPv6" } else { "IPv4" }, gw, dev_name);
+                let dev_name = ifindex_to_name(oif)
+                    .await
+                    .unwrap_or_else(|| format!("ifindex:{oif}"));
+                info!(
+                    "captured {} default route: via {} dev {}",
+                    if ipv6 { "IPv6" } else { "IPv4" },
+                    gw,
+                    dev_name
+                );
             }
             best = Some(route);
         }
@@ -225,7 +243,10 @@ async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, Backe
 /// Logged as a warning if deletion fails — the route may not exist.
 async fn delete_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
     let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
-    info!("deleting {} default route via rtnetlink", if ipv6 { "IPv6" } else { "IPv4" });
+    info!(
+        "deleting {} default route via rtnetlink",
+        if ipv6 { "IPv6" } else { "IPv4" }
+    );
 
     let (conn, handle, _) = rtnetlink::new_connection()
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
@@ -233,10 +254,16 @@ async fn delete_default_route(saved: &RouteMessage) -> Result<(), BackendError> 
 
     match handle.route().del(saved.clone()).execute().await {
         Ok(()) => {
-            info!("deleted {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
+            info!(
+                "deleted {} default route — ok",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
         }
         Err(e) => {
-            warn!("delete {} default route failed: {e} (may be harmless)", if ipv6 { "IPv6" } else { "IPv4" });
+            warn!(
+                "delete {} default route failed: {e} (may be harmless)",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
         }
     }
     Ok(())
@@ -248,7 +275,10 @@ async fn delete_default_route(saved: &RouteMessage) -> Result<(), BackendError> 
 /// restore error since the tunnel itself is already torn down.
 async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError> {
     let ipv6 = saved.header.address_family == netlink_packet_route::AddressFamily::Inet6;
-    info!("restoring {} default route via rtnetlink", if ipv6 { "IPv6" } else { "IPv4" });
+    info!(
+        "restoring {} default route via rtnetlink",
+        if ipv6 { "IPv6" } else { "IPv4" }
+    );
 
     let (conn, handle, _) = rtnetlink::new_connection()
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
@@ -260,7 +290,10 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
     // Ensure NLM_F_CREATE is set.
     match req.execute().await {
         Ok(()) => {
-            info!("restored {} default route — ok", if ipv6 { "IPv6" } else { "IPv4" });
+            info!(
+                "restored {} default route — ok",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
         }
         // EEXIST means a default route is already back — NetworkManager or
         // dhcpcd reinstalled it when the tunnel interface went away, which is
@@ -274,7 +307,10 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
             );
         }
         Err(e) => {
-            warn!("restore {} default route failed: {e}", if ipv6 { "IPv6" } else { "IPv4" });
+            warn!(
+                "restore {} default route failed: {e}",
+                if ipv6 { "IPv6" } else { "IPv4" }
+            );
         }
     }
     Ok(())
@@ -288,7 +324,9 @@ async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), Bac
 
     let result = match (ip, gateway) {
         (IpAddr::V4(dst), IpAddr::V4(gw)) => {
-            handle.route().add()
+            handle
+                .route()
+                .add()
                 .v4()
                 .destination_prefix(dst, 32)
                 .gateway(gw)
@@ -297,7 +335,9 @@ async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), Bac
                 .await
         }
         (IpAddr::V6(dst), IpAddr::V6(gw)) => {
-            handle.route().add()
+            handle
+                .route()
+                .add()
                 .v6()
                 .destination_prefix(dst, 128)
                 .gateway(gw)
@@ -305,7 +345,11 @@ async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), Bac
                 .execute()
                 .await
         }
-        _ => return Err(BackendError::Interface("mixed IPv4/IPv6 gateway mismatch".into())),
+        _ => {
+            return Err(BackendError::Interface(
+                "mixed IPv4/IPv6 gateway mismatch".into(),
+            ))
+        }
     };
 
     result.map_err(|e| BackendError::Interface(format!("add host route for {ip}: {e}")))
@@ -320,9 +364,15 @@ async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
     tokio::spawn(conn);
 
     // Find the matching route.
-    let family = if ip.is_ipv4() { rtnetlink::IpVersion::V4 } else { rtnetlink::IpVersion::V6 };
+    let family = if ip.is_ipv4() {
+        rtnetlink::IpVersion::V4
+    } else {
+        rtnetlink::IpVersion::V6
+    };
     let mut routes = handle.route().get(family).execute();
-    while let Some(route) = routes.try_next().await
+    while let Some(route) = routes
+        .try_next()
+        .await
         .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
     {
         if route.header.destination_prefix_length != prefix {
@@ -330,8 +380,12 @@ async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
         }
         let matches_dst = route.attributes.iter().any(|a| match a {
             RouteAttribute::Destination(addr) => match (addr, ip) {
-                (netlink_packet_route::route::RouteAddress::Inet(v4), IpAddr::V4(want)) => *v4 == want,
-                (netlink_packet_route::route::RouteAddress::Inet6(v6), IpAddr::V6(want)) => *v6 == want,
+                (netlink_packet_route::route::RouteAddress::Inet(v4), IpAddr::V4(want)) => {
+                    *v4 == want
+                }
+                (netlink_packet_route::route::RouteAddress::Inet6(v6), IpAddr::V6(want)) => {
+                    *v6 == want
+                }
                 _ => false,
             },
             _ => false,
@@ -352,7 +406,11 @@ async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
 }
 
 /// Add a route for an AllowedIP CIDR via a WireGuard interface.
-async fn add_allowed_ip_route(cidr: &str, iface_index: u32, metric: Option<u32>) -> Result<(), BackendError> {
+async fn add_allowed_ip_route(
+    cidr: &str,
+    iface_index: u32,
+    metric: Option<u32>,
+) -> Result<(), BackendError> {
     let (ip, prefix) = parse_cidr(cidr)?;
 
     let (conn, handle, _) = rtnetlink::new_connection()
@@ -361,19 +419,27 @@ async fn add_allowed_ip_route(cidr: &str, iface_index: u32, metric: Option<u32>)
 
     let result = match ip {
         IpAddr::V4(v4) => {
-            let mut req = handle.route().add()
+            let mut req = handle
+                .route()
+                .add()
                 .v4()
                 .destination_prefix(v4, prefix)
                 .output_interface(iface_index);
-            if let Some(m) = metric { req = req.priority(m); }
+            if let Some(m) = metric {
+                req = req.priority(m);
+            }
             req.execute().await
         }
         IpAddr::V6(v6) => {
-            let mut req = handle.route().add()
+            let mut req = handle
+                .route()
+                .add()
                 .v6()
                 .destination_prefix(v6, prefix)
                 .output_interface(iface_index);
-            if let Some(m) = metric { req = req.priority(m); }
+            if let Some(m) = metric {
+                req = req.priority(m);
+            }
             req.execute().await
         }
     };
@@ -396,7 +462,8 @@ async fn add_allowed_ip_route(cidr: &str, iface_index: u32, metric: Option<u32>)
 
 /// Parse a CIDR string like "10.0.0.1/32" into (IpAddr, prefix_len).
 fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
-    let net: ipnet::IpNet = cidr.parse()
+    let net: ipnet::IpNet = cidr
+        .parse()
         .map_err(|e| BackendError::Interface(format!("invalid CIDR '{cidr}': {e}")))?;
     Ok((net.addr(), net.prefix_len()))
 }
@@ -529,17 +596,15 @@ fn kernel_module_tree_state() -> ModuleTree {
     // Any other tree present means a different kernel is installed. Not sorted
     // by version — "newest" here just needs to name one for the operator, and
     // version-comparing distro kernel strings is its own swamp.
-    let other = std::fs::read_dir("/lib/modules")
-        .ok()
-        .and_then(|entries| {
-            let mut names: Vec<String> = entries
-                .filter_map(Result::ok)
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| *n != running)
-                .collect();
-            names.sort();
-            names.pop()
-        });
+    let other = std::fs::read_dir("/lib/modules").ok().and_then(|entries| {
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| *n != running)
+            .collect();
+        names.sort();
+        names.pop()
+    });
 
     match other {
         Some(newest) => ModuleTree::Stale { running, newest },
@@ -615,9 +680,9 @@ impl WireGuardBackend {
         wg_cfg: &WireGuardConfig,
         private_key: Key,
     ) -> Result<(), BackendError> {
-        let iface: InterfaceName = iface_name
-            .parse()
-            .map_err(|e| BackendError::Interface(format!("invalid interface name '{iface_name}': {e}")))?;
+        let iface: InterfaceName = iface_name.parse().map_err(|e| {
+            BackendError::Interface(format!("invalid interface name '{iface_name}': {e}"))
+        })?;
 
         // The netlink call below needs the wireguard family registered.
         ensure_module_loaded().await;
@@ -639,23 +704,26 @@ impl WireGuardBackend {
             if let Some(ref ep) = peer.endpoint {
                 let addr = tokio::net::lookup_host(ep)
                     .await
-                    .map_err(|e| BackendError::Interface(format!(
-                        "cannot resolve peer endpoint '{ep}': {e} — \
+                    .map_err(|e| {
+                        BackendError::Interface(format!(
+                            "cannot resolve peer endpoint '{ep}': {e} — \
                          check that the hostname is correct and DNS is working"
-                    )))?
+                        ))
+                    })?
                     .next()
-                    .ok_or_else(|| BackendError::Interface(format!(
-                        "peer endpoint '{ep}' resolved to zero addresses — \
+                    .ok_or_else(|| {
+                        BackendError::Interface(format!(
+                            "peer endpoint '{ep}' resolved to zero addresses — \
                          verify the hostname in your WireGuard configuration"
-                    )))?;
+                        ))
+                    })?;
                 peer_builder = peer_builder.set_endpoint(addr);
             }
 
             for allowed_ip in &peer.allowed_ips {
                 peer_builder = peer_builder.add_allowed_ip(
                     allowed_ip.addr(),
-                    u8::try_from(allowed_ip.prefix_len())
-                        .expect("prefix length fits in u8"),
+                    u8::try_from(allowed_ip.prefix_len()).expect("prefix length fits in u8"),
                 );
             }
 
@@ -674,7 +742,10 @@ impl WireGuardBackend {
                                 Ok(Key(arr))
                             }
                             Err(_) => {
-                                warn!("PSK bytes not UTF-8 and not 32 bytes for peer {}", &peer.public_key[..8]);
+                                warn!(
+                                    "PSK bytes not UTF-8 and not 32 bytes for peer {}",
+                                    &peer.public_key[..8]
+                                );
                                 Err(wireguard_control::InvalidKey)
                             }
                         };
@@ -683,10 +754,18 @@ impl WireGuardBackend {
                                 peer_builder = peer_builder.set_preshared_key(psk_key);
                                 debug!("applied PSK for peer {}", &peer.public_key[..8]);
                             }
-                            Err(e) => warn!("PSK decode failed for peer {}: {}", &peer.public_key[..8], e),
+                            Err(e) => warn!(
+                                "PSK decode failed for peer {}: {}",
+                                &peer.public_key[..8],
+                                e
+                            ),
                         }
                     }
-                    Err(e) => warn!("PSK not found in keyring for peer {}: {}", &peer.public_key[..8], e),
+                    Err(e) => warn!(
+                        "PSK not found in keyring for peer {}: {}",
+                        &peer.public_key[..8],
+                        e
+                    ),
                 }
             }
 
@@ -695,24 +774,28 @@ impl WireGuardBackend {
 
         // Apply to the kernel.
         debug!("applying WireGuard config to {}", iface_name);
-        update
-            .apply(&iface, Backend::Kernel)
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("Permission denied") || msg.contains("EPERM") || msg.contains("Operation not permitted") {
-                    BackendError::Interface(format!(
-                        "permission denied creating WireGuard interface '{iface_name}': \
+        update.apply(&iface, Backend::Kernel).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Permission denied")
+                || msg.contains("EPERM")
+                || msg.contains("Operation not permitted")
+            {
+                BackendError::Interface(format!(
+                    "permission denied creating WireGuard interface '{iface_name}': \
                          the daemon must run as root (or with CAP_NET_ADMIN) — {e}"
-                    ))
-                } else if msg.contains("not supported") || msg.contains("ENOTSUP") || msg.contains("No such device") {
-                    // Reached only after ensure_module_loaded() has already
-                    // tried, so the module really is unavailable — the
-                    // diagnosis says which of the reasons it is.
-                    BackendError::Prerequisite(wireguard_unsupported_hint(&e.to_string()))
-                } else {
-                    BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
-                }
-            })?;
+                ))
+            } else if msg.contains("not supported")
+                || msg.contains("ENOTSUP")
+                || msg.contains("No such device")
+            {
+                // Reached only after ensure_module_loaded() has already
+                // tried, so the module really is unavailable — the
+                // diagnosis says which of the reasons it is.
+                BackendError::Prerequisite(wireguard_unsupported_hint(&e.to_string()))
+            } else {
+                BackendError::Interface(format!("WireGuard DeviceUpdate failed: {e}"))
+            }
+        })?;
 
         // Tell NetworkManager not to manage this interface so it does not
         // appear as a new network adapter in the system tray / network applet.
@@ -727,7 +810,11 @@ impl WireGuardBackend {
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                debug!("nmcli: set {iface_name} unmanaged — {} ({})", out.status, stderr.trim());
+                debug!(
+                    "nmcli: set {iface_name} unmanaged — {} ({})",
+                    out.status,
+                    stderr.trim()
+                );
             }
             Err(e) => debug!("nmcli not available, skipping unmanaged flag: {e}"),
         }
@@ -748,12 +835,20 @@ impl WireGuardBackend {
         tokio::spawn(conn);
 
         // Look up the interface index by name.
-        let mut links = handle.link().get().match_name(iface_name.to_owned()).execute();
+        let mut links = handle
+            .link()
+            .get()
+            .match_name(iface_name.to_owned())
+            .execute();
         let link = links
             .try_next()
             .await
-            .map_err(|e| BackendError::Interface(format!("rtnetlink link get '{iface_name}': {e}")))?
-            .ok_or_else(|| BackendError::Interface(format!("interface '{iface_name}' not found")))?;
+            .map_err(|e| {
+                BackendError::Interface(format!("rtnetlink link get '{iface_name}': {e}"))
+            })?
+            .ok_or_else(|| {
+                BackendError::Interface(format!("interface '{iface_name}' not found"))
+            })?;
         let if_index = link.header.index;
 
         // Assign each address.
@@ -765,7 +860,9 @@ impl WireGuardBackend {
                 .execute()
                 .await
                 .map_err(|e| {
-                    BackendError::Interface(format!("rtnetlink addr add {addr} dev {iface_name}: {e}"))
+                    BackendError::Interface(format!(
+                        "rtnetlink addr add {addr} dev {iface_name}: {e}"
+                    ))
                 })?;
         }
 
@@ -780,7 +877,11 @@ impl WireGuardBackend {
                 BackendError::Interface(format!("rtnetlink link set up '{iface_name}': {e}"))
             })?;
 
-        info!("interface {} brought up with {} address(es) (rtnetlink)", iface_name, wg_cfg.addresses.len());
+        info!(
+            "interface {} brought up with {} address(es) (rtnetlink)",
+            iface_name,
+            wg_cfg.addresses.len()
+        );
         Ok(())
     }
 
@@ -808,12 +909,14 @@ impl WireGuardBackend {
         let mut endpoint_host_routes: Vec<String> = Vec::new();
 
         // Determine whether full-tunnel routing is needed for each family.
-        let needs_full_tunnel_v4 = wg_cfg.peers.iter().any(|p| {
-            p.allowed_ips.iter().any(|ip| ip.to_string() == "0.0.0.0/0")
-        });
-        let needs_full_tunnel_v6 = wg_cfg.peers.iter().any(|p| {
-            p.allowed_ips.iter().any(|ip| ip.to_string() == "::/0")
-        });
+        let needs_full_tunnel_v4 = wg_cfg
+            .peers
+            .iter()
+            .any(|p| p.allowed_ips.iter().any(|ip| ip.to_string() == "0.0.0.0/0"));
+        let needs_full_tunnel_v6 = wg_cfg
+            .peers
+            .iter()
+            .any(|p| p.allowed_ips.iter().any(|ip| ip.to_string() == "::/0"));
 
         // ----------------------------------------------------------------
         // Phase 1: Capture default routes via rtnetlink.
@@ -833,13 +936,18 @@ impl WireGuardBackend {
 
         if needs_full_tunnel_v4 || needs_full_tunnel_v6 {
             for peer in &wg_cfg.peers {
-                let Some(ref ep) = peer.endpoint else { continue };
+                let Some(ref ep) = peer.endpoint else {
+                    continue;
+                };
 
                 let ep_ip = match tokio::net::lookup_host(ep.as_str()).await {
                     Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
                         Some(ip) => ip,
                         None => {
-                            warn!("endpoint {} resolved to zero addresses — skipping host route", ep);
+                            warn!(
+                                "endpoint {} resolved to zero addresses — skipping host route",
+                                ep
+                            );
                             continue;
                         }
                     },
@@ -850,9 +958,17 @@ impl WireGuardBackend {
                 };
 
                 let (host_cidr, gw_info, family_active) = if ep_ip.is_ipv4() {
-                    (format!("{}/32", ep_ip), gw_v4.as_ref(), needs_full_tunnel_v4)
+                    (
+                        format!("{}/32", ep_ip),
+                        gw_v4.as_ref(),
+                        needs_full_tunnel_v4,
+                    )
                 } else {
-                    (format!("{}/128", ep_ip), gw_v6.as_ref(), needs_full_tunnel_v6)
+                    (
+                        format!("{}/128", ep_ip),
+                        gw_v6.as_ref(),
+                        needs_full_tunnel_v6,
+                    )
                 };
 
                 if !family_active {
@@ -861,7 +977,10 @@ impl WireGuardBackend {
 
                 match gw_info {
                     Some((gw, oif)) => {
-                        info!("adding endpoint host route: {} via {} oif {}", host_cidr, gw, oif);
+                        info!(
+                            "adding endpoint host route: {} via {} oif {}",
+                            host_cidr, gw, oif
+                        );
                         match add_host_route(ep_ip, *gw, *oif).await {
                             Ok(()) => {
                                 info!("endpoint host route {} — ok", host_cidr);
@@ -915,9 +1034,17 @@ impl WireGuardBackend {
                 let is_default_v4 = cidr == "0.0.0.0/0";
                 let is_default_v6 = cidr == "::/0";
 
-                let metric = if is_default_v4 || is_default_v6 { Some(100) } else { None };
-                info!("adding route {} dev {}{}", cidr, iface_name,
-                    metric.map(|m| format!(" metric {m}")).unwrap_or_default());
+                let metric = if is_default_v4 || is_default_v6 {
+                    Some(100)
+                } else {
+                    None
+                };
+                info!(
+                    "adding route {} dev {}{}",
+                    cidr,
+                    iface_name,
+                    metric.map(|m| format!(" metric {m}")).unwrap_or_default()
+                );
 
                 add_allowed_ip_route(&cidr, iface_index, metric).await?;
                 debug!("added route {} dev {}", cidr, iface_name);
@@ -1135,7 +1262,6 @@ impl WireGuardBackend {
 
         Some(ifindex)
     }
-
 }
 
 /// Remove a WireGuard kernel interface via rtnetlink.
@@ -1153,7 +1279,11 @@ async fn delete_interface(iface_name: &str) -> Result<(), BackendError> {
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
 
-    let mut links = handle.link().get().match_name(iface_name.to_owned()).execute();
+    let mut links = handle
+        .link()
+        .get()
+        .match_name(iface_name.to_owned())
+        .execute();
     let link = links
         .try_next()
         .await
@@ -1218,12 +1348,14 @@ impl VpnBackend for WireGuardBackend {
         //   full_tunnel=true  → ensure 0.0.0.0/0 and ::/0 are in AllowedIPs
         //   full_tunnel=false → remove 0.0.0.0/0 and ::/0 (use explicit routes only)
         let effective_cfg: std::borrow::Cow<'_, WireGuardConfig> = if profile.full_tunnel {
-            let has_v4 = wg_cfg.peers.iter().any(|p| {
-                p.allowed_ips.iter().any(|ip| ip.to_string() == "0.0.0.0/0")
-            });
-            let has_v6 = wg_cfg.peers.iter().any(|p| {
-                p.allowed_ips.iter().any(|ip| ip.to_string() == "::/0")
-            });
+            let has_v4 = wg_cfg
+                .peers
+                .iter()
+                .any(|p| p.allowed_ips.iter().any(|ip| ip.to_string() == "0.0.0.0/0"));
+            let has_v6 = wg_cfg
+                .peers
+                .iter()
+                .any(|p| p.allowed_ips.iter().any(|ip| ip.to_string() == "::/0"));
             if has_v4 && has_v6 {
                 std::borrow::Cow::Borrowed(wg_cfg)
             } else {
@@ -1265,10 +1397,12 @@ impl VpnBackend for WireGuardBackend {
             // stalls until timeout. Cryptokey routing allows a prefix in only
             // one peer, so the missing host prefixes go to the first peer —
             // split profiles overwhelmingly have exactly one.
-            let all_allowed: Vec<ipnet::IpNet> =
-                cfg.peers.iter().flat_map(|p| p.allowed_ips.iter().copied()).collect();
-            let missing =
-                supermgr_core::vpn::profile::uncovered_dns_hosts(&all_allowed, &cfg.dns);
+            let all_allowed: Vec<ipnet::IpNet> = cfg
+                .peers
+                .iter()
+                .flat_map(|p| p.allowed_ips.iter().copied())
+                .collect();
+            let missing = supermgr_core::vpn::profile::uncovered_dns_hosts(&all_allowed, &cfg.dns);
             if !missing.is_empty() {
                 if let Some(first) = cfg.peers.first_mut() {
                     info!(
@@ -1283,7 +1417,8 @@ impl VpnBackend for WireGuardBackend {
         let wg_cfg = effective_cfg.as_ref();
 
         // 2. Create / configure the WireGuard kernel interface.
-        self.apply_wg_config(&iface_name, wg_cfg, private_key).await?;
+        self.apply_wg_config(&iface_name, wg_cfg, private_key)
+            .await?;
 
         // 3. Assign addresses and bring the interface up.
         self.assign_addresses(&iface_name, wg_cfg).await?;
@@ -1353,12 +1488,10 @@ impl VpnBackend for WireGuardBackend {
                     )
                     .await
                     {
-                        Ok(proxy) => {
-                            match proxy.call_method("RevertLink", &(ifindex,)).await {
-                                Ok(_) => info!("RevertLink({iface_name}) — ok"),
-                                Err(e) => warn!("RevertLink({iface_name}) failed: {e}"),
-                            }
-                        }
+                        Ok(proxy) => match proxy.call_method("RevertLink", &(ifindex,)).await {
+                            Ok(_) => info!("RevertLink({iface_name}) — ok"),
+                            Err(e) => warn!("RevertLink({iface_name}) failed: {e}"),
+                        },
                         Err(e) => warn!("resolve1 proxy for RevertLink failed: {e}"),
                     }
                 }
@@ -1408,7 +1541,11 @@ impl VpnBackend for WireGuardBackend {
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
-        let (iface_name, cached_addresses, connected_at): (String, Vec<ipnet::IpNet>, Option<std::time::Instant>) = {
+        let (iface_name, cached_addresses, connected_at): (
+            String,
+            Vec<ipnet::IpNet>,
+            Option<std::time::Instant>,
+        ) = {
             let state = self.state.lock().await;
             match state.interface.clone() {
                 Some(name) => (name, state.addresses.clone(), state.connected_at),
@@ -1436,16 +1573,13 @@ impl VpnBackend for WireGuardBackend {
 
             if let Some(lhs) = peer.stats.last_handshake_time {
                 use std::time::UNIX_EPOCH;
-                let secs: u64 = lhs
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let secs: u64 = lhs.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 // chrono 0.4.27+: from_timestamp returns Option<DateTime<Utc>>.
                 if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
-                    last_handshake =
-                        Some(last_handshake.map_or(dt, |prev: chrono::DateTime<chrono::Utc>| {
-                            prev.max(dt)
-                        }));
+                    last_handshake = Some(
+                        last_handshake
+                            .map_or(dt, |prev: chrono::DateTime<chrono::Utc>| prev.max(dt)),
+                    );
                 }
             }
         }
@@ -1545,8 +1679,14 @@ mod module_hint_tests {
         );
 
         assert!(msg.contains("reboot"), "no remedy given: {msg}");
-        assert!(msg.contains("7.1.5-1-cachyos"), "does not name the running kernel: {msg}");
-        assert!(msg.contains("7.2.0-1-cachyos"), "does not name the installed one: {msg}");
+        assert!(
+            msg.contains("7.1.5-1-cachyos"),
+            "does not name the running kernel: {msg}"
+        );
+        assert!(
+            msg.contains("7.2.0-1-cachyos"),
+            "does not name the installed one: {msg}"
+        );
         assert!(
             !msg.contains("sudo modprobe"),
             "tells you to run modprobe when no tree exists to load from: {msg}"
@@ -1560,7 +1700,9 @@ mod module_hint_tests {
     #[test]
     fn a_missing_tree_with_no_alternative_says_so_without_blaming_the_config() {
         let msg = super::wireguard_unsupported_hint_for(
-            ModuleTree::Missing { running: "9.9.9-custom".into() },
+            ModuleTree::Missing {
+                running: "9.9.9-custom".into(),
+            },
             "os error 95",
         );
         assert!(msg.contains("9.9.9-custom"), "{msg}");
@@ -1584,11 +1726,13 @@ mod module_hint_tests {
         match kernel_module_tree_state() {
             ModuleTree::Present => {}
             ModuleTree::Stale { running, .. } | ModuleTree::Missing { running } => {
-                assert!(!running.is_empty(), "claimed a bad tree without naming the kernel");
+                assert!(
+                    !running.is_empty(),
+                    "claimed a bad tree without naming the kernel"
+                );
             }
         }
     }
-
 
     #[test]
     fn a_loaded_module_is_not_told_to_load_it_again() {

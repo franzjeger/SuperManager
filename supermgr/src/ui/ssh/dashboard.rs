@@ -90,9 +90,18 @@ pub fn build_ssh_dashboard(
         .halign(gtk4::Align::Center)
         .hexpand(true)
         .build();
-    let btn_all = gtk4::ToggleButton::builder().label("All").active(true).build();
-    let btn_fg  = gtk4::ToggleButton::builder().label("FortiGate").group(&btn_all).build();
-    let btn_ui  = gtk4::ToggleButton::builder().label("UniFi").group(&btn_all).build();
+    let btn_all = gtk4::ToggleButton::builder()
+        .label("All")
+        .active(true)
+        .build();
+    let btn_fg = gtk4::ToggleButton::builder()
+        .label("FortiGate")
+        .group(&btn_all)
+        .build();
+    let btn_ui = gtk4::ToggleButton::builder()
+        .label("UniFi")
+        .group(&btn_all)
+        .build();
     filter_box.append(&btn_all);
     filter_box.append(&btn_fg);
     filter_box.append(&btn_ui);
@@ -155,7 +164,11 @@ pub fn build_ssh_dashboard(
             _ => {
                 let a_name = a.widget_name();
                 let b_name = b.widget_name();
-                if a_name < b_name { gtk4::Ordering::Smaller } else { gtk4::Ordering::Larger }
+                if a_name < b_name {
+                    gtk4::Ordering::Smaller
+                } else {
+                    gtk4::Ordering::Larger
+                }
             }
         }
     });
@@ -181,7 +194,9 @@ pub fn build_ssh_dashboard(
             let search_ok = if filter_query.is_empty() {
                 true
             } else {
-                collect_card_text(child.upcast_ref()).to_lowercase().contains(&filter_query)
+                collect_card_text(child.upcast_ref())
+                    .to_lowercase()
+                    .contains(&filter_query)
             };
 
             type_ok && search_ok
@@ -189,14 +204,24 @@ pub fn build_ssh_dashboard(
     }
 
     // Wire up filter buttons + search to invalidate the filter.
-    let setup_filter = |flow_box: &gtk4::FlowBox, btn_all: &gtk4::ToggleButton, btn_fg: &gtk4::ToggleButton, btn_ui: &gtk4::ToggleButton, search: &gtk4::SearchEntry| {
+    let setup_filter = |flow_box: &gtk4::FlowBox,
+                        btn_all: &gtk4::ToggleButton,
+                        btn_fg: &gtk4::ToggleButton,
+                        btn_ui: &gtk4::ToggleButton,
+                        search: &gtk4::SearchEntry| {
         let update = {
             let flow_box = flow_box.clone();
             let btn_all = btn_all.clone();
             let btn_fg = btn_fg.clone();
             let search = search.clone();
             move || {
-                let t = if btn_all.is_active() { "all" } else if btn_fg.is_active() { "fg" } else { "ui" };
+                let t = if btn_all.is_active() {
+                    "all"
+                } else if btn_fg.is_active() {
+                    "fg"
+                } else {
+                    "ui"
+                };
                 let q = search.text().to_string();
                 flow_box.set_widget_name(&format!("filter:{t}:{q}"));
                 flow_box.invalidate_filter();
@@ -263,11 +288,7 @@ pub fn build_ssh_dashboard(
         });
     }
 
-    (
-        flow_box.clone(),
-        outer_stack.clone(),
-        outer_stack.upcast(),
-    )
+    (flow_box.clone(), outer_stack.clone(), outer_stack.upcast())
 }
 
 /// Check if any label in the widget tree has the "error" CSS class (offline dot).
@@ -279,7 +300,9 @@ fn has_error_class(widget: &gtk4::Widget) -> bool {
     }
     let mut child = widget.first_child();
     while let Some(c) = child {
-        if has_error_class(&c) { return true; }
+        if has_error_class(&c) {
+            return true;
+        }
         child = c.next_sibling();
     }
     false
@@ -374,14 +397,14 @@ pub fn populate_dashboard(
                                 if let Ok(proxy) = DaemonProxy::new(&conn).await {
                                     match proxy.fortigate_backup_config(&host_id).await {
                                         Ok(path) => {
-                                            let _ = tx.send(AppMsg::ShowToast(
-                                                format!("Backup saved: {path}"),
-                                            ));
+                                            let _ = tx.send(AppMsg::ShowToast(format!(
+                                                "Backup saved: {path}"
+                                            )));
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(AppMsg::OperationFailed(
-                                                format!("Backup failed: {e}"),
-                                            ));
+                                            let _ = tx.send(AppMsg::OperationFailed(format!(
+                                                "Backup failed: {e}"
+                                            )));
                                         }
                                     }
                                 }
@@ -425,9 +448,10 @@ pub fn populate_dashboard(
                                     ));
                                 }
                                 Ok(diff) => {
-                                    let _ = tx.send(AppMsg::ShowToast(
-                                        format!("Config diff: {} changes", diff.lines().count()),
-                                    ));
+                                    let _ = tx.send(AppMsg::ShowToast(format!(
+                                        "Config diff: {} changes",
+                                        diff.lines().count()
+                                    )));
                                     // Store diff for display.
                                     let _ = tx.send(AppMsg::FortigateConfigDiff {
                                         hostname: hostname.clone(),
@@ -435,9 +459,8 @@ pub fn populate_dashboard(
                                     });
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(AppMsg::OperationFailed(
-                                        format!("Diff failed: {e}"),
-                                    ));
+                                    let _ = tx
+                                        .send(AppMsg::OperationFailed(format!("Diff failed: {e}")));
                                 }
                             }
                         });
@@ -527,12 +550,18 @@ pub fn populate_dashboard(
 
                 // WAN interface (IP, link speed).
                 if let Ok(iface_resp) = proxy
-                    .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/interface?interface_name=wan", "")
+                    .fortigate_api(
+                        &host_id,
+                        "GET",
+                        "/api/v2/monitor/system/interface?interface_name=wan",
+                        "",
+                    )
                     .await
                 {
                     if let Ok(iface_data) = serde_json::from_str::<Value>(&iface_resp) {
                         // Try wan, wan1, or first interface with an IP.
-                        let wan = iface_data.pointer("/results/wan")
+                        let wan = iface_data
+                            .pointer("/results/wan")
                             .or_else(|| iface_data.pointer("/results/wan1"));
                         if let Some(wan) = wan {
                             data["wan_ip"] = wan.get("ip").cloned().unwrap_or(Value::Null);
@@ -541,7 +570,8 @@ pub fn populate_dashboard(
                 }
 
                 // Firmware update check — only show versions newer than current.
-                let current_ver = data.get("version")
+                let current_ver = data
+                    .get("version")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
@@ -550,7 +580,8 @@ pub fn populate_dashboard(
                     .await
                 {
                     if let Ok(fw_data) = serde_json::from_str::<Value>(&fw_resp) {
-                        if let Some(arr) = fw_data.pointer("/results/available")
+                        if let Some(arr) = fw_data
+                            .pointer("/results/available")
                             .and_then(|v| v.as_array())
                         {
                             // Find a version that is strictly newer than current.
@@ -567,7 +598,8 @@ pub fn populate_dashboard(
                 }
 
                 // Active session count (from resource/usage already fetched).
-                if let Some(sessions) = data.pointer("/resource/session")
+                if let Some(sessions) = data
+                    .pointer("/resource/session")
                     .and_then(|v| v.as_array())
                     .and_then(|a| a.first())
                     .and_then(|v| v.get("current"))
@@ -649,7 +681,10 @@ pub fn populate_dashboard(
 async fn fetch_unifi_cloud_devices(
     api_key: &str,
 ) -> anyhow::Result<Vec<(String, String, String, Value)>> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
 
     // Fetch hosts (consoles) to get site names.
     let resp = client
@@ -664,16 +699,19 @@ async fn fetch_unifi_cloud_devices(
     let hosts_resp: Value = resp.json().await?;
 
     // Map host ID -> (hostname, WAN IP).
-    let mut host_info: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    let mut host_info: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     if let Some(hosts) = hosts_resp.get("data").and_then(|d| d.as_array()) {
         for host in hosts {
             if let Some(id) = host.get("id").and_then(|v| v.as_str()) {
-                let name = host.get("reportedState")
+                let name = host
+                    .get("reportedState")
                     .and_then(|s| s.get("hostname"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown")
                     .to_owned();
-                let wan_ip = host.get("ipAddress")
+                let wan_ip = host
+                    .get("ipAddress")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_owned();
@@ -697,32 +735,60 @@ async fn fetch_unifi_cloud_devices(
         for item in items {
             let devices = item.get("devices").and_then(|d| d.as_array());
             let api_host_id = item.get("hostId").and_then(|v| v.as_str()).unwrap_or("");
-            let (site_name, site_wan_ip) = host_info.get(api_host_id)
-                .cloned()
-                .unwrap_or_default();
+            let (site_name, site_wan_ip) = host_info.get(api_host_id).cloned().unwrap_or_default();
 
             if let Some(devs) = devices {
                 for dev in devs {
-                    let dev_id = dev.get("mac").and_then(|v| v.as_str())
-                        .unwrap_or("unknown").to_owned();
-                    let dev_name = dev.get("name").and_then(|v| v.as_str())
-                        .unwrap_or("UniFi Device").to_owned();
-                    let ip = dev.get("ip").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let model = dev.get("model").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let shortname = dev.get("shortname").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let version = dev.get("version").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let status = dev.get("status").and_then(|v| v.as_str())
-                        .unwrap_or("offline").to_owned();
-                    let startup_time = dev.get("startupTime").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let firmware_status = dev.get("firmwareStatus").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
-                    let product_line = dev.get("productLine").and_then(|v| v.as_str())
-                        .unwrap_or("").to_owned();
+                    let dev_id = dev
+                        .get("mac")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    let dev_name = dev
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("UniFi Device")
+                        .to_owned();
+                    let ip = dev
+                        .get("ip")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let model = dev
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let shortname = dev
+                        .get("shortname")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let version = dev
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let status = dev
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("offline")
+                        .to_owned();
+                    let startup_time = dev
+                        .get("startupTime")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let firmware_status = dev
+                        .get("firmwareStatus")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
+                    let product_line = dev
+                        .get("productLine")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_owned();
 
                     // Only include network devices.
                     if product_line != "network" && !product_line.is_empty() {
@@ -774,10 +840,9 @@ async fn fetch_unifi_cloud_devices(
     // Send webhook for offline devices.
     let settings = AppSettings::load();
     if !settings.webhook_url.is_empty() {
-        let offline: Vec<&str> = result.iter()
-            .filter(|(_, _, _, data)| {
-                data.get("status").and_then(|v| v.as_str()) != Some("online")
-            })
+        let offline: Vec<&str> = result
+            .iter()
+            .filter(|(_, _, _, data)| data.get("status").and_then(|v| v.as_str()) != Some("online"))
             .map(|(_, label, _, _)| label.as_str())
             .collect();
         if !offline.is_empty() {
@@ -785,9 +850,13 @@ async fn fetch_unifi_cloud_devices(
                 "\u{26a0}\u{fe0f} UniFi devices offline: {}",
                 offline.join(", ")
             );
-            let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default();
             let payload = serde_json::json!({ "text": &msg, "content": &msg });
-            let _ = client.post(&settings.webhook_url)
+            let _ = client
+                .post(&settings.webhook_url)
                 .json(&payload)
                 .send()
                 .await;
@@ -802,10 +871,7 @@ async fn fetch_unifi_cloud_devices(
 // UniFi local controller status fetch
 // ---------------------------------------------------------------------------
 
-async fn fetch_unifi_status(
-    proxy: &DaemonProxy<'_>,
-    host_id: &str,
-) -> anyhow::Result<Value> {
+async fn fetch_unifi_status(proxy: &DaemonProxy<'_>, host_id: &str) -> anyhow::Result<Value> {
     // UniFi controller API: /api/s/default/stat/device
     let resp = proxy
         .unifi_api(host_id, "GET", "/api/s/default/stat/device", "")
@@ -832,11 +898,12 @@ async fn fetch_unifi_status(
                 data["clients"] = nc.clone();
             }
             // Model name
-            if let Some(mn) = dev.get("model_in_lts") .or_else(|| dev.get("model_in_eol")) {
+            if let Some(mn) = dev.get("model_in_lts").or_else(|| dev.get("model_in_eol")) {
                 data["model_name"] = mn.clone();
             }
             // WAN IP (for UDM/USG)
-            if let Some(wan_ip) = dev.pointer("/wan1/ip")
+            if let Some(wan_ip) = dev
+                .pointer("/wan1/ip")
                 .or_else(|| dev.pointer("/wan/ip"))
                 .or_else(|| dev.get("ip"))
             {
@@ -892,10 +959,7 @@ fn make_progress_row(label_text: &str, bar_name: &str, pct_name: &str) -> gtk4::
 }
 
 /// Build a single device card for the flow box.
-fn build_device_card(
-    host: &HostSummary,
-    app_state: &Arc<Mutex<AppState>>,
-) -> gtk4::FlowBoxChild {
+fn build_device_card(host: &HostSummary, app_state: &Arc<Mutex<AppState>>) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
         .spacing(6)
@@ -976,14 +1040,25 @@ fn build_device_card(
         .margin_top(2)
         .build();
 
-    info_box.append(&make_caption_label("Loading\u{2026}", &format!("model-{id}")));
+    info_box.append(&make_caption_label(
+        "Loading\u{2026}",
+        &format!("model-{id}"),
+    ));
     info_box.append(&make_caption_label("", &format!("firmware-{id}")));
     info_box.append(&make_caption_label("", &format!("uptime-{id}")));
     info_box.append(&make_caption_label("", &format!("wan-ip-{id}")));
 
     // CPU + Memory bars.
-    info_box.append(&make_progress_row("CPU", &format!("cpu-bar-{id}"), &format!("cpu-pct-{id}")));
-    info_box.append(&make_progress_row("Mem", &format!("mem-bar-{id}"), &format!("mem-pct-{id}")));
+    info_box.append(&make_progress_row(
+        "CPU",
+        &format!("cpu-bar-{id}"),
+        &format!("cpu-pct-{id}"),
+    ));
+    info_box.append(&make_progress_row(
+        "Mem",
+        &format!("mem-bar-{id}"),
+        &format!("mem-pct-{id}"),
+    ));
 
     // Bottom stat (VPN tunnels for FortiGate, clients for UniFi).
     let bottom_lbl = make_caption_label("", &format!("bottom-stat-{id}"));
@@ -1019,7 +1094,14 @@ pub fn apply_dashboard_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Va
         update_label_by_name(flow_box, &format!("model-{host_id}"), |lbl| {
             lbl.set_label("Unreachable");
         });
-        for f in &["firmware", "uptime", "wan-ip", "cpu-pct", "mem-pct", "bottom-stat"] {
+        for f in &[
+            "firmware",
+            "uptime",
+            "wan-ip",
+            "cpu-pct",
+            "mem-pct",
+            "bottom-stat",
+        ] {
             update_label_by_name(flow_box, &format!("{f}-{host_id}"), |lbl| {
                 lbl.set_label("");
             });
@@ -1062,10 +1144,17 @@ pub fn summary_text(cards: &[CardState]) -> String {
         return String::new();
     }
     let count = |want: CardState| cards.iter().filter(|c| **c == want).count();
-    let (online, offline, pending) =
-        (count(CardState::Online), count(CardState::Offline), count(CardState::Pending));
+    let (online, offline, pending) = (
+        count(CardState::Online),
+        count(CardState::Offline),
+        count(CardState::Pending),
+    );
 
-    let noun = if cards.len() == 1 { "device" } else { "devices" };
+    let noun = if cards.len() == 1 {
+        "device"
+    } else {
+        "devices"
+    };
     let mut text = format!("{} {noun} \u{2014} {online} online", cards.len());
     if offline > 0 {
         text.push_str(&format!(" \u{2014} {offline} offline"));
@@ -1092,8 +1181,10 @@ pub fn refresh_summary(flow_box: &gtk4::FlowBox) {
     }
 
     // Walk up to find the summary label (sibling of the flow_box's scroll parent).
-    if let Some(parent) = flow_box.parent() {             // ScrolledWindow
-        if let Some(content_box) = parent.parent() {      // content VBox
+    if let Some(parent) = flow_box.parent() {
+        // ScrolledWindow
+        if let Some(content_box) = parent.parent() {
+            // content VBox
             if let Some(summary) = find_widget_by_name(&content_box, "dashboard-summary") {
                 if let Some(lbl) = summary.downcast_ref::<gtk4::Label>() {
                     lbl.set_label(&summary_text(&cards));
@@ -1111,7 +1202,9 @@ fn has_success_class(widget: &gtk4::Widget) -> bool {
     }
     let mut child = widget.first_child();
     while let Some(c) = child {
-        if has_success_class(&c) { return true; }
+        if has_success_class(&c) {
+            return true;
+        }
         child = c.next_sibling();
     }
     false
@@ -1119,10 +1212,16 @@ fn has_success_class(widget: &gtk4::Widget) -> bool {
 
 fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value, results: &Value) {
     // Model + serial.
-    let model = data.get("model").or_else(|| results.get("model"))
-        .and_then(|v| v.as_str()).unwrap_or("FortiGate");
-    let serial = data.get("serial").or_else(|| results.get("serial"))
-        .and_then(|v| v.as_str()).unwrap_or("");
+    let model = data
+        .get("model")
+        .or_else(|| results.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("FortiGate");
+    let serial = data
+        .get("serial")
+        .or_else(|| results.get("serial"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let model_text = if serial.is_empty() {
         model.to_owned()
     } else {
@@ -1133,8 +1232,11 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
     });
 
     // Firmware.
-    let version = data.get("version").or_else(|| results.get("version"))
-        .and_then(|v| v.as_str()).unwrap_or("--");
+    let version = data
+        .get("version")
+        .or_else(|| results.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("--");
     let build = data.get("build").and_then(|v| v.as_u64()).unwrap_or(0);
     let fw_update = data.get("firmware_update").and_then(|v| v.as_str());
     let fw = if let Some(update_ver) = fw_update {
@@ -1267,15 +1369,24 @@ fn version_is_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn format_ago(secs: u64) -> String {
-    if secs < 60 { return "just now".to_owned(); }
-    if secs < 3600 { return format!("{}m ago", secs / 60); }
-    if secs < 86400 { return format!("{}h ago", secs / 3600); }
+    if secs < 60 {
+        return "just now".to_owned();
+    }
+    if secs < 3600 {
+        return format!("{}m ago", secs / 60);
+    }
+    if secs < 86400 {
+        return format!("{}h ago", secs / 3600);
+    }
     format!("{}d ago", secs / 86400)
 }
 
 fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     // Health dot: online/offline from status field.
-    let status = data.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let status = data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     update_label_by_name(flow_box, &format!("health-dot-{host_id}"), |lbl| {
         if status == "online" {
             lbl.set_css_classes(&["success"]);
@@ -1285,8 +1396,11 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     });
 
     // Model.
-    let model = data.get("model_name").or_else(|| data.get("model"))
-        .and_then(|v| v.as_str()).unwrap_or("UniFi");
+    let model = data
+        .get("model_name")
+        .or_else(|| data.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("UniFi");
     let shortname = data.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let model_text = if !shortname.is_empty() && shortname != model {
         format!("{model} ({shortname})")
@@ -1299,7 +1413,10 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
 
     // Firmware + update status.
     let ver = data.get("version").and_then(|v| v.as_str()).unwrap_or("");
-    let fw_status = data.get("firmware_status").and_then(|v| v.as_str()).unwrap_or("");
+    let fw_status = data
+        .get("firmware_status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let fw_text = if fw_status == "updateAvailable" {
         format!("{ver} (update available)")
     } else if !ver.is_empty() {
@@ -1328,9 +1445,10 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     }
 
     // CPU (UniFi returns as string percentage like "12").
-    if let Some(cpu) = data.get("cpu").and_then(|v| {
-        v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok())
-    }) {
+    if let Some(cpu) = data
+        .get("cpu")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok()))
+    {
         update_label_by_name(flow_box, &format!("cpu-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{cpu}%"));
         });
@@ -1338,9 +1456,10 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     }
 
     // Memory.
-    if let Some(mem) = data.get("mem").and_then(|v| {
-        v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok())
-    }) {
+    if let Some(mem) = data
+        .get("mem")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse::<u64>().ok()))
+    {
         update_label_by_name(flow_box, &format!("mem-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{mem}%"));
         });
@@ -1360,10 +1479,14 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
 fn extract_resource_val(resource: Option<&Value>, results: &Value, key: &str) -> Option<u64> {
     resource
         .and_then(|r| r.get(key))
-        .and_then(|v| v.as_u64().or_else(|| v.as_array()?.first()?.get("current")?.as_u64()))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_array()?.first()?.get("current")?.as_u64())
+        })
         .or_else(|| {
             let v = results.get(key)?;
-            v.as_u64().or_else(|| v.as_array()?.first()?.get("current")?.as_u64())
+            v.as_u64()
+                .or_else(|| v.as_array()?.first()?.get("current")?.as_u64())
         })
 }
 
@@ -1377,9 +1500,17 @@ pub fn add_cloud_device_cards(
     flow_box: &gtk4::FlowBox,
     devices: &[(String, String, String, Value)],
 ) {
-    let batch: Vec<_> = devices.iter().map(|(id, label, hostname, data)| {
-        (id.replace(':', ""), label.clone(), hostname.clone(), data.clone())
-    }).collect();
+    let batch: Vec<_> = devices
+        .iter()
+        .map(|(id, label, hostname, data)| {
+            (
+                id.replace(':', ""),
+                label.clone(),
+                hostname.clone(),
+                data.clone(),
+            )
+        })
+        .collect();
 
     let flow_box = flow_box.clone();
     let idx = std::rc::Rc::new(std::cell::Cell::new(0usize));
@@ -1475,8 +1606,16 @@ fn build_cloud_card(id: &str, label: &str, hostname: &str, site: &str) -> gtk4::
     info_box.append(&make_caption_label("", &format!("firmware-{id}")));
     info_box.append(&make_caption_label("", &format!("uptime-{id}")));
     info_box.append(&make_caption_label("", &format!("wan-ip-{id}")));
-    info_box.append(&make_progress_row("CPU", &format!("cpu-bar-{id}"), &format!("cpu-pct-{id}")));
-    info_box.append(&make_progress_row("Mem", &format!("mem-bar-{id}"), &format!("mem-pct-{id}")));
+    info_box.append(&make_progress_row(
+        "CPU",
+        &format!("cpu-bar-{id}"),
+        &format!("cpu-pct-{id}"),
+    ));
+    info_box.append(&make_progress_row(
+        "Mem",
+        &format!("mem-bar-{id}"),
+        &format!("mem-pct-{id}"),
+    ));
     info_box.append(&make_caption_label("", &format!("bottom-stat-{id}")));
 
     card.append(&info_box);
@@ -1557,14 +1696,20 @@ mod summary_tests {
             CardState::Offline,
             CardState::Pending,
         ]);
-        assert_eq!(text, "4 devices \u{2014} 2 online \u{2014} 1 offline \u{2014} 1 waiting");
+        assert_eq!(
+            text,
+            "4 devices \u{2014} 2 online \u{2014} 1 offline \u{2014} 1 waiting"
+        );
     }
 
     #[test]
     fn a_healthy_fleet_says_nothing_it_does_not_have_to() {
         // No zero counts padding out the line — the only numbers shown are
         // ones that are not zero, so anything visible is worth reading.
-        assert_eq!(summary_text(&[CardState::Online]), "1 device \u{2014} 1 online");
+        assert_eq!(
+            summary_text(&[CardState::Online]),
+            "1 device \u{2014} 1 online"
+        );
     }
 
     #[test]
@@ -1575,8 +1720,13 @@ mod summary_tests {
     }
 }
 
-
 #[cfg(test)]
-pub(crate) fn preview_cards(flow: &gtk4::FlowBox, hosts: &[HostSummary], state: &Arc<Mutex<AppState>>) {
-    for host in hosts { flow.insert(&build_device_card(host, state), -1); }
+pub(crate) fn preview_cards(
+    flow: &gtk4::FlowBox,
+    hosts: &[HostSummary],
+    state: &Arc<Mutex<AppState>>,
+) {
+    for host in hosts {
+        flow.insert(&build_device_card(host, state), -1);
+    }
 }

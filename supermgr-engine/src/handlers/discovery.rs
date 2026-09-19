@@ -57,13 +57,14 @@ impl EngineServer {
                     .collect()
             })
             .unwrap_or_default();
-        let ports: Vec<u16> = params
-            .get("ports")
-            .and_then(|v| v.as_array()).map_or_else(|| crate::probes::COMMON_PORTS.to_vec(), |arr| {
+        let ports: Vec<u16> = params.get("ports").and_then(|v| v.as_array()).map_or_else(
+            || crate::probes::COMMON_PORTS.to_vec(),
+            |arr| {
                 arr.iter()
                     .filter_map(|x| x.as_u64().map(|n| n as u16))
                     .collect()
-            });
+            },
+        );
         let cap = params
             .get("max_targets")
             .and_then(serde_json::Value::as_u64)
@@ -92,7 +93,8 @@ impl EngineServer {
                         &engagement.exclusions,
                     );
                     if !violations.is_empty() {
-                        let sample = violations.iter()
+                        let sample = violations
+                            .iter()
                             .take(5)
                             .cloned()
                             .collect::<Vec<_>>()
@@ -171,11 +173,8 @@ impl EngineServer {
                     }
                 }
                 if !controllers.is_empty() {
-                    let macs: Vec<String> = result
-                        .hosts
-                        .iter()
-                        .filter_map(|h| h.mac.clone())
-                        .collect();
+                    let macs: Vec<String> =
+                        result.hosts.iter().filter_map(|h| h.mac.clone()).collect();
                     if !macs.is_empty() {
                         let by_mac = crate::unifi_controllers::cross_reference(
                             &self.secrets,
@@ -328,7 +327,9 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        let evidence_dir = if let Some(eid) = engagement_id.as_deref() { crate::traffic_sniff::engagement_evidence_dir(eid) } else {
+        let evidence_dir = if let Some(eid) = engagement_id.as_deref() {
+            crate::traffic_sniff::engagement_evidence_dir(eid)
+        } else {
             let mut p = crate::secrets::default_data_dir();
             p.push("captures");
             p

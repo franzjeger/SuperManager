@@ -107,7 +107,8 @@ pub async fn set_inform(
     }
     // Sanity-check it parses as a URL so we fail fast on
     // typos rather than getting an opaque shell exit.
-    let _parsed: reqwest::Url = url.parse()
+    let _parsed: reqwest::Url = url
+        .parse()
         .with_context(|| format!("invalid inform URL: {url:?}"))?;
     // Pre-flight TCP probe with a single retry. EHOSTUNREACH
     // from a daemon process is occasionally just a cold ARP
@@ -224,8 +225,7 @@ pub async fn set_controller(
         .get_mut(&host_id)
         .ok_or_else(|| anyhow!("host vanished: {host_id}"))?;
     host.unifi_controller_url = Some(url.to_owned());
-    host.unifi_api_token_ref =
-        Some(supermgr_core::vpn::profile::SecretRef::new(label.clone()));
+    host.unifi_api_token_ref = Some(supermgr_core::vpn::profile::SecretRef::new(label.clone()));
     host.updated_at = chrono::Utc::now();
     let snapshot = host.clone();
     st.save_ssh_host(&snapshot).context("persist host")?;
@@ -304,10 +304,8 @@ pub async fn api_request(
         .retrieve(&creds_label)
         .await
         .context("retrieve UniFi credentials")?;
-    let creds_str =
-        String::from_utf8(creds_bytes.to_vec()).context("decode credentials")?;
-    let creds: serde_json::Value =
-        serde_json::from_str(&creds_str).context("parse credentials")?;
+    let creds_str = String::from_utf8(creds_bytes.to_vec()).context("decode credentials")?;
+    let creds: serde_json::Value = serde_json::from_str(&creds_str).context("parse credentials")?;
     let username = creds["username"]
         .as_str()
         .ok_or_else(|| anyhow!("missing username in credentials"))?;

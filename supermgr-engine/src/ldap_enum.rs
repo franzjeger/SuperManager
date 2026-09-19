@@ -71,14 +71,12 @@ pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)
     //           04 00             ; bindDN = ""
     //           80 00             ; AuthenticationChoice simple = ""
     let bind = [
-        0x30, 0x0c,
-        0x02, 0x01, 0x01,
-        0x60, 0x07,
-        0x02, 0x01, 0x03,
-        0x04, 0x00,
-        0x80, 0x00,
+        0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00,
     ];
-    if timeout(Duration::from_secs(3), stream.write_all(&bind)).await.is_err() {
+    if timeout(Duration::from_secs(3), stream.write_all(&bind))
+        .await
+        .is_err()
+    {
         return None;
     }
 
@@ -102,7 +100,10 @@ pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)
     // Asks for: namingContexts, defaultNamingContext, dnsHostName,
     // serverName, domainFunctionality, forestFunctionality.
     let search = build_rootdse_search();
-    if timeout(Duration::from_secs(3), stream.write_all(&search)).await.is_err() {
+    if timeout(Duration::from_secs(3), stream.write_all(&search))
+        .await
+        .is_err()
+    {
         return None;
     }
 
@@ -174,14 +175,20 @@ pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)
 /// resultCode 0 = success.
 fn parse_bind_success(bytes: &[u8]) -> bool {
     // Skip outer sequence header (2 bytes), messageID (3 bytes).
-    if bytes.len() < 12 || bytes[0] != 0x30 { return false; }
+    if bytes.len() < 12 || bytes[0] != 0x30 {
+        return false;
+    }
     // After messageID we expect 0x61 (BindResponse tag).
     let after_id_idx = 5; // 0x30 LL 02 01 ID
-    if bytes[after_id_idx] != 0x61 { return false; }
+    if bytes[after_id_idx] != 0x61 {
+        return false;
+    }
     // BindResponse → enumerated tag 0x0a, length 0x01, value.
     // Find first 0x0a 0x01 sequence inside the BindResponse.
     let bind_body_start = after_id_idx + 2; // skip 0x61 LL
-    if bind_body_start + 3 > bytes.len() { return false; }
+    if bind_body_start + 3 > bytes.len() {
+        return false;
+    }
     if bytes[bind_body_start] == 0x0a && bytes[bind_body_start + 1] == 0x01 {
         return bytes[bind_body_start + 2] == 0x00;
     }
@@ -226,13 +233,13 @@ fn build_rootdse_search() -> Vec<u8> {
         attr_seq.extend_from_slice(a.as_bytes());
     }
     let mut body: Vec<u8> = Vec::new();
-    body.extend_from_slice(&[0x04, 0x00]);                     // baseObject ""
-    body.extend_from_slice(&[0x0a, 0x01, 0x00]);               // scope = base
-    body.extend_from_slice(&[0x0a, 0x01, 0x00]);               // derefAliases = never
-    body.extend_from_slice(&[0x02, 0x01, 0x00]);               // sizeLimit = 0
-    body.extend_from_slice(&[0x02, 0x01, 0x05]);               // timeLimit = 5
-    body.extend_from_slice(&[0x01, 0x01, 0x00]);               // typesOnly = false
-    // filter [7] PRESENT "objectClass"
+    body.extend_from_slice(&[0x04, 0x00]); // baseObject ""
+    body.extend_from_slice(&[0x0a, 0x01, 0x00]); // scope = base
+    body.extend_from_slice(&[0x0a, 0x01, 0x00]); // derefAliases = never
+    body.extend_from_slice(&[0x02, 0x01, 0x00]); // sizeLimit = 0
+    body.extend_from_slice(&[0x02, 0x01, 0x05]); // timeLimit = 5
+    body.extend_from_slice(&[0x01, 0x01, 0x00]); // typesOnly = false
+                                                 // filter [7] PRESENT "objectClass"
     body.push(0x87);
     body.push(11);
     body.extend_from_slice(b"objectClass");
@@ -247,7 +254,7 @@ fn build_rootdse_search() -> Vec<u8> {
     search_req.extend_from_slice(&body);
 
     let mut msg: Vec<u8> = Vec::new();
-    msg.extend_from_slice(&[0x02, 0x01, 0x02]);               // messageID = 2
+    msg.extend_from_slice(&[0x02, 0x01, 0x02]); // messageID = 2
     msg.extend_from_slice(&search_req);
 
     let mut envelope: Vec<u8> = Vec::new();
@@ -315,7 +322,9 @@ fn dn_to_dns(dn: &str) -> String {
         .filter_map(|component| {
             let trimmed = component.trim();
             let lower = trimmed.to_lowercase();
-            lower.strip_prefix("dc=").map(std::borrow::ToOwned::to_owned)
+            lower
+                .strip_prefix("dc=")
+                .map(std::borrow::ToOwned::to_owned)
         })
         .collect::<Vec<_>>()
         .join(".")

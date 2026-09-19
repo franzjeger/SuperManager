@@ -56,7 +56,9 @@ static FALLBACKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Spawn the watchdog. Idempotent.
 pub fn spawn_watchdog() -> Result<()> {
     let mut spawned = SPAWNED.lock().unwrap();
-    if *spawned { return Ok(()); }
+    if *spawned {
+        return Ok(());
+    }
     *spawned = true;
     drop(spawned);
 
@@ -73,8 +75,8 @@ pub fn spawn_watchdog() -> Result<()> {
         // domains). Defaults must be reachable everywhere so
         // the watchdog works out of the box on any network.
         *FALLBACKS.lock().unwrap() = vec![
-            "1.1.1.1".to_string(),   // Cloudflare
-            "9.9.9.9".to_string(),   // Quad9
+            "1.1.1.1".to_string(), // Cloudflare
+            "9.9.9.9".to_string(), // Quad9
         ];
     }
 
@@ -252,10 +254,7 @@ fn probe_resolver(ip: &str) -> bool {
         ])
         .output();
     match out {
-        Ok(o) => {
-            o.status.success()
-                && !String::from_utf8_lossy(&o.stdout).trim().is_empty()
-        }
+        Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
         Err(_) => false,
     }
 }

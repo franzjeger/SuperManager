@@ -306,11 +306,24 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             Ok(value)
         }
         #[cfg(target_os = "linux")]
-        "tailscale_devices" => parse_response(proxy.tailscale_list_nodes().await.map_err(|e| e.to_string())?),
+        "tailscale_devices" => parse_response(
+            proxy
+                .tailscale_list_nodes()
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
         #[cfg(target_os = "linux")]
-        "tailscale_management" => parse_response(proxy.tailscale_management().await.map_err(|e| e.to_string())?),
+        "tailscale_management" => parse_response(
+            proxy
+                .tailscale_management()
+                .await
+                .map_err(|e| e.to_string())?,
+        ),
         #[cfg(target_os = "linux")]
-        "findings_scopes" => Ok(json!(proxy.findings_scopes().await.map_err(|e| e.to_string())?)),
+        "findings_scopes" => Ok(json!(proxy
+            .findings_scopes()
+            .await
+            .map_err(|e| e.to_string())?)),
         #[cfg(target_os = "linux")]
         "findings_summary" => parse_response(
             proxy
@@ -580,8 +593,10 @@ pub fn is_read_only(name: &str) -> bool {
             | "customer_catalog"
             | "host_health"
             | "tailscale_health"
-            | "tailscale_devices" | "tailscale_management"
-            | "findings_scopes" | "findings_summary"
+            | "tailscale_devices"
+            | "tailscale_management"
+            | "findings_scopes"
+            | "findings_summary"
             | "findings_list"
             | "compliance_history"
             | "compliance_get_run"

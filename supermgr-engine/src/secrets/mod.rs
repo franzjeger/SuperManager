@@ -18,7 +18,6 @@ pub mod file;
 #[cfg(target_os = "macos")]
 pub mod keychain;
 
-
 // Lives in `supermgr-core::paths` now: the Linux daemon needs the same answer
 // and does not depend on this crate. Re-exported so `secrets::default_data_dir`
 // keeps resolving at every existing call site.

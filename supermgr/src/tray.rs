@@ -86,8 +86,7 @@ impl ksni::Tray for VpnTray {
             .iter()
             .map(|profile| {
                 let profile_id = profile.id.to_string();
-                let is_active =
-                    active_id.as_deref() == Some(profile_id.as_str());
+                let is_active = active_id.as_deref() == Some(profile_id.as_str());
 
                 let label = if is_active {
                     format!("\u{2713} {}", profile.name)

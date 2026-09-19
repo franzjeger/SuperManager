@@ -60,7 +60,10 @@ impl client::Handler for SshClientHandler {
         // and we only ever compare it to ourselves.
         let fingerprint = KnownHostsStore::fingerprint(&server_public_key.public_key_bytes());
 
-        match self.known_hosts.check_and_enroll(&self.host, self.port, &fingerprint)? {
+        match self
+            .known_hosts
+            .check_and_enroll(&self.host, self.port, &fingerprint)?
+        {
             HostKeyCheck::Match => Ok(true),
             HostKeyCheck::NewHost => {
                 tracing::info!(
@@ -408,12 +411,7 @@ impl SshSession {
     ) -> Result<russh::ChannelStream<Msg>, SshError> {
         let channel = self
             .handle
-            .channel_open_direct_tcpip(
-                target_host,
-                target_port as u32,
-                "127.0.0.1",
-                0,
-            )
+            .channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0)
             .await
             .map_err(|e| SshError::ConnectionFailed {
                 host: format!("{target_host}:{target_port}"),
@@ -429,14 +427,14 @@ impl SshSession {
     ///
     /// Returns `(exit_status, stdout, stderr)`.
     pub async fn exec(&self, command: &str) -> Result<(u32, String, String), SshError> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("failed to open session channel: {e}"),
-            })?;
+        let mut channel =
+            self.handle
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("failed to open session channel: {e}"),
+                })?;
 
         channel
             .exec(true, command)
@@ -489,14 +487,14 @@ impl SshSession {
         _delay_ms: u64,
         timeout_secs: u64,
     ) -> Result<String, SshError> {
-        let mut channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("failed to open session channel: {e}"),
-            })?;
+        let mut channel =
+            self.handle
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("failed to open session channel: {e}"),
+                })?;
 
         // Request a PTY so FortiGate treats it as interactive.
         channel
@@ -515,8 +513,7 @@ impl SshSession {
                 reason: format!("request_shell failed: {e}"),
             })?;
 
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_secs(timeout_secs);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         let mut output = Vec::new();
 
         // Macro-like helper: drain channel data until a keyword appears
@@ -558,13 +555,22 @@ impl SshSession {
             // Wait until new data arrives that contains a prompt or keyword.
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() { break; }
+                if remaining.is_zero() {
+                    break;
+                }
                 match tokio::time::timeout(remaining, channel.wait()).await {
                     Ok(Some(russh::ChannelMsg::Data { data })) => {
                         output.extend_from_slice(&data);
                         // Only check NEW data (after prev_len).
                         let new_text = String::from_utf8_lossy(&output[prev_len..]);
-                        let keywords = ["# ", "$ ", "password:", "Password:", "New API key:", "API key:"];
+                        let keywords = [
+                            "# ",
+                            "$ ",
+                            "password:",
+                            "Password:",
+                            "New API key:",
+                            "API key:",
+                        ];
                         let found = keywords.iter().any(|kw| new_text.contains(kw));
                         let trimmed = new_text.trim_end();
                         if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
@@ -589,14 +595,14 @@ impl SshSession {
     ///
     /// The caller is responsible for dropping the `SftpSession` when done.
     pub async fn sftp(&self) -> Result<russh_sftp::client::SftpSession, SshError> {
-        let channel = self
-            .handle
-            .channel_open_session()
-            .await
-            .map_err(|e| SshError::ConnectionFailed {
-                host: String::new(),
-                reason: format!("failed to open session channel for SFTP: {e}"),
-            })?;
+        let channel =
+            self.handle
+                .channel_open_session()
+                .await
+                .map_err(|e| SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: format!("failed to open session channel for SFTP: {e}"),
+                })?;
 
         channel
             .request_subsystem(true, "sftp")
@@ -628,12 +634,7 @@ impl SshSession {
         remote_port: u16,
     ) -> Result<Channel<Msg>, SshError> {
         self.handle
-            .channel_open_direct_tcpip(
-                remote_host,
-                remote_port as u32,
-                "127.0.0.1",
-                0u32,
-            )
+            .channel_open_direct_tcpip(remote_host, remote_port as u32, "127.0.0.1", 0u32)
             .await
             .map_err(|e| SshError::ConnectionFailed {
                 host: String::new(),
@@ -670,7 +671,10 @@ struct SftpFiles(russh_sftp::client::SftpSession);
 #[async_trait::async_trait]
 impl RemoteFiles for SftpFiles {
     async fn read(&self, path: &str) -> Result<Vec<u8>, SshError> {
-        self.0.read(path).await.map_err(|e| sftp_err("read", path, &e))
+        self.0
+            .read(path)
+            .await
+            .map_err(|e| sftp_err("read", path, &e))
     }
 
     async fn write(&self, path: &str, contents: &[u8]) -> Result<(), SshError> {

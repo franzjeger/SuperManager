@@ -158,7 +158,16 @@ mod tests {
         let json = serde_json::to_string(&b).unwrap();
         let back: PortableBackup = serde_json::from_str(&json).unwrap();
         assert_eq!(back.version, BACKUP_VERSION);
-        assert_eq!(back.counts(), BackupCounts { profiles: 0, ssh_keys: 0, hosts: 0, customers: 0, secrets: 0 });
+        assert_eq!(
+            back.counts(),
+            BackupCounts {
+                profiles: 0,
+                ssh_keys: 0,
+                hosts: 0,
+                customers: 0,
+                secrets: 0
+            }
+        );
     }
 
     /// Wire-compatibility with the JSON the Linux daemon emits: a
@@ -181,7 +190,10 @@ mod tests {
         }"#;
         let b: PortableBackup = serde_json::from_str(json).unwrap();
         assert_eq!(b.version, 3);
-        assert_eq!(b.secrets.get("vpn/abc/password").map(String::as_str), Some("cGFzcw=="));
+        assert_eq!(
+            b.secrets.get("vpn/abc/password").map(String::as_str),
+            Some("cGFzcw==")
+        );
         assert_eq!(b.config_backups.len(), 1);
         assert_eq!(b.gui_settings["theme"], "dark");
     }

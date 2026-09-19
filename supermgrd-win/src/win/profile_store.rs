@@ -89,8 +89,7 @@ impl ProfileStore {
     /// existing profile with the same id.
     pub async fn save(&self, profile: Profile) -> Result<Uuid, StoreError> {
         let path = self.dir.join(format!("{}.toml", profile.id));
-        let text = toml::to_string_pretty(&profile)
-            .map_err(|e| StoreError::Toml(e.to_string()))?;
+        let text = toml::to_string_pretty(&profile).map_err(|e| StoreError::Toml(e.to_string()))?;
         tokio::task::spawn_blocking(move || std::fs::write(&path, text))
             .await
             .map_err(|e| StoreError::Toml(format!("spawn_blocking: {e}")))??;

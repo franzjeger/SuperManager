@@ -63,8 +63,7 @@ pub async fn enumerate(domain: &str) -> Result<SubdomainResult> {
     if bytes.len() > 50 * 1024 * 1024 {
         anyhow::bail!("crt.sh response too large: {} bytes", bytes.len());
     }
-    let entries: Vec<CrtEntry> = serde_json::from_slice(&bytes)
-        .context("parse crt.sh JSON")?;
+    let entries: Vec<CrtEntry> = serde_json::from_slice(&bytes).context("parse crt.sh JSON")?;
     let cert_count = entries.len() as u32;
 
     let mut found: HashSet<String> = HashSet::new();
@@ -104,7 +103,9 @@ fn extract_hostnames(blob: &str, apex: &str, out: &mut HashSet<String>) {
     let apex_lc = apex.to_lowercase();
     for raw in blob.split(['\n', ' ', ',', ';']) {
         let mut name = raw.trim().to_lowercase();
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
         if let Some(rest) = name.strip_prefix("*.") {
             name = rest.to_owned();
         }
@@ -130,7 +131,7 @@ mod tests {
         );
         assert!(out.contains("api.example.com"));
         assert!(out.contains("staging.example.com"));
-        assert!(out.contains("dev.example.com"));  // wildcard prefix stripped
+        assert!(out.contains("dev.example.com")); // wildcard prefix stripped
         assert!(!out.contains("evil.org"));
         assert!(!out.contains("foo.evil.org"));
     }

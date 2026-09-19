@@ -30,9 +30,7 @@ use std::{ffi::c_void, io, ptr};
 
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::{
-    Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    },
+    Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1},
     SECURITY_ATTRIBUTES,
 };
 

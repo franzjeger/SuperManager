@@ -44,11 +44,7 @@ use crate::rpc_args::arg_id;
 /// cleared it by hand, or the record predates the field), while a label that
 /// fails to delete is worth a line in the log because the credential is
 /// still readable.
-async fn clear_owned_secrets<T: SecretOwner>(
-    state: &Arc<DaemonState>,
-    owner: &T,
-    what: &str,
-) {
+async fn clear_owned_secrets<T: SecretOwner>(state: &Arc<DaemonState>, owner: &T, what: &str) {
     for label in owner.secret_labels() {
         if let Err(e) = state.secret_store.delete(&label).await {
             warn!("{what}: credential {label} not removed: {e}");
@@ -67,9 +63,7 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
         "get_status" => handle_get_status(state).await,
         "delete_profile" => handle_delete_profile(state, &req.args).await,
         "import_wireguard" => handle_import_wireguard(state, &req.args).await,
-        "import_forticlient_sslvpn" => {
-            handle_import_forticlient_sslvpn(state, &req.args).await
-        }
+        "import_forticlient_sslvpn" => handle_import_forticlient_sslvpn(state, &req.args).await,
         "import_fortigate" => handle_import_fortigate(state, &req.args).await,
 
         // ----- SSH keys -----
@@ -161,8 +155,8 @@ async fn handle_list_profiles(state: &Arc<DaemonState>) -> Result<Value, RpcErro
 }
 
 async fn handle_connect(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    use supermgr_core::vpn::profile::ProfileConfig;
     use super::vpn::VpnBackend as _;
+    use supermgr_core::vpn::profile::ProfileConfig;
 
     let profile_id_str = arg_str(args, "profile_id")?;
     let profile_id = uuid::Uuid::parse_str(profile_id_str)
@@ -322,12 +316,7 @@ async fn handle_get_status(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
             .map(Value::String)
             .map_err(map_vpn_err);
     }
-    let wg = state
-        .vpn
-        .wireguard
-        .status()
-        .await
-        .map_err(map_vpn_err)?;
+    let wg = state.vpn.wireguard.status().await.map_err(map_vpn_err)?;
     Ok(Value::String(wg))
 }
 
@@ -366,16 +355,12 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
         .await
         .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
 
-    state
-        .profile_store
-        .delete(id)
-        .await
-        .map_err(|e| match e {
-            super::profile_store::StoreError::NotFound(_) => {
-                RpcError::NotFound(format!("profile {id}"))
-            }
-            other => RpcError::Other(other.to_string()),
-        })?;
+    state.profile_store.delete(id).await.map_err(|e| match e {
+        super::profile_store::StoreError::NotFound(_) => {
+            RpcError::NotFound(format!("profile {id}"))
+        }
+        other => RpcError::Other(other.to_string()),
+    })?;
 
     clear_owned_secrets(state, &profile, &format!("profile {id}")).await;
     Ok(Value::Null)
@@ -385,10 +370,11 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
 /// Credential Manager, save the profile TOML, and return the new
 /// profile's UUID. Mirrors the Linux daemon's `import_wireguard` method
 /// so the GUI and MCP server can use the same call on both OSes.
-async fn handle_import_wireguard(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    use supermgr_core::vpn::profile::{
-        import_wireguard_conf, Profile, ProfileConfig,
-    };
+async fn handle_import_wireguard(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
+    use supermgr_core::vpn::profile::{import_wireguard_conf, Profile, ProfileConfig};
 
     let conf_text = arg_str(args, "conf_text")?;
     let name = arg_str(args, "name")?.trim();
@@ -460,19 +446,14 @@ async fn handle_import_forticlient_sslvpn(
     state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    use supermgr_core::vpn::profile::{
-        ForticlientSslvpnConfig, Profile, ProfileConfig, SecretRef,
-    };
+    use supermgr_core::vpn::profile::{ForticlientSslvpnConfig, Profile, ProfileConfig, SecretRef};
 
     let name = arg_str(args, "name")?.trim();
     if name.is_empty() {
         return Err(RpcError::Other("profile name must not be empty".into()));
     }
     let host = arg_str(args, "host")?;
-    let port = args
-        .get("port")
-        .and_then(Value::as_u64)
-        .unwrap_or(443) as u16;
+    let port = args.get("port").and_then(Value::as_u64).unwrap_or(443) as u16;
     let username = arg_str(args, "username")?;
     let password = arg_str(args, "password")?;
     let trusted_cert = args
@@ -484,7 +465,10 @@ async fn handle_import_forticlient_sslvpn(
         .get("dns_servers_json")
         .and_then(Value::as_str)
         .unwrap_or("[]");
-    let routes_json = args.get("routes_json").and_then(Value::as_str).unwrap_or("[]");
+    let routes_json = args
+        .get("routes_json")
+        .and_then(Value::as_str)
+        .unwrap_or("[]");
 
     let dns_servers: Vec<std::net::IpAddr> = serde_json::from_str(dns_servers_json)
         .map_err(|e| RpcError::Other(format!("parse dns_servers_json: {e}")))?;
@@ -534,7 +518,10 @@ async fn handle_import_forticlient_sslvpn(
 /// the FortiGateBackend then dials via Windows RAS (`Add-VpnConnection`
 /// + `rasdial`) — no third-party client needed on a standards-compliant
 /// FortiGate deployment (EAP-MSCHAPv2 + PSK).
-async fn handle_import_fortigate(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+async fn handle_import_fortigate(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
     use supermgr_core::vpn::profile::{FortiGateConfig, Profile, ProfileConfig, SecretRef};
 
     let name = arg_str(args, "name")?.trim();
@@ -598,14 +585,23 @@ async fn handle_import_fortigate(state: &Arc<DaemonState>, args: &Value) -> Resu
 // goes into Credential Manager via `DaemonState::secret_store`.
 // ---------------------------------------------------------------------------
 
-async fn handle_ssh_generate_key(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+async fn handle_ssh_generate_key(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
     use ssh_key::private::{KeypairData, RsaKeypair};
     use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 
     let key_type = arg_str(args, "key_type")?;
     let name = arg_str(args, "name")?;
-    let description = args.get("description").and_then(Value::as_str).unwrap_or("");
-    let tags_json = args.get("tags_json").and_then(Value::as_str).unwrap_or("[]");
+    let description = args
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let tags_json = args
+        .get("tags_json")
+        .and_then(Value::as_str)
+        .unwrap_or("[]");
 
     // ssh-key's own OsRng (rand_core 0.6), not rand 0.9's — same reason as
     // supermgr-core::ssh::keygen: ssh-key's `random` requires rand_core 0.6's
@@ -618,50 +614,51 @@ async fn handle_ssh_generate_key(state: &Arc<DaemonState>, args: &Value) -> Resu
     // blocking thread so we don't park the async runtime.
     let key_type_owned = key_type.to_owned();
     let name_owned = name.to_owned();
-    let generated = tokio::task::spawn_blocking(move || -> Result<(String, String, String), RpcError> {
-        let private = match key_type_owned.to_ascii_lowercase().as_str() {
-            "ed25519" => {
-                let mut pk = PrivateKey::random(&mut rng, Algorithm::Ed25519)
-                    .map_err(|e| RpcError::Other(format!("ed25519 keygen: {e}")))?;
-                if !name_owned.is_empty() {
-                    pk.set_comment(&name_owned);
+    let generated =
+        tokio::task::spawn_blocking(move || -> Result<(String, String, String), RpcError> {
+            let private = match key_type_owned.to_ascii_lowercase().as_str() {
+                "ed25519" => {
+                    let mut pk = PrivateKey::random(&mut rng, Algorithm::Ed25519)
+                        .map_err(|e| RpcError::Other(format!("ed25519 keygen: {e}")))?;
+                    if !name_owned.is_empty() {
+                        pk.set_comment(&name_owned);
+                    }
+                    pk
                 }
-                pk
-            }
-            "rsa" | "rsa4096" | "rsa-4096" => {
-                let kp = RsaKeypair::random(&mut rng, 4096)
-                    .map_err(|e| RpcError::Other(format!("rsa-4096 keygen: {e}")))?;
-                PrivateKey::new(KeypairData::from(kp), &name_owned)
-                    .map_err(|e| RpcError::Other(format!("rsa-4096 wrap: {e}")))?
-            }
-            "rsa2048" | "rsa-2048" => {
-                let kp = RsaKeypair::random(&mut rng, 2048)
-                    .map_err(|e| RpcError::Other(format!("rsa-2048 keygen: {e}")))?;
-                PrivateKey::new(KeypairData::from(kp), &name_owned)
-                    .map_err(|e| RpcError::Other(format!("rsa-2048 wrap: {e}")))?
-            }
-            other => {
-                return Err(RpcError::Other(format!(
-                    "unsupported key_type {other:?} (supported: ed25519, rsa2048, rsa4096)"
-                )));
-            }
-        };
-        let public_openssh = private
-            .public_key()
-            .to_openssh()
-            .map_err(|e| RpcError::Other(format!("public openssh encode: {e}")))?;
-        let fingerprint = private
-            .public_key()
-            .fingerprint(HashAlg::Sha256)
-            .to_string();
-        let private_pem = private
-            .to_openssh(LineEnding::LF)
-            .map_err(|e| RpcError::Other(format!("private openssh encode: {e}")))?
-            .to_string();
-        Ok((public_openssh, fingerprint, private_pem))
-    })
-    .await
-    .map_err(|e| RpcError::Other(format!("keygen spawn_blocking: {e}")))??;
+                "rsa" | "rsa4096" | "rsa-4096" => {
+                    let kp = RsaKeypair::random(&mut rng, 4096)
+                        .map_err(|e| RpcError::Other(format!("rsa-4096 keygen: {e}")))?;
+                    PrivateKey::new(KeypairData::from(kp), &name_owned)
+                        .map_err(|e| RpcError::Other(format!("rsa-4096 wrap: {e}")))?
+                }
+                "rsa2048" | "rsa-2048" => {
+                    let kp = RsaKeypair::random(&mut rng, 2048)
+                        .map_err(|e| RpcError::Other(format!("rsa-2048 keygen: {e}")))?;
+                    PrivateKey::new(KeypairData::from(kp), &name_owned)
+                        .map_err(|e| RpcError::Other(format!("rsa-2048 wrap: {e}")))?
+                }
+                other => {
+                    return Err(RpcError::Other(format!(
+                        "unsupported key_type {other:?} (supported: ed25519, rsa2048, rsa4096)"
+                    )));
+                }
+            };
+            let public_openssh = private
+                .public_key()
+                .to_openssh()
+                .map_err(|e| RpcError::Other(format!("public openssh encode: {e}")))?;
+            let fingerprint = private
+                .public_key()
+                .fingerprint(HashAlg::Sha256)
+                .to_string();
+            let private_pem = private
+                .to_openssh(LineEnding::LF)
+                .map_err(|e| RpcError::Other(format!("private openssh encode: {e}")))?
+                .to_string();
+            Ok((public_openssh, fingerprint, private_pem))
+        })
+        .await
+        .map_err(|e| RpcError::Other(format!("keygen spawn_blocking: {e}")))??;
 
     let (public_openssh, fingerprint, private_pem) = generated;
     let key_id = uuid::Uuid::new_v4().to_string();
@@ -694,8 +691,8 @@ async fn handle_ssh_generate_key(state: &Arc<DaemonState>, args: &Value) -> Resu
 async fn handle_ssh_list_keys(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let dir = state.root.join("keys");
     let mut out: Vec<Value> = Vec::new();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| RpcError::Other(format!("read keys dir: {e}")))?;
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| RpcError::Other(format!("read keys dir: {e}")))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -753,8 +750,8 @@ async fn handle_ssh_export_public_key(
 ) -> Result<Value, RpcError> {
     let key_id = arg_id(args, "key_id")?;
     let path = state.root.join("keys").join(format!("{key_id}.json"));
-    let bytes = std::fs::read(&path)
-        .map_err(|_| RpcError::NotFound(format!("ssh key {key_id}")))?;
+    let bytes =
+        std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("ssh key {key_id}")))?;
     let meta: Value = serde_json::from_slice(&bytes)
         .map_err(|e| RpcError::Other(format!("parse key metadata: {e}")))?;
     let public = meta
@@ -771,8 +768,8 @@ async fn handle_ssh_export_public_key(
 async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let dir = state.root.join("hosts");
     let mut out: Vec<Value> = Vec::new();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| RpcError::Other(format!("read hosts dir: {e}")))?;
+    let entries =
+        std::fs::read_dir(&dir).map_err(|e| RpcError::Other(format!("read hosts dir: {e}")))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -790,10 +787,9 @@ async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
 async fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
-    let bytes = std::fs::read(&path)
-        .map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
-    let v: Value = serde_json::from_slice(&bytes)
-        .map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
+    let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+    let v: Value =
+        serde_json::from_slice(&bytes).map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
     Ok(Value::String(v.to_string()))
 }
 
@@ -841,8 +837,7 @@ async fn handle_delete_host(state: &Arc<DaemonState>, args: &Value) -> Result<Va
         warn!("host {host_id}: record unreadable, deleting it without clearing its credentials");
     }
 
-    std::fs::remove_file(&path)
-        .map_err(|e| RpcError::Other(format!("delete host: {e}")))?;
+    std::fs::remove_file(&path).map_err(|e| RpcError::Other(format!("delete host: {e}")))?;
 
     if let Some(host) = host {
         clear_owned_secrets(state, &host, &format!("host {host_id}")).await;
@@ -880,14 +875,10 @@ async fn handle_test_host_connection(
 async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
-    let bytes = std::fs::read(&path)
-        .map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
-    let mut v: Value = serde_json::from_slice(&bytes)
-        .map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
-    let new_state = !v
-        .get("pinned")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+    let mut v: Value =
+        serde_json::from_slice(&bytes).map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
+    let new_state = !v.get("pinned").and_then(Value::as_bool).unwrap_or(false);
     if let Some(obj) = v.as_object_mut() {
         obj.insert("pinned".into(), Value::Bool(new_state));
     }
@@ -988,12 +979,9 @@ async fn handle_fortigate_backup_config(
     args: &Value,
 ) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
-    let filename = appliance::fortigate_backup_config(
-        &state.root,
-        state.secret_store.clone(),
-        host_id,
-    )
-    .await?;
+    let filename =
+        appliance::fortigate_backup_config(&state.root, state.secret_store.clone(), host_id)
+            .await?;
     Ok(Value::String(filename))
 }
 
@@ -1053,27 +1041,16 @@ async fn handle_opnsense_backup_config(
     args: &Value,
 ) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
-    let filename = appliance::opnsense_backup_config(
-        &state.root,
-        state.secret_store.clone(),
-        host_id,
-    )
-    .await?;
+    let filename =
+        appliance::opnsense_backup_config(&state.root, state.secret_store.clone(), host_id).await?;
     Ok(Value::String(filename))
 }
 
-async fn handle_sophos_xml_api(
-    state: &Arc<DaemonState>,
-    args: &Value,
-) -> Result<Value, RpcError> {
+async fn handle_sophos_xml_api(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let inner_xml = arg_str(args, "inner_xml")?;
-    let resp = appliance::sophos_xml_api(
-        &state.root,
-        state.secret_store.clone(),
-        host_id,
-        inner_xml,
-    )
-    .await?;
+    let resp =
+        appliance::sophos_xml_api(&state.root, state.secret_store.clone(), host_id, inner_xml)
+            .await?;
     Ok(Value::String(resp))
 }

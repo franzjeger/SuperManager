@@ -25,11 +25,7 @@
 //!
 //! Kill the openvpn child, delete the temp directory, revert DNS.
 
-use std::{
-    net::IpAddr,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{net::IpAddr, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -38,8 +34,8 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use supermgr_core::{
-    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     error::BackendError,
+    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     vpn::profile::{AzureVpnConfig, Profile, ProfileConfig},
 };
 
@@ -141,10 +137,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(hex) = u8::from_str_radix(
-                std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(hex) =
+                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(hex as char);
                 i += 3;
                 continue;
@@ -189,8 +184,7 @@ async fn pkce_auth_code_flow(
     let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
     // code_challenge = BASE64URL(SHA-256(code_verifier))
-    let code_challenge =
-        URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(code_verifier.as_bytes()));
+    let code_challenge = URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(code_verifier.as_bytes()));
 
     let state = uuid::Uuid::new_v4().to_string();
     let scope = format!("{audience}/.default openid offline_access profile");
@@ -245,8 +239,7 @@ async fn pkce_auth_code_flow(
 
     // ── Token exchange ────────────────────────────────────────────────────────
     let client = reqwest::Client::new();
-    let token_url =
-        format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+    let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
 
     let resp = client
         .post(&token_url)
@@ -363,8 +356,7 @@ async fn try_refresh_token(
     refresh_token: &str,
 ) -> Result<(String, String), BackendError> {
     let client = reqwest::Client::new();
-    let token_url =
-        format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
+    let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
     let scope = format!("{audience}/.default openid offline_access profile");
 
     let resp = client
@@ -536,7 +528,13 @@ fn build_ovpn_config(
     // Avoid overwriting the default route for DNS when using split tunnel.
     if !cfg.dns_servers.is_empty() {
         s.push_str("dhcp-option DNS ");
-        s.push_str(&cfg.dns_servers.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(" "));
+        s.push_str(
+            &cfg.dns_servers
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
         s.push('\n');
     }
 
@@ -592,13 +590,22 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
 
     let domains: Vec<(String, bool)> = vec![("~.".to_owned(), true)];
 
-    if let Err(e) = proxy.call_method("SetLinkDNS", &(ifindex, &dns_addrs)).await {
+    if let Err(e) = proxy
+        .call_method("SetLinkDNS", &(ifindex, &dns_addrs))
+        .await
+    {
         error!("Azure DNS: SetLinkDNS({iface_name}): {e}");
         return None;
     }
-    info!("Azure DNS: SetLinkDNS({iface_name}, {} servers) — ok", dns_addrs.len());
+    info!(
+        "Azure DNS: SetLinkDNS({iface_name}, {} servers) — ok",
+        dns_addrs.len()
+    );
 
-    if let Err(e) = proxy.call_method("SetLinkDomains", &(ifindex, &domains)).await {
+    if let Err(e) = proxy
+        .call_method("SetLinkDomains", &(ifindex, &domains))
+        .await
+    {
         warn!("Azure DNS: SetLinkDomains({iface_name}): {e}");
     }
 
@@ -606,7 +613,9 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
 }
 
 async fn revert_link_dns(ifindex: i32) {
-    let Ok(conn) = zbus::Connection::system().await else { return };
+    let Ok(conn) = zbus::Connection::system().await else {
+        return;
+    };
     let Ok(proxy) = zbus::Proxy::new(
         &conn,
         "org.freedesktop.resolve1",
@@ -632,15 +641,18 @@ impl VpnBackend for AzureBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
         let cfg = match &profile.config {
             ProfileConfig::AzureVpn(c) => c,
-            _ => return Err(BackendError::Interface("wrong profile type for AzureBackend".into())),
+            _ => {
+                return Err(BackendError::Interface(
+                    "wrong profile type for AzureBackend".into(),
+                ))
+            }
         };
 
         info!("Azure: connecting profile '{}'", profile.name);
 
         // ── Step 1: Authenticate (cached refresh token or device-code flow) ──
         let access_token =
-            authenticate(&profile.id, &cfg.tenant_id, &cfg.client_id, &self.auth_tx)
-                .await?;
+            authenticate(&profile.id, &cfg.tenant_id, &cfg.client_id, &self.auth_tx).await?;
 
         let upn = jwt_upn(&access_token);
         info!("Azure: authenticated as '{upn}'");
@@ -697,10 +709,7 @@ impl VpnBackend for AzureBackend {
         crate::secure_file::write_private(&ovpn_path, ovpn_text.as_bytes(), None)
             .map_err(BackendError::Io)?;
 
-        info!(
-            "Azure: temp files written to {}",
-            tmp_dir.display()
-        );
+        info!("Azure: temp files written to {}", tmp_dir.display());
 
         // ── Step 3: Launch openvpn ────────────────────────────────────────────
         let mut child = tokio::process::Command::new("openvpn")
@@ -717,7 +726,8 @@ impl VpnBackend for AzureBackend {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     BackendError::Interface(
                         "openvpn not found — install the 'openvpn' package \
-                         (Azure VPN requires the classic openvpn binary, not openvpn3)".into(),
+                         (Azure VPN requires the classic openvpn binary, not openvpn3)"
+                            .into(),
                     )
                 } else if e.kind() == std::io::ErrorKind::PermissionDenied {
                     BackendError::Interface(
@@ -729,12 +739,14 @@ impl VpnBackend for AzureBackend {
             })?;
 
         // ── Step 4: Wait for "Initialization Sequence Completed" ─────────────
-        let stdout = child.stdout.take().ok_or_else(|| {
-            BackendError::Interface("openvpn stdout pipe unavailable".into())
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            BackendError::Interface("openvpn stderr pipe unavailable".into())
-        })?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| BackendError::Interface("openvpn stdout pipe unavailable".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| BackendError::Interface("openvpn stderr pipe unavailable".into()))?;
 
         // Merge stdout + stderr into a single line stream.
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -790,7 +802,8 @@ impl VpnBackend for AzureBackend {
                 Err(BackendError::ConnectionFailed(
                     "openvpn process exited before the tunnel was established — \
                      check that the Azure VPN gateway is reachable and the \
-                     configuration (CA cert, gateway FQDN) is correct".into(),
+                     configuration (CA cert, gateway FQDN) is correct"
+                        .into(),
                 ))
             },
         )
@@ -811,7 +824,8 @@ impl VpnBackend for AzureBackend {
                 return Err(BackendError::ConnectionFailed(
                     "Azure VPN connection timed out after 60 s — the gateway \
                      may be unreachable or firewalled; verify your network \
-                     connection and the gateway address".into(),
+                     connection and the gateway address"
+                        .into(),
                 ));
             }
         }
@@ -868,10 +882,7 @@ impl VpnBackend for AzureBackend {
                 nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
                 nix::sys::signal::Signal::SIGTERM,
             );
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                child.wait(),
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
                 Ok(_) => info!("Azure: openvpn exited cleanly"),
                 Err(_) => {
                     warn!("Azure: openvpn did not exit in 5 s, killing");
@@ -946,7 +957,11 @@ fn extract_tun_iface(line: &str) -> Option<String> {
     let rest = &line[start..];
     let end = rest.find(' ').unwrap_or(rest.len());
     let name = rest[..end].trim().to_owned();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 /// Parse the virtual IP from an openvpn log line.

@@ -62,7 +62,14 @@ pub async fn send(
     );
     match settings.ai_provider {
         AiProvider::Claude if settings.use_claude_subscription => {
-            claude::send_message_subscription(text, tx, &context, allow_changes, &settings.anthropic_model).await?;
+            claude::send_message_subscription(
+                text,
+                tx,
+                &context,
+                allow_changes,
+                &settings.anthropic_model,
+            )
+            .await?;
             Ok(messages)
         }
         AiProvider::Claude => {
@@ -166,8 +173,10 @@ mod tests {
             "Call the SuperManager compliance_list_checks tool once, then report how many checks it lists. Do not call any other tool.",
             &tx, vec![], SYSTEM, false).await.unwrap();
         assert!(!history.is_empty());
-        assert!(rx.try_iter().any(|event| matches!(event,
+        assert!(
+            rx.try_iter().any(|event| matches!(event,
             AppMsg::ConsoleResponse(text) if text.contains("Using compliance_list_checks"))),
-            "Codex must actually call the MCP tool, not answer from memory");
+            "Codex must actually call the MCP tool, not answer from memory"
+        );
     }
 }

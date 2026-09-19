@@ -17,8 +17,8 @@
 use async_trait::async_trait;
 
 pub mod azure;
-pub mod fortigate;
 pub mod forticlient;
+pub mod fortigate;
 /// Backwards-compatibility alias — the daemon's slot is named `ikev2`
 /// from when this backend was a stub doing IKEv2 via PowerShell. The
 /// real implementation under `azure` is the Azure P2S OpenVPN flow.

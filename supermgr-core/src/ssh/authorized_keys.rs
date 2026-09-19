@@ -146,8 +146,7 @@ async fn push_via_exec(shell: &dyn RemoteShell, pub_line: &str) -> Result<(), Ss
     let b64 = encode(pub_line);
 
     // Check for duplicate.
-    let check_cmd =
-        format!("grep -qF \"$(printf '%s' {b64} | base64 -d)\" {ak_path} 2>/dev/null");
+    let check_cmd = format!("grep -qF \"$(printf '%s' {b64} | base64 -d)\" {ak_path} 2>/dev/null");
     let (rc, _, _) = shell.exec(&check_cmd).await?;
     if rc == 0 {
         return Ok(()); // Already present.
@@ -508,7 +507,10 @@ mod tests {
     async fn push_via_sftp_appends_to_the_existing_file() {
         let shell = FakeShell::with_sftp(&[
             ("/home/admin/.ssh", ""),
-            ("/home/admin/.ssh/authorized_keys", "ssh-rsa AAAAB3 other@host\n"),
+            (
+                "/home/admin/.ssh/authorized_keys",
+                "ssh-rsa AAAAB3 other@host\n",
+            ),
         ]);
         push_public_key(&shell, KEY, false).await.unwrap();
         let written = shell.file("/home/admin/.ssh/authorized_keys").unwrap();
@@ -523,14 +525,20 @@ mod tests {
             ("/home/admin/.ssh/authorized_keys", &existing),
         ]);
         push_public_key(&shell, KEY, false).await.unwrap();
-        assert_eq!(shell.file("/home/admin/.ssh/authorized_keys").unwrap(), existing);
+        assert_eq!(
+            shell.file("/home/admin/.ssh/authorized_keys").unwrap(),
+            existing
+        );
     }
 
     #[tokio::test]
     async fn push_via_sftp_creates_the_ssh_dir_when_missing() {
         let shell = FakeShell::with_sftp(&[]);
         push_public_key(&shell, KEY, false).await.unwrap();
-        assert_eq!(shell.file("/home/admin/.ssh/authorized_keys").unwrap(), format!("{KEY}\n"));
+        assert_eq!(
+            shell.file("/home/admin/.ssh/authorized_keys").unwrap(),
+            format!("{KEY}\n")
+        );
         assert!(shell.issued_any("chmod 700 /home/admin/.ssh"));
         assert!(shell.issued_any("chmod 600 /home/admin/.ssh/authorized_keys"));
     }
@@ -600,7 +608,10 @@ mod tests {
         let existing = "ssh-rsa AAAAB3 someone@else\n";
         let shell = FakeShell::with_sftp(&[("/home/admin/.ssh/authorized_keys", existing)]);
         revoke_public_key(&shell, KEY, false).await.unwrap();
-        assert_eq!(shell.file("/home/admin/.ssh/authorized_keys").unwrap(), existing);
+        assert_eq!(
+            shell.file("/home/admin/.ssh/authorized_keys").unwrap(),
+            existing
+        );
     }
 
     #[tokio::test]

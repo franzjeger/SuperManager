@@ -11,7 +11,11 @@ impl EngineServer {
     /// Run all baseline compliance checks against a host. Returns
     /// the run record (with full check breakdown), and persists
     /// it under the app support directory for later history view.
-    pub(crate) async fn handle_compliance_run(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_compliance_run(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -97,7 +101,9 @@ impl EngineServer {
         };
         let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
+            }
         };
         match crate::compliance::load_run(&host_id.simple().to_string(), &run_id) {
             Ok(run) => match serde_json::to_value(&run) {
@@ -120,19 +126,22 @@ impl EngineServer {
     /// immediately preceding it on the same host. The first run
     /// for a host has no baseline; the report renders all current
     /// failures as "newly failing" in that case.
-    pub(crate) async fn handle_compliance_drift(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_compliance_drift(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };
         let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
+            }
         };
-        match crate::compliance::drift_against_previous(
-            &host_id.simple().to_string(),
-            &run_id,
-        ) {
+        match crate::compliance::drift_against_previous(&host_id.simple().to_string(), &run_id) {
             Ok(report) => match serde_json::to_value(&report) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -165,13 +174,8 @@ impl EngineServer {
             .get("min_age_hours")
             .and_then(serde_json::Value::as_i64);
 
-        match crate::compliance::scan_all(
-            &self.state,
-            &self.secrets,
-            triggered_by,
-            min_age_hours,
-        )
-        .await
+        match crate::compliance::scan_all(&self.state, &self.secrets, triggered_by, min_age_hours)
+            .await
         {
             Ok(results) => match serde_json::to_value(&results) {
                 Ok(v) => Response::ok(id, v),
@@ -279,10 +283,7 @@ impl EngineServer {
         // we still return the run to the caller even if writing
         // the history file fails.
         if let Err(e) = crate::compliance::persist_run(&run) {
-            tracing::warn!(
-                "compliance(linux): failed to persist run {}: {e:#}",
-                run.id
-            );
+            tracing::warn!("compliance(linux): failed to persist run {}: {e:#}", run.id);
         }
 
         match serde_json::to_value(&run) {
@@ -320,7 +321,9 @@ impl EngineServer {
         };
         let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned()),
+            None => {
+                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
+            }
         };
         let host_str = host_id.simple().to_string();
         let run = match crate::compliance::load_run(&host_str, &run_id) {
@@ -330,8 +333,7 @@ impl EngineServer {
         // Best-effort drift — first run has none, that's fine.
         let drift = crate::compliance::drift_against_previous(&host_str, &run_id).ok();
         let library = crate::compliance::list_checks();
-        let markdown =
-            crate::compliance::render_markdown_report(&run, drift.as_ref(), &library);
+        let markdown = crate::compliance::render_markdown_report(&run, drift.as_ref(), &library);
         Response::ok(id, serde_json::json!({ "markdown": markdown }))
     }
 }

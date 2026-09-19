@@ -60,20 +60,14 @@ impl DaemonState {
         let secret_store: Arc<dyn supermgr_core::keyring::SecretStore> =
             Arc::new(supermgr_core::keyring::CredentialManagerStore::new());
         let profile_store =
-            Arc::new(ProfileStore::load_from(root.join("profiles"))
-                .context("load profile store")?);
-        let known_hosts = KnownHostsStore::load_from(&root)
-            .context("load known_hosts store")?;
+            Arc::new(ProfileStore::load_from(root.join("profiles")).context("load profile store")?);
+        let known_hosts = KnownHostsStore::load_from(&root).context("load known_hosts store")?;
         let vpn_backends = VpnBackends {
-            wireguard: Arc::new(vpn::wireguard::WireGuardBackend::new(
-                secret_store.clone(),
-            )),
+            wireguard: Arc::new(vpn::wireguard::WireGuardBackend::new(secret_store.clone())),
             openvpn: Arc::new(vpn::openvpn::OpenVpnBackend::with_store(
                 secret_store.clone(),
             )),
-            ikev2: Arc::new(vpn::ikev2::Ikev2Backend::with_store(
-                secret_store.clone(),
-            )),
+            ikev2: Arc::new(vpn::ikev2::Ikev2Backend::with_store(secret_store.clone())),
             fortigate: Arc::new(vpn::fortigate::FortiGateBackend::with_store(
                 secret_store.clone(),
             )),

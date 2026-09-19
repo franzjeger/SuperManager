@@ -7,7 +7,6 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tracing::{debug, info};
 
-
 use crate::app::AppMsg;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -17,11 +16,22 @@ const MAX_TOKENS: u64 = 4096;
 /// An explicit --model also overrides inherited CLI defaults or old sessions.
 pub fn subscription_command(model: &str) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("claude");
-    command.args([
-        "--print", "--model", crate::settings::anthropic_model_id(model),
-        "--tools", "", "--strict-mcp-config", "--setting-sources", "",
-        "--disable-slash-commands", "--permission-prompts", "none",
-    ]).kill_on_drop(true).stdin(std::process::Stdio::null());
+    command
+        .args([
+            "--print",
+            "--model",
+            crate::settings::anthropic_model_id(model),
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "",
+            "--disable-slash-commands",
+            "--permission-prompts",
+            "none",
+        ])
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null());
     command
 }
 
@@ -84,23 +94,33 @@ pub async fn send_message_subscription(
         }
     });
 
-    let allowed_tools = supermgr_mcp::available_tools(allow_changes).as_array().unwrap().iter()
-        .filter_map(|tool| tool["name"].as_str().map(|name| format!("mcp__supermgr__{name}")))
-        .collect::<Vec<_>>().join(",");
+    let allowed_tools = supermgr_mcp::available_tools(allow_changes)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| {
+            tool["name"]
+                .as_str()
+                .map(|name| format!("mcp__supermgr__{name}"))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
 
-    let system_with_context = format!(
-        "{SYSTEM_PROMPT}\n\n## Current State\n{context}"
-    );
+    let system_with_context = format!("{SYSTEM_PROMPT}\n\n## Current State\n{context}");
 
     let session_id = SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
     let mut cmd = subscription_command(model);
     cmd.args([
-        "--output-format", "stream-json",
+        "--output-format",
+        "stream-json",
         "--verbose",
-        "--mcp-config", &mcp_config.to_string(),
-        "--allowedTools", &allowed_tools,
-        "--system-prompt", &system_with_context,
+        "--mcp-config",
+        &mcp_config.to_string(),
+        "--allowedTools",
+        &allowed_tools,
+        "--system-prompt",
+        &system_with_context,
     ]);
 
     // Resume existing session for speed + memory.
@@ -109,19 +129,28 @@ pub async fn send_message_subscription(
         cmd.args(["--resume", sid]);
     }
 
-    if !allow_changes { cmd.env("SUPERMGR_MCP_READ_ONLY", "1"); }
-    else { cmd.env_remove("SUPERMGR_MCP_READ_ONLY"); }
+    if !allow_changes {
+        cmd.env("SUPERMGR_MCP_READ_ONLY", "1");
+    } else {
+        cmd.env_remove("SUPERMGR_MCP_READ_ONLY");
+    }
     cmd.kill_on_drop(true);
     cmd.arg(user_text);
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
 
-    info!(model = crate::settings::anthropic_model_id(model), "sending via Claude Code CLI (subscription)");
+    info!(
+        model = crate::settings::anthropic_model_id(model),
+        "sending via Claude Code CLI (subscription)"
+    );
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .context("failed to start `claude` CLI — is it installed?")?;
 
-    let stdout = child.stdout.take()
+    let stdout = child
+        .stdout
+        .take()
         .context("failed to capture claude stdout")?;
 
     // Read streaming JSON lines from stdout.
@@ -158,14 +187,12 @@ pub async fn send_message_subscription(
                                 if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                                     if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                                         if !sent_text {
-                                            let _ = tx_stream.send(AppMsg::ConsoleResponse(
-                                                "\nClaude: ".into(),
-                                            ));
+                                            let _ = tx_stream
+                                                .send(AppMsg::ConsoleResponse("\nClaude: ".into()));
                                             sent_text = true;
                                         }
-                                        let _ = tx_stream.send(AppMsg::ConsoleStreamChunk(
-                                            text.to_owned(),
-                                        ));
+                                        let _ = tx_stream
+                                            .send(AppMsg::ConsoleStreamChunk(text.to_owned()));
                                     }
                                 }
                             }
@@ -174,14 +201,18 @@ pub async fn send_message_subscription(
                 }
                 Some("result") => {
                     if parsed["is_error"] == true {
-                        failure = Some(parsed["result"].as_str().unwrap_or("Claude CLI request failed").to_owned());
+                        failure = Some(
+                            parsed["result"]
+                                .as_str()
+                                .unwrap_or("Claude CLI request failed")
+                                .to_owned(),
+                        );
                     }
                     // Final result — extract text if we haven't streamed yet.
                     if !sent_text {
                         if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
-                            let _ = tx_stream.send(AppMsg::ConsoleResponse(
-                                format!("\nClaude: {result}\n"),
-                            ));
+                            let _ = tx_stream
+                                .send(AppMsg::ConsoleResponse(format!("\nClaude: {result}\n")));
                         }
                     } else {
                         let _ = tx_stream.send(AppMsg::ConsoleResponse("\n".into()));
@@ -201,8 +232,13 @@ pub async fn send_message_subscription(
     // its reader, so no detached task can append to the next conversation.
     let (session, status) = tokio::join!(reader, child.wait());
     let status = status.context("Claude CLI exited unexpectedly")?;
-    if let Some(failure) = session.1 { anyhow::bail!("{failure}"); }
-    anyhow::ensure!(status.success(), "Claude CLI exited with {status}. Check 'claude auth status'.");
+    if let Some(failure) = session.1 {
+        anyhow::bail!("{failure}");
+    }
+    anyhow::ensure!(
+        status.success(),
+        "Claude CLI exited with {status}. Check 'claude auth status'."
+    );
     if let Some(sid) = session.0 {
         *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid);
     }
@@ -229,7 +265,10 @@ pub async fn send_message(
     model: &str,
     allow_changes: bool,
 ) -> Result<Vec<Value>> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .unwrap_or_default();
     let model = crate::settings::anthropic_model_id(model);
 
     // Build the full system prompt with injected state context.
@@ -250,7 +289,11 @@ pub async fn send_message(
             "stream": true,
         });
 
-        debug!(model, "Claude API request (streaming): {} messages", messages.len());
+        debug!(
+            model,
+            "Claude API request (streaming): {} messages",
+            messages.len()
+        );
 
         let resp = client
             .post(API_URL)
@@ -269,8 +312,7 @@ pub async fn send_message(
         }
 
         // --- Stream SSE events ---
-        let (content, stop_reason, tool_calls) =
-            parse_stream(resp, tx).await?;
+        let (content, stop_reason, tool_calls) = parse_stream(resp, tx).await?;
 
         // Always record the assistant response in history.
         if stop_reason != "tool_use" || tool_calls.is_empty() {
@@ -346,20 +388,53 @@ async fn parse_stream(
         for event in parser.push(&chunk_result.context("stream read error")?)? {
             let event_type = event["type"].as_str().unwrap_or("");
             if event_type == "error" {
-                anyhow::bail!("Anthropic stream error: {}", event["error"]["message"].as_str().unwrap_or("request failed"));
+                anyhow::bail!(
+                    "Anthropic stream error: {}",
+                    event["error"]["message"]
+                        .as_str()
+                        .unwrap_or("request failed")
+                );
             }
-            if event_type == "message_stop" { completed = true; }
-            dispatch_sse_event(event_type, &event.to_string(), tx,
-                &mut content_blocks, &mut current_text, &mut has_open_text_block,
-                &mut tool_id, &mut tool_name, &mut tool_input_json, &mut in_tool_block,
-                &mut stop_reason, &mut sent_prefix, &mut tool_calls)?;
+            if event_type == "message_stop" {
+                completed = true;
+            }
+            dispatch_sse_event(
+                event_type,
+                &event.to_string(),
+                tx,
+                &mut content_blocks,
+                &mut current_text,
+                &mut has_open_text_block,
+                &mut tool_id,
+                &mut tool_name,
+                &mut tool_input_json,
+                &mut in_tool_block,
+                &mut stop_reason,
+                &mut sent_prefix,
+                &mut tool_calls,
+            )?;
         }
-        if completed { break; }
+        if completed {
+            break;
+        }
     }
-    anyhow::ensure!(completed && matches!(stop_reason.as_str(), "end_turn" | "tool_use" | "stop_sequence"),
+    anyhow::ensure!(
+        completed
+            && matches!(
+                stop_reason.as_str(),
+                "end_turn" | "tool_use" | "stop_sequence"
+            ),
         "Claude response was incomplete ({}). Retry or narrow the request.",
-        if stop_reason.is_empty() { "stream ended early" } else { &stop_reason });
-    anyhow::ensure!(!in_tool_block, "Claude tool arguments were incomplete; no commands were executed.");
+        if stop_reason.is_empty() {
+            "stream ended early"
+        } else {
+            &stop_reason
+        }
+    );
+    anyhow::ensure!(
+        !in_tool_block,
+        "Claude tool arguments were incomplete; no commands were executed."
+    );
 
     // Finalize any open text block.
     if has_open_text_block && !current_text.is_empty() {
@@ -397,7 +472,11 @@ fn dispatch_sse_event(
                 // Close any previous tool block.
                 if *in_tool_block {
                     finalize_tool_block(
-                        content_blocks, tool_id, tool_name, tool_input_json, tool_calls,
+                        content_blocks,
+                        tool_id,
+                        tool_name,
+                        tool_input_json,
+                        tool_calls,
                     )?;
                     *in_tool_block = false;
                 }
@@ -416,14 +495,19 @@ fn dispatch_sse_event(
                     *has_open_text_block = false;
                 }
                 *tool_id = parsed["content_block"]["id"]
-                    .as_str().unwrap_or("").to_owned();
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
                 *tool_name = parsed["content_block"]["name"]
-                    .as_str().unwrap_or("").to_owned();
+                    .as_str()
+                    .unwrap_or("")
+                    .to_owned();
                 *tool_input_json = String::new();
                 *in_tool_block = true;
-                let _ = tx.send(AppMsg::ConsoleResponse(
-                    format!("\n[tool: {}]\n", tool_name),
-                ));
+                let _ = tx.send(AppMsg::ConsoleResponse(format!(
+                    "\n[tool: {}]\n",
+                    tool_name
+                )));
             }
         }
         "content_block_delta" => {
@@ -442,7 +526,11 @@ fn dispatch_sse_event(
         "content_block_stop" => {
             if *in_tool_block {
                 finalize_tool_block(
-                    content_blocks, tool_id, tool_name, tool_input_json, tool_calls,
+                    content_blocks,
+                    tool_id,
+                    tool_name,
+                    tool_input_json,
+                    tool_calls,
                 )?;
                 *in_tool_block = false;
             }
@@ -471,8 +559,12 @@ fn finalize_tool_block(
     tool_input_json: &mut String,
     tool_calls: &mut Vec<(String, String, Value)>,
 ) -> Result<()> {
-    let input: Value = if tool_input_json.is_empty() { json!({}) }
-        else { serde_json::from_str(tool_input_json).context("Invalid Claude tool arguments; no command was executed")? };
+    let input: Value = if tool_input_json.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_str(tool_input_json)
+            .context("Invalid Claude tool arguments; no command was executed")?
+    };
     anyhow::ensure!(input.is_object(), "Tool arguments must be a JSON object");
     tool_calls.push((tool_id.clone(), tool_name.clone(), input.clone()));
     content_blocks.push(json!({
@@ -493,13 +585,27 @@ mod tests {
 
     #[test]
     fn subscription_overrides_old_cli_models_and_respects_explicit_model_choices() {
-        for (configured, expected) in [("claude-sonnet-4-20250514", "claude-sonnet-5"), ("", "claude-sonnet-5"), (" custom-model ", "custom-model")] {
+        for (configured, expected) in [
+            ("claude-sonnet-4-20250514", "claude-sonnet-5"),
+            ("", "claude-sonnet-5"),
+            (" custom-model ", "custom-model"),
+        ] {
             let command = subscription_command(configured);
-            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_str().unwrap()).collect();
-            let models: Vec<_> = args.windows(2).filter(|a| a[0] == "--model").map(|a| a[1]).collect();
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|a| a.to_str().unwrap())
+                .collect();
+            let models: Vec<_> = args
+                .windows(2)
+                .filter(|a| a[0] == "--model")
+                .map(|a| a[1])
+                .collect();
             assert_eq!(models, [expected]);
             assert!(args.windows(2).any(|a| a == ["--tools", ""]));
-            assert!(args.windows(2).any(|a| a == ["--permission-prompts", "none"]));
+            assert!(args
+                .windows(2)
+                .any(|a| a == ["--permission-prompts", "none"]));
         }
     }
 
@@ -524,10 +630,22 @@ mod tests {
             json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
             json!({"type":"message_stop"}),
         ];
-        let body = events.iter().map(|e|format!("data: {e}\n\n")).collect::<String>();
+        let body = events
+            .iter()
+            .map(|e| format!("data: {e}\n\n"))
+            .collect::<String>();
         let (tx, _rx) = mpsc::channel();
-        let (_, reason, calls) = parse_stream(super::super::tests::response(&body).await, &tx).await.unwrap();
+        let (_, reason, calls) = parse_stream(super::super::tests::response(&body).await, &tx)
+            .await
+            .unwrap();
         assert_eq!(reason, "tool_use");
-        assert_eq!(calls, vec![("call1".into(), "findings_list".into(), json!({"scope":"Blåbær"}))]);
+        assert_eq!(
+            calls,
+            vec![(
+                "call1".into(),
+                "findings_list".into(),
+                json!({"scope":"Blåbær"})
+            )]
+        );
     }
 }

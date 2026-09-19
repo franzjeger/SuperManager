@@ -59,8 +59,7 @@ pub struct CaptureReport {
 }
 
 pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
-    let p: Params = serde_json::from_value(raw_params)
-        .map_err(|e| anyhow!("bad params: {e}"))?;
+    let p: Params = serde_json::from_value(raw_params).map_err(|e| anyhow!("bad params: {e}"))?;
     let duration = p.duration_secs.clamp(1, 600);
 
     validate_interface(&p.interface)?;
@@ -91,16 +90,21 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
     let bpf_filter = p.bpf_filter.clone();
     let mut child = tokio::process::Command::new("tcpdump")
         .args([
-            "-i", &p.interface,
-            "-w", &output_path.to_string_lossy(),
-            "-G", &duration.to_string(),
-            "-W", "1",
+            "-i",
+            &p.interface,
+            "-w",
+            &output_path.to_string_lossy(),
+            "-G",
+            &duration.to_string(),
+            "-W",
+            "1",
             "-q",
             // Snap length — limit per-packet capture to 1600
             // bytes. Enough for any reasonable ASCII protocol
             // exchange. Bigger captures bloat the pcap without
             // value for cleartext-credential audit.
-            "-s", "1600",
+            "-s",
+            "1600",
             // Pass the BPF as a single argv string. tcpdump
             // joins multiple bare args internally; the explicit
             // single-string form means we never need to worry
@@ -138,10 +142,9 @@ pub async fn run(raw_params: serde_json::Value) -> Result<CaptureReport> {
     // doesn't broaden the attack surface.
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(
-            &output_path,
-            std::fs::Permissions::from_mode(0o644),
-        ) {
+        if let Err(e) =
+            std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o644))
+        {
             tracing::warn!("could not chmod 0644 {}: {e}", output_path.display());
         }
     }
@@ -182,12 +185,30 @@ fn validate_interface(name: &str) -> Result<()> {
     // via the BSD-name regex above. Anything matching the regex
     // but not in this list will still run, but tracing logs it.
     let recognised = [
-        "en0", "en1", "en2", "en3", "en4", "en5",
-        "lo0", "bridge0", "bridge100", "bridge101",
-        "utun0", "utun1", "utun2", "utun3", "utun4", "utun5",
-        "utun6", "utun7", "utun8", "utun9",
-        "awdl0", "llw0",
-        "vmnet1", "vmnet8",
+        "en0",
+        "en1",
+        "en2",
+        "en3",
+        "en4",
+        "en5",
+        "lo0",
+        "bridge0",
+        "bridge100",
+        "bridge101",
+        "utun0",
+        "utun1",
+        "utun2",
+        "utun3",
+        "utun4",
+        "utun5",
+        "utun6",
+        "utun7",
+        "utun8",
+        "utun9",
+        "awdl0",
+        "llw0",
+        "vmnet1",
+        "vmnet8",
     ];
     if !recognised.contains(&name) {
         tracing::info!("traffic_capture: unrecognised interface {name} (running anyway)");
@@ -207,8 +228,8 @@ fn validate_bpf(expr: &str) -> Result<()> {
     // colons, square brackets (for tcp[12] etc.), ampersands +
     // pipes (and/or), arithmetic + comparison operators.
     let allowed: &[char] = &[
-        ' ', '\t', '.', '/', '(', ')', ':', '[', ']',
-        '&', '|', '<', '>', '=', '-', '!', '+', '*', '%',
+        ' ', '\t', '.', '/', '(', ')', ':', '[', ']', '&', '|', '<', '>', '=', '-', '!', '+', '*',
+        '%',
     ];
     for c in expr.chars() {
         if !c.is_ascii_alphanumeric() && !allowed.contains(&c) {
@@ -271,8 +292,7 @@ fn user_home_dir() -> Result<PathBuf> {
     // Fall back to scanning /Users for a non-Shared entry. The
     // helper is single-user macOS — there's usually exactly one
     // candidate.
-    let entries = std::fs::read_dir("/Users")
-        .map_err(|e| anyhow!("read /Users: {e}"))?;
+    let entries = std::fs::read_dir("/Users").map_err(|e| anyhow!("read /Users: {e}"))?;
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -297,7 +317,9 @@ fn user_home_dir() -> Result<PathBuf> {
 /// average TCP payload + headers ~80 bytes, that's ~96 bytes per
 /// captured packet at our snap length. Used only as a GUI hint.
 fn estimate_packet_count(bytes: u64) -> u64 {
-    if bytes <= 24 { return 0; }
+    if bytes <= 24 {
+        return 0;
+    }
     (bytes - 24) / 96
 }
 
@@ -365,7 +387,8 @@ mod tests {
     fn rejects_path_with_dotdot() {
         // Must be absolute AND no `..` AND must start with the
         // user's SuperManager dir. The dotdot rule alone fails it.
-        let p = "/Users/somebody/Library/Application Support/SuperManager/captures/../../etc/x.pcap";
+        let p =
+            "/Users/somebody/Library/Application Support/SuperManager/captures/../../etc/x.pcap";
         assert!(validate_output_path(p).is_err());
     }
 

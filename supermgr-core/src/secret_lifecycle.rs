@@ -50,7 +50,7 @@ use uuid::Uuid;
 use crate::host::Host;
 use crate::ssh::key::SshKey;
 use crate::vpn::profile::{
-    AzureVpnConfig, ForticlientSslvpnConfig, FortiGateConfig, GenericConfig, OpenVpnConfig,
+    AzureVpnConfig, FortiGateConfig, ForticlientSslvpnConfig, GenericConfig, OpenVpnConfig,
     Profile, ProfileConfig, WireGuardConfig, WireGuardPeer,
 };
 
@@ -784,10 +784,7 @@ mod tests {
             azure_profile(id),
             generic_profile(id),
         ];
-        let names: HashSet<&str> = all
-            .iter()
-            .map(|i| i.entity.config.backend_name())
-            .collect();
+        let names: HashSet<&str> = all.iter().map(|i| i.entity.config.backend_name()).collect();
         assert_eq!(names.len(), all.len(), "duplicate backend in coverage list");
     }
 
@@ -1056,7 +1053,10 @@ mod tests {
         let orphans = LiveSecrets::new().find_orphans([&password, &privkey, &password]);
 
         assert_eq!(orphans.len(), 2, "duplicate not collapsed: {orphans:?}");
-        assert!(orphans.windows(2).all(|w| w[0] < w[1]), "unsorted: {orphans:?}");
+        assert!(
+            orphans.windows(2).all(|w| w[0] < w[1]),
+            "unsorted: {orphans:?}"
+        );
         assert!(orphans.contains(&privkey) && orphans.contains(&password));
     }
 

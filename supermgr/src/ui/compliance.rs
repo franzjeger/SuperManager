@@ -53,7 +53,10 @@ pub fn build_compliance_page(
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) -> ComplianceView {
-    let (scroller, content) = design::workspace_body("Compliance", "Run a supported baseline, inspect evidence and compare previous results.");
+    let (scroller, content) = design::workspace_body(
+        "Compliance",
+        "Run a supported baseline, inspect evidence and compare previous results.",
+    );
 
     let host_list = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.append(&host_list);
@@ -94,7 +97,9 @@ impl ComplianceView {
             let group = design::card("Hosts");
             let row = adw::ActionRow::new();
             row.set_title("No SSH hosts");
-            row.set_subtitle("Add a host in the SSH section first. Linux uses SSH; FortiGate uses its API.");
+            row.set_subtitle(
+                "Add a host in the SSH section first. Linux uses SSH; FortiGate uses its API.",
+            );
             group.add(&row);
             self.host_list.append(&group);
             return;
@@ -119,7 +124,10 @@ impl ComplianceView {
 
         match dispatch {
             ComplianceDispatch::LinuxBaseline => {
-                row.set_subtitle(&host_subtitle(host, &format!("{}@{}", host.username, host.hostname)));
+                row.set_subtitle(&host_subtitle(
+                    host,
+                    &format!("{}@{}", host.username, host.hostname),
+                ));
                 let btn = gtk4::Button::with_label("Run scan");
                 btn.add_css_class("suggested-action");
                 btn.set_valign(gtk4::Align::Center);
@@ -164,16 +172,21 @@ impl ComplianceView {
                     rt.spawn(async move {
                         match crate::dbus_client::dbus_fortigate_compliance(&host_id).await {
                             Ok(data) => tx.send(AppMsg::FortigateCompliance { host_id, data }).ok(),
-                            Err(error) => tx.send(AppMsg::OperationFailed(format!(
-                                "FortiGate compliance scan failed: {error}"
-                            ))).ok(),
+                            Err(error) => tx
+                                .send(AppMsg::OperationFailed(format!(
+                                    "FortiGate compliance scan failed: {error}"
+                                )))
+                                .ok(),
                         };
                     });
                 });
                 row.add_suffix(&btn);
             }
             ComplianceDispatch::NotApplicable => {
-                row.set_subtitle(&host_subtitle(host, "No CIS baseline exists for this device type."));
+                row.set_subtitle(&host_subtitle(
+                    host,
+                    "No CIS baseline exists for this device type.",
+                ));
                 row.add_suffix(&design::badge("N/A"));
             }
         }
@@ -316,14 +329,14 @@ impl ComplianceView {
                 let host_id = host_id.clone();
                 let run_id = run_id.clone();
                 rt.spawn(async move {
-                    let result =
-                        crate::dbus_client::dbus_compliance_get_run(&host_id, &run_id)
-                            .await
-                            .map_err(|e| format!("{e:#}"));
+                    let result = crate::dbus_client::dbus_compliance_get_run(&host_id, &run_id)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
                     // Same message as a fresh scan: from the page's point of
                     // view a loaded run and a new one render identically, and
                     // routing them through one path keeps it that way.
-                    tx.send(AppMsg::ComplianceRunFinished { host_id, result }).ok();
+                    tx.send(AppMsg::ComplianceRunFinished { host_id, result })
+                        .ok();
                 });
             });
             card.add(&row);

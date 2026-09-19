@@ -39,9 +39,8 @@ async fn spawn_server() -> (tempfile::TempDir, String) {
     let socket_path = dir.path().join("test.sock").to_string_lossy().into_owned();
 
     let state = DaemonState::new(dir.path().to_path_buf()).expect("open test trust store");
-    let secrets: Arc<dyn supermgr_core::keyring::SecretStore> = Arc::new(
-        FileSecretStore::new(dir.path().join("secrets.json")),
-    );
+    let secrets: Arc<dyn supermgr_core::keyring::SecretStore> =
+        Arc::new(FileSecretStore::new(dir.path().join("secrets.json")));
     let server = Arc::new(EngineServer::new(state, secrets));
 
     let sock_for_task = socket_path.clone();
@@ -75,7 +74,10 @@ async fn rpc_call(socket_path: &str, method: &str, params: Value, id: u64) -> Va
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await.expect("read len");
     let resp_len = u32::from_be_bytes(len_buf) as usize;
-    assert!(resp_len < 10 * 1024 * 1024, "response should be under 10 MiB");
+    assert!(
+        resp_len < 10 * 1024 * 1024,
+        "response should be under 10 MiB"
+    );
 
     let mut resp_buf = vec![0u8; resp_len];
     stream.read_exact(&mut resp_buf).await.expect("read body");
@@ -129,7 +131,10 @@ async fn malformed_json_returns_parse_error() {
     stream.read_exact(&mut resp_buf).await.unwrap();
     let resp: Value = serde_json::from_slice(&resp_buf).unwrap();
 
-    assert!(resp["error"].is_object(), "parse error should populate error field");
+    assert!(
+        resp["error"].is_object(),
+        "parse error should populate error field"
+    );
 }
 
 #[tokio::test]
@@ -137,7 +142,10 @@ async fn list_profiles_on_empty_state_returns_array() {
     let (_dir, socket) = spawn_server().await;
     let resp = rpc_call(&socket, "list_profiles", json!({}), 1).await;
     assert!(resp["error"].is_null() || resp["error"] == json!(null));
-    assert!(resp["result"].is_array(), "list_profiles should return an array");
+    assert!(
+        resp["result"].is_array(),
+        "list_profiles should return an array"
+    );
 }
 
 #[tokio::test]
@@ -181,7 +189,6 @@ async fn invalid_id_zero_still_responds() {
     let resp = rpc_call(&socket, "api_version", json!({}), 0).await;
     assert_eq!(resp["id"], 0);
 }
-
 
 #[tokio::test]
 async fn mac_client_uses_engine_framing_and_reports_rpc_errors() {

@@ -122,9 +122,9 @@ pub fn spawn(
                             Err(e) => {
                                 warn!("tray disconnect: {e}");
                                 let _ = weak.upgrade_in_event_loop(move |w| {
-                                    w.set_last_error(
-                                        slint::SharedString::from(format!("Disconnect: {e}")),
-                                    );
+                                    w.set_last_error(slint::SharedString::from(format!(
+                                        "Disconnect: {e}"
+                                    )));
                                 });
                             }
                         }

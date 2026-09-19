@@ -20,14 +20,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SnmpDetail {
-    pub community: Option<String>,         // which community worked
+    pub community: Option<String>, // which community worked
     pub sys_descr: Option<String>,
     pub sys_name: Option<String>,
     pub sys_contact: Option<String>,
     pub sys_location: Option<String>,
     pub sys_uptime: Option<String>,
-    pub interfaces: Vec<String>,           // ifDescr entries
-    pub raw_count: u32,                    // total OIDs successfully read
+    pub interfaces: Vec<String>, // ifDescr entries
+    pub raw_count: u32,          // total OIDs successfully read
 }
 
 /// Try `public`, then `private`. First community that responds
@@ -42,13 +42,21 @@ pub async fn walk(host: &str) -> Option<SnmpDetail> {
                 ..Default::default()
             };
             detail.sys_name = snmpget(host, community, "1.3.6.1.2.1.1.5.0").await;
-            if detail.sys_name.is_some() { detail.raw_count += 1; }
+            if detail.sys_name.is_some() {
+                detail.raw_count += 1;
+            }
             detail.sys_contact = snmpget(host, community, "1.3.6.1.2.1.1.4.0").await;
-            if detail.sys_contact.is_some() { detail.raw_count += 1; }
+            if detail.sys_contact.is_some() {
+                detail.raw_count += 1;
+            }
             detail.sys_location = snmpget(host, community, "1.3.6.1.2.1.1.6.0").await;
-            if detail.sys_location.is_some() { detail.raw_count += 1; }
+            if detail.sys_location.is_some() {
+                detail.raw_count += 1;
+            }
             detail.sys_uptime = snmpget(host, community, "1.3.6.1.2.1.1.3.0").await;
-            if detail.sys_uptime.is_some() { detail.raw_count += 1; }
+            if detail.sys_uptime.is_some() {
+                detail.raw_count += 1;
+            }
             detail.interfaces = snmpwalk_iface(host, community).await;
             if !detail.interfaces.is_empty() {
                 detail.raw_count += detail.interfaces.len() as u32;
@@ -63,7 +71,9 @@ async fn snmpget(host: &str, community: &str, oid: &str) -> Option<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::process::Command::new("snmpget")
-            .args(["-v", "2c", "-c", community, "-Ovq", "-t", "2", "-r", "0", host, oid])
+            .args([
+                "-v", "2c", "-c", community, "-Ovq", "-t", "2", "-r", "0", host, oid,
+            ])
             .output(),
     )
     .await
@@ -87,11 +97,23 @@ async fn snmpwalk_iface(host: &str, community: &str) -> Vec<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new("snmpwalk")
-            .args(["-v", "2c", "-c", community, "-Ovq", "-t", "2", host, "1.3.6.1.2.1.2.2.1.2"])
+            .args([
+                "-v",
+                "2c",
+                "-c",
+                community,
+                "-Ovq",
+                "-t",
+                "2",
+                host,
+                "1.3.6.1.2.1.2.2.1.2",
+            ])
             .output(),
     )
     .await;
-    let Ok(Ok(out)) = res else { return Vec::new(); };
+    let Ok(Ok(out)) = res else {
+        return Vec::new();
+    };
     if !out.status.success() {
         return Vec::new();
     }

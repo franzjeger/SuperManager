@@ -193,14 +193,13 @@ pub fn reconcile_status(current: &VpnState, backend: &BackendStatus) -> Option<V
         }
 
         // Tunnel was connected but the backend reports failure.
-        (
-            VpnState::Connected { profile_id, .. },
-            BackendStatus::Failed { reason },
-        ) => Some(VpnState::Error {
-            profile_id: Some(*profile_id),
-            code: ErrorCode::Internal,
-            message: reason.clone(),
-        }),
+        (VpnState::Connected { profile_id, .. }, BackendStatus::Failed { reason }) => {
+            Some(VpnState::Error {
+                profile_id: Some(*profile_id),
+                code: ErrorCode::Internal,
+                message: reason.clone(),
+            })
+        }
 
         // All other combinations require no daemon-side state change.
         _ => None,

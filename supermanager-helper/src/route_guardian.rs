@@ -75,7 +75,10 @@ enum Af {
 }
 impl Af {
     fn label(self) -> &'static str {
-        match self { Af::V4 => "v4", Af::V6 => "v6" }
+        match self {
+            Af::V4 => "v4",
+            Af::V6 => "v6",
+        }
     }
     fn route_get_args(self) -> &'static [&'static str] {
         match self {
@@ -85,12 +88,13 @@ impl Af {
     }
     fn route_add_args(self, gw: &str) -> Vec<String> {
         match self {
-            Af::V4 => vec![
-                "-q".into(), "add".into(), "default".into(), gw.into(),
-            ],
+            Af::V4 => vec!["-q".into(), "add".into(), "default".into(), gw.into()],
             Af::V6 => vec![
-                "-q".into(), "add".into(), "-inet6".into(),
-                "default".into(), gw.into(),
+                "-q".into(),
+                "add".into(),
+                "-inet6".into(),
+                "default".into(),
+                gw.into(),
             ],
         }
     }
@@ -361,9 +365,7 @@ fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
 /// `-q` keeps stderr silent on the duplicate-add path.
 fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
     let args: Vec<String> = af.route_add_args(&snap.gateway);
-    let out = Command::new("/sbin/route")
-        .args(&args)
-        .output()?;
+    let out = Command::new("/sbin/route").args(&args).output()?;
     if out.status.success() {
         return Ok(());
     }
@@ -371,7 +373,11 @@ fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
     if stderr.contains("File exists") || stderr.contains("file exists") {
         return Ok(());
     }
-    Err(anyhow!("route add ({}) failed: {}", af.label(), stderr.trim()))
+    Err(anyhow!(
+        "route add ({}) failed: {}",
+        af.label(),
+        stderr.trim()
+    ))
 }
 
 /// **TEST ONLY** — deletes the default route to simulate

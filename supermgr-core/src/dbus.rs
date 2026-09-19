@@ -189,891 +189,880 @@ mod generated {
 
     use zbus::fdo;
 
-#[zbus::proxy(
-    interface = "org.supermgr.Daemon1",
-    default_service = "org.supermgr.Daemon",
-    default_path = "/org/supermgr/Daemon"
-)]
-pub trait Daemon {
-    // =======================================================================
-    // VPN methods
-    // =======================================================================
-
-    /// Return a JSON array of [`crate::vpn::profile::ProfileSummary`] objects.
-    ///
-    /// The GUI deserialises the string with [`crate::vpn::profile::ProfileSummary`].
-    async fn list_profiles(&self) -> fdo::Result<String>;
-
-    /// Initiate a connection for the profile identified by `profile_id` (UUID string).
-    ///
-    /// Returns immediately; the actual connection runs asynchronously in the
-    /// daemon.  Listen for [`Self::receive_state_changed`] to track progress.
-    async fn connect(&self, profile_id: &str) -> fdo::Result<()>;
-
-    /// Tear down the active tunnel (no-op if already disconnected).
-    async fn disconnect(&self) -> fdo::Result<()>;
-
-    /// Return the current [`crate::vpn::state::VpnState`] serialised as JSON.
-    async fn get_status(&self) -> fdo::Result<String>;
-
-    /// Return recent daemon log lines from the in-memory ring buffer.
-    ///
-    /// Each element is a pre-formatted string `[HH:MM:SS] LEVEL target: message`.
-    /// Returns up to 500 lines, oldest first.
-    async fn get_logs(&self) -> fdo::Result<Vec<String>>;
-
-    /// Clear the in-memory log buffer.
-    async fn clear_logs(&self) -> fdo::Result<()>;
-
-    /// Dynamically change the daemon's tracing log level at runtime.
-    ///
-    /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
-    /// `"info"`, `"debug"`, or `"trace"`.
-    async fn set_log_level(&self, level: &str) -> fdo::Result<()>;
-
-    /// Return live tunnel statistics as a compact JSON object.
-    ///
-    /// JSON shape: `{"bytes_sent": u64, "bytes_received": u64, "last_handshake_secs": u64}`
-    ///
-    /// `last_handshake_secs` is a Unix epoch timestamp; `0` means no handshake
-    /// has been observed yet or no tunnel is active.
-    async fn get_stats(&self) -> fdo::Result<String>;
-
-    /// Import a WireGuard `.conf` file.
-    ///
-    /// `conf_text` is the raw file contents; `name` is the desired display name.
-    /// Returns the new profile's UUID string on success.
-    ///
-    /// The daemon will parse the config, store the private key in the system
-    /// keyring, and persist the profile to disk.
-    async fn import_wireguard(&self, conf_text: &str, name: &str) -> fdo::Result<String>;
-
-    /// Delete a profile by UUID string.
-    ///
-    /// Fails with `org.freedesktop.DBus.Error.Failed` if the profile is
-    /// currently connected.
-    async fn delete_profile(&self, profile_id: &str) -> fdo::Result<()>;
-
-    /// Rename a profile identified by `profile_id` to `new_name`.
-    async fn rename_profile(&self, profile_id: &str, new_name: &str) -> fdo::Result<()>;
-
-    /// Set the `auto_connect` flag on a profile.
-    ///
-    /// When `true` the daemon will automatically connect this profile when
-    /// NetworkManager reports the network is available (e.g. after resume from
-    /// suspend).  Only one profile should have `auto_connect = true` at a time;
-    /// if multiple profiles have the flag set, the daemon picks the first one
-    /// it finds.
-    ///
-    /// The change is persisted to the profile's TOML file immediately.
-    async fn set_auto_connect(&self, profile_id: &str, auto_connect: bool) -> fdo::Result<()>;
-
-    /// Update a FortiGate profile's connection settings.
-    ///
-    /// Non-empty `password` / `psk` overwrite the stored secret; empty strings
-    /// leave the existing secret unchanged.
-    ///
-    /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
-    /// addresses that overrides the FortiGate's mode-config-pushed DNS.
-    /// Pass an empty string to clear any previous override and revert to
-    /// using mode-config DNS.
-    async fn update_fortigate(
-        &self,
-        profile_id: &str,
-        name: &str,
-        host: &str,
-        username: &str,
-        password: &str,
-        psk: &str,
-        dns_servers: &str,
-        local_id: &str,
-    ) -> fdo::Result<()>;
-
-    /// Update an OpenVPN profile's credentials.
-    ///
-    /// A non-empty `password` overwrites the stored secret; an empty string
-    /// leaves the existing secret unchanged.
-    async fn update_openvpn_credentials(
-        &self,
-        profile_id: &str,
-        username: &str,
-        password: &str,
-    ) -> fdo::Result<()>;
-
-    /// Set the `full_tunnel` flag on a profile.
-    ///
-    /// `true`  → route all traffic through the VPN when connected.
-    /// `false` → use only the backend-specific split-tunnel routes.
-    ///
-    /// The change is persisted to the profile's TOML file immediately.
-    /// If the profile is currently connected the change takes effect on the
-    /// next reconnect.
-    async fn set_full_tunnel(&self, profile_id: &str, full_tunnel: bool) -> fdo::Result<()>;
-
-    /// Set the kill-switch flag on a profile.
-    ///
-    /// When `true` all non-VPN traffic is blocked via nftables while this
-    /// profile is connected.
-    ///
-    /// The change is persisted to the profile's TOML file immediately.
-    async fn set_kill_switch(&self, profile_id: &str, enabled: bool) -> fdo::Result<()>;
-
-    /// Set or clear the customer/tenant tag on a VPN profile.
-    ///
-    /// Pass an empty string to clear the tag (un-group the profile).
-    /// The change is persisted to the profile's TOML file immediately.
-    async fn set_profile_customer(
-        &self,
-        profile_id: &str,
-        customer: &str,
-    ) -> fdo::Result<()>;
-
-    /// Set the split-tunnel route list for a WireGuard profile.
-    ///
-    /// `routes` is a list of CIDR strings (e.g. `["10.0.0.0/8", "192.168.1.0/24"]`).
-    /// These replace the catch-all `0.0.0.0/0` when `full_tunnel = false` is active.
-    /// Passing an empty list clears split routes (split-tunnel will then fall back
-    /// to whatever explicit prefixes are in the peer's AllowedIPs after stripping
-    /// catch-alls, which may cause a connect-time error if none remain).
-    ///
-    /// Only valid for WireGuard profiles; returns an error for other backends.
-    async fn set_split_routes(
-        &self,
-        profile_id: &str,
-        routes: Vec<String>,
-    ) -> fdo::Result<()>;
-
-    /// Create a new FortiGate IPsec/IKEv2 profile and persist it to disk.
-    ///
-    /// `name` is the display name; `host` is the appliance hostname or IP;
-    /// `username` / `password` are the EAP-MSCHAPv2 credentials; `psk` is
-    /// the group pre-shared key for IKE SA authentication.
-    ///
-    /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
-    /// addresses to push to systemd-resolved on connect. Pass an empty
-    /// string to fall back to whatever DNS servers the FortiGate sends
-    /// during IKE mode-config negotiation.
-    ///
-    /// Returns the new profile's UUID string on success.
-    async fn import_fortigate(
-        &self,
-        name: &str,
-        host: &str,
-        username: &str,
-        password: &str,
-        psk: &str,
-        dns_servers: &str,
-        local_id: &str,
-    ) -> fdo::Result<String>;
-
-    /// Import an OpenVPN `.ovpn` configuration file.
-    ///
-    /// `conf_text` is the raw `.ovpn` file contents; `name` is the desired
-    /// display name.  `username` and `password` are optional credentials —
-    /// pass empty strings to import without credentials.
-    /// Returns the new profile's UUID string on success.
-    async fn import_openvpn(
-        &self,
-        conf_text: &str,
-        name: &str,
-        username: &str,
-        password: &str,
-    ) -> fdo::Result<String>;
-
-    /// Import an Azure Point-to-Site VPN profile from the XML config files
-    /// that Azure downloads as a zip archive.
-    ///
-    /// `azure_xml` is the contents of `AzureVPN/azurevpnconfig.xml`;
-    /// `vpn_settings_xml` is the contents of `Generic/VpnSettings.xml`.
-    /// `name` is the desired display name (pre-filled from `<name>` in the XML
-    /// is a sensible default).
-    ///
-    /// Returns the new profile's UUID string on success.
-    async fn import_azure_vpn(
-        &self,
-        azure_xml: &str,
-        vpn_settings_xml: &str,
-        name: &str,
-    ) -> fdo::Result<String>;
-
-    /// Import a TOML configuration file (VPN profile, SSH key, or SSH host).
-    ///
-    /// Auto-detects the type based on TOML content.  Returns a JSON object
-    /// with `{ "type": "vpn"|"ssh_key"|"ssh_host", "id": "<uuid>" }`.
-    async fn import_toml(&self, toml_text: &str) -> fdo::Result<String>;
-
-    /// Rotate the WireGuard private key for the given profile.
-    ///
-    /// Generates a new key pair, overwrites the stored private key in the
-    /// secret service, and returns the new base64-encoded public key.
-    async fn rotate_wireguard_key(&self, profile_id: &str) -> fdo::Result<String>;
-
-    /// Export a profile as a TOML string (secrets replaced by their labels).
-    ///
-    /// Returns the serialised TOML text of the profile.  Secrets are stored
-    /// as `SecretRef` labels (not raw values), so the output is safe to share.
-    async fn export_profile(&self, profile_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // SSH methods
-    // =======================================================================
-
-    /// Generate a new SSH key pair of the given type.
-    ///
-    /// `key_type` is one of `"ed25519"`, `"ecdsa"`, `"rsa"`.
-    /// `tags_json` is a JSON array of tag strings (e.g. `["prod", "web"]`).
-    /// Returns the new key's UUID string on success.
-    async fn ssh_generate_key(
-        &self,
-        key_type: &str,
-        name: &str,
-        description: &str,
-        tags_json: &str,
-    ) -> fdo::Result<String>;
-
-    /// Scan a directory for existing SSH key files and return a JSON array of
-    /// discovered key metadata (paths, types, fingerprints).
-    async fn ssh_import_keys_scan(&self, directory: &str) -> fdo::Result<String>;
-
-    /// Import an existing SSH key pair into the managed store.
-    ///
-    /// `public_key` is the contents of the `.pub` file; `private_key_pem` is
-    /// the PEM-encoded private key.  `key_type` is `"ed25519"`, `"ecdsa"`, or
-    /// `"rsa"`.  Returns the new key's UUID string on success.
-    async fn ssh_import_key(
-        &self,
-        name: &str,
-        public_key: &str,
-        private_key_pem: &str,
-        key_type: &str,
-    ) -> fdo::Result<String>;
-
-    /// Delete an SSH key by UUID string.
-    async fn ssh_delete_key(&self, key_id: &str) -> fdo::Result<()>;
-
-    /// Return a JSON array of [`crate::ssh::key::SshKeySummary`] objects.
-    async fn ssh_list_keys(&self) -> fdo::Result<String>;
-
-    /// List nodes in the local tailnet via `tailscale status --json`.
-    ///
-    /// Returns a JSON array of TailscaleNode objects (defined in the
-    /// daemon's `tailscale` module). Errors string-wise when the
-    /// tailscale CLI isn't installed or tailscaled isn't running.
-    async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
-
-    /// Normalized settings and saved accounts; no raw preferences or keys.
-    async fn tailscale_management(&self) -> fdo::Result<String>;
-    /// Apply only explicitly changed settings to the expected account.
-    async fn tailscale_apply_preferences(&self, patch_json: &str) -> fdo::Result<String>;
-    async fn tailscale_set_running(&self, profile_id: &str, running: bool) -> fdo::Result<String>;
-    async fn tailscale_switch_profile(&self, profile_id: &str) -> fdo::Result<String>;
-    async fn tailscale_logout(&self, profile_id: &str) -> fdo::Result<String>;
-    /// Bounded diagnostic ping to a peer still present in the active tailnet.
-    async fn tailscale_ping(&self, node_id: &str) -> fdo::Result<String>;
-    async fn tailscale_begin_login(&self, profile_id: &str) -> fdo::Result<String>;
-    async fn tailscale_login_status(&self, attempt_id: &str) -> fdo::Result<String>;
-    async fn tailscale_cancel_login(&self, attempt_id: &str) -> fdo::Result<()>;
-    async fn tailscale_dns_diagnostics(&self, profile_id: &str) -> fdo::Result<String>;
-    async fn tailscale_change_exit_node(&self, profile_id: &str, node_id: &str) -> fdo::Result<String>;
-
-    /// Route this machine's traffic through `value`, or clear the selection
-    /// when `value` is empty.
-    ///
-    /// `value` is a Tailscale IP or MagicDNS name of a peer advertising
-    /// exit-node capability. Runs `tailscale set --exit-node=…`, which on
-    /// Linux installs the routing itself.
-    ///
-    /// Polkit-gated (`org.supermgr.daemon.tailscale-exit-node`): the caller
-    /// is choosing where every packet this machine sends goes.
-    async fn tailscale_set_exit_node(&self, value: &str) -> fdo::Result<()>;
-
-    /// Diagnose the local Tailscale stack.
-    ///
-    /// Returns a [`crate::tailscale::TailscaleHealth`] as JSON. Tailscale
-    /// being broken is not an error here — it is the payload: CLI missing,
-    /// daemon stopped, logged out, and brought down are distinct states,
-    /// each with a remedy the GUI can offer.
-    async fn tailscale_health(&self) -> fdo::Result<String>;
-
-    /// Bring the Tailscale stack up as far as it can go without a human:
-    /// install the package, enable and start tailscaled, `tailscale up` a
-    /// stopped backend. Returns a summary of the steps taken. Idempotent.
-    ///
-    /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): every step
-    /// changes system state as root.
-    async fn tailscale_repair(&self) -> fdo::Result<String>;
-
-    /// Start an interactive Tailscale login; returns the URL to open in a
-    /// browser. May return an empty string when the control plane is slow —
-    /// the URL then appears in `TailscaleHealth.auth_url`, which the GUI
-    /// polls during a login.
-    ///
-    /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): a login
-    /// decides whose tailnet this machine becomes reachable from.
-    async fn tailscale_login(&self) -> fdo::Result<String>;
-
-    /// Return the full [`crate::ssh::key::SshKey`] serialised as JSON.
-    async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String>;
-
-    /// Return the public key in OpenSSH `authorized_keys` format.
-    async fn ssh_export_public_key(&self, key_id: &str) -> fdo::Result<String>;
-
-    /// Return the PEM-encoded private key (retrieved from the secret store).
-    async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String>;
-
-    /// Add a new SSH host from a JSON-serialised
-    /// [`crate::host::Host`] object.
-    ///
-    /// Returns the new host's UUID string on success.
-    async fn add_host(&self, host_json: &str) -> fdo::Result<String>;
-
-    /// Update an existing SSH host.
-    ///
-    /// `host_json` is the full JSON-serialised host object with updated fields.
-    async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()>;
-
-    /// Toggle the pinned/favourite state of an SSH host.
-    ///
-    /// Flips `pinned` and returns the refreshed host list as a JSON array of
-    /// [`crate::host::HostSummary`] objects.
-    async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String>;
-
-    /// Set or clear the customer/tenant tag on an SSH host.
-    ///
-    /// Pass an empty string to clear the tag.
-    async fn ssh_set_host_customer(
-        &self,
-        host_id: &str,
-        customer: &str,
-    ) -> fdo::Result<()>;
-
-    // =======================================================================
-    // Per-customer documentation export
-    // =======================================================================
-
-    /// Return a JSON array of distinct customer tags currently in use across
-    /// VPN profiles and SSH hosts. Sorted, case-insensitively deduplicated.
-    async fn list_customers(&self) -> fdo::Result<String>;
-
-    /// Render a Markdown documentation snapshot for `customer`.
-    ///
-    /// Matching is case-insensitive on the trimmed input. Pass an empty
-    /// string to render an "Ungrouped" report covering every profile and
-    /// host whose customer tag is empty.
-    async fn export_customer_docs(&self, customer: &str) -> fdo::Result<String>;
-
-    /// Return the stable customer/site catalog as JSON.
-    async fn customer_catalog(&self) -> fdo::Result<String>;
-
-    /// Create or update one customer record from JSON.
-    async fn customer_save(&self, customer_json: &str) -> fdo::Result<()>;
-
-    /// Delete an empty customer from the catalog.
-    async fn customer_delete(&self, slug: &str) -> fdo::Result<()>;
-
-    /// Attach one managed host to exactly one customer/site.
-    async fn customer_assign_host(
-        &self,
-        customer_slug: &str,
-        site_id: &str,
-        host_id: &str,
-    ) -> fdo::Result<()>;
-
-    /// Attach a VPN profile to a customer.
-    async fn customer_assign_profile(
-        &self,
-        customer_slug: &str,
-        profile_id: &str,
-    ) -> fdo::Result<()>;
-
-    /// Scan a bounded private IPv4 CIDR for selected TCP ports.
-    async fn recon_scan(&self, target_cidr: &str, ports_json: &str) -> fdo::Result<String>;
-
-    /// Delete an SSH host by UUID string.
-    async fn delete_host(&self, host_id: &str) -> fdo::Result<()>;
-
-    /// Return a JSON array of [`crate::host::HostSummary`] objects.
-    async fn list_hosts(&self) -> fdo::Result<String>;
-
-    /// Return the full [`crate::host::Host`] serialised as JSON.
-    async fn get_host(&self, host_id: &str) -> fdo::Result<String>;
-
-    /// Push a public key to one or more remote hosts' `authorized_keys`.
-    ///
-    /// `host_ids_json` is a JSON array of host UUID strings.
-    /// `use_sudo` controls whether `sudo` is used on the remote side.
-    /// Returns a JSON object with per-host results.
-    async fn ssh_push_key(
-        &self,
-        key_id: &str,
-        host_ids_json: &str,
-        use_sudo: bool,
-    ) -> fdo::Result<String>;
-
-    /// Revoke (remove) a public key from one or more remote hosts'
-    /// `authorized_keys`.
-    ///
-    /// `host_ids_json` is a JSON array of host UUID strings.
-    /// `use_sudo` controls whether `sudo` is used on the remote side.
-    /// Returns a JSON object with per-host results.
-    async fn ssh_revoke_key(
-        &self,
-        key_id: &str,
-        host_ids_json: &str,
-        use_sudo: bool,
-    ) -> fdo::Result<String>;
-
-    /// Return recent SSH audit log entries.
-    ///
-    /// Each element is a pre-formatted log line.  Returns up to `max_lines`
-    /// entries, newest first.
-    async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>>;
-
-    /// Store an SSH password for the given host.
-    async fn ssh_get_password(&self, host_id: &str) -> fdo::Result<String>;
-    async fn ssh_set_password(&self, host_id: &str, password: &str) -> fdo::Result<()>;
-
-    /// Store an OpenSSH certificate for the given host (certificate auth).
-    async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()>;
-
-    /// Store a FortiGate REST API token and port for the given host.
-    /// Pass `port = 0` to keep the existing port.
-    async fn ssh_set_api_token(&self, host_id: &str, token: &str, port: u16) -> fdo::Result<()>;
-
-    /// Call the FortiGate REST API on a host.
-    ///
-    /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
-    /// (e.g. `/api/v2/cmdb/system/admin/admin`).  `body` is optional JSON.
-    /// Returns the JSON response body.
-    async fn fortigate_api(
-        &self,
-        host_id: &str,
-        method: &str,
-        path: &str,
-        body: &str,
-    ) -> fdo::Result<String>;
-
-    /// Push an SSH public key to a FortiGate admin user via REST API.
-    ///
-    /// `host_id` is the UUID of the FortiGate host with an API token configured.
-    /// `key_id` is the UUID of the SSH key whose public key will be pushed.
-    /// `admin_user` is the FortiGate admin username (e.g. `"admin"`).
-    ///
-    /// The key is set as `ssh-public-key1` on the admin user via
-    /// `PUT /api/v2/cmdb/system/admin/{admin_user}`.
-    async fn fortigate_push_ssh_key(
-        &self,
-        host_id: &str,
-        key_id: &str,
-        admin_user: &str,
-    ) -> fdo::Result<String>;
-
-    /// Execute a shell command on a remote SSH host.
-    ///
-    /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
-    async fn ssh_execute_command(&self, host_id: &str, command: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // UniFi methods
-    // =======================================================================
-
-    /// Execute `set-inform <url>` on a UniFi device via SSH.
-    ///
-    /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
-    async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String>;
-
-    /// Call the UniFi Controller REST API on a host.
-    ///
-    /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
-    /// (e.g. `/proxy/network/api/s/default/stat/device`).  `body` is optional JSON.
-    /// Returns the JSON response body.
-    async fn unifi_api(
-        &self,
-        host_id: &str,
-        method: &str,
-        path: &str,
-        body: &str,
-    ) -> fdo::Result<String>;
-
-    /// Store UniFi Controller URL and credentials for a host.
-    ///
-    /// Validates the credentials by attempting to log in, then stores the URL
-    /// and credentials securely.
-    async fn unifi_set_controller(
-        &self,
-        host_id: &str,
-        url: &str,
-        username: &str,
-        password: &str,
-    ) -> fdo::Result<()>;
-
-    // =======================================================================
-    // OPNsense REST API
-    // =======================================================================
-
-    /// Store OPNsense API credentials (key + secret) for an SSH host.
-    ///
-    /// `port` is the HTTPS port (defaults to 443 if 0). `api_key` and
-    /// `api_secret` are the values from OPNsense → System → Access → Users
-    /// → API keys.
-    ///
-    /// Validates the credentials by issuing an authenticated probe; on
-    /// success the credentials are persisted as a JSON blob in the system
-    /// secret service and the host's `api_token_ref` / `api_port` fields
-    /// are updated.
-    async fn opnsense_set_credentials(
-        &self,
-        host_id: &str,
-        port: u16,
-        api_key: &str,
-        api_secret: &str,
-    ) -> fdo::Result<()>;
-
-    /// Issue a Basic-Auth REST API call to an OPNsense host and return the
-    /// raw response body as text.
-    ///
-    /// `method` is one of `GET`, `POST`, `PUT`, `DELETE`. `path` is the
-    /// URL path including the leading `/api/...`. `body` is sent as
-    /// JSON for non-GET methods.
-    async fn opnsense_api(
-        &self,
-        host_id: &str,
-        method: &str,
-        path: &str,
-        body: &str,
-    ) -> fdo::Result<String>;
-
-    /// Composite "is this OPNsense alive" status snapshot for the dashboard.
-    ///
-    /// Returns the `OpnSenseStatus` struct (defined in the daemon's
-    /// `opnsense` module) serialised as JSON. Each field is optional; an
-    /// individual endpoint failure does not fail the whole call.
-    async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
-
-    /// Download the OPNsense running config and save it under
-    /// `/etc/supermgrd/backups/<safe_host>_<ts>.opnsense.xml`.
-    /// Returns the filename written.
-    async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Sophos XML Configuration API
-    // =======================================================================
-
-    /// Store Sophos WebAdmin credentials for an SSH host and validate them.
-    ///
-    /// Sophos has no token endpoint; the username and password are stored as
-    /// a JSON blob in the system secret service and resent on every API call
-    /// inside the `<Login>` block of the XML envelope.
-    ///
-    /// `port` defaults to 4444 (the conventional WebAdmin HTTPS port) if 0.
-    async fn sophos_set_credentials(
-        &self,
-        host_id: &str,
-        port: u16,
-        username: &str,
-        password: &str,
-    ) -> fdo::Result<()>;
-
-    /// Send a Sophos XML Configuration API operation.
-    ///
-    /// `inner_xml` is the operation body (`<Get>...</Get>`, `<Set>...</Set>`,
-    /// `<Remove>...</Remove>`). The daemon adds the `<Request>` envelope and
-    /// `<Login>` block. The caller is responsible for XML-escaping any
-    /// user-supplied values inside `inner_xml`.
-    ///
-    /// Sophos always returns HTTP 200; success/failure is encoded in the
-    /// `<Status code="N">` tag of the response body, which is returned
-    /// verbatim.
-    async fn sophos_xml_api(
-        &self,
-        host_id: &str,
-        inner_xml: &str,
-    ) -> fdo::Result<String>;
-
-    // =======================================================================
-    // SSH port forwarding
-    // =======================================================================
-
-    /// Start a local TCP port forward through an SSH tunnel.
-    ///
-    /// Binds `local_port` on localhost, and for each accepted connection opens
-    /// an SSH direct-tcpip channel to `remote_host:remote_port`.
-    /// Returns a unique forward ID string that can be passed to
-    /// [`Self::ssh_stop_port_forward`] to tear it down.
-    async fn ssh_start_port_forward(
-        &self,
-        host_id: &str,
-        local_port: u16,
-        remote_host: &str,
-        remote_port: u16,
-    ) -> fdo::Result<String>;
-
-    /// Stop an active port forward by its forward ID.
-    async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()>;
-
-    /// List all active port forwards as a JSON array.
-    ///
-    /// Each element: `{"forward_id":"...","host_id":"...","local_port":N,"remote_host":"...","remote_port":N}`
-    async fn ssh_list_port_forwards(&self) -> fdo::Result<String>;
-
-    /// Return the SSH command string for connecting to the given host.
-    ///
-    /// The returned string is suitable for `std::process::Command` or display
-    /// to the user (e.g. `"ssh -i /path/to/key user@host -p 22"`).
-    async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String>;
-
-    /// Test SSH and (optionally) FortiGate API connectivity for a host.
-    ///
-    /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
-    /// `{"ssh": "timeout", "api": "auth_failed"}`.
-    async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Config versioning
-    // =======================================================================
-
-    /// Save a generated config with a timestamp for later comparison.
-    ///
-    /// Returns the filename under which the config was stored.
-    async fn save_config_version(
-        &self,
-        customer: &str,
-        device_type: &str,
-        config: &str,
-    ) -> fdo::Result<String>;
-
-    /// List saved config versions for a customer.
-    ///
-    /// Returns a JSON array of `{"filename": "...", "timestamp": "..."}` objects,
-    /// newest first.
-    async fn list_config_versions(&self, customer: &str) -> fdo::Result<String>;
-
-    /// Retrieve a previously saved config version by filename.
-    async fn get_config_version(&self, filename: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Signals
-    // =======================================================================
-
-    /// Emitted whenever the daemon transitions to a new [`crate::vpn::state::VpnState`].
-    ///
-    /// `state_json` is the new state serialised as JSON.
-    #[zbus(signal)]
-    fn state_changed(&self, state_json: String) -> fdo::Result<()>;
-
-    /// Emitted periodically (every ~5 s) while a tunnel is active.
-    ///
-    /// `stats_json` is a [`crate::vpn::state::TunnelStats`] serialised as JSON.
-    #[zbus(signal)]
-    fn stats_updated(&self, stats_json: String) -> fdo::Result<()>;
-
-    /// Emitted by the daemon during an Azure Entra ID connection when the
-    /// user must complete a device-code authentication challenge.
-    ///
-    /// The GUI should display `user_code` prominently and tell the user to
-    /// visit `verification_url` (typically `https://microsoft.com/devicelogin`)
-    /// in a browser.  The code expires after ~15 minutes.
-    #[zbus(signal)]
-    fn auth_challenge(&self, user_code: String, verification_url: String) -> fdo::Result<()>;
-
-    /// Emitted during multi-host SSH operations (push/revoke) to report
-    /// per-host progress.
-    ///
-    /// `operation_id` is a unique identifier for the batch operation;
-    /// `host_label` identifies which host this update concerns;
-    /// `message` is a human-readable status string.
-    #[zbus(signal)]
-    fn ssh_operation_progress(
-        &self,
-        operation_id: String,
-        host_label: String,
-        message: String,
-    ) -> fdo::Result<()>;
-
-    // =======================================================================
-    // SSH health check
-    // =======================================================================
-
-    /// Return a JSON map of `host_id → reachable(bool)` for all SSH hosts.
-    async fn ssh_host_health(&self) -> fdo::Result<String>;
-
-    // =======================================================================
-    // SSH known hosts
-    // =======================================================================
-
-    /// Return the recorded SSH host-key fingerprints as a JSON object mapping
-    /// `"host:port"` → SHA-256 fingerprint (lowercase hex).
-    async fn ssh_list_known_hosts(&self) -> fdo::Result<String>;
-
-    /// Drop the recorded host key for `hostname:port` so the next connection
-    /// is treated as first sight and re-recorded.
-    ///
-    /// The remedy for a host-key mismatch that turned out to be a legitimate
-    /// rotation or reinstall. Returns `true` if an entry was removed.
-    async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool>;
-
-    // =======================================================================
-    // Config backup & restore
-    // =======================================================================
-
-    /// Export all configuration (profiles, SSH keys, SSH hosts) as a single
-    /// JSON string.  Secret values are not included -- only `SecretRef` labels.
-    async fn export_all(&self) -> fdo::Result<String>;
-
-    /// Import configuration from a JSON backup string produced by
-    /// [`Self::export_all`].  Each imported item receives a new UUID.
-    /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "hosts": N}`.
-    async fn import_all(&self, data: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // FortiGate config backup
-    // =======================================================================
-
-    /// Download the FortiGate running config and save it to disk.
-    ///
-    /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and writes
-    /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
-    /// Returns the filename on success.
-    async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
-
-    /// Run CIS benchmark compliance checks against a FortiGate device via SSH.
-    ///
-    /// Returns a JSON object with individual check results and a summary score:
-    /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
-    async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // CIS Linux baseline
-    //
-    // The Linux baseline needs nothing but an SSH session: `run_baseline` in
-    // `supermgr_core::ssh_compliance` takes a closure for command execution.
-    // That is why these exist on the Linux daemon while FortiGate compliance
-    // does not yet — the FortiGate path wants a REST client this daemon has
-    // no equivalent of.
-    // =======================================================================
-
-    /// Run the CIS Linux baseline against a host over SSH and persist the run.
-    ///
-    /// `triggered_by` is `manual`, `scheduled` or `post_deploy`; anything else
-    /// is read as `manual`. Returns the full `ComplianceRun` as JSON.
-    async fn compliance_run_linux(
-        &self,
-        host_id: &str,
-        triggered_by: &str,
-    ) -> fdo::Result<String>;
-
-    /// Run summaries for a host, newest first, capped at `limit`.
-    ///
-    /// Summaries rather than full runs so a history list does not deserialise
-    /// every check vector to render its rows.
-    async fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String>;
-
-    /// One stored run in full, as JSON.
-    async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
-
-    /// The check library: every `CheckDefinition` this build knows, including
-    /// user-supplied ones. What the GUI resolves descriptions, CIS references
-    /// and remediation through.
-    async fn compliance_list_checks(&self) -> fdo::Result<String>;
-
-    /// What changed between `run_id` and the run before it on the same host.
-    ///
-    /// A host's first run has no baseline to compare against; everything
-    /// currently failing is reported as newly failing in that case.
-    async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Security findings
-    //
-    // A finding is a compliance failure (or, on macOS, a scanner result) that
-    // has been given a lifecycle: a first-seen date, a scan count, and a
-    // disposition an operator can move. The Linux daemon fills the store from
-    // its own compliance runs, which is what lets a Security page exist here
-    // without the port scanner.
-    // =======================================================================
-
-    /// List persisted scope identifiers, including scopes no longer in inventory.
-    async fn findings_scopes(&self) -> fdo::Result<Vec<String>>;
-
-    /// Every stored `PersistedFinding` for a scope, as JSON.
-    ///
-    /// `scope` is a customer slug, or a host id when the host has no customer
-    /// set. Invalid slugs are refused rather than sanitised — it is a
-    /// path-traversal guard, since the slug becomes a directory name.
-    async fn findings_list(&self, scope: &str) -> fdo::Result<String>;
-
-    /// `StoreSummary` counts for a scope, as JSON.
-    ///
-    /// For a dashboard tile that should not deserialise every finding to show
-    /// four numbers.
-    async fn findings_summary(&self, scope: &str) -> fdo::Result<String>;
-
-    /// Move a finding through triage. Returns the updated `PersistedFinding`.
-    ///
-    /// `disposition` is a JSON `Disposition` — a tagged enum, so a reason and an
-    /// expiry travel with the state instead of as loose arguments that can
-    /// contradict it. `key` comes from `findings_store::finding_key`, which the
-    /// listed findings already carry.
-    ///
-    /// The author is *not* a parameter: the daemon records it from the caller's
-    /// uid, because a self-reported author in an audit trail is worth nothing.
-    async fn findings_set_disposition(
-        &self,
-        scope: &str,
-        key: &str,
-        disposition: &str,
-        note: &str,
-    ) -> fdo::Result<String>;
-
-    /// Generate a new FortiGate REST API token via SSH.
-    ///
-    /// Creates the API user if needed, generates a key, stores it in the
-    /// secret store, and returns the token string.
-    async fn fortigate_generate_api_token(
-        &self,
-        host_id: &str,
-        api_user: &str,
-        api_port: u16,
-    ) -> fdo::Result<String>;
-
-    /// Retrieve the stored FortiGate API token (for clipboard copy / docs).
-    async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Webhook / notification methods
-    // =======================================================================
-
-    /// Configure outgoing webhook notifications.
-    ///
-    /// `url` is the incoming-webhook URL (empty string to disable).
-    /// `on_host_down` and `on_vpn_disconnect` control which events fire.
-    async fn set_webhook(
-        &self,
-        url: String,
-        on_host_down: bool,
-        on_vpn_disconnect: bool,
-    ) -> fdo::Result<()>;
-
-    /// Return the current webhook configuration as JSON.
-    ///
-    /// Shape: `{"url":"...","on_host_down":true,"on_vpn_disconnect":false}`
-    async fn get_webhook_config(&self) -> fdo::Result<String>;
-
-    /// Send a test message to the configured webhook URL.
-    async fn test_webhook(&self) -> fdo::Result<String>;
-
-    // =======================================================================
-    // Signals
-    // =======================================================================
-
-    /// Emitted when the reachability of an SSH host changes.
-    #[zbus(signal)]
-    fn host_health_changed(
-        &self,
-        host_id: String,
-        reachable: bool,
-    ) -> fdo::Result<()>;
-}
+    #[zbus::proxy(
+        interface = "org.supermgr.Daemon1",
+        default_service = "org.supermgr.Daemon",
+        default_path = "/org/supermgr/Daemon"
+    )]
+    pub trait Daemon {
+        // =======================================================================
+        // VPN methods
+        // =======================================================================
+
+        /// Return a JSON array of [`crate::vpn::profile::ProfileSummary`] objects.
+        ///
+        /// The GUI deserialises the string with [`crate::vpn::profile::ProfileSummary`].
+        async fn list_profiles(&self) -> fdo::Result<String>;
+
+        /// Initiate a connection for the profile identified by `profile_id` (UUID string).
+        ///
+        /// Returns immediately; the actual connection runs asynchronously in the
+        /// daemon.  Listen for [`Self::receive_state_changed`] to track progress.
+        async fn connect(&self, profile_id: &str) -> fdo::Result<()>;
+
+        /// Tear down the active tunnel (no-op if already disconnected).
+        async fn disconnect(&self) -> fdo::Result<()>;
+
+        /// Return the current [`crate::vpn::state::VpnState`] serialised as JSON.
+        async fn get_status(&self) -> fdo::Result<String>;
+
+        /// Return recent daemon log lines from the in-memory ring buffer.
+        ///
+        /// Each element is a pre-formatted string `[HH:MM:SS] LEVEL target: message`.
+        /// Returns up to 500 lines, oldest first.
+        async fn get_logs(&self) -> fdo::Result<Vec<String>>;
+
+        /// Clear the in-memory log buffer.
+        async fn clear_logs(&self) -> fdo::Result<()>;
+
+        /// Dynamically change the daemon's tracing log level at runtime.
+        ///
+        /// `level` is a tracing filter directive, e.g. `"error"`, `"warn"`,
+        /// `"info"`, `"debug"`, or `"trace"`.
+        async fn set_log_level(&self, level: &str) -> fdo::Result<()>;
+
+        /// Return live tunnel statistics as a compact JSON object.
+        ///
+        /// JSON shape: `{"bytes_sent": u64, "bytes_received": u64, "last_handshake_secs": u64}`
+        ///
+        /// `last_handshake_secs` is a Unix epoch timestamp; `0` means no handshake
+        /// has been observed yet or no tunnel is active.
+        async fn get_stats(&self) -> fdo::Result<String>;
+
+        /// Import a WireGuard `.conf` file.
+        ///
+        /// `conf_text` is the raw file contents; `name` is the desired display name.
+        /// Returns the new profile's UUID string on success.
+        ///
+        /// The daemon will parse the config, store the private key in the system
+        /// keyring, and persist the profile to disk.
+        async fn import_wireguard(&self, conf_text: &str, name: &str) -> fdo::Result<String>;
+
+        /// Delete a profile by UUID string.
+        ///
+        /// Fails with `org.freedesktop.DBus.Error.Failed` if the profile is
+        /// currently connected.
+        async fn delete_profile(&self, profile_id: &str) -> fdo::Result<()>;
+
+        /// Rename a profile identified by `profile_id` to `new_name`.
+        async fn rename_profile(&self, profile_id: &str, new_name: &str) -> fdo::Result<()>;
+
+        /// Set the `auto_connect` flag on a profile.
+        ///
+        /// When `true` the daemon will automatically connect this profile when
+        /// NetworkManager reports the network is available (e.g. after resume from
+        /// suspend).  Only one profile should have `auto_connect = true` at a time;
+        /// if multiple profiles have the flag set, the daemon picks the first one
+        /// it finds.
+        ///
+        /// The change is persisted to the profile's TOML file immediately.
+        async fn set_auto_connect(&self, profile_id: &str, auto_connect: bool) -> fdo::Result<()>;
+
+        /// Update a FortiGate profile's connection settings.
+        ///
+        /// Non-empty `password` / `psk` overwrite the stored secret; empty strings
+        /// leave the existing secret unchanged.
+        ///
+        /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
+        /// addresses that overrides the FortiGate's mode-config-pushed DNS.
+        /// Pass an empty string to clear any previous override and revert to
+        /// using mode-config DNS.
+        async fn update_fortigate(
+            &self,
+            profile_id: &str,
+            name: &str,
+            host: &str,
+            username: &str,
+            password: &str,
+            psk: &str,
+            dns_servers: &str,
+            local_id: &str,
+        ) -> fdo::Result<()>;
+
+        /// Update an OpenVPN profile's credentials.
+        ///
+        /// A non-empty `password` overwrites the stored secret; an empty string
+        /// leaves the existing secret unchanged.
+        async fn update_openvpn_credentials(
+            &self,
+            profile_id: &str,
+            username: &str,
+            password: &str,
+        ) -> fdo::Result<()>;
+
+        /// Set the `full_tunnel` flag on a profile.
+        ///
+        /// `true`  → route all traffic through the VPN when connected.
+        /// `false` → use only the backend-specific split-tunnel routes.
+        ///
+        /// The change is persisted to the profile's TOML file immediately.
+        /// If the profile is currently connected the change takes effect on the
+        /// next reconnect.
+        async fn set_full_tunnel(&self, profile_id: &str, full_tunnel: bool) -> fdo::Result<()>;
+
+        /// Set the kill-switch flag on a profile.
+        ///
+        /// When `true` all non-VPN traffic is blocked via nftables while this
+        /// profile is connected.
+        ///
+        /// The change is persisted to the profile's TOML file immediately.
+        async fn set_kill_switch(&self, profile_id: &str, enabled: bool) -> fdo::Result<()>;
+
+        /// Set or clear the customer/tenant tag on a VPN profile.
+        ///
+        /// Pass an empty string to clear the tag (un-group the profile).
+        /// The change is persisted to the profile's TOML file immediately.
+        async fn set_profile_customer(&self, profile_id: &str, customer: &str) -> fdo::Result<()>;
+
+        /// Set the split-tunnel route list for a WireGuard profile.
+        ///
+        /// `routes` is a list of CIDR strings (e.g. `["10.0.0.0/8", "192.168.1.0/24"]`).
+        /// These replace the catch-all `0.0.0.0/0` when `full_tunnel = false` is active.
+        /// Passing an empty list clears split routes (split-tunnel will then fall back
+        /// to whatever explicit prefixes are in the peer's AllowedIPs after stripping
+        /// catch-alls, which may cause a connect-time error if none remain).
+        ///
+        /// Only valid for WireGuard profiles; returns an error for other backends.
+        async fn set_split_routes(&self, profile_id: &str, routes: Vec<String>) -> fdo::Result<()>;
+
+        /// Create a new FortiGate IPsec/IKEv2 profile and persist it to disk.
+        ///
+        /// `name` is the display name; `host` is the appliance hostname or IP;
+        /// `username` / `password` are the EAP-MSCHAPv2 credentials; `psk` is
+        /// the group pre-shared key for IKE SA authentication.
+        ///
+        /// `dns_servers` is a comma- or whitespace-separated list of IPv4/IPv6
+        /// addresses to push to systemd-resolved on connect. Pass an empty
+        /// string to fall back to whatever DNS servers the FortiGate sends
+        /// during IKE mode-config negotiation.
+        ///
+        /// Returns the new profile's UUID string on success.
+        async fn import_fortigate(
+            &self,
+            name: &str,
+            host: &str,
+            username: &str,
+            password: &str,
+            psk: &str,
+            dns_servers: &str,
+            local_id: &str,
+        ) -> fdo::Result<String>;
+
+        /// Import an OpenVPN `.ovpn` configuration file.
+        ///
+        /// `conf_text` is the raw `.ovpn` file contents; `name` is the desired
+        /// display name.  `username` and `password` are optional credentials —
+        /// pass empty strings to import without credentials.
+        /// Returns the new profile's UUID string on success.
+        async fn import_openvpn(
+            &self,
+            conf_text: &str,
+            name: &str,
+            username: &str,
+            password: &str,
+        ) -> fdo::Result<String>;
+
+        /// Import an Azure Point-to-Site VPN profile from the XML config files
+        /// that Azure downloads as a zip archive.
+        ///
+        /// `azure_xml` is the contents of `AzureVPN/azurevpnconfig.xml`;
+        /// `vpn_settings_xml` is the contents of `Generic/VpnSettings.xml`.
+        /// `name` is the desired display name (pre-filled from `<name>` in the XML
+        /// is a sensible default).
+        ///
+        /// Returns the new profile's UUID string on success.
+        async fn import_azure_vpn(
+            &self,
+            azure_xml: &str,
+            vpn_settings_xml: &str,
+            name: &str,
+        ) -> fdo::Result<String>;
+
+        /// Import a TOML configuration file (VPN profile, SSH key, or SSH host).
+        ///
+        /// Auto-detects the type based on TOML content.  Returns a JSON object
+        /// with `{ "type": "vpn"|"ssh_key"|"ssh_host", "id": "<uuid>" }`.
+        async fn import_toml(&self, toml_text: &str) -> fdo::Result<String>;
+
+        /// Rotate the WireGuard private key for the given profile.
+        ///
+        /// Generates a new key pair, overwrites the stored private key in the
+        /// secret service, and returns the new base64-encoded public key.
+        async fn rotate_wireguard_key(&self, profile_id: &str) -> fdo::Result<String>;
+
+        /// Export a profile as a TOML string (secrets replaced by their labels).
+        ///
+        /// Returns the serialised TOML text of the profile.  Secrets are stored
+        /// as `SecretRef` labels (not raw values), so the output is safe to share.
+        async fn export_profile(&self, profile_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // SSH methods
+        // =======================================================================
+
+        /// Generate a new SSH key pair of the given type.
+        ///
+        /// `key_type` is one of `"ed25519"`, `"ecdsa"`, `"rsa"`.
+        /// `tags_json` is a JSON array of tag strings (e.g. `["prod", "web"]`).
+        /// Returns the new key's UUID string on success.
+        async fn ssh_generate_key(
+            &self,
+            key_type: &str,
+            name: &str,
+            description: &str,
+            tags_json: &str,
+        ) -> fdo::Result<String>;
+
+        /// Scan a directory for existing SSH key files and return a JSON array of
+        /// discovered key metadata (paths, types, fingerprints).
+        async fn ssh_import_keys_scan(&self, directory: &str) -> fdo::Result<String>;
+
+        /// Import an existing SSH key pair into the managed store.
+        ///
+        /// `public_key` is the contents of the `.pub` file; `private_key_pem` is
+        /// the PEM-encoded private key.  `key_type` is `"ed25519"`, `"ecdsa"`, or
+        /// `"rsa"`.  Returns the new key's UUID string on success.
+        async fn ssh_import_key(
+            &self,
+            name: &str,
+            public_key: &str,
+            private_key_pem: &str,
+            key_type: &str,
+        ) -> fdo::Result<String>;
+
+        /// Delete an SSH key by UUID string.
+        async fn ssh_delete_key(&self, key_id: &str) -> fdo::Result<()>;
+
+        /// Return a JSON array of [`crate::ssh::key::SshKeySummary`] objects.
+        async fn ssh_list_keys(&self) -> fdo::Result<String>;
+
+        /// List nodes in the local tailnet via `tailscale status --json`.
+        ///
+        /// Returns a JSON array of TailscaleNode objects (defined in the
+        /// daemon's `tailscale` module). Errors string-wise when the
+        /// tailscale CLI isn't installed or tailscaled isn't running.
+        async fn tailscale_list_nodes(&self) -> fdo::Result<String>;
+
+        /// Normalized settings and saved accounts; no raw preferences or keys.
+        async fn tailscale_management(&self) -> fdo::Result<String>;
+        /// Apply only explicitly changed settings to the expected account.
+        async fn tailscale_apply_preferences(&self, patch_json: &str) -> fdo::Result<String>;
+        async fn tailscale_set_running(
+            &self,
+            profile_id: &str,
+            running: bool,
+        ) -> fdo::Result<String>;
+        async fn tailscale_switch_profile(&self, profile_id: &str) -> fdo::Result<String>;
+        async fn tailscale_logout(&self, profile_id: &str) -> fdo::Result<String>;
+        /// Bounded diagnostic ping to a peer still present in the active tailnet.
+        async fn tailscale_ping(&self, node_id: &str) -> fdo::Result<String>;
+        async fn tailscale_begin_login(&self, profile_id: &str) -> fdo::Result<String>;
+        async fn tailscale_login_status(&self, attempt_id: &str) -> fdo::Result<String>;
+        async fn tailscale_cancel_login(&self, attempt_id: &str) -> fdo::Result<()>;
+        async fn tailscale_dns_diagnostics(&self, profile_id: &str) -> fdo::Result<String>;
+        async fn tailscale_change_exit_node(
+            &self,
+            profile_id: &str,
+            node_id: &str,
+        ) -> fdo::Result<String>;
+
+        /// Route this machine's traffic through `value`, or clear the selection
+        /// when `value` is empty.
+        ///
+        /// `value` is a Tailscale IP or MagicDNS name of a peer advertising
+        /// exit-node capability. Runs `tailscale set --exit-node=…`, which on
+        /// Linux installs the routing itself.
+        ///
+        /// Polkit-gated (`org.supermgr.daemon.tailscale-exit-node`): the caller
+        /// is choosing where every packet this machine sends goes.
+        async fn tailscale_set_exit_node(&self, value: &str) -> fdo::Result<()>;
+
+        /// Diagnose the local Tailscale stack.
+        ///
+        /// Returns a [`crate::tailscale::TailscaleHealth`] as JSON. Tailscale
+        /// being broken is not an error here — it is the payload: CLI missing,
+        /// daemon stopped, logged out, and brought down are distinct states,
+        /// each with a remedy the GUI can offer.
+        async fn tailscale_health(&self) -> fdo::Result<String>;
+
+        /// Bring the Tailscale stack up as far as it can go without a human:
+        /// install the package, enable and start tailscaled, `tailscale up` a
+        /// stopped backend. Returns a summary of the steps taken. Idempotent.
+        ///
+        /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): every step
+        /// changes system state as root.
+        async fn tailscale_repair(&self) -> fdo::Result<String>;
+
+        /// Start an interactive Tailscale login; returns the URL to open in a
+        /// browser. May return an empty string when the control plane is slow —
+        /// the URL then appears in `TailscaleHealth.auth_url`, which the GUI
+        /// polls during a login.
+        ///
+        /// Polkit-gated (`org.supermgr.daemon.tailscale-repair`): a login
+        /// decides whose tailnet this machine becomes reachable from.
+        async fn tailscale_login(&self) -> fdo::Result<String>;
+
+        /// Return the full [`crate::ssh::key::SshKey`] serialised as JSON.
+        async fn ssh_get_key(&self, key_id: &str) -> fdo::Result<String>;
+
+        /// Return the public key in OpenSSH `authorized_keys` format.
+        async fn ssh_export_public_key(&self, key_id: &str) -> fdo::Result<String>;
+
+        /// Return the PEM-encoded private key (retrieved from the secret store).
+        async fn ssh_export_private_key(&self, key_id: &str) -> fdo::Result<String>;
+
+        /// Add a new SSH host from a JSON-serialised
+        /// [`crate::host::Host`] object.
+        ///
+        /// Returns the new host's UUID string on success.
+        async fn add_host(&self, host_json: &str) -> fdo::Result<String>;
+
+        /// Update an existing SSH host.
+        ///
+        /// `host_json` is the full JSON-serialised host object with updated fields.
+        async fn update_host(&self, host_id: &str, host_json: &str) -> fdo::Result<()>;
+
+        /// Toggle the pinned/favourite state of an SSH host.
+        ///
+        /// Flips `pinned` and returns the refreshed host list as a JSON array of
+        /// [`crate::host::HostSummary`] objects.
+        async fn toggle_host_pin(&self, host_id: &str) -> fdo::Result<String>;
+
+        /// Set or clear the customer/tenant tag on an SSH host.
+        ///
+        /// Pass an empty string to clear the tag.
+        async fn ssh_set_host_customer(&self, host_id: &str, customer: &str) -> fdo::Result<()>;
+
+        // =======================================================================
+        // Per-customer documentation export
+        // =======================================================================
+
+        /// Return a JSON array of distinct customer tags currently in use across
+        /// VPN profiles and SSH hosts. Sorted, case-insensitively deduplicated.
+        async fn list_customers(&self) -> fdo::Result<String>;
+
+        /// Render a Markdown documentation snapshot for `customer`.
+        ///
+        /// Matching is case-insensitive on the trimmed input. Pass an empty
+        /// string to render an "Ungrouped" report covering every profile and
+        /// host whose customer tag is empty.
+        async fn export_customer_docs(&self, customer: &str) -> fdo::Result<String>;
+
+        /// Return the stable customer/site catalog as JSON.
+        async fn customer_catalog(&self) -> fdo::Result<String>;
+
+        /// Create or update one customer record from JSON.
+        async fn customer_save(&self, customer_json: &str) -> fdo::Result<()>;
+
+        /// Delete an empty customer from the catalog.
+        async fn customer_delete(&self, slug: &str) -> fdo::Result<()>;
+
+        /// Attach one managed host to exactly one customer/site.
+        async fn customer_assign_host(
+            &self,
+            customer_slug: &str,
+            site_id: &str,
+            host_id: &str,
+        ) -> fdo::Result<()>;
+
+        /// Attach a VPN profile to a customer.
+        async fn customer_assign_profile(
+            &self,
+            customer_slug: &str,
+            profile_id: &str,
+        ) -> fdo::Result<()>;
+
+        /// Scan a bounded private IPv4 CIDR for selected TCP ports.
+        async fn recon_scan(&self, target_cidr: &str, ports_json: &str) -> fdo::Result<String>;
+
+        /// Delete an SSH host by UUID string.
+        async fn delete_host(&self, host_id: &str) -> fdo::Result<()>;
+
+        /// Return a JSON array of [`crate::host::HostSummary`] objects.
+        async fn list_hosts(&self) -> fdo::Result<String>;
+
+        /// Return the full [`crate::host::Host`] serialised as JSON.
+        async fn get_host(&self, host_id: &str) -> fdo::Result<String>;
+
+        /// Push a public key to one or more remote hosts' `authorized_keys`.
+        ///
+        /// `host_ids_json` is a JSON array of host UUID strings.
+        /// `use_sudo` controls whether `sudo` is used on the remote side.
+        /// Returns a JSON object with per-host results.
+        async fn ssh_push_key(
+            &self,
+            key_id: &str,
+            host_ids_json: &str,
+            use_sudo: bool,
+        ) -> fdo::Result<String>;
+
+        /// Revoke (remove) a public key from one or more remote hosts'
+        /// `authorized_keys`.
+        ///
+        /// `host_ids_json` is a JSON array of host UUID strings.
+        /// `use_sudo` controls whether `sudo` is used on the remote side.
+        /// Returns a JSON object with per-host results.
+        async fn ssh_revoke_key(
+            &self,
+            key_id: &str,
+            host_ids_json: &str,
+            use_sudo: bool,
+        ) -> fdo::Result<String>;
+
+        /// Return recent SSH audit log entries.
+        ///
+        /// Each element is a pre-formatted log line.  Returns up to `max_lines`
+        /// entries, newest first.
+        async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>>;
+
+        /// Store an SSH password for the given host.
+        async fn ssh_get_password(&self, host_id: &str) -> fdo::Result<String>;
+        async fn ssh_set_password(&self, host_id: &str, password: &str) -> fdo::Result<()>;
+
+        /// Store an OpenSSH certificate for the given host (certificate auth).
+        async fn ssh_set_certificate(&self, host_id: &str, certificate: &str) -> fdo::Result<()>;
+
+        /// Store a FortiGate REST API token and port for the given host.
+        /// Pass `port = 0` to keep the existing port.
+        async fn ssh_set_api_token(&self, host_id: &str, token: &str, port: u16)
+            -> fdo::Result<()>;
+
+        /// Call the FortiGate REST API on a host.
+        ///
+        /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
+        /// (e.g. `/api/v2/cmdb/system/admin/admin`).  `body` is optional JSON.
+        /// Returns the JSON response body.
+        async fn fortigate_api(
+            &self,
+            host_id: &str,
+            method: &str,
+            path: &str,
+            body: &str,
+        ) -> fdo::Result<String>;
+
+        /// Push an SSH public key to a FortiGate admin user via REST API.
+        ///
+        /// `host_id` is the UUID of the FortiGate host with an API token configured.
+        /// `key_id` is the UUID of the SSH key whose public key will be pushed.
+        /// `admin_user` is the FortiGate admin username (e.g. `"admin"`).
+        ///
+        /// The key is set as `ssh-public-key1` on the admin user via
+        /// `PUT /api/v2/cmdb/system/admin/{admin_user}`.
+        async fn fortigate_push_ssh_key(
+            &self,
+            host_id: &str,
+            key_id: &str,
+            admin_user: &str,
+        ) -> fdo::Result<String>;
+
+        /// Execute a shell command on a remote SSH host.
+        ///
+        /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
+        async fn ssh_execute_command(&self, host_id: &str, command: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // UniFi methods
+        // =======================================================================
+
+        /// Execute `set-inform <url>` on a UniFi device via SSH.
+        ///
+        /// Returns a JSON object with `stdout`, `stderr`, and `exit_code`.
+        async fn unifi_set_inform(&self, host_id: &str, inform_url: &str) -> fdo::Result<String>;
+
+        /// Call the UniFi Controller REST API on a host.
+        ///
+        /// `method` is GET, POST, PUT, or DELETE.  `path` is the API path
+        /// (e.g. `/proxy/network/api/s/default/stat/device`).  `body` is optional JSON.
+        /// Returns the JSON response body.
+        async fn unifi_api(
+            &self,
+            host_id: &str,
+            method: &str,
+            path: &str,
+            body: &str,
+        ) -> fdo::Result<String>;
+
+        /// Store UniFi Controller URL and credentials for a host.
+        ///
+        /// Validates the credentials by attempting to log in, then stores the URL
+        /// and credentials securely.
+        async fn unifi_set_controller(
+            &self,
+            host_id: &str,
+            url: &str,
+            username: &str,
+            password: &str,
+        ) -> fdo::Result<()>;
+
+        // =======================================================================
+        // OPNsense REST API
+        // =======================================================================
+
+        /// Store OPNsense API credentials (key + secret) for an SSH host.
+        ///
+        /// `port` is the HTTPS port (defaults to 443 if 0). `api_key` and
+        /// `api_secret` are the values from OPNsense → System → Access → Users
+        /// → API keys.
+        ///
+        /// Validates the credentials by issuing an authenticated probe; on
+        /// success the credentials are persisted as a JSON blob in the system
+        /// secret service and the host's `api_token_ref` / `api_port` fields
+        /// are updated.
+        async fn opnsense_set_credentials(
+            &self,
+            host_id: &str,
+            port: u16,
+            api_key: &str,
+            api_secret: &str,
+        ) -> fdo::Result<()>;
+
+        /// Issue a Basic-Auth REST API call to an OPNsense host and return the
+        /// raw response body as text.
+        ///
+        /// `method` is one of `GET`, `POST`, `PUT`, `DELETE`. `path` is the
+        /// URL path including the leading `/api/...`. `body` is sent as
+        /// JSON for non-GET methods.
+        async fn opnsense_api(
+            &self,
+            host_id: &str,
+            method: &str,
+            path: &str,
+            body: &str,
+        ) -> fdo::Result<String>;
+
+        /// Composite "is this OPNsense alive" status snapshot for the dashboard.
+        ///
+        /// Returns the `OpnSenseStatus` struct (defined in the daemon's
+        /// `opnsense` module) serialised as JSON. Each field is optional; an
+        /// individual endpoint failure does not fail the whole call.
+        async fn opnsense_get_status(&self, host_id: &str) -> fdo::Result<String>;
+
+        /// Download the OPNsense running config and save it under
+        /// `/etc/supermgrd/backups/<safe_host>_<ts>.opnsense.xml`.
+        /// Returns the filename written.
+        async fn opnsense_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Sophos XML Configuration API
+        // =======================================================================
+
+        /// Store Sophos WebAdmin credentials for an SSH host and validate them.
+        ///
+        /// Sophos has no token endpoint; the username and password are stored as
+        /// a JSON blob in the system secret service and resent on every API call
+        /// inside the `<Login>` block of the XML envelope.
+        ///
+        /// `port` defaults to 4444 (the conventional WebAdmin HTTPS port) if 0.
+        async fn sophos_set_credentials(
+            &self,
+            host_id: &str,
+            port: u16,
+            username: &str,
+            password: &str,
+        ) -> fdo::Result<()>;
+
+        /// Send a Sophos XML Configuration API operation.
+        ///
+        /// `inner_xml` is the operation body (`<Get>...</Get>`, `<Set>...</Set>`,
+        /// `<Remove>...</Remove>`). The daemon adds the `<Request>` envelope and
+        /// `<Login>` block. The caller is responsible for XML-escaping any
+        /// user-supplied values inside `inner_xml`.
+        ///
+        /// Sophos always returns HTTP 200; success/failure is encoded in the
+        /// `<Status code="N">` tag of the response body, which is returned
+        /// verbatim.
+        async fn sophos_xml_api(&self, host_id: &str, inner_xml: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // SSH port forwarding
+        // =======================================================================
+
+        /// Start a local TCP port forward through an SSH tunnel.
+        ///
+        /// Binds `local_port` on localhost, and for each accepted connection opens
+        /// an SSH direct-tcpip channel to `remote_host:remote_port`.
+        /// Returns a unique forward ID string that can be passed to
+        /// [`Self::ssh_stop_port_forward`] to tear it down.
+        async fn ssh_start_port_forward(
+            &self,
+            host_id: &str,
+            local_port: u16,
+            remote_host: &str,
+            remote_port: u16,
+        ) -> fdo::Result<String>;
+
+        /// Stop an active port forward by its forward ID.
+        async fn ssh_stop_port_forward(&self, forward_id: &str) -> fdo::Result<()>;
+
+        /// List all active port forwards as a JSON array.
+        ///
+        /// Each element: `{"forward_id":"...","host_id":"...","local_port":N,"remote_host":"...","remote_port":N}`
+        async fn ssh_list_port_forwards(&self) -> fdo::Result<String>;
+
+        /// Return the SSH command string for connecting to the given host.
+        ///
+        /// The returned string is suitable for `std::process::Command` or display
+        /// to the user (e.g. `"ssh -i /path/to/key user@host -p 22"`).
+        async fn ssh_connect_command(&self, host_id: &str) -> fdo::Result<String>;
+
+        /// Test SSH and (optionally) FortiGate API connectivity for a host.
+        ///
+        /// Returns a JSON object like `{"ssh": "ok", "api": "ok"}` or
+        /// `{"ssh": "timeout", "api": "auth_failed"}`.
+        async fn test_host_connection(&self, host_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Config versioning
+        // =======================================================================
+
+        /// Save a generated config with a timestamp for later comparison.
+        ///
+        /// Returns the filename under which the config was stored.
+        async fn save_config_version(
+            &self,
+            customer: &str,
+            device_type: &str,
+            config: &str,
+        ) -> fdo::Result<String>;
+
+        /// List saved config versions for a customer.
+        ///
+        /// Returns a JSON array of `{"filename": "...", "timestamp": "..."}` objects,
+        /// newest first.
+        async fn list_config_versions(&self, customer: &str) -> fdo::Result<String>;
+
+        /// Retrieve a previously saved config version by filename.
+        async fn get_config_version(&self, filename: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Signals
+        // =======================================================================
+
+        /// Emitted whenever the daemon transitions to a new [`crate::vpn::state::VpnState`].
+        ///
+        /// `state_json` is the new state serialised as JSON.
+        #[zbus(signal)]
+        fn state_changed(&self, state_json: String) -> fdo::Result<()>;
+
+        /// Emitted periodically (every ~5 s) while a tunnel is active.
+        ///
+        /// `stats_json` is a [`crate::vpn::state::TunnelStats`] serialised as JSON.
+        #[zbus(signal)]
+        fn stats_updated(&self, stats_json: String) -> fdo::Result<()>;
+
+        /// Emitted by the daemon during an Azure Entra ID connection when the
+        /// user must complete a device-code authentication challenge.
+        ///
+        /// The GUI should display `user_code` prominently and tell the user to
+        /// visit `verification_url` (typically `https://microsoft.com/devicelogin`)
+        /// in a browser.  The code expires after ~15 minutes.
+        #[zbus(signal)]
+        fn auth_challenge(&self, user_code: String, verification_url: String) -> fdo::Result<()>;
+
+        /// Emitted during multi-host SSH operations (push/revoke) to report
+        /// per-host progress.
+        ///
+        /// `operation_id` is a unique identifier for the batch operation;
+        /// `host_label` identifies which host this update concerns;
+        /// `message` is a human-readable status string.
+        #[zbus(signal)]
+        fn ssh_operation_progress(
+            &self,
+            operation_id: String,
+            host_label: String,
+            message: String,
+        ) -> fdo::Result<()>;
+
+        // =======================================================================
+        // SSH health check
+        // =======================================================================
+
+        /// Return a JSON map of `host_id → reachable(bool)` for all SSH hosts.
+        async fn ssh_host_health(&self) -> fdo::Result<String>;
+
+        // =======================================================================
+        // SSH known hosts
+        // =======================================================================
+
+        /// Return the recorded SSH host-key fingerprints as a JSON object mapping
+        /// `"host:port"` → SHA-256 fingerprint (lowercase hex).
+        async fn ssh_list_known_hosts(&self) -> fdo::Result<String>;
+
+        /// Drop the recorded host key for `hostname:port` so the next connection
+        /// is treated as first sight and re-recorded.
+        ///
+        /// The remedy for a host-key mismatch that turned out to be a legitimate
+        /// rotation or reinstall. Returns `true` if an entry was removed.
+        async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> fdo::Result<bool>;
+
+        // =======================================================================
+        // Config backup & restore
+        // =======================================================================
+
+        /// Export all configuration (profiles, SSH keys, SSH hosts) as a single
+        /// JSON string.  Secret values are not included -- only `SecretRef` labels.
+        async fn export_all(&self) -> fdo::Result<String>;
+
+        /// Import configuration from a JSON backup string produced by
+        /// [`Self::export_all`].  Each imported item receives a new UUID.
+        /// Returns a JSON summary `{"profiles": N, "ssh_keys": N, "hosts": N}`.
+        async fn import_all(&self, data: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // FortiGate config backup
+        // =======================================================================
+
+        /// Download the FortiGate running config and save it to disk.
+        ///
+        /// Calls `GET /api/v2/monitor/system/config/backup?scope=global` and writes
+        /// the result to `/etc/supermgrd/backups/{hostname}_{timestamp}.conf`.
+        /// Returns the filename on success.
+        async fn fortigate_backup_config(&self, host_id: &str) -> fdo::Result<String>;
+
+        /// Run CIS benchmark compliance checks against a FortiGate device via SSH.
+        ///
+        /// Returns a JSON object with individual check results and a summary score:
+        /// `{ "checks": [...], "score": "8/10", "passed": 8, "failed": 2, "total": 10 }`.
+        async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // CIS Linux baseline
+        //
+        // The Linux baseline needs nothing but an SSH session: `run_baseline` in
+        // `supermgr_core::ssh_compliance` takes a closure for command execution.
+        // That is why these exist on the Linux daemon while FortiGate compliance
+        // does not yet — the FortiGate path wants a REST client this daemon has
+        // no equivalent of.
+        // =======================================================================
+
+        /// Run the CIS Linux baseline against a host over SSH and persist the run.
+        ///
+        /// `triggered_by` is `manual`, `scheduled` or `post_deploy`; anything else
+        /// is read as `manual`. Returns the full `ComplianceRun` as JSON.
+        async fn compliance_run_linux(
+            &self,
+            host_id: &str,
+            triggered_by: &str,
+        ) -> fdo::Result<String>;
+
+        /// Run summaries for a host, newest first, capped at `limit`.
+        ///
+        /// Summaries rather than full runs so a history list does not deserialise
+        /// every check vector to render its rows.
+        async fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String>;
+
+        /// One stored run in full, as JSON.
+        async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
+
+        /// The check library: every `CheckDefinition` this build knows, including
+        /// user-supplied ones. What the GUI resolves descriptions, CIS references
+        /// and remediation through.
+        async fn compliance_list_checks(&self) -> fdo::Result<String>;
+
+        /// What changed between `run_id` and the run before it on the same host.
+        ///
+        /// A host's first run has no baseline to compare against; everything
+        /// currently failing is reported as newly failing in that case.
+        async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Security findings
+        //
+        // A finding is a compliance failure (or, on macOS, a scanner result) that
+        // has been given a lifecycle: a first-seen date, a scan count, and a
+        // disposition an operator can move. The Linux daemon fills the store from
+        // its own compliance runs, which is what lets a Security page exist here
+        // without the port scanner.
+        // =======================================================================
+
+        /// List persisted scope identifiers, including scopes no longer in inventory.
+        async fn findings_scopes(&self) -> fdo::Result<Vec<String>>;
+
+        /// Every stored `PersistedFinding` for a scope, as JSON.
+        ///
+        /// `scope` is a customer slug, or a host id when the host has no customer
+        /// set. Invalid slugs are refused rather than sanitised — it is a
+        /// path-traversal guard, since the slug becomes a directory name.
+        async fn findings_list(&self, scope: &str) -> fdo::Result<String>;
+
+        /// `StoreSummary` counts for a scope, as JSON.
+        ///
+        /// For a dashboard tile that should not deserialise every finding to show
+        /// four numbers.
+        async fn findings_summary(&self, scope: &str) -> fdo::Result<String>;
+
+        /// Move a finding through triage. Returns the updated `PersistedFinding`.
+        ///
+        /// `disposition` is a JSON `Disposition` — a tagged enum, so a reason and an
+        /// expiry travel with the state instead of as loose arguments that can
+        /// contradict it. `key` comes from `findings_store::finding_key`, which the
+        /// listed findings already carry.
+        ///
+        /// The author is *not* a parameter: the daemon records it from the caller's
+        /// uid, because a self-reported author in an audit trail is worth nothing.
+        async fn findings_set_disposition(
+            &self,
+            scope: &str,
+            key: &str,
+            disposition: &str,
+            note: &str,
+        ) -> fdo::Result<String>;
+
+        /// Generate a new FortiGate REST API token via SSH.
+        ///
+        /// Creates the API user if needed, generates a key, stores it in the
+        /// secret store, and returns the token string.
+        async fn fortigate_generate_api_token(
+            &self,
+            host_id: &str,
+            api_user: &str,
+            api_port: u16,
+        ) -> fdo::Result<String>;
+
+        /// Retrieve the stored FortiGate API token (for clipboard copy / docs).
+        async fn fortigate_get_api_token(&self, host_id: &str) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Webhook / notification methods
+        // =======================================================================
+
+        /// Configure outgoing webhook notifications.
+        ///
+        /// `url` is the incoming-webhook URL (empty string to disable).
+        /// `on_host_down` and `on_vpn_disconnect` control which events fire.
+        async fn set_webhook(
+            &self,
+            url: String,
+            on_host_down: bool,
+            on_vpn_disconnect: bool,
+        ) -> fdo::Result<()>;
+
+        /// Return the current webhook configuration as JSON.
+        ///
+        /// Shape: `{"url":"...","on_host_down":true,"on_vpn_disconnect":false}`
+        async fn get_webhook_config(&self) -> fdo::Result<String>;
+
+        /// Send a test message to the configured webhook URL.
+        async fn test_webhook(&self) -> fdo::Result<String>;
+
+        // =======================================================================
+        // Signals
+        // =======================================================================
+
+        /// Emitted when the reachability of an SSH host changes.
+        #[zbus(signal)]
+        fn host_health_changed(&self, host_id: String, reachable: bool) -> fdo::Result<()>;
+    }
 }
 
 // `#[zbus::proxy]` consumes the `Daemon` trait it is applied to and emits

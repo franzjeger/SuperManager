@@ -54,7 +54,7 @@ impl TlsClientHello {
     /// we surface "TLS 1.2+" because we can't distinguish 1.2
     /// from 1.3 without parsing the `supported_versions` extension
     /// (out of MVP scope).
-    #[must_use] 
+    #[must_use]
     pub fn version_label(&self) -> &'static str {
         match self.legacy_version {
             0x0300 => "SSLv3",
@@ -66,7 +66,7 @@ impl TlsClientHello {
     }
 
     /// True if this is a deprecated-protocol attempt.
-    #[must_use] 
+    #[must_use]
     pub fn is_downgrade(&self) -> bool {
         self.legacy_version < 0x0303
     }
@@ -112,7 +112,10 @@ pub async fn detect_tls_downgrade_clients(pcap_path: &Path) -> Result<Vec<Findin
             _ => (Severity::Medium, 4.0),
         };
         findings.push(Finding {
-            id: format!("tls.client-downgrade-{}", label.to_lowercase().replace(' ', "")),
+            id: format!(
+                "tls.client-downgrade-{}",
+                label.to_lowercase().replace(' ', "")
+            ),
             host_ip: src_ip.clone(),
             port: cluster.first().map(|h| h.src_port),
             service: Some("tls-client".into()),
@@ -141,14 +144,17 @@ fn tls_downgrade_recommendation(version: u16) -> String {
         0x0300 => "Identify the SSLv3-attempting client and upgrade or replace it. \
             SSLv3 is broken (POODLE downgrade attack); modern servers refuse the handshake. \
             On macOS: `system_profiler SPSoftwareDataType` to identify the host. On Windows: \
-            `Get-Hotfix` + check the registry SCHANNEL keys.".into(),
+            `Get-Hotfix` + check the registry SCHANNEL keys."
+            .into(),
         0x0301 => "Identify the TLS-1.0-attempting client and update its TLS library. \
             Common culprits: legacy Java apps (pre-JDK-8u261), Python 2.7 with old OpenSSL, \
             embedded devices (printers, IP cameras, IoT). Server-side: enforce \
-            `minimum_protocol_version = TLS_1_2` to break the downgrade cleanly.".into(),
+            `minimum_protocol_version = TLS_1_2` to break the downgrade cleanly."
+            .into(),
         0x0302 => "Identify the TLS-1.1-attempting client and update its TLS library. \
             Same playbook as TLS 1.0 — both are RFC 8996 deprecated. Enforce TLS 1.2+ on \
-            the server side to surface the broken clients via connection failure logs.".into(),
+            the server side to surface the broken clients via connection failure logs."
+            .into(),
         _ => "Investigate the client's TLS configuration.".into(),
     }
 }
@@ -344,7 +350,7 @@ mod tests {
         // Eth: dst MAC (6) + src MAC (6) + ethertype (2)
         frame.extend_from_slice(&[0; 12]);
         frame.extend_from_slice(&[0x08, 0x00]); // IPv4
-        // IPv4 header (20 bytes, no options).
+                                                // IPv4 header (20 bytes, no options).
         let ip_total_len = 20 + 20 + payload.len();
         frame.push(0x45); // version 4, IHL 5
         frame.push(0x00); // DSCP/ECN
@@ -379,10 +385,10 @@ mod tests {
         p.push(22);
         p.extend_from_slice(&[0x03, 0x01]); // record version
         p.extend_from_slice(&[0x00, 0x40]); // record length (placeholder)
-        // Handshake header: type=1 (ClientHello), length 3 bytes
+                                            // Handshake header: type=1 (ClientHello), length 3 bytes
         p.push(1);
         p.extend_from_slice(&[0x00, 0x00, 0x3c]); // body length
-        // ClientHello body: legacy_version (2)
+                                                  // ClientHello body: legacy_version (2)
         p.extend_from_slice(&legacy_version.to_be_bytes());
         // …followed by ignored bytes (random, session_id, ciphers, ext)
         p.extend_from_slice(&[0; 64]);
@@ -473,7 +479,10 @@ mod tests {
         let pcap = pcap_with_one_packet(&frame);
 
         let hellos = parse_pcap_for_clienthellos(&pcap);
-        assert!(hellos.is_empty(), "only ClientHellos flagged, not ServerHellos");
+        assert!(
+            hellos.is_empty(),
+            "only ClientHellos flagged, not ServerHellos"
+        );
     }
 
     #[test]
@@ -516,8 +525,12 @@ mod tests {
 
         let findings = detect_tls_downgrade_clients(tmp.path()).await.expect("ok");
         assert_eq!(findings.len(), 2, "TLS 1.0 + TLS 1.1 = two findings");
-        assert!(findings.iter().any(|f| f.id == "tls.client-downgrade-tls1.0"));
-        assert!(findings.iter().any(|f| f.id == "tls.client-downgrade-tls1.1"));
+        assert!(findings
+            .iter()
+            .any(|f| f.id == "tls.client-downgrade-tls1.0"));
+        assert!(findings
+            .iter()
+            .any(|f| f.id == "tls.client-downgrade-tls1.1"));
     }
 
     #[tokio::test]

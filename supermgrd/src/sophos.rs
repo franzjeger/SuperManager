@@ -171,9 +171,7 @@ pub fn looks_successful(body: &str) -> bool {
     // The XML may or may not have whitespace between attributes; do a
     // simple substring check on the documented success codes. For a real
     // parser, swap in `quick-xml`.
-    body.contains("code=\"200\"")
-        || body.contains("code=\"216\"")
-        || body.contains("code=\"250\"")
+    body.contains("code=\"200\"") || body.contains("code=\"216\"") || body.contains("code=\"250\"")
 }
 
 #[cfg(test)]
@@ -208,7 +206,9 @@ mod tests {
     #[test]
     fn looks_successful_recognises_documented_codes() {
         assert!(looks_successful(r#"<Status code="200">OK</Status>"#));
-        assert!(looks_successful(r#"<Status code="216">Configuration applied</Status>"#));
+        assert!(looks_successful(
+            r#"<Status code="216">Configuration applied</Status>"#
+        ));
         assert!(looks_successful(r#"<Status code="250">No change</Status>"#));
     }
 
@@ -217,8 +217,12 @@ mod tests {
         assert!(!looks_successful(
             r#"<Login status="Authentication Failure"></Login>"#
         ));
-        assert!(!looks_successful(r#"<Status code="500">Operation failed</Status>"#));
-        assert!(!looks_successful(r#"<Status code="530">Authentication failure</Status>"#));
+        assert!(!looks_successful(
+            r#"<Status code="500">Operation failed</Status>"#
+        ));
+        assert!(!looks_successful(
+            r#"<Status code="530">Authentication failure</Status>"#
+        ));
     }
 
     #[test]

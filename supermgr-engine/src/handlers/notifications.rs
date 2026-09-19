@@ -19,9 +19,7 @@ impl EngineServer {
     ) -> Response {
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned())
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned()),
         };
         let webhook = params
             .get("webhook_url")
@@ -51,7 +49,11 @@ impl EngineServer {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned()),
         };
-        let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
         let mut cfg = crate::notify::load_config();
         if key.is_empty() {
             cfg.pagerduty_keys.remove(&scope);
@@ -74,7 +76,11 @@ impl EngineServer {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned()),
         };
-        let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let key = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
         let mut cfg = crate::notify::load_config();
         if key.is_empty() {
             cfg.opsgenie_keys.remove(&scope);

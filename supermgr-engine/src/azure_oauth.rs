@@ -93,10 +93,7 @@ pub enum DeviceCodePoll {
 /// Kick off the device-code flow against the given tenant. The
 /// `client_id` is the gateway's expected audience (from the
 /// `.azurevpnconfig`); we wrap it as a `.default` scope.
-pub async fn start_device_flow(
-    tenant: &str,
-    audience: &str,
-) -> anyhow::Result<DeviceCodeStart> {
+pub async fn start_device_flow(tenant: &str, audience: &str) -> anyhow::Result<DeviceCodeStart> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
@@ -123,17 +120,13 @@ pub async fn start_device_flow(
         ));
     }
 
-    serde_json::from_str(&text).map_err(|e| {
-        anyhow::anyhow!("couldn't parse devicecode response: {e}\n\nbody: {text}")
-    })
+    serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("couldn't parse devicecode response: {e}\n\nbody: {text}"))
 }
 
 /// One poll against the token endpoint. The caller is responsible
 /// for spacing polls at `interval` seconds (we don't sleep here).
-pub async fn poll_token(
-    tenant: &str,
-    device_code: &str,
-) -> anyhow::Result<DeviceCodePoll> {
+pub async fn poll_token(tenant: &str, device_code: &str) -> anyhow::Result<DeviceCodePoll> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()?;
@@ -158,7 +151,9 @@ pub async fn poll_token(
     // non-2xx with an `error` field. Both paths come through
     // here and we discriminate on the parsed body.
     let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-        anyhow::anyhow!("couldn't parse token-endpoint response (status {status}): {e}\n\nbody: {text}")
+        anyhow::anyhow!(
+            "couldn't parse token-endpoint response (status {status}): {e}\n\nbody: {text}"
+        )
     })?;
 
     if status.is_success() {
@@ -288,7 +283,7 @@ impl AzureRuntime {
     /// True iff we can drive the connection from the privileged
     /// helper — i.e. the runtime is a CLI we can spawn, not a
     /// .app we'd need to hand off to.
-    #[must_use] 
+    #[must_use]
     pub fn is_helper_driveable(&self) -> bool {
         matches!(self, AzureRuntime::Openvpn3Cli { .. })
     }
@@ -296,7 +291,7 @@ impl AzureRuntime {
     /// True iff *some* macOS app exists that can complete an
     /// Azure-AAD VPN session, even if we can't drive it from the
     /// helper. Drives the GUI's "Open in Azure VPN Client" button.
-    #[must_use] 
+    #[must_use]
     pub fn is_app_handoff(&self) -> bool {
         matches!(
             self,
@@ -313,7 +308,7 @@ impl AzureRuntime {
 ///   4. `OpenVPN` 2.x (refused — token-as-password handshake is too
 ///      flaky to ship as a default)
 ///   5. Nothing
-#[must_use] 
+#[must_use]
 pub fn detect_azure_runtime() -> AzureRuntime {
     // Brew prefixes + a few known custom-port locations. The
     // openvpn3-aircrack port lands the binary at `/usr/local/sbin`
@@ -327,18 +322,24 @@ pub fn detect_azure_runtime() -> AzureRuntime {
     ];
     for p in OVPN3_CLI_PATHS {
         if std::path::Path::new(p).exists() {
-            return AzureRuntime::Openvpn3Cli { path: (*p).to_owned() };
+            return AzureRuntime::Openvpn3Cli {
+                path: (*p).to_owned(),
+            };
         }
     }
 
     let azure_app = "/Applications/Azure VPN Client.app";
     if std::path::Path::new(azure_app).exists() {
-        return AzureRuntime::AzureVpnClientApp { path: azure_app.to_owned() };
+        return AzureRuntime::AzureVpnClientApp {
+            path: azure_app.to_owned(),
+        };
     }
 
     let connect_app = "/Applications/OpenVPN Connect.app";
     if std::path::Path::new(connect_app).exists() {
-        return AzureRuntime::OpenvpnConnectApp { path: connect_app.to_owned() };
+        return AzureRuntime::OpenvpnConnectApp {
+            path: connect_app.to_owned(),
+        };
     }
 
     // Last-resort 2.x detection. We DON'T return this as "good
@@ -353,7 +354,9 @@ pub fn detect_azure_runtime() -> AzureRuntime {
     ];
     for p in OVPN2_PATHS {
         if std::path::Path::new(p).exists() {
-            return AzureRuntime::Only2x { path: (*p).to_owned() };
+            return AzureRuntime::Only2x {
+                path: (*p).to_owned(),
+            };
         }
     }
 
@@ -396,20 +399,31 @@ mod tests {
     fn runtime_helper_classifiers() {
         // Smoke-tests for the boolean predicates. Build dummy
         // variants without touching the filesystem.
-        let cli = AzureRuntime::Openvpn3Cli { path: "/usr/bin/openvpn3".into() };
+        let cli = AzureRuntime::Openvpn3Cli {
+            path: "/usr/bin/openvpn3".into(),
+        };
         assert!(cli.is_helper_driveable());
         assert!(!cli.is_app_handoff());
 
-        let azure_app = AzureRuntime::AzureVpnClientApp { path: "/Applications/X.app".into() };
+        let azure_app = AzureRuntime::AzureVpnClientApp {
+            path: "/Applications/X.app".into(),
+        };
         assert!(!azure_app.is_helper_driveable());
         assert!(azure_app.is_app_handoff());
 
-        let connect_app = AzureRuntime::OpenvpnConnectApp { path: "/Applications/Y.app".into() };
+        let connect_app = AzureRuntime::OpenvpnConnectApp {
+            path: "/Applications/Y.app".into(),
+        };
         assert!(connect_app.is_app_handoff());
 
-        let only2x = AzureRuntime::Only2x { path: "/usr/sbin/openvpn".into() };
+        let only2x = AzureRuntime::Only2x {
+            path: "/usr/sbin/openvpn".into(),
+        };
         assert!(!only2x.is_helper_driveable());
-        assert!(!only2x.is_app_handoff(), "2.x can't carry AAD reliably — refuse, don't pretend");
+        assert!(
+            !only2x.is_app_handoff(),
+            "2.x can't carry AAD reliably — refuse, don't pretend"
+        );
 
         let none = AzureRuntime::None;
         assert!(!none.is_helper_driveable());

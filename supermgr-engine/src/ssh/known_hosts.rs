@@ -6,6 +6,4 @@
 //! kind of drift a single shared module prevents. This re-export keeps the
 //! `crate::ssh::known_hosts::*` paths working for engine callers.
 
-pub use supermgr_core::ssh::known_hosts::{
-    HostKeyCheck, KnownHostsError, KnownHostsStore, Result,
-};
+pub use supermgr_core::ssh::known_hosts::{HostKeyCheck, KnownHostsError, KnownHostsStore, Result};

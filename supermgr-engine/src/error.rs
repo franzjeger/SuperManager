@@ -92,16 +92,16 @@ impl EngineError {
     #[must_use]
     pub fn rpc_code(&self) -> i32 {
         match self {
-            Self::SshAuth { .. }         => -32010,
-            Self::SshNetwork { .. }      => -32011,
+            Self::SshAuth { .. } => -32010,
+            Self::SshNetwork { .. } => -32011,
             Self::SshDisconnected { .. } => -32012,
-            Self::FindingsIo { .. }      => -32020,
-            Self::FindingsParse { .. }   => -32021,
-            Self::InvalidScope { .. }    => -32022,
-            Self::ToolMissing { .. }     => -32030,
-            Self::ToolFailed { .. }      => -32031,
-            Self::PdfEngineMissing       => -32040,
-            Self::Other(_)               => -32099,
+            Self::FindingsIo { .. } => -32020,
+            Self::FindingsParse { .. } => -32021,
+            Self::InvalidScope { .. } => -32022,
+            Self::ToolMissing { .. } => -32030,
+            Self::ToolFailed { .. } => -32031,
+            Self::PdfEngineMissing => -32040,
+            Self::Other(_) => -32099,
         }
     }
 
@@ -114,16 +114,16 @@ impl EngineError {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::SshAuth { .. }         => "ssh_auth",
-            Self::SshNetwork { .. }      => "ssh_network",
+            Self::SshAuth { .. } => "ssh_auth",
+            Self::SshNetwork { .. } => "ssh_network",
             Self::SshDisconnected { .. } => "ssh_disconnected",
-            Self::FindingsIo { .. }      => "findings_io",
-            Self::FindingsParse { .. }   => "findings_parse",
-            Self::InvalidScope { .. }    => "invalid_scope",
-            Self::ToolMissing { .. }     => "tool_missing",
-            Self::ToolFailed { .. }      => "tool_failed",
-            Self::PdfEngineMissing       => "pdf_engine_missing",
-            Self::Other(_)               => "other",
+            Self::FindingsIo { .. } => "findings_io",
+            Self::FindingsParse { .. } => "findings_parse",
+            Self::InvalidScope { .. } => "invalid_scope",
+            Self::ToolMissing { .. } => "tool_missing",
+            Self::ToolFailed { .. } => "tool_failed",
+            Self::PdfEngineMissing => "pdf_engine_missing",
+            Self::Other(_) => "other",
         }
     }
 

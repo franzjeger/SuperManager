@@ -638,7 +638,7 @@ fn map_severity(v: Severity) -> compliance::Severity {
 /// share this function rather than referencing parallel literals.
 /// The runtime backstop for this invariant lives in
 /// `compliance::tests::linux_library_category_byte_identical_to_runner_category`.
-#[must_use] 
+#[must_use]
 pub fn category_for_id(check_id: &str) -> String {
     let mid = check_id.strip_prefix("linux.").unwrap_or(check_id);
     let segment = mid.split('.').next().unwrap_or("baseline");
@@ -679,7 +679,7 @@ pub fn category_for_id(check_id: &str) -> String {
 /// remediation / cisReference / category / severity / title /
 /// framework` — the fields `ChecksLibrarySheet` and `CheckRow`
 /// actually render. See per-field notes below.
-#[must_use] 
+#[must_use]
 pub fn linux_default_checks() -> Vec<compliance::CheckDefinition> {
     LINUX_CHECKS
         .iter()
@@ -816,7 +816,7 @@ fn linux_description(check_id: &str) -> &'static str {
 /// Static count of checks the baseline currently covers — handy
 /// for the UI's baseline coverage subtitle without
 /// needing to call `run_baseline` first.
-#[must_use] 
+#[must_use]
 pub fn check_count() -> usize {
     LINUX_CHECKS.len()
 }
@@ -824,7 +824,7 @@ pub fn check_count() -> usize {
 /// Names of every check, in order. Surfaced to the UI when the
 /// operator wants to see what the baseline actually checks
 /// before running it.
-#[must_use] 
+#[must_use]
 pub fn check_titles() -> Vec<&'static str> {
     LINUX_CHECKS.iter().map(|c| c.title).collect()
 }

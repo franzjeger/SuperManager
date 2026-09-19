@@ -87,8 +87,7 @@ pub fn status_view(vpn: &VpnState, selected_profile: Option<&str>) -> StatusView
         return StatusView {
             status: Status::Disconnected,
             headline: "Disconnected",
-            detail: "Another profile is using the tunnel. Disconnect it first."
-                .to_owned(),
+            detail: "Another profile is using the tunnel. Disconnect it first.".to_owned(),
             action: "Connect",
             destructive: false,
             action_enabled: false,
@@ -197,13 +196,8 @@ pub fn toolbar_status(
             active_name.unwrap_or("Connected").to_owned(),
         ),
         VpnState::Connecting { .. } => (Status::Connecting, "Connecting\u{2026}".to_owned()),
-        VpnState::Disconnecting { .. } => {
-            (Status::Connecting, "Disconnecting\u{2026}".to_owned())
-        }
-        VpnState::Error { .. } => (
-            Status::Error,
-            active_name.unwrap_or("VPN error").to_owned(),
-        ),
+        VpnState::Disconnecting { .. } => (Status::Connecting, "Disconnecting\u{2026}".to_owned()),
+        VpnState::Error { .. } => (Status::Error, active_name.unwrap_or("VPN error").to_owned()),
         VpnState::Disconnected => (Status::Disconnected, "No VPN".to_owned()),
     }
 }
@@ -278,19 +272,35 @@ pub struct VpnDetail {
 
 /// A compact live metric; hiding its value also removes the complete tile.
 fn stat_row(card: &gtk4::FlowBox, title: &str, monospace: bool) -> gtk4::Label {
-    let tile = gtk4::Box::builder().orientation(gtk4::Orientation::Vertical)
-        .spacing(8).css_classes(["supermgr-metric"]).build();
-    let caption = gtk4::Label::builder().label(title).xalign(0.0)
-        .css_classes(["dim-label", "caption"]).build();
-    let value = gtk4::Label::builder().label("—").xalign(0.0).selectable(true)
-        .ellipsize(gtk4::pango::EllipsizeMode::End).max_width_chars(20)
-        .css_classes(["heading"]).build();
-    if monospace { value.add_css_class("monospace"); }
+    let tile = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .css_classes(["supermgr-metric"])
+        .build();
+    let caption = gtk4::Label::builder()
+        .label(title)
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    let value = gtk4::Label::builder()
+        .label("—")
+        .xalign(0.0)
+        .selectable(true)
+        .ellipsize(gtk4::pango::EllipsizeMode::End)
+        .max_width_chars(20)
+        .css_classes(["heading"])
+        .build();
+    if monospace {
+        value.add_css_class("monospace");
+    }
     tile.append(&caption);
     tile.append(&value);
     card.append(&tile);
     if let Some(slot) = tile.parent() {
-        value.bind_property("visible", &slot, "visible").sync_create().build();
+        value
+            .bind_property("visible", &slot, "visible")
+            .sync_create()
+            .build();
     }
     value
 }
@@ -354,9 +364,14 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     // Every live fact about the connection, as a definition list. All of it
     // is meaningless without a tunnel, so the whole card comes and goes as
     // one.
-    let stats_card = gtk4::FlowBox::builder().selection_mode(gtk4::SelectionMode::None)
-        .min_children_per_line(2).max_children_per_line(3).homogeneous(true)
-        .column_spacing(12).row_spacing(12).build();
+    let stats_card = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .min_children_per_line(2)
+        .max_children_per_line(3)
+        .homogeneous(true)
+        .column_spacing(12)
+        .row_spacing(12)
+        .build();
     let stats_interface = stat_row(&stats_card, "Interface", true);
     let stats_virtual_ip = stat_row(&stats_card, "VPN IP", true);
     let stats_routes = stat_row(&stats_card, "Routes", true);
@@ -383,14 +398,20 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
 
     let settings_card = design::card("Settings");
 
-    let auto_connect_switch = gtk4::Switch::builder().active(false).sensitive(false).build();
+    let auto_connect_switch = gtk4::Switch::builder()
+        .active(false)
+        .sensitive(false)
+        .build();
     settings_card.add(&design::toggle_row(
         &auto_connect_switch,
         "Connect automatically",
         "Reconnect when the network returns or the tunnel drops",
     ));
 
-    let full_tunnel_switch = gtk4::Switch::builder().active(true).sensitive(false).build();
+    let full_tunnel_switch = gtk4::Switch::builder()
+        .active(true)
+        .sensitive(false)
+        .build();
     let full_tunnel_row = design::toggle_row(
         &full_tunnel_switch,
         "Route all traffic",
@@ -398,7 +419,10 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
     );
     settings_card.add(&full_tunnel_row);
 
-    let kill_switch_switch = gtk4::Switch::builder().active(false).sensitive(false).build();
+    let kill_switch_switch = gtk4::Switch::builder()
+        .active(false)
+        .sensitive(false)
+        .build();
     settings_card.add(&design::toggle_row(
         &kill_switch_switch,
         "Kill switch",
@@ -561,7 +585,11 @@ pub fn build_vpn_detail() -> (VpnDetail, adw::NavigationPage) {
 /// `status_view`. What is left here is only the assignment.
 pub fn apply_vpn_state(w: &VpnStatusWidgets, state: &AppState) {
     let active_name = state.vpn_state.profile_id().and_then(|id| {
-        state.profiles.iter().find(|p| p.id == id).map(|p| p.name.as_str())
+        state
+            .profiles
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.as_str())
     });
     let (toolbar, toolbar_label) =
         toolbar_status(&state.vpn_state, active_name, state.daemon_available);
@@ -605,7 +633,11 @@ mod tests {
     use uuid::Uuid;
 
     fn connected(id: Uuid) -> VpnState {
-        VpnState::Connected { profile_id: id, since: Utc::now(), interface: "wg0".into() }
+        VpnState::Connected {
+            profile_id: id,
+            since: Utc::now(),
+            interface: "wg0".into(),
+        }
     }
 
     fn error(id: Option<Uuid>, message: &str) -> VpnState {
@@ -638,8 +670,14 @@ mod tests {
         let view = status_view(&error(None, message), Some("p"));
 
         assert_eq!(view.headline, "Error");
-        assert!(view.headline.len() < 16, "the pill's text has to fit in a pill");
-        assert_eq!(view.detail, message, "the message was dropped instead of moved");
+        assert!(
+            view.headline.len() < 16,
+            "the pill's text has to fit in a pill"
+        );
+        assert_eq!(
+            view.detail, message,
+            "the message was dropped instead of moved"
+        );
         assert_eq!(view.status, Status::Error);
     }
 
@@ -666,7 +704,11 @@ mod tests {
         let id = Uuid::new_v4();
         for state in [
             VpnState::Disconnected,
-            VpnState::Connecting { profile_id: id, since: Utc::now(), phase: String::new() },
+            VpnState::Connecting {
+                profile_id: id,
+                since: Utc::now(),
+                phase: String::new(),
+            },
             connected(id),
             VpnState::Disconnecting { profile_id: id },
             error(Some(id), "boom"),
@@ -685,7 +727,11 @@ mod tests {
         let view = status_view(&connected(other), Some(&Uuid::new_v4().to_string()));
 
         assert!(!view.action_enabled);
-        assert_eq!(view.status, Status::Disconnected, "*this* profile is not connected");
+        assert_eq!(
+            view.status,
+            Status::Disconnected,
+            "*this* profile is not connected"
+        );
         assert!(
             view.detail.contains("Another profile"),
             "a dead button with no explanation reads as a bug: {:?}",
@@ -714,7 +760,11 @@ mod tests {
         assert!(status_view(&connected(id), Some(&sel)).show_stats);
         for state in [
             VpnState::Disconnected,
-            VpnState::Connecting { profile_id: id, since: Utc::now(), phase: "IKE".into() },
+            VpnState::Connecting {
+                profile_id: id,
+                since: Utc::now(),
+                phase: "IKE".into(),
+            },
             VpnState::Disconnecting { profile_id: id },
             error(Some(id), "boom"),
         ] {
@@ -733,11 +783,18 @@ mod tests {
         let sel = id.to_string();
         for state in [
             connected(id),
-            VpnState::Connecting { profile_id: id, since: Utc::now(), phase: "IKE".into() },
+            VpnState::Connecting {
+                profile_id: id,
+                since: Utc::now(),
+                phase: "IKE".into(),
+            },
             VpnState::Disconnecting { profile_id: id },
         ] {
             let view = status_view(&state, Some(&sel));
-            assert!(view.destructive, "{state:?} offers a non-destructive-looking teardown");
+            assert!(
+                view.destructive,
+                "{state:?} offers a non-destructive-looking teardown"
+            );
             assert!(view.action.contains("Disconnect"), "{:?}", view.action);
         }
         for state in [VpnState::Disconnected, error(Some(id), "boom")] {

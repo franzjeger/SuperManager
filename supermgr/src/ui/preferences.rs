@@ -42,9 +42,7 @@ pub fn show_settings_dialog(
 ) {
     let dialog = adw::PreferencesDialog::builder().title("Settings").build();
 
-    let appearance_group = adw::PreferencesGroup::builder()
-        .title("Appearance")
-        .build();
+    let appearance_group = adw::PreferencesGroup::builder().title("Appearance").build();
 
     let theme_model = gtk4::StringList::new(&["Follow System", "Light", "Dark"]);
     let theme_row = adw::ComboRow::builder()
@@ -67,7 +65,11 @@ pub fn show_settings_dialog(
         .subtitle("Window transparency")
         .build();
     let opacity_adj = gtk4::Adjustment::new(
-        app_settings.lock().unwrap_or_else(|e| e.into_inner()).opacity * 100.0,
+        app_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .opacity
+            * 100.0,
         10.0,
         100.0,
         1.0,
@@ -191,7 +193,10 @@ pub fn show_settings_dialog(
         .title("Auto-lock timeout")
         .subtitle("Minutes of inactivity (0 = disabled)")
         .adjustment(&gtk4::Adjustment::new(
-            app_settings.lock().unwrap_or_else(|e| e.into_inner()).auto_lock_minutes as f64,
+            app_settings
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .auto_lock_minutes as f64,
             0.0,
             120.0,
             1.0,
@@ -219,9 +224,7 @@ pub fn show_settings_dialog(
         .description("Send alerts to Slack, Teams, or Discord via webhook")
         .build();
 
-    let webhook_url_row = adw::EntryRow::builder()
-        .title("Webhook URL")
-        .build();
+    let webhook_url_row = adw::EntryRow::builder().title("Webhook URL").build();
     {
         let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
         if !s.webhook_url.is_empty() {
@@ -234,14 +237,24 @@ pub fn show_settings_dialog(
         .title("Host down alerts")
         .subtitle("Notify when an SSH host becomes unreachable")
         .build();
-    host_down_toggle.set_active(app_settings.lock().unwrap_or_else(|e| e.into_inner()).webhook_on_host_down);
+    host_down_toggle.set_active(
+        app_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhook_on_host_down,
+    );
     notify_group.add(&host_down_toggle);
 
     let vpn_disconnect_toggle = adw::SwitchRow::builder()
         .title("VPN disconnect alerts")
         .subtitle("Notify when a VPN tunnel drops unexpectedly")
         .build();
-    vpn_disconnect_toggle.set_active(app_settings.lock().unwrap_or_else(|e| e.into_inner()).webhook_on_vpn_disconnect);
+    vpn_disconnect_toggle.set_active(
+        app_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhook_on_vpn_disconnect,
+    );
     notify_group.add(&vpn_disconnect_toggle);
 
     let test_webhook_row = adw::ActionRow::builder()
@@ -268,7 +281,9 @@ pub fn show_settings_dialog(
             use supermgr_core::dbus::DaemonProxy;
             if let Ok(conn) = zbus::Connection::system().await {
                 if let Ok(proxy) = DaemonProxy::new(&conn).await {
-                    let _ = proxy.set_webhook(url, on_host_down, on_vpn_disconnect).await;
+                    let _ = proxy
+                        .set_webhook(url, on_host_down, on_vpn_disconnect)
+                        .await;
                 }
             }
         });
@@ -342,9 +357,9 @@ pub fn show_settings_dialog(
                                 ));
                             }
                             Err(e) => {
-                                let _ = tx.send(crate::app::AppMsg::OperationFailed(
-                                    format!("Webhook test failed: {e}"),
-                                ));
+                                let _ = tx.send(crate::app::AppMsg::OperationFailed(format!(
+                                    "Webhook test failed: {e}"
+                                )));
                             }
                         }
                     }
@@ -355,7 +370,12 @@ pub fn show_settings_dialog(
 
     let anthropic_model = adw::EntryRow::builder().title("Claude model").build();
     anthropic_model.set_tooltip_text(Some("Used by the console and provisioning, with API key or Claude subscription. Leave blank to use the default model."));
-    anthropic_model.set_text(&app_settings.lock().unwrap_or_else(|e| e.into_inner()).anthropic_model);
+    anthropic_model.set_text(
+        &app_settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .anthropic_model,
+    );
     console_group.add(&anthropic_model);
     {
         let settings = Arc::clone(&app_settings);
@@ -365,10 +385,15 @@ pub fn show_settings_dialog(
             s.save();
         });
     }
-    let openai_group = adw::PreferencesGroup::builder().title("OpenAI API")
-        .description("Separate API billing. For your ChatGPT subscription, choose Codex in the assistant.")
+    let openai_group = adw::PreferencesGroup::builder()
+        .title("OpenAI API")
+        .description(
+            "Separate API billing. For your ChatGPT subscription, choose Codex in the assistant.",
+        )
         .build();
-    let openai_key = adw::PasswordEntryRow::builder().title("OpenAI API key").build();
+    let openai_key = adw::PasswordEntryRow::builder()
+        .title("OpenAI API key")
+        .build();
     let openai_model = adw::EntryRow::builder().title("OpenAI model").build();
     {
         let settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
@@ -396,7 +421,8 @@ pub fn show_settings_dialog(
     let codex_group = adw::PreferencesGroup::builder().title("Codex")
         .description("Uses the Codex CLI and its existing ChatGPT login. SuperManager never reads your login tokens.")
         .build();
-    let login_row = adw::ActionRow::builder().title("ChatGPT account")
+    let login_row = adw::ActionRow::builder()
+        .title("ChatGPT account")
         .subtitle("Sign in using your browser; requires Codex CLI on this computer")
         .build();
     let login_button = gtk4::Button::with_label("Sign in…");
@@ -479,7 +505,10 @@ pub fn show_settings_dialog(
         let window = window.clone();
         verify_btn.connect_clicked(move |_| {
             let window = window.clone();
-            let file_dialog = gtk4::FileDialog::builder().title("Verify Backup").modal(true).build();
+            let file_dialog = gtk4::FileDialog::builder()
+                .title("Verify Backup")
+                .modal(true)
+                .build();
             let parent = window.clone();
             file_dialog.open(Some(&parent), gio::Cancellable::NONE, move |result| {
                 let Ok(file) = result else { return };
@@ -489,13 +518,20 @@ pub fn show_settings_dialog(
                     let result = gio::spawn_blocking(move || {
                         let bytes = std::fs::read(path)?;
                         crate::backup::verify(&bytes)
-                    }).await;
+                    })
+                    .await;
                     let (heading, body) = match result {
                         Ok(Ok(summary)) => ("Backup checked", summary),
                         Ok(Err(e)) => ("Backup check failed", e.to_string()),
-                        Err(_) => ("Backup check failed", "The file could not be checked.".into()),
+                        Err(_) => (
+                            "Backup check failed",
+                            "The file could not be checked.".into(),
+                        ),
                     };
-                    let alert = adw::AlertDialog::builder().heading(heading).body(&body).build();
+                    let alert = adw::AlertDialog::builder()
+                        .heading(heading)
+                        .body(&body)
+                        .build();
                     alert.add_response("close", "Close");
                     alert.present(Some(&window));
                 });
@@ -546,21 +582,20 @@ pub fn show_settings_dialog(
                     match crate::dbus_client::dbus_export_all().await {
                         Ok(json) => match crate::backup::write_private(&path, json.as_bytes()) {
                             Ok(()) => {
-                                let _ = tx.send(AppMsg::ShowToast(
-                                    format!("Config exported to {}", path.display()),
-                                ));
+                                let _ = tx.send(AppMsg::ShowToast(format!(
+                                    "Config exported to {}",
+                                    path.display()
+                                )));
                             }
                             Err(e) => {
-                                let _ = tx.send(AppMsg::OperationFailed(
-                                    format!("Failed to write file: {e}"),
-                                ));
+                                let _ = tx.send(AppMsg::OperationFailed(format!(
+                                    "Failed to write file: {e}"
+                                )));
                             }
                         },
                         Err(e) => {
                             error!("export_all failed: {e}");
-                            let _ = tx.send(AppMsg::OperationFailed(
-                                format!("Export failed: {e}"),
-                            ));
+                            let _ = tx.send(AppMsg::OperationFailed(format!("Export failed: {e}")));
                         }
                     }
                 });
@@ -614,22 +649,19 @@ pub fn show_settings_dialog(
                     match tokio::fs::read_to_string(&path).await {
                         Ok(data) => match crate::dbus_client::dbus_import_all(data).await {
                             Ok(summary) => {
-                                let _ = tx.send(AppMsg::ShowToast(
-                                    format!("Import complete: {summary}"),
-                                ));
+                                let _ = tx
+                                    .send(AppMsg::ShowToast(format!("Import complete: {summary}")));
                             }
                             Err(e) => {
                                 error!("import_all failed: {e}");
-                                let _ = tx.send(AppMsg::OperationFailed(
-                                    format!("Import failed: {e}"),
-                                ));
+                                let _ =
+                                    tx.send(AppMsg::OperationFailed(format!("Import failed: {e}")));
                             }
                         },
                         Err(e) => {
                             error!("failed to read backup file: {e}");
-                            let _ = tx.send(AppMsg::OperationFailed(
-                                format!("Failed to read file: {e}"),
-                            ));
+                            let _ = tx
+                                .send(AppMsg::OperationFailed(format!("Failed to read file: {e}")));
                         }
                     }
                 });
@@ -837,7 +869,8 @@ pub fn show_settings_dialog(
             let dialog = gtk4::FileDialog::builder()
                 .title("Save Support Report")
                 .initial_name("supermanager-support.txt")
-                .modal(true).build();
+                .modal(true)
+                .build();
             let rt = rt.clone();
             let tx = tx.clone();
             let button = button.clone();
@@ -850,7 +883,9 @@ pub fn show_settings_dialog(
                     let report = crate::diagnostics::collect(include_logs).await;
                     let result = crate::backup::write_private(&path, report.as_bytes());
                     let message = match result {
-                        Ok(()) => AppMsg::ShowToast(format!("Support report saved to {}", path.display())),
+                        Ok(()) => {
+                            AppMsg::ShowToast(format!("Support report saved to {}", path.display()))
+                        }
                         Err(e) => AppMsg::OperationFailed(format!("Could not save report: {e}")),
                     };
                     let _ = tx.send(message);
@@ -877,7 +912,11 @@ pub fn show_settings_dialog(
             "preferences-system-symbolic",
             vec![&appearance_group, &rdp_group],
         ),
-        ("Security", crate::ui::design::icon_name(crate::ui::design::icons::SHIELD), vec![&security_group]),
+        (
+            "Security",
+            crate::ui::design::icon_name(crate::ui::design::icons::SHIELD),
+            vec![&security_group],
+        ),
         (
             "Notifications",
             crate::ui::design::icon_name(crate::ui::design::icons::NOTIFICATIONS),
@@ -888,18 +927,22 @@ pub fn show_settings_dialog(
             crate::ui::design::icon_name(crate::ui::design::icons::INTEGRATION),
             vec![&unifi_group],
         ),
-        ("AI", "avatar-default-symbolic", vec![&codex_group, &console_group, &openai_group]),
         (
-            "Backup",
-            "document-save-symbolic",
-            vec![&backup_group],
+            "AI",
+            "avatar-default-symbolic",
+            vec![&codex_group, &console_group, &openai_group],
         ),
+        ("Backup", "document-save-symbolic", vec![&backup_group]),
         (
             "Updates",
             "software-update-available-symbolic",
             vec![&updates_group],
         ),
-        ("Diagnostics", "utilities-system-monitor-symbolic", vec![&diagnostics_group]),
+        (
+            "Diagnostics",
+            "utilities-system-monitor-symbolic",
+            vec![&diagnostics_group],
+        ),
     ] {
         let page = adw::PreferencesPage::builder()
             .title(title)
@@ -973,7 +1016,10 @@ fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Hand
         .top_margin(8)
         .bottom_margin(8)
         .build();
-    let scroll = gtk4::ScrolledWindow::builder().child(&view).vexpand(true).build();
+    let scroll = gtk4::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .build();
 
     let status = gtk4::Label::builder()
         .label("Running supermgr-update \u{2014} pulling, rebuilding, reinstalling\u{2026}")
@@ -1059,7 +1105,11 @@ fn show_change_password_dialog(
     let has_pw = crate::master_password::is_set();
 
     let dialog = adw::Dialog::builder()
-        .title(if has_pw { "Change Password" } else { "Set Password" })
+        .title(if has_pw {
+            "Change Password"
+        } else {
+            "Set Password"
+        })
         .content_width(340)
         .build();
 

@@ -6,9 +6,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::ssh::key::SshKeyType;
 use serde::{Deserialize, Serialize};
 use ssh_key::{HashAlg, LineEnding, PrivateKey};
-use crate::ssh::key::SshKeyType;
 
 /// A candidate key found during a directory scan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +50,7 @@ const SKIP_EXTENSIONS: &[&str] = &[".pub", ".txt", ".bak", ".old", ".orig", ".lo
 /// `has_passphrase = true` if a corresponding `.pub` file provides
 /// enough information to populate the public key and fingerprint fields.
 /// Keys that cannot be parsed at all are silently skipped.
-#[must_use] 
+#[must_use]
 pub fn scan_ssh_directory(directory: &Path) -> Vec<ImportCandidate> {
     let entries = match std::fs::read_dir(directory) {
         Ok(rd) => rd,
@@ -62,9 +62,7 @@ pub fn scan_ssh_directory(directory: &Path) -> Vec<ImportCandidate> {
     let mut candidates: Vec<ImportCandidate> = Vec::new();
 
     // Collect and sort entries by name for deterministic output.
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .collect();
+    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
 
     for path in paths {
@@ -144,11 +142,8 @@ fn build_candidate(
     };
 
     // Prefer the .pub file if it exists (it usually carries a useful comment).
-    let pub_str = read_pub_file(path).unwrap_or_else(|| {
-        public_key
-            .to_openssh()
-            .unwrap_or_default()
-    });
+    let pub_str =
+        read_pub_file(path).unwrap_or_else(|| public_key.to_openssh().unwrap_or_default());
 
     let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
 
@@ -207,14 +202,14 @@ fn build_from_pub_file(private_key_path: &Path, file_name: &str) -> Option<Impor
 /// Tries `<path>.pub` first, then `<path_without_ext>.pub`.
 fn read_pub_file(private_key_path: &Path) -> Option<String> {
     // Try appending .pub to the full path.
-    let pub_path = private_key_path.with_extension(
-        private_key_path
-            .extension().map_or_else(|| "pub".into(), |ext| {
-                let mut s = ext.to_os_string();
-                s.push(".pub");
-                s
-            }),
-    );
+    let pub_path = private_key_path.with_extension(private_key_path.extension().map_or_else(
+        || "pub".into(),
+        |ext| {
+            let mut s = ext.to_os_string();
+            s.push(".pub");
+            s
+        },
+    ));
 
     // Simpler: just append ".pub" to the full filename.
     let pub_path_appended = PathBuf::from(format!("{}.pub", private_key_path.display()));
@@ -241,10 +236,7 @@ fn derive_display_name(file_name: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(file_name);
 
-    let display = stem
-        .strip_prefix("id_")
-        .unwrap_or(stem)
-        .replace('_', " ");
+    let display = stem.strip_prefix("id_").unwrap_or(stem).replace('_', " ");
 
     if display.is_empty() {
         file_name.to_owned()

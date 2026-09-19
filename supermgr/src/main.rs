@@ -66,7 +66,7 @@ use tracing::{error, info};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use app::AppState;
-use dbus_client::{fetch_initial_state, fetch_initial_ssh_state};
+use dbus_client::{fetch_initial_ssh_state, fetch_initial_state};
 use settings::AppSettings;
 use ui::build_ui;
 
@@ -78,11 +78,20 @@ fn print_palette() {
     );
     match ui::palette::kdeglobals_path() {
         Some(path) => {
-            println!("kdeglobals          = {} ({})", path.display(),
-                if path.exists() { "exists" } else { "MISSING" });
+            println!(
+                "kdeglobals          = {} ({})",
+                path.display(),
+                if path.exists() { "exists" } else { "MISSING" }
+            );
             if let Ok(ini) = std::fs::read_to_string(&path) {
-                println!("  inline colours    = {}",
-                    if ui::palette::parse(&ini).is_some() { "yes" } else { "no" });
+                println!(
+                    "  inline colours    = {}",
+                    if ui::palette::parse(&ini).is_some() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
                 match ui::palette::scheme_name(&ini) {
                     Some(name) => {
                         println!("  ColorScheme       = {name}");
@@ -101,7 +110,10 @@ fn print_palette() {
 
     match ui::palette::desktop_palette() {
         Some(palette) => {
-            println!("\nresolved: {} scheme", if palette.is_dark() { "dark" } else { "light" });
+            println!(
+                "\nresolved: {} scheme",
+                if palette.is_dark() { "dark" } else { "light" }
+            );
             print!("{}", palette.to_css());
         }
         None => println!("\nresolved: nothing — the stock stylesheet will be used"),

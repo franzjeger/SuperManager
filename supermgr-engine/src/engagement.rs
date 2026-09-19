@@ -128,7 +128,7 @@ pub enum Cadence {
 }
 
 impl Cadence {
-    #[must_use] 
+    #[must_use]
     pub fn advance(self, from: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
         match self {
             Self::Hourly => from + chrono::Duration::hours(1),
@@ -138,7 +138,7 @@ impl Cadence {
         }
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Hourly => "Hourly",
@@ -213,10 +213,10 @@ impl Technique {
 pub struct EngagementEvent {
     pub at: chrono::DateTime<chrono::Utc>,
     pub technique: Technique,
-    pub target: String,                            // CIDR or host
-    pub action: String,                            // "passive_scan", "nuclei_run", etc.
-    pub findings: u32,                             // count of new findings produced
-    pub notes: String,                             // free-form summary
+    pub target: String, // CIDR or host
+    pub action: String, // "passive_scan", "nuclei_run", etc.
+    pub findings: u32,  // count of new findings produced
+    pub notes: String,  // free-form summary
 }
 
 /// Filter a list of target IP strings against an engagement's
@@ -239,7 +239,7 @@ pub struct EngagementEvent {
 /// mode. Strict mode without any scope CIDRs would lock the
 /// operator out of their own scans — there's no meaningful
 /// interpretation of "must be in scope" when there's no scope.
-#[must_use] 
+#[must_use]
 pub fn targets_outside_scope(
     targets: &[String],
     scope_cidrs: &[String],
@@ -268,7 +268,8 @@ pub fn targets_outside_scope(
         // the network address as a proxy; if `expand_targets`
         // already exploded a CIDR into individual hosts then this
         // simplification is moot (each host is checked).
-        let ip: Option<IpAddr> = IpAddr::from_str(raw).ok()
+        let ip: Option<IpAddr> = IpAddr::from_str(raw)
+            .ok()
             .or_else(|| ipnet::IpNet::from_str(raw).ok().map(|n| n.network()));
         let Some(ip) = ip else {
             // Hostname (not IP/CIDR). Skip — we'd need DNS to
@@ -464,31 +465,20 @@ mod tests {
     fn scope_empty_means_no_violations() {
         // Ad-hoc engagement (no scope set) — strict mode is
         // meaningless because there's nothing to enforce.
-        let violations = targets_outside_scope(
-            &["1.2.3.4".into(), "8.8.8.8".into()],
-            &[],
-            &[],
-        );
+        let violations = targets_outside_scope(&["1.2.3.4".into(), "8.8.8.8".into()], &[], &[]);
         assert!(violations.is_empty());
     }
 
     #[test]
     fn target_inside_scope_passes() {
-        let violations = targets_outside_scope(
-            &["10.0.0.5".into()],
-            &["10.0.0.0/16".into()],
-            &[],
-        );
+        let violations = targets_outside_scope(&["10.0.0.5".into()], &["10.0.0.0/16".into()], &[]);
         assert!(violations.is_empty());
     }
 
     #[test]
     fn target_outside_scope_caught() {
-        let violations = targets_outside_scope(
-            &["192.168.1.1".into()],
-            &["10.0.0.0/16".into()],
-            &[],
-        );
+        let violations =
+            targets_outside_scope(&["192.168.1.1".into()], &["10.0.0.0/16".into()], &[]);
         assert_eq!(violations, vec!["192.168.1.1".to_string()]);
     }
 
@@ -529,11 +519,7 @@ mod tests {
         // The GUI's separate validation should catch CIDR typos
         // at save-time; this test just pins the safe failure
         // mode at the validation layer.
-        let violations = targets_outside_scope(
-            &["1.2.3.4".into()],
-            &["not-a-cidr".into()],
-            &[],
-        );
+        let violations = targets_outside_scope(&["1.2.3.4".into()], &["not-a-cidr".into()], &[]);
         assert_eq!(violations, vec!["1.2.3.4".to_string()]);
     }
 
@@ -542,11 +528,8 @@ mod tests {
         // FQDN can't be checked without DNS, which we deliberately
         // don't do (forward-then-check is racy). The hostname path
         // is GUI's responsibility.
-        let violations = targets_outside_scope(
-            &["server.example.com".into()],
-            &["10.0.0.0/16".into()],
-            &[],
-        );
+        let violations =
+            targets_outside_scope(&["server.example.com".into()], &["10.0.0.0/16".into()], &[]);
         assert!(violations.is_empty());
     }
 
@@ -673,7 +656,11 @@ mod tests {
         h1.join().unwrap();
         h2.join().unwrap();
         let loaded = load(&e.id).unwrap();
-        assert_eq!(loaded.log.len(), 10, "all 10 events should persist (no race losses)");
+        assert_eq!(
+            loaded.log.len(),
+            10,
+            "all 10 events should persist (no race losses)"
+        );
         cleanup(&e.id);
     }
 }

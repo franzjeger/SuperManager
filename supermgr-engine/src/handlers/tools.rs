@@ -12,17 +12,22 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_dns_health_audit(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_dns_health_audit(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let domain = match params.get("domain").and_then(|v| v.as_str()) {
             Some(d) if !d.is_empty() => d.to_owned(),
-            _ => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing domain".to_owned())
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing domain".to_owned()),
         };
         // Optional persistence scope — when given, the domain
         // findings reconcile into the customer's findings store
         // alongside other findings.
-        let scope = params.get("scope").and_then(|v| v.as_str()).map(str::to_owned);
+        let scope = params
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
         let report = crate::dns_health::audit(&domain).await;
         if let Some(s) = scope.as_deref() {
             if let Err(e) = crate::findings_store::reconcile(s, &report.findings) {
@@ -37,10 +42,7 @@ impl EngineServer {
 
     pub(crate) async fn handle_cve_feed_refresh(&self, id: u64) -> Response {
         match crate::cve_feed::refresh().await {
-            Ok(added) => Response::ok(
-                id,
-                serde_json::json!({ "ok": true, "added": added }),
-            ),
+            Ok(added) => Response::ok(id, serde_json::json!({ "ok": true, "added": added })),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
         }
     }
@@ -54,7 +56,11 @@ impl EngineServer {
         Response::ok(id, payload)
     }
 
-    pub(crate) async fn handle_subdomain_enum(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_subdomain_enum(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let domain = match params.get("domain").and_then(|v| v.as_str()) {
             Some(d) if !d.is_empty() => d.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing domain".to_owned()),

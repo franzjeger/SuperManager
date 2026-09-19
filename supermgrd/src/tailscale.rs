@@ -21,10 +21,16 @@ use tracing::{debug, warn};
 pub use supermgr_core::tailscale::{TailscaleHealth, TailscaleNode};
 
 async fn status_output() -> std::io::Result<std::process::Output> {
-    tokio::time::timeout(std::time::Duration::from_secs(5),
-        tokio::process::Command::new("tailscale").args(["status", "--json"])
-            .stdin(std::process::Stdio::null()).kill_on_drop(true).output())
-        .await.map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Tailscale status timed out"))?
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("tailscale")
+            .args(["status", "--json"])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "Tailscale status timed out"))?
 }
 
 /// Diagnose the local Tailscale stack: CLI present, daemon answering,
@@ -35,8 +41,7 @@ async fn status_output() -> std::io::Result<std::process::Output> {
 /// GUI renders the returned struct; `TailscaleRepair` and `TailscaleLogin`
 /// consume it to decide what needs doing.
 pub async fn health() -> TailscaleHealth {
-    let out = match status_output().await
-    {
+    let out = match status_output().await {
         Ok(out) => out,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return TailscaleHealth {
@@ -109,10 +114,7 @@ fn detect_package_manager() -> Option<(&'static str, &'static [&'static str])> {
         ("dnf", &["install", "-y", "tailscale"]),
         ("zypper", &["--non-interactive", "install", "tailscale"]),
     ];
-    CANDIDATES
-        .iter()
-        .find(|(pm, _)| which_exists(pm))
-        .copied()
+    CANDIDATES.iter().find(|(pm, _)| which_exists(pm)).copied()
 }
 
 /// `command -v` without the shell: walk PATH for an executable file.
@@ -205,7 +207,7 @@ pub async fn repair() -> Result<String, String> {
             tokio::process::Command::new("tailscale")
                 .args(["up"])
                 .kill_on_drop(true)
-                .output()
+                .output(),
         )
         .await
         .map_err(|_| "tailscale up timed out".to_owned())?
@@ -218,9 +220,11 @@ pub async fn repair() -> Result<String, String> {
     }
 
     if done.is_empty() {
-        Ok("nothing to repair — the Tailscale stack is already as far up \
+        Ok(
+            "nothing to repair — the Tailscale stack is already as far up \
             as it can get without a login"
-            .to_owned())
+                .to_owned(),
+        )
     } else {
         Ok(done.join("; "))
     }
@@ -232,14 +236,13 @@ pub async fn repair() -> Result<String, String> {
 pub async fn list_nodes() -> Result<Vec<TailscaleNode>, String> {
     debug!("tailscale::list_nodes: spawning `tailscale status --json`");
 
-    let out = status_output().await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "tailscale CLI not found — install the tailscale package".to_owned()
-            } else {
-                format!("failed to spawn tailscale: {e}")
-            }
-        })?;
+    let out = status_output().await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "tailscale CLI not found — install the tailscale package".to_owned()
+        } else {
+            format!("failed to spawn tailscale: {e}")
+        }
+    })?;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -250,8 +253,8 @@ pub async fn list_nodes() -> Result<Vec<TailscaleNode>, String> {
         ));
     }
 
-    let raw: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("parse tailscale JSON: {e}"))?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("parse tailscale JSON: {e}"))?;
 
     let mut nodes: Vec<TailscaleNode> = Vec::new();
 
@@ -280,15 +283,27 @@ pub async fn list_nodes() -> Result<Vec<TailscaleNode>, String> {
 /// useful than a hard error.
 fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
     TailscaleNode {
-        id: v.get("ID").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-        hostname: v.get("HostName").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+        id: v
+            .get("ID")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        hostname: v
+            .get("HostName")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned(),
         dns_name: v
             .get("DNSName")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .trim_end_matches('.')
             .to_owned(),
-        os: v.get("OS").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+        os: v
+            .get("OS")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned(),
         tailscale_ips: v
             .get("TailscaleIPs")
             .and_then(|x| x.as_array())
@@ -315,8 +330,16 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
             .to_owned(),
         rx_bytes: v.get("RxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
         tx_bytes: v.get("TxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
-        current_address: v.get("CurAddr").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
-        relay: v.get("Relay").and_then(|x| x.as_str()).unwrap_or("").to_owned(),
+        current_address: v
+            .get("CurAddr")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        relay: v
+            .get("Relay")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned(),
     }
 }
 
@@ -341,8 +364,13 @@ pub async fn set_exit_node(value: &str) -> Result<(), String> {
         return Err("Select a Tailscale address or MagicDNS name".into());
     }
     let profiles = crate::tailscale_management::profiles().await?;
-    let profile = profiles.iter().find(|p| p.selected).ok_or("No active Tailscale account")?;
-    crate::tailscale_exit::change(&profile.id, value).await.map(|_| ())
+    let profile = profiles
+        .iter()
+        .find(|p| p.selected)
+        .ok_or("No active Tailscale account")?;
+    crate::tailscale_exit::change(&profile.id, value)
+        .await
+        .map(|_| ())
 }
 
 /// Whether `value` looks like a Tailscale IP or a MagicDNS name.
@@ -421,7 +449,10 @@ mod tests {
     async fn live_listing() {
         let nodes = list_nodes().await.expect("tailscale status --json failed");
         assert!(!nodes.is_empty(), "tailnet should at least include Self");
-        let me = nodes.iter().find(|n| n.is_self).expect("no Self in node list");
+        let me = nodes
+            .iter()
+            .find(|n| n.is_self)
+            .expect("no Self in node list");
         eprintln!("Self: {me:?}");
         assert!(!me.hostname.is_empty());
     }
@@ -431,10 +462,9 @@ mod tests {
         // The two mean different things and a real tailnet has peers where
         // they differ: one advertising exit-node capability while none is in
         // use. Collapsing them mislabels every candidate as active.
-        let v: serde_json::Value = serde_json::from_str(
-            r#"{"HostName":"gw","ExitNode":false,"ExitNodeOption":true}"#,
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"HostName":"gw","ExitNode":false,"ExitNodeOption":true}"#)
+                .unwrap();
         let n = parse_node(&v, false);
         assert!(!n.exit_node, "not the active exit node");
         assert!(n.exit_node_option, "but available as one");

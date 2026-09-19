@@ -349,7 +349,9 @@ fn render_linux_preview() {
         ("linux-tailscale-settings", 1262, true, false),
         ("linux-tailscale-add-account", 900, false, false),
     ] {
-        if let Some(dialog) = window.visible_dialog() { dialog.force_close(); }
+        if let Some(dialog) = window.visible_dialog() {
+            dialog.force_close();
+        }
         adw::StyleManager::default().set_color_scheme(if dark {
             adw::ColorScheme::ForceDark
         } else {
@@ -404,8 +406,15 @@ fn render_linux_preview() {
                 }
                 false
             }
-            let label = if name.ends_with("add-account") { "Add account…" } else { "Settings" };
-            assert!(click_button(stack.visible_child().unwrap().upcast_ref(), label));
+            let label = if name.ends_with("add-account") {
+                "Add account…"
+            } else {
+                "Settings"
+            };
+            assert!(click_button(
+                stack.visible_child().unwrap().upcast_ref(),
+                label
+            ));
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(450);
         while std::time::Instant::now() < deadline {

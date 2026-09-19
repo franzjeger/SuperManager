@@ -192,10 +192,7 @@ impl OpenVpn {
         // child never finished writing.
         if !Path::new(&args.config_file).exists() {
             tracing::error!("ovpn_connect: config file missing: {}", args.config_file);
-            return Err(anyhow!(
-                "config file does not exist: {}",
-                args.config_file
-            ));
+            return Err(anyhow!("config file does not exist: {}", args.config_file));
         }
         // Stat the config so we know what we're dealing with —
         // size (sanity check the daemon actually wrote it),
@@ -274,20 +271,24 @@ impl OpenVpn {
         //        let it run as a child of this helper. On
         //        disconnect we SIGTERM the PID like 2.x.)
         let is_v3 = is_openvpn3(&openvpn);
-        tracing::info!("ovpn_connect: spawning {} (v3={})", openvpn.display(), is_v3);
+        tracing::info!(
+            "ovpn_connect: spawning {} (v3={})",
+            openvpn.display(),
+            is_v3
+        );
         let output = if is_v3 {
             use std::os::unix::process::CommandExt as _;
             // Open the log file for stdout+stderr redirection.
             // ovpncli writes status to stderr; we merge both into
             // one log so the GUI can `cat` it for diagnostics.
             let log_for_stdout = std::fs::OpenOptions::new()
-                .create(true).truncate(true).write(true)
+                .create(true)
+                .truncate(true)
+                .write(true)
                 .mode(0o644)
                 .open(&log_path)
                 .with_context(|| format!("open log {}", log_path.display()))?;
-            let log_for_stderr = log_for_stdout
-                .try_clone()
-                .context("dup log fd")?;
+            let log_for_stderr = log_for_stdout.try_clone().context("dup log fd")?;
 
             let user = args.username.as_deref().unwrap_or("AzureAD");
             let pass = args.password.as_deref().unwrap_or("");
@@ -304,13 +305,15 @@ impl OpenVpn {
             // mitigations are (a) keep tokens short-lived (Azure
             // gives us 1h) and (b) trust the operator's machine.
             let mut cmd = Command::new(&openvpn);
-            cmd.arg("--no-cert")           // Azure VPN auths via JWT in
-                                            // auth-user-pass — no client
-                                            // cert. Without this flag
-                                            // ovpncli aborts with
-                                            // `Missing External PKI alias`.
-                .arg("--username").arg(user)
-                .arg("--password").arg(pass)
+            cmd.arg("--no-cert") // Azure VPN auths via JWT in
+                // auth-user-pass — no client
+                // cert. Without this flag
+                // ovpncli aborts with
+                // `Missing External PKI alias`.
+                .arg("--username")
+                .arg(user)
+                .arg("--password")
+                .arg(pass)
                 .arg(&args.config_file)
                 .stdin(std::process::Stdio::null())
                 .stdout(log_for_stdout)
@@ -323,10 +326,12 @@ impl OpenVpn {
                     Ok(())
                 });
             }
-            let child = cmd.spawn().with_context(|| {
-                format!("spawn {} (ovpncli)", openvpn.display())
-            })?;
-            let pid = child.id().ok_or_else(|| anyhow!("ovpncli spawn returned no pid"))?;
+            let child = cmd
+                .spawn()
+                .with_context(|| format!("spawn {} (ovpncli)", openvpn.display()))?;
+            let pid = child
+                .id()
+                .ok_or_else(|| anyhow!("ovpncli spawn returned no pid"))?;
             tracing::info!(
                 "ovpn_connect: ovpncli spawned pid={} log={}",
                 pid,
@@ -354,17 +359,26 @@ impl OpenVpn {
             }
         } else {
             let mut argv: Vec<String> = vec![
-                "--config".into(), args.config_file.clone(),
-                "--daemon".into(), format!("supermgr-ovpn-{safe}"),
-                "--writepid".into(), pid_path.display().to_string(),
-                "--log".into(), log_path.display().to_string(),
-                "--verb".into(), "3".into(),
+                "--config".into(),
+                args.config_file.clone(),
+                "--daemon".into(),
+                format!("supermgr-ovpn-{safe}"),
+                "--writepid".into(),
+                pid_path.display().to_string(),
+                "--log".into(),
+                log_path.display().to_string(),
+                "--verb".into(),
+                "3".into(),
             ];
             if let Some(ref auth) = auth_path {
                 argv.push("--auth-user-pass".into());
                 argv.push(auth.display().to_string());
             }
-            tracing::info!("ovpn_connect: argv = {} {}", openvpn.display(), argv.join(" "));
+            tracing::info!(
+                "ovpn_connect: argv = {} {}",
+                openvpn.display(),
+                argv.join(" ")
+            );
             let mut cmd = Command::new(&openvpn);
             cmd.args(&argv);
             cmd.output().await.with_context(|| {
@@ -405,7 +419,10 @@ impl OpenVpn {
             // (config parse fail, "Cannot load CA certificate",
             // "Options error", etc.) instead of a bare "refused
             // to start".
-            tracing::error!("ovpn_connect: NON-ZERO exit, reading {}", log_path.display());
+            tracing::error!(
+                "ovpn_connect: NON-ZERO exit, reading {}",
+                log_path.display()
+            );
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             let log_tail = std::fs::read_to_string(&log_path)
                 .ok()
@@ -413,18 +430,16 @@ impl OpenVpn {
                     // Last ~20 non-empty lines is plenty — early
                     // openvpn errors fit comfortably and we don't
                     // want to flood the GUI alert.
-                    let lines: Vec<&str> = s.lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .collect();
+                    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
                     let start = lines.len().saturating_sub(20);
                     lines[start..].join("\n")
                 })
                 .unwrap_or_default();
             let combined = match (stderr.is_empty(), log_tail.is_empty()) {
                 (false, false) => format!("{stderr}\n--- log ---\n{log_tail}"),
-                (true,  false) => log_tail,
-                (false, true)  => stderr,
-                (true,  true)  => format!("(no diagnostic output, see {})", log_path.display()),
+                (true, false) => log_tail,
+                (false, true) => stderr,
+                (true, true) => format!("(no diagnostic output, see {})", log_path.display()),
             };
             tracing::error!("ovpn_connect: refused to start:\n{combined}");
             return Ok(OvpnConnectResult {
@@ -433,7 +448,10 @@ impl OpenVpn {
                 log_path: Some(log_path.display().to_string()),
             });
         }
-        tracing::info!("ovpn_connect: spawn succeeded for profile={}", args.profile_id);
+        tracing::info!(
+            "ovpn_connect: spawn succeeded for profile={}",
+            args.profile_id
+        );
 
         // Auth file was loaded by the now-running daemon. Unlink the
         // dirent — the running child still has the fd open, so it
@@ -499,11 +517,12 @@ impl OpenVpn {
             if !pid_alive || fatal_hit.is_some() {
                 let reason = fatal_hit
                     .map(|m| format!("openvpn died after fork — {m}"))
-                    .unwrap_or_else(|| "openvpn died after fork (no PID, no fatal marker — see log)".to_owned());
+                    .unwrap_or_else(|| {
+                        "openvpn died after fork (no PID, no fatal marker — see log)".to_owned()
+                    });
                 let log_tail = {
-                    let lines: Vec<&str> = log_body.lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .collect();
+                    let lines: Vec<&str> =
+                        log_body.lines().filter(|l| !l.trim().is_empty()).collect();
                     let start = lines.len().saturating_sub(25);
                     lines[start..].join("\n")
                 };
@@ -528,7 +547,11 @@ impl OpenVpn {
             },
             // openvpn3 owns its own log; only the 2.x path has a
             // file we can hand back to the GUI's "View log" button.
-            log_path: if is_v3 { None } else { Some(log_path.display().to_string()) },
+            log_path: if is_v3 {
+                None
+            } else {
+                Some(log_path.display().to_string())
+            },
         })
     }
 
@@ -548,7 +571,9 @@ impl OpenVpn {
         if let Some(pid) = read_pid_file(&pid_path) {
             // SIGTERM lets openvpn flush its log + run its
             // `down` script, which is what we want.
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
             killed.push(pid);
         }
 
@@ -558,8 +583,12 @@ impl OpenVpn {
         // that already exited (or doesn't exist) is a no-op for us.
         let stragglers = collect_openvpn_pids_for(&safe).await;
         for pid in stragglers {
-            if killed.contains(&pid) { continue; }
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            if killed.contains(&pid) {
+                continue;
+            }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
             killed.push(pid);
         }
 
@@ -583,8 +612,11 @@ impl OpenVpn {
             message: if killed.is_empty() {
                 format!("OpenVPN tunnel '{safe}' was not running")
             } else {
-                format!("OpenVPN tunnel '{safe}' down (killed {} process{})",
-                    killed.len(), if killed.len() == 1 { "" } else { "es" })
+                format!(
+                    "OpenVPN tunnel '{safe}' down (killed {} process{})",
+                    killed.len(),
+                    if killed.len() == 1 { "" } else { "es" }
+                )
             },
         })
     }
@@ -670,10 +702,10 @@ impl OpenVpn {
         Ok(OvpnStatusResult {
             state: tunnel_state,
             pid: Some(pid),
-            interface:        if connected { interface        } else { None },
-            virtual_ip:       if connected { virtual_ip       } else { None },
-            virtual_gateway:  if connected { virtual_gateway  } else { None },
-            active_routes:    if connected { active_routes    } else { Vec::new() },
+            interface: if connected { interface } else { None },
+            virtual_ip: if connected { virtual_ip } else { None },
+            virtual_gateway: if connected { virtual_gateway } else { None },
+            active_routes: if connected { active_routes } else { Vec::new() },
             rx_bytes,
             tx_bytes,
             error_reason,
@@ -731,9 +763,7 @@ fn last_event_from_log(log: &str) -> (OvpnState, Option<String>) {
         } else if line.contains("EVENT: DISCONNECTED") {
             state = OvpnState::Disconnected;
             reason = event_detail(line, "DISCONNECTED");
-        } else if line.contains("EVENT: TRANSPORT_ERROR")
-            || line.contains("EVENT: RECONNECTING")
-        {
+        } else if line.contains("EVENT: TRANSPORT_ERROR") || line.contains("EVENT: RECONNECTING") {
             state = OvpnState::Reconnecting;
             reason = event_detail(line, "EVENT:");
         } else if line.contains("EVENT: CONNECTING")
@@ -811,16 +841,18 @@ async fn read_iface_byte_counts(iface: &str) -> (Option<u64>, Option<u64>) {
     };
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines().skip(1) {
-        if !line.starts_with(iface) { continue; }
+        if !line.starts_with(iface) {
+            continue;
+        }
         let cols: Vec<&str> = line.split_whitespace().collect();
         // Columns: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
         // Some address-family rows omit "Address" — column count drops by one.
         // The Ibytes column is always cols[6] when "Address" present, cols[5]
         // otherwise. We match by length to handle both.
         let (i_idx, o_idx) = match cols.len() {
-            11 => (6, 9),    // header form: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
-            10 => (5, 8),    // shorter form (no Address column)
-            _  => continue,
+            11 => (6, 9), // header form: Name Mtu Network Address Ipkts Ierrs Ibytes Opkts Oerrs Obytes Coll
+            10 => (5, 8), // shorter form (no Address column)
+            _ => continue,
         };
         let rx = cols.get(i_idx).and_then(|s| s.parse::<u64>().ok());
         let tx = cols.get(o_idx).and_then(|s| s.parse::<u64>().ok());
@@ -847,15 +879,9 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
     // Try the openvpn3 format first — single line, three fields,
     // unambiguous.
     if let Some(idx) = log.find("EVENT: CONNECTED") {
-        let line: &str = log[idx..]
-            .split('\n')
-            .next()
-            .unwrap_or_default();
+        let line: &str = log[idx..].split('\n').next().unwrap_or_default();
         // " on <iface>/<vip>/ gw=[<vgw>/]"
-        let iface_vip = line
-            .split(" on ")
-            .nth(1)
-            .and_then(|s| s.split(' ').next());
+        let iface_vip = line.split(" on ").nth(1).and_then(|s| s.split(' ').next());
         let (iface, vip) = match iface_vip {
             Some(s) => {
                 let mut it = s.split('/');
@@ -919,8 +945,12 @@ fn parse_active_routes(log: &str) -> Vec<String> {
             continue;
         };
         // Drop the redirect-gateway halves — they're noise.
-        if dest == "0.0.0.0" && prefix == 1 { continue; }
-        if dest == "128.0.0.0" && prefix == 1 { continue; }
+        if dest == "0.0.0.0" && prefix == 1 {
+            continue;
+        }
+        if dest == "128.0.0.0" && prefix == 1 {
+            continue;
+        }
         let cidr = format!("{dest}/{prefix}");
         if !out.contains(&cidr) {
             out.push(cidr);
@@ -932,17 +962,22 @@ fn parse_active_routes(log: &str) -> Vec<String> {
 /// `255.255.255.0` → `Some(24)`. Returns `None` for non-contiguous
 /// masks (impossible from any real VPN gateway, but defensive).
 fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
-    let octets: Vec<u8> = mask.split('.')
+    let octets: Vec<u8> = mask
+        .split('.')
         .map(|s| s.parse::<u8>().ok())
         .collect::<Option<Vec<_>>>()?;
-    if octets.len() != 4 { return None; }
+    if octets.len() != 4 {
+        return None;
+    }
     let bits = ((octets[0] as u32) << 24)
         | ((octets[1] as u32) << 16)
         | ((octets[2] as u32) << 8)
         | (octets[3] as u32);
     let leading = bits.leading_ones();
     let trailing = bits.trailing_zeros();
-    if leading + trailing != 32 { return None; }
+    if leading + trailing != 32 {
+        return None;
+    }
     Some(leading as u8)
 }
 
@@ -1060,10 +1095,14 @@ fn pid_path_for(safe: &str) -> PathBuf {
 /// Returns the number of processes signalled.
 pub async fn terminate_all() -> usize {
     let mut killed = 0usize;
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
+        return 0;
+    };
     for entry in entries.flatten() {
         let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else { continue };
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
         let Some(safe) = fname
             .strip_prefix("supermgr-ovpn-")
             .and_then(|s| s.strip_suffix(".pid"))
@@ -1073,7 +1112,9 @@ pub async fn terminate_all() -> usize {
         if let Some(pid) = read_pid_file(&entry.path()) {
             if unsafe { libc::kill(pid as i32, 0) } == 0 {
                 // SIGTERM lets openvpn flush its log and run its down script.
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
                 killed += 1;
             }
         }
@@ -1081,7 +1122,9 @@ pub async fn terminate_all() -> usize {
         // daemon-name fingerprint (catches a tunnel whose pidfile was lost).
         for pid in collect_openvpn_pids_for(safe).await {
             if unsafe { libc::kill(pid as i32, 0) } == 0 {
-                unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
                 killed += 1;
             }
         }
@@ -1102,17 +1145,23 @@ pub async fn terminate_all() -> usize {
 /// them, and OpenVPN's `redirect-gateway def1` uses the exact same pair.
 pub fn live_tunnel_interfaces() -> Vec<String> {
     let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return out };
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
+        return out;
+    };
     for entry in entries.flatten() {
         let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else { continue };
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
         let Some(safe) = fname
             .strip_prefix("supermgr-ovpn-")
             .and_then(|s| s.strip_suffix(".pid"))
         else {
             continue;
         };
-        let Some(pid) = read_pid_file(&entry.path()) else { continue };
+        let Some(pid) = read_pid_file(&entry.path()) else {
+            continue;
+        };
         // Skip dead/stale pidfiles — a stale full-tunnel route from a dead
         // OpenVPN session SHOULD be swept, so we only protect live ones.
         if unsafe { libc::kill(pid as i32, 0) } != 0 {
@@ -1135,11 +1184,19 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
 /// parseable. This is the cheap liveness-only scan: a live pidfile is enough to
 /// say "a foreign full tunnel may own the split-default; do not steal it".
 pub fn has_live_tunnel() -> bool {
-    let Ok(entries) = std::fs::read_dir(PID_DIR) else { return false };
+    let Ok(entries) = std::fs::read_dir(PID_DIR) else {
+        return false;
+    };
     for entry in entries.flatten() {
         let fname = entry.file_name();
-        let Some(fname) = fname.to_str() else { continue };
-        if fname.strip_prefix("supermgr-ovpn-").and_then(|s| s.strip_suffix(".pid")).is_none() {
+        let Some(fname) = fname.to_str() else {
+            continue;
+        };
+        if fname
+            .strip_prefix("supermgr-ovpn-")
+            .and_then(|s| s.strip_suffix(".pid"))
+            .is_none()
+        {
             continue;
         }
         if let Some(pid) = read_pid_file(&entry.path()) {
@@ -1207,7 +1264,9 @@ async fn collect_openvpn_pids_for(safe: &str) -> Vec<u32> {
     };
     let text = String::from_utf8_lossy(&output.stdout);
     for line in text.lines().skip(1) {
-        if !line.contains(&needle) { continue; }
+        if !line.contains(&needle) {
+            continue;
+        }
         let mut parts = line.split_whitespace();
         if let Some(pid_str) = parts.next() {
             if let Ok(pid) = pid_str.parse::<u32>() {
@@ -1263,7 +1322,10 @@ mod tests {
 
     #[test]
     fn azure_never_falls_back_to_openvpn2() {
-        for installed in ["/opt/homebrew/sbin/openvpn", "/opt/homebrew/bin/openvpn-patched"] {
+        for installed in [
+            "/opt/homebrew/sbin/openvpn",
+            "/opt/homebrew/bin/openvpn-patched",
+        ] {
             let err = select_openvpn(true, |path| path == Path::new(installed)).unwrap_err();
             assert!(err.to_string().contains("Azure VPN requires OpenVPN 3"));
         }
@@ -1277,20 +1339,23 @@ mod tests {
 
     #[test]
     fn ordinary_openvpn_keeps_v2_fallback() {
-        let path = select_openvpn(false, |path| path == Path::new("/opt/homebrew/sbin/openvpn"))
-            .unwrap();
+        let path = select_openvpn(false, |path| {
+            path == Path::new("/opt/homebrew/sbin/openvpn")
+        })
+        .unwrap();
         assert_eq!(path, Path::new("/opt/homebrew/sbin/openvpn"));
     }
 
     #[test]
     fn existing_connect_requests_remain_compatible() {
-        let args: OvpnConnectArgs = serde_json::from_str(
-            r#"{"profile_id":"test","config_file":"/tmp/test.ovpn"}"#,
-        ).unwrap();
+        let args: OvpnConnectArgs =
+            serde_json::from_str(r#"{"profile_id":"test","config_file":"/tmp/test.ovpn"}"#)
+                .unwrap();
         assert!(!args.require_openvpn3);
         let args: OvpnConnectArgs = serde_json::from_str(
             r#"{"profile_id":"test","config_file":"/tmp/test.ovpn","require_openvpn3":true}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(args.require_openvpn3);
     }
 

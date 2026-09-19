@@ -86,7 +86,8 @@ async fn run(
                     .collect::<Vec<_>>())
             ));
         if !allow_changes {
-            command.arg("-c")
+            command
+                .arg("-c")
                 .arg("mcp_servers.supermgr.env.SUPERMGR_MCP_READ_ONLY=\"1\"");
         }
     }

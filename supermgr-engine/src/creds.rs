@@ -33,12 +33,12 @@ use crate::vuln::{Finding, Severity};
 pub struct CredentialPair {
     pub username: String,
     pub password: String,
-    pub source: String,                  // "Ubiquiti default", "vendor-known", etc.
+    pub source: String, // "Ubiquiti default", "vendor-known", etc.
 }
 
 /// Curated default-credentials database. Keep small + relevant.
 /// Each (service, vendor-context) → list of (user, pass) tuples.
-#[must_use] 
+#[must_use]
 pub fn default_creds_for_service(service: &str) -> Vec<CredentialPair> {
     match service {
         "ssh" => vec![
@@ -202,27 +202,29 @@ async fn ssh_try_auth(
     });
     let target = (host.to_owned(), port);
     let connect_fut = russh::client::connect(config, target, Client);
-    let mut session: Handle<Client> = match tokio::time::timeout(
-        Duration::from_secs(5),
-        connect_fut,
-    )
-    .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => return Err(EngineError::SshNetwork {
-            reason: format!("connect: {e}"),
-        }),
-        Err(_) => return Err(EngineError::SshNetwork {
-            reason: "connect timeout (5s)".into(),
-        }),
-    };
+    let mut session: Handle<Client> =
+        match tokio::time::timeout(Duration::from_secs(5), connect_fut).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                return Err(EngineError::SshNetwork {
+                    reason: format!("connect: {e}"),
+                })
+            }
+            Err(_) => {
+                return Err(EngineError::SshNetwork {
+                    reason: "connect timeout (5s)".into(),
+                })
+            }
+        };
     let success = session
         .authenticate_password(user, pass)
         .await
         .map_err(|e| EngineError::SshDisconnected {
             reason: format!("auth path: {e}"),
         })?;
-    let _ = session.disconnect(russh::Disconnect::ByApplication, "", "").await;
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "", "")
+        .await;
     Ok(success)
 }
 
@@ -256,7 +258,12 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
             // Heuristic — only flag if without auth we got 401
             // (avoiding open services that just always return 200).
             // Cheap probe: do an unauth GET to compare.
-            let baseline = client.get(&url).send().await.ok().map_or(200, |r| r.status().as_u16());
+            let baseline = client
+                .get(&url)
+                .send()
+                .await
+                .ok()
+                .map_or(200, |r| r.status().as_u16());
             if baseline == 401 || baseline == 403 {
                 findings.push(Finding {
                     id: "creds.http-default".into(),
@@ -294,22 +301,44 @@ mod tests {
         let pairs = default_creds_for_service("ssh");
         // Proves the curated list contains the high-impact entries
         // an operator expects.
-        assert!(pairs.iter().any(|p| p.username == "ubnt" && p.password == "ubnt"),
-            "Ubiquiti default ubnt/ubnt must be present");
-        assert!(pairs.iter().any(|p| p.username == "root" && p.password == "calvin"),
-            "Dell iDRAC root/calvin must be present");
-        assert!(pairs.iter().any(|p| p.username == "Administrator" && p.password == "Administrator"),
-            "HP iLO Administrator/Administrator must be present");
-        assert!(pairs.iter().any(|p| p.username == "admin" && p.password.is_empty()),
-            "Mikrotik admin with empty password must be present");
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.username == "ubnt" && p.password == "ubnt"),
+            "Ubiquiti default ubnt/ubnt must be present"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.username == "root" && p.password == "calvin"),
+            "Dell iDRAC root/calvin must be present"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.username == "Administrator" && p.password == "Administrator"),
+            "HP iLO Administrator/Administrator must be present"
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.username == "admin" && p.password.is_empty()),
+            "Mikrotik admin with empty password must be present"
+        );
     }
 
     #[test]
     fn http_defaults_include_web_admin_combos() {
         let pairs = default_creds_for_service("http");
-        assert!(pairs.iter().any(|p| p.username == "admin" && p.password == "admin"));
-        assert!(pairs.iter().any(|p| p.username == "ubnt" && p.password == "ubnt"));
-        assert!(pairs.iter().any(|p| p.username == "admin" && p.password == "fortinet"));
+        assert!(pairs
+            .iter()
+            .any(|p| p.username == "admin" && p.password == "admin"));
+        assert!(pairs
+            .iter()
+            .any(|p| p.username == "ubnt" && p.password == "ubnt"));
+        assert!(pairs
+            .iter()
+            .any(|p| p.username == "admin" && p.password == "fortinet"));
     }
 
     #[test]
@@ -323,8 +352,12 @@ mod tests {
         // Source field drives the finding's `detail` text — every
         // pair must have it so we don't ship "(unknown)" findings.
         for pair in default_creds_for_service("ssh") {
-            assert!(!pair.source.is_empty(),
-                "{}/{} has no source", pair.username, pair.password);
+            assert!(
+                !pair.source.is_empty(),
+                "{}/{} has no source",
+                pair.username,
+                pair.password
+            );
         }
         for pair in default_creds_for_service("http") {
             assert!(!pair.source.is_empty());
@@ -336,7 +369,9 @@ mod tests {
         // SSH-specific defaults shouldn't appear under "http".
         let http = default_creds_for_service("http");
         // pfSense default is SSH-side; should not be in HTTP list.
-        assert!(!http.iter().any(|p| p.username == "admin" && p.password == "pfsense"));
+        assert!(!http
+            .iter()
+            .any(|p| p.username == "admin" && p.password == "pfsense"));
     }
 
     proptest::proptest! {

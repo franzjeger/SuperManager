@@ -221,7 +221,11 @@ mod tests {
         let host: Host = serde_json::from_value(serde_json::json!({
             "label":"Local fixture","hostname":"localhost","username":"test","auth_method":"password"
         })).expect("Host fixture should be valid JSON");
-        let (known, warnings) = resolve_inventory("127.0.0.0/24".parse().expect("CIDR should parse"), vec![host]).await;
+        let (known, warnings) = resolve_inventory(
+            "127.0.0.0/24".parse().expect("CIDR should parse"),
+            vec![host],
+        )
+        .await;
         assert!(warnings.is_empty());
         assert!(known.contains_key("127.0.0.1"));
         assert!(!known.contains_key("192.0.2.1"));

@@ -252,14 +252,19 @@ fn template_body(template_id: &str) -> Result<String> {
 /// Tera's parser/renderer with full diagnostic — the GUI surfaces
 /// them so the template author knows exactly which line is wrong.
 pub fn render(req: &RenderRequest) -> Result<RenderResult> {
-    let customer = crate::customer::load(&req.customer_slug).with_context(|| {
-        format!("load customer {}", req.customer_slug)
-    })?;
+    let customer = crate::customer::load(&req.customer_slug)
+        .with_context(|| format!("load customer {}", req.customer_slug))?;
     let site = customer
         .sites
         .iter()
         .find(|s| s.id == req.site_id)
-        .ok_or_else(|| anyhow!("site '{}' not found in customer '{}'", req.site_id, req.customer_slug))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "site '{}' not found in customer '{}'",
+                req.site_id,
+                req.customer_slug
+            )
+        })?;
     let body = template_body(&req.template_id)?;
 
     let mut tera = Tera::default();
@@ -366,7 +371,7 @@ pub struct ConfigSection {
 /// and blank lines outside any section are ignored. Lines
 /// inside a section are kept verbatim — order matters for
 /// `edit` blocks.
-#[must_use] 
+#[must_use]
 pub fn parse_sections(text: &str) -> Vec<ConfigSection> {
     let mut out: Vec<ConfigSection> = Vec::new();
     let mut depth: usize = 0; // 0 = outside any section
@@ -442,17 +447,15 @@ pub struct SectionDiff {
 /// the live device config. Both are passed as raw text — the
 /// daemon fetches the device side via SSH `show full-configuration`
 /// before calling this.
-#[must_use] 
+#[must_use]
 pub fn diff_sections(template: &str, device: &str) -> Vec<SectionDiff> {
     let tmpl_sections = parse_sections(template);
     let dev_sections = parse_sections(device);
 
     // Build maps for O(1) lookup. FortiOS path strings are stable;
     // we don't need fuzzy matching.
-    let mut dev_map: std::collections::HashMap<String, String> = dev_sections
-        .into_iter()
-        .map(|s| (s.path, s.body))
-        .collect();
+    let mut dev_map: std::collections::HashMap<String, String> =
+        dev_sections.into_iter().map(|s| (s.path, s.body)).collect();
 
     let mut out: Vec<SectionDiff> = Vec::new();
 
@@ -556,17 +559,13 @@ fn unified_diff(old: &str, new: &str, path: &str) -> String {
             continue;
         }
         // Deletion from old.
-        if oi < old_lines.len()
-            && (li >= lcs.len() || old_lines[oi] != lcs[li])
-        {
+        if oi < old_lines.len() && (li >= lcs.len() || old_lines[oi] != lcs[li]) {
             let _ = writeln!(out, "-{}", old_lines[oi]);
             oi += 1;
             continue;
         }
         // Addition to new.
-        if ni < new_lines.len()
-            && (li >= lcs.len() || new_lines[ni] != lcs[li])
-        {
+        if ni < new_lines.len() && (li >= lcs.len() || new_lines[ni] != lcs[li]) {
             let _ = writeln!(out, "+{}", new_lines[ni]);
             ni += 1;
             continue;
@@ -741,15 +740,16 @@ async fn open_session(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
     host_id: uuid::Uuid,
-) -> Result<(supermgr_core::host::Host, crate::ssh::connection::SshSession)> {
+) -> Result<(
+    supermgr_core::host::Host,
+    crate::ssh::connection::SshSession,
+)> {
     crate::server::connect_to_host_owned(state, secrets, host_id)
         .await
         .map_err(|e| anyhow!("ssh connect: {e}"))
 }
 
-async fn fetch_full_config(
-    session: &crate::ssh::connection::SshSession,
-) -> Result<String> {
+async fn fetch_full_config(session: &crate::ssh::connection::SshSession) -> Result<String> {
     let (_, stdout, _) = session
         .exec("show full-configuration")
         .await
@@ -930,9 +930,7 @@ pub async fn deploy(
 fn extract_first_error(transcript: &str) -> String {
     transcript
         .lines()
-        .find(|l| {
-            l.contains("Command fail") || l.contains("Command parse error")
-        })
+        .find(|l| l.contains("Command fail") || l.contains("Command parse error"))
         .unwrap_or("Unknown FortiOS error")
         .trim()
         .to_owned()
@@ -951,8 +949,8 @@ pub async fn rollback(
 ) -> Result<Deployment> {
     let host_str = host_id.simple().to_string();
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let backup_text = std::fs::read_to_string(backup_path)
-        .with_context(|| format!("read {backup_path}"))?;
+    let backup_text =
+        std::fs::read_to_string(backup_path).with_context(|| format!("read {backup_path}"))?;
 
     let mut record = Deployment {
         id: id.clone(),
@@ -1057,7 +1055,10 @@ fn register_filters(tera: &mut Tera) {
             let last: u32 = octets[3].parse().unwrap_or(0);
             Ok(tera::Value::String(format!(
                 "{}.{}.{}.{}",
-                octets[0], octets[1], octets[2], last + 1
+                octets[0],
+                octets[1],
+                octets[2],
+                last + 1
             )))
         },
     );
@@ -1069,7 +1070,9 @@ fn register_filters(tera: &mut Tera) {
     tera.register_filter(
         "cidr_dhcp_start",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
-            let cidr = value.as_str().ok_or_else(|| tera::Error::msg("cidr_dhcp_start requires a string"))?;
+            let cidr = value
+                .as_str()
+                .ok_or_else(|| tera::Error::msg("cidr_dhcp_start requires a string"))?;
             let parts: Vec<&str> = cidr.split('/').collect();
             let ip = parts.first().copied().unwrap_or("");
             let octets: Vec<&str> = ip.split('.').collect();
@@ -1088,7 +1091,9 @@ fn register_filters(tera: &mut Tera) {
     tera.register_filter(
         "cidr_dhcp_end",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
-            let cidr = value.as_str().ok_or_else(|| tera::Error::msg("cidr_dhcp_end requires a string"))?;
+            let cidr = value
+                .as_str()
+                .ok_or_else(|| tera::Error::msg("cidr_dhcp_end requires a string"))?;
             let parts: Vec<&str> = cidr.split('/').collect();
             let ip = parts.first().copied().unwrap_or("");
             let octets: Vec<&str> = ip.split('.').collect();
@@ -1108,10 +1113,16 @@ fn register_filters(tera: &mut Tera) {
     tera.register_filter(
         "cidr_netmask",
         |value: &tera::Value, _args: &std::collections::HashMap<String, tera::Value>| {
-            let cidr = value.as_str().ok_or_else(|| tera::Error::msg("cidr_netmask requires a string"))?;
+            let cidr = value
+                .as_str()
+                .ok_or_else(|| tera::Error::msg("cidr_netmask requires a string"))?;
             let parts: Vec<&str> = cidr.split('/').collect();
             let prefix: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(24);
-            let mask = if prefix == 0 { 0u32 } else { (!0u32) << (32 - prefix) };
+            let mask = if prefix == 0 {
+                0u32
+            } else {
+                (!0u32) << (32 - prefix)
+            };
             Ok(tera::Value::String(format!(
                 "{}.{}.{}.{}",
                 (mask >> 24) & 0xff,

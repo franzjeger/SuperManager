@@ -23,8 +23,7 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let mut engagement: crate::engagement::Engagement = match serde_json::from_value(params)
-        {
+        let mut engagement: crate::engagement::Engagement = match serde_json::from_value(params) {
             Ok(e) => e,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
@@ -71,20 +70,19 @@ impl EngineServer {
             }
         };
         // cadence: null/missing = clear schedule.
-        let cadence: Option<crate::engagement::Cadence> =
-            match params.get("cadence").cloned().unwrap_or(serde_json::Value::Null) {
-                serde_json::Value::Null => None,
-                v => match serde_json::from_value(v) {
-                    Ok(c) => Some(c),
-                    Err(e) => {
-                        return Response::err(
-                            id,
-                            protocol::INVALID_PARAMS,
-                            format!("cadence: {e}"),
-                        )
-                    }
-                },
-            };
+        let cadence: Option<crate::engagement::Cadence> = match params
+            .get("cadence")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+        {
+            serde_json::Value::Null => None,
+            v => match serde_json::from_value(v) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    return Response::err(id, protocol::INVALID_PARAMS, format!("cadence: {e}"))
+                }
+            },
+        };
         match crate::scheduler::set_schedule(&engagement_id, cadence) {
             Ok(updated) => match serde_json::to_value(&updated) {
                 Ok(v) => Response::ok(id, v),
@@ -112,7 +110,11 @@ impl EngineServer {
         let engagement = match crate::engagement::load(&engagement_id) {
             Ok(e) => e,
             Err(e) => {
-                return Response::err(id, protocol::INTERNAL_ERROR, format!("load engagement: {e:#}"))
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("load engagement: {e:#}"),
+                )
             }
         };
         // Pull findings for the engagement's natural scope.
@@ -138,10 +140,20 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_report_html(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_engagement_report_html(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing engagement_id".to_owned()),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing engagement_id".to_owned(),
+                )
+            }
         };
         let engagement = match crate::engagement::load(&engagement_id) {
             Ok(e) => e,
@@ -169,10 +181,20 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_report_pdf(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_engagement_report_pdf(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing engagement_id".to_owned()),
+            _ => {
+                return Response::err(
+                    id,
+                    protocol::INVALID_PARAMS,
+                    "missing engagement_id".to_owned(),
+                )
+            }
         };
         let engagement = match crate::engagement::load(&engagement_id) {
             Ok(e) => e,
@@ -198,7 +220,10 @@ impl EngineServer {
             Ok(bytes) => {
                 use base64::Engine;
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                Response::ok(id, serde_json::json!({ "pdf_base64": b64, "size": bytes.len() }))
+                Response::ok(
+                    id,
+                    serde_json::json!({ "pdf_base64": b64, "size": bytes.len() }),
+                )
             }
             Err(e) => {
                 // Downcast to recognise structured EngineError variants.

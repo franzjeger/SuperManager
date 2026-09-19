@@ -145,11 +145,13 @@ impl WireGuardBackend {
             // 3. Fallback to PATH / default search.
             unsafe { wireguard_nt::load() }
         })()
-        .map_err(|e| VpnError::MissingDependency(format!(
-            "wireguard.dll not found ({e}). \
+        .map_err(|e| {
+            VpnError::MissingDependency(format!(
+                "wireguard.dll not found ({e}). \
              It should be bundled at %ProgramFiles%\\SuperManager\\bin\\wireguard.dll. \
              Re-run the SuperManager installer to restore it."
-        )))?;
+            ))
+        })?;
 
         match WG_LIB.set(loaded.clone()) {
             Ok(()) => Ok(loaded),
@@ -180,9 +182,11 @@ impl WireGuardBackend {
             .secret_store
             .retrieve(cfg.private_key.label())
             .await
-            .map_err(|e| VpnError::MissingDependency(format!(
-                "WireGuard private key not found in Credential Manager: {e}"
-            )))?;
+            .map_err(|e| {
+                VpnError::MissingDependency(format!(
+                    "WireGuard private key not found in Credential Manager: {e}"
+                ))
+            })?;
         let priv_b64 = std::str::from_utf8(&priv_secret).map_err(|_| {
             VpnError::MissingDependency("stored private key is not valid UTF-8".into())
         })?;
@@ -196,9 +200,9 @@ impl WireGuardBackend {
                     .secret_store
                     .retrieve(psk_ref.label())
                     .await
-                    .map_err(|e| VpnError::MissingDependency(format!(
-                        "PSK lookup ({psk_ref}): {e}"
-                    )))?;
+                    .map_err(|e| {
+                        VpnError::MissingDependency(format!("PSK lookup ({psk_ref}): {e}"))
+                    })?;
                 let psk_str = std::str::from_utf8(&psk).map_err(|_| {
                     VpnError::MissingDependency("stored PSK is not valid UTF-8".into())
                 })?;
@@ -262,7 +266,10 @@ impl WireGuardBackend {
         // `open` and `create` borrow the library in 0.5 instead of taking an
         // owned `Arc`, so `wg` is no longer consumed and needs no clone.
         if let Ok(existing) = wireguard_nt::Adapter::open(&wg, &adapter_name) {
-            warn!(adapter_name, "tearing down stale WireGuard adapter from prior run");
+            warn!(
+                adapter_name,
+                "tearing down stale WireGuard adapter from prior run"
+            );
             // Not fatal: `create` below is the real gate, and it will fail with
             // a clearer message if the stale adapter is genuinely stuck. Logged
             // rather than discarded because it is the first hint of that.
@@ -293,7 +300,11 @@ impl WireGuardBackend {
             .up()
             .map_err(|e| VpnError::Win32(format!("bring WireGuard adapter up: {e}")))?;
 
-        info!(adapter_name, peers = wg_cfg.peers.len(), "WireGuard adapter up");
+        info!(
+            adapter_name,
+            peers = wg_cfg.peers.len(),
+            "WireGuard adapter up"
+        );
 
         // DNS + MTU happen after the adapter is up so the interface index
         // exists in the Get-NetAdapter table. Both are best-effort — if
@@ -410,10 +421,7 @@ fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr, VpnError> {
 /// Quoting via single quotes everywhere; the adapter name and IPs are
 /// validated upstream and we don't interpolate user-supplied text into a
 /// shell command line beyond that.
-async fn set_dns_servers(
-    adapter_name: &str,
-    dns: &[std::net::IpAddr],
-) -> Result<(), VpnError> {
+async fn set_dns_servers(adapter_name: &str, dns: &[std::net::IpAddr]) -> Result<(), VpnError> {
     if dns.is_empty() {
         return Ok(());
     }

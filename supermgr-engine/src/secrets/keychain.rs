@@ -82,7 +82,7 @@ const KEYCHAIN_SERVICE: &str = "com.sybr.supermanager";
 pub struct KeychainSecretStore;
 
 impl KeychainSecretStore {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self
     }
@@ -184,7 +184,9 @@ fn dp_update(label: &str, secret: &[u8]) -> Result<(), SecretError> {
     if status == 0 {
         Ok(())
     } else if status == errSecItemNotFound {
-        Err(SecretError::NotFound { label: label.to_owned() })
+        Err(SecretError::NotFound {
+            label: label.to_owned(),
+        })
     } else {
         Err(SecretError::ServiceUnavailable(format!(
             "SecItemUpdate {label}: status={status}"
@@ -203,7 +205,9 @@ fn dp_retrieve(label: &str) -> Result<Vec<u8>, SecretError> {
     let mut result: CFTypeRef = std::ptr::null();
     let status = unsafe { SecItemCopyMatching(dict.as_concrete_TypeRef(), &raw mut result) };
     if status == errSecItemNotFound {
-        return Err(SecretError::NotFound { label: label.to_owned() });
+        return Err(SecretError::NotFound {
+            label: label.to_owned(),
+        });
     }
     if status != 0 {
         return Err(SecretError::ServiceUnavailable(format!(
@@ -211,7 +215,9 @@ fn dp_retrieve(label: &str) -> Result<Vec<u8>, SecretError> {
         )));
     }
     if result.is_null() {
-        return Err(SecretError::NotFound { label: label.to_owned() });
+        return Err(SecretError::NotFound {
+            label: label.to_owned(),
+        });
     }
     // Wrap the returned CFData and copy its bytes out.
     let cf_data = unsafe { CFData::wrap_under_create_rule(result.cast()) };
@@ -241,7 +247,10 @@ fn dp_delete(label: &str) -> Result<(), SecretError> {
 pub async fn migrate_from_file(secrets_json_path: &std::path::Path) -> anyhow::Result<()> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
-    if !tokio::fs::try_exists(secrets_json_path).await.unwrap_or(false) {
+    if !tokio::fs::try_exists(secrets_json_path)
+        .await
+        .unwrap_or(false)
+    {
         return Ok(());
     }
 
@@ -249,10 +258,8 @@ pub async fn migrate_from_file(secrets_json_path: &std::path::Path) -> anyhow::R
         .await
         .with_context(|| format!("read {}", secrets_json_path.display()))?;
 
-    let map: std::collections::HashMap<String, String> =
-        serde_json::from_str(&text).with_context(|| {
-            format!("parse legacy secrets file {}", secrets_json_path.display())
-        })?;
+    let map: std::collections::HashMap<String, String> = serde_json::from_str(&text)
+        .with_context(|| format!("parse legacy secrets file {}", secrets_json_path.display()))?;
 
     let store = KeychainSecretStore::new();
     let mut migrated = 0usize;

@@ -78,17 +78,13 @@ impl DeviceType {
 
     /// Returns a warning message for device types that require manual key
     /// deployment steps, or `None` if automated deployment is supported.
-    #[must_use] 
+    #[must_use]
     pub fn warning_message(&self) -> Option<&'static str> {
         match self {
             Self::UniFi => Some("Keys must be added via UniFi Controller GUI"),
             Self::Fortigate => Some("Keys must be added via FortiGate GUI or CLI"),
-            Self::OpnSense => Some(
-                "Keys must be added via OPNsense → System → Access → Users",
-            ),
-            Self::Sophos => Some(
-                "Keys must be added via Sophos Webadmin → Authentication → Users",
-            ),
+            Self::OpnSense => Some("Keys must be added via OPNsense → System → Access → Users"),
+            Self::Sophos => Some("Keys must be added via Sophos Webadmin → Authentication → Users"),
             _ => None,
         }
     }

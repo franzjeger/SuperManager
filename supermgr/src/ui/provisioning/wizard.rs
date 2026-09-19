@@ -222,14 +222,10 @@ pub fn build_provisioning_page(
         .build();
 
     nav_box.append(&back_btn);
-    let spacer = gtk4::Box::builder()
-        .hexpand(true)
-        .build();
+    let spacer = gtk4::Box::builder().hexpand(true).build();
     nav_box.append(&spacer);
     nav_box.append(&step_label);
-    let spacer2 = gtk4::Box::builder()
-        .hexpand(true)
-        .build();
+    let spacer2 = gtk4::Box::builder().hexpand(true).build();
     nav_box.append(&spacer2);
     nav_box.append(&next_btn);
 
@@ -265,7 +261,11 @@ pub fn build_provisioning_page(
 
                 // Skip security step for UniFi
                 let is_fortigate = state.borrow().device_type == "FortiGate";
-                let effective_max = if is_fortigate { TOTAL_STEPS } else { TOTAL_STEPS };
+                let effective_max = if is_fortigate {
+                    TOTAL_STEPS
+                } else {
+                    TOTAL_STEPS
+                };
 
                 if step >= effective_max {
                     next_btn.set_label("Finish");
@@ -380,13 +380,9 @@ fn build_step1_customer_info(
     ]);
     template_row.set_model(Some(&template_list));
 
-    let name_row = adw::EntryRow::builder()
-        .title("Customer Name")
-        .build();
+    let name_row = adw::EntryRow::builder().title("Customer Name").build();
 
-    let location_row = adw::EntryRow::builder()
-        .title("Location")
-        .build();
+    let location_row = adw::EntryRow::builder().title("Location").build();
 
     // Device type combo
     let device_type_row = adw::ComboRow::builder()
@@ -432,7 +428,10 @@ fn build_step1_customer_info(
             for host in &s.hosts {
                 let dt = format!("{:?}", host.device_type);
                 if filter.is_empty() || dt == filter {
-                    labels.push(format!("{} ({}@{})", host.label, host.username, host.hostname));
+                    labels.push(format!(
+                        "{} ({}@{})",
+                        host.label, host.username, host.hostname
+                    ));
                     host_ids.borrow_mut().push(host.id.to_string());
                 }
             }
@@ -535,9 +534,21 @@ fn build_step1_customer_info(
                     s.lan_subnet = "10.10.0.0/24".into();
                     s.management_vlan = true;
                     s.vlans = vec![
-                        VlanEntry { id: 10, name: "Staff".into(), subnet: "10.10.10.0/24".into() },
-                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.10.20.0/24".into() },
-                        VlanEntry { id: 99, name: "Management".into(), subnet: "10.10.99.0/24".into() },
+                        VlanEntry {
+                            id: 10,
+                            name: "Staff".into(),
+                            subnet: "10.10.10.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 20,
+                            name: "Guests".into(),
+                            subnet: "10.10.20.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 99,
+                            name: "Management".into(),
+                            subnet: "10.10.99.0/24".into(),
+                        },
                     ];
                     s.vpn_site_to_site = true;
                     s.vpn_remote_access = false;
@@ -577,8 +588,16 @@ fn build_step1_customer_info(
                     s.lan_subnet = "10.20.0.0/24".into();
                     s.management_vlan = false;
                     s.vlans = vec![
-                        VlanEntry { id: 10, name: "POS".into(), subnet: "10.20.10.0/24".into() },
-                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.20.20.0/24".into() },
+                        VlanEntry {
+                            id: 10,
+                            name: "POS".into(),
+                            subnet: "10.20.10.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 20,
+                            name: "Guests".into(),
+                            subnet: "10.20.20.0/24".into(),
+                        },
                     ];
                     s.vpn_site_to_site = false;
                     s.vpn_remote_access = false;
@@ -618,10 +637,26 @@ fn build_step1_customer_info(
                     s.lan_subnet = "10.30.0.0/24".into();
                     s.management_vlan = true;
                     s.vlans = vec![
-                        VlanEntry { id: 10, name: "Staff".into(), subnet: "10.30.10.0/24".into() },
-                        VlanEntry { id: 20, name: "Guests".into(), subnet: "10.30.20.0/24".into() },
-                        VlanEntry { id: 30, name: "IoT".into(), subnet: "10.30.30.0/24".into() },
-                        VlanEntry { id: 99, name: "Management".into(), subnet: "10.30.99.0/24".into() },
+                        VlanEntry {
+                            id: 10,
+                            name: "Staff".into(),
+                            subnet: "10.30.10.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 20,
+                            name: "Guests".into(),
+                            subnet: "10.30.20.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 30,
+                            name: "IoT".into(),
+                            subnet: "10.30.30.0/24".into(),
+                        },
+                        VlanEntry {
+                            id: 99,
+                            name: "Management".into(),
+                            subnet: "10.30.99.0/24".into(),
+                        },
                     ];
                     s.vpn_site_to_site = true;
                     s.vpn_remote_access = true;
@@ -660,9 +695,11 @@ fn build_step1_customer_info(
                     s.wan_dns = String::new();
                     s.lan_subnet = "192.168.1.0/24".into();
                     s.management_vlan = false;
-                    s.vlans = vec![
-                        VlanEntry { id: 10, name: "LAN".into(), subnet: "192.168.1.0/24".into() },
-                    ];
+                    s.vlans = vec![VlanEntry {
+                        id: 10,
+                        name: "LAN".into(),
+                        subnet: "192.168.1.0/24".into(),
+                    }];
                     s.vpn_site_to_site = false;
                     s.vpn_remote_access = true;
                     s.dns_servers = "1.1.1.1, 8.8.8.8".into();
@@ -734,10 +771,26 @@ fn build_step1_customer_info(
             s.lan_subnet = "10.42.100.0/24".into();
             s.management_vlan = true;
             s.vlans = vec![
-                VlanEntry { id: 10, name: "Staff".into(), subnet: "10.42.10.0/24".into() },
-                VlanEntry { id: 20, name: "Guests".into(), subnet: "10.42.20.0/24".into() },
-                VlanEntry { id: 30, name: "IoT".into(), subnet: "10.42.30.0/24".into() },
-                VlanEntry { id: 99, name: "Management".into(), subnet: "10.42.99.0/24".into() },
+                VlanEntry {
+                    id: 10,
+                    name: "Staff".into(),
+                    subnet: "10.42.10.0/24".into(),
+                },
+                VlanEntry {
+                    id: 20,
+                    name: "Guests".into(),
+                    subnet: "10.42.20.0/24".into(),
+                },
+                VlanEntry {
+                    id: 30,
+                    name: "IoT".into(),
+                    subnet: "10.42.30.0/24".into(),
+                },
+                VlanEntry {
+                    id: 99,
+                    name: "Management".into(),
+                    subnet: "10.42.99.0/24".into(),
+                },
             ];
             s.vpn_site_to_site = true;
             s.vpn_remote_access = true;
@@ -808,9 +861,7 @@ fn build_step1_customer_info(
         let state = Rc::clone(state);
         let app_state = Arc::clone(app_state);
         batch_btn.connect_clicked(move |btn| {
-            let window = btn
-                .root()
-                .and_then(|r| r.downcast::<gtk4::Window>().ok());
+            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
             show_batch_dialog(window.as_ref(), &state, &app_state);
         });
     }
@@ -846,9 +897,7 @@ fn build_step2_network_design(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget 
         .description("Configure the upstream internet connection.")
         .build();
 
-    let wan_type_row = adw::ComboRow::builder()
-        .title("WAN Type")
-        .build();
+    let wan_type_row = adw::ComboRow::builder().title("WAN Type").build();
     let wan_types = gtk4::StringList::new(&["DHCP", "Static", "PPPoE"]);
     wan_type_row.set_model(Some(&wan_types));
 
@@ -983,15 +1032,9 @@ fn build_step2_network_design(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget 
                 .margin_bottom(8)
                 .build();
 
-            let vlan_id_entry = adw::EntryRow::builder()
-                .title("VLAN ID")
-                .build();
-            let vlan_name_entry = adw::EntryRow::builder()
-                .title("Name")
-                .build();
-            let vlan_subnet_entry = adw::EntryRow::builder()
-                .title("Subnet")
-                .build();
+            let vlan_id_entry = adw::EntryRow::builder().title("VLAN ID").build();
+            let vlan_name_entry = adw::EntryRow::builder().title("Name").build();
+            let vlan_subnet_entry = adw::EntryRow::builder().title("Subnet").build();
 
             let remove_btn = gtk4::Button::builder()
                 .icon_name("list-remove-symbolic")
@@ -1202,11 +1245,8 @@ fn build_step3_services(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
         .sensitive(false)
         .build();
 
-    let wifi_security_model = gtk4::StringList::new(&[
-        "WPA3-Enterprise",
-        "WPA3-Personal",
-        "WPA2-Personal",
-    ]);
+    let wifi_security_model =
+        gtk4::StringList::new(&["WPA3-Enterprise", "WPA3-Personal", "WPA2-Personal"]);
     let wifi_security_row = adw::ComboRow::builder()
         .title("Security")
         .model(&wifi_security_model)
@@ -1323,12 +1363,8 @@ fn build_step3_services(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
         .sensitive(false)
         .build();
 
-    let sdwan_mode_model = gtk4::StringList::new(&[
-        "Source IP",
-        "Bandwidth",
-        "Session",
-        "Spillover",
-    ]);
+    let sdwan_mode_model =
+        gtk4::StringList::new(&["Source IP", "Bandwidth", "Session", "Spillover"]);
     let sdwan_mode_row = adw::ComboRow::builder()
         .title("Load Balance Mode")
         .model(&sdwan_mode_model)
@@ -1639,10 +1675,13 @@ fn build_step4_security(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
 
 #[cfg(test)]
 pub(crate) fn preview_review(
-    app_state: &Arc<Mutex<AppState>>, tx: &mpsc::Sender<AppMsg>, rt: &tokio::runtime::Handle,
+    app_state: &Arc<Mutex<AppState>>,
+    tx: &mpsc::Sender<AppMsg>,
+    rt: &tokio::runtime::Handle,
 ) -> gtk4::Widget {
     let state = Rc::new(RefCell::new(WizardState {
-        customer_name: "Nordic Systems".into(), device_type: "FortiGate".into(),
+        customer_name: "Nordic Systems".into(),
+        device_type: "FortiGate".into(),
         generated_config: "config system global\n    set hostname oslo-gateway\nend\n".into(),
         ..WizardState::default()
     }));
@@ -1680,7 +1719,8 @@ fn build_step5_review(
     let config_scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Automatic)
         .vexpand(true)
-        .margin_start(16).margin_end(16)
+        .margin_start(16)
+        .margin_end(16)
         .child(&config_view)
         .build();
     config_scroll.add_css_class("supermgr-chat-surface");
@@ -1690,7 +1730,8 @@ fn build_step5_review(
         let state = Rc::clone(state);
         config_buffer.connect_changed(move |buffer| {
             state.borrow_mut().generated_config = buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string();
         });
     }
 
@@ -1705,25 +1746,32 @@ fn build_step5_review(
         .build();
 
     // Actions wrap on laptop-sized windows instead of clipping the editor.
-    let btn_box = gtk4::FlowBox::builder().selection_mode(gtk4::SelectionMode::None)
-        .max_children_per_line(5).min_children_per_line(1)
-        .column_spacing(8).row_spacing(8).margin_start(16).margin_end(16)
-        .margin_top(12).margin_bottom(16).build();
+    let btn_box = gtk4::FlowBox::builder()
+        .selection_mode(gtk4::SelectionMode::None)
+        .max_children_per_line(5)
+        .min_children_per_line(1)
+        .column_spacing(8)
+        .row_spacing(8)
+        .margin_start(16)
+        .margin_end(16)
+        .margin_top(12)
+        .margin_bottom(16)
+        .build();
 
     let generate_btn = gtk4::Button::builder()
         .label("Generate with AI")
         .css_classes(["suggested-action", "pill"])
         .build();
 
-    let generate_spinner = gtk4::Spinner::builder()
-        .visible(false)
-        .build();
+    let generate_spinner = gtk4::Spinner::builder().visible(false).build();
 
     let push_btn = gtk4::Button::builder()
         .label("Back up & push")
         .css_classes(["pill"])
         .sensitive(false)
-        .tooltip_text("Validate the draft, save the current configuration, then send commands over SSH")
+        .tooltip_text(
+            "Validate the draft, save the current configuration, then send commands over SSH",
+        )
         .build();
 
     let export_btn = gtk4::Button::builder()
@@ -1769,23 +1817,38 @@ fn build_step5_review(
     let validate = gtk4::Button::with_label("Validate draft");
     {
         let state = Rc::clone(state);
-        let push = push_btn.clone(); let diff = diff_btn.clone();
-        let exports = [export_btn.clone(), export_html_btn.clone(), export_pdf_btn.clone()];
+        let push = push_btn.clone();
+        let diff = diff_btn.clone();
+        let exports = [
+            export_btn.clone(),
+            export_html_btn.clone(),
+            export_pdf_btn.clone(),
+        ];
         config_buffer.connect_changed(move |buffer| {
             let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
-            let available = !text.trim().is_empty() && !text.starts_with("# Error") && !text.starts_with("Generating configuration");
-            let json = state.borrow().device_type == "UniFi" && super::validation::is_controller_json(&text);
+            let available = !text.trim().is_empty()
+                && !text.starts_with("# Error")
+                && !text.starts_with("Generating configuration");
+            let json = state.borrow().device_type == "UniFi"
+                && super::validation::is_controller_json(&text);
             push.set_sensitive(available && !json);
-            push.set_tooltip_text(Some(if json { "UniFi controller JSON is export-only; it cannot be sent over SSH" }
-                else { "Validate the draft, save the current configuration, then send commands over SSH" }));
+            push.set_tooltip_text(Some(if json {
+                "UniFi controller JSON is export-only; it cannot be sent over SSH"
+            } else {
+                "Validate the draft, save the current configuration, then send commands over SSH"
+            }));
             diff.set_sensitive(available && !json);
-            for button in &exports { button.set_sensitive(available); }
+            for button in &exports {
+                button.set_sensitive(available);
+            }
         });
     }
     let initial = state.borrow().generated_config.clone();
     config_buffer.set_text(&initial);
     {
-        let state = Rc::clone(state); let tx = tx.clone(); let rt = rt.clone();
+        let state = Rc::clone(state);
+        let tx = tx.clone();
+        let rt = rt.clone();
         validate.connect_clicked(move |_| {
             let state = state.borrow().clone(); let tx = tx.clone();
             rt.spawn_blocking(move || {
@@ -1804,7 +1867,13 @@ fn build_step5_review(
     let more = gtk4::MenuButton::builder().label("More").build();
     let popover = gtk4::Popover::new();
     let menu = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
-    for button in [&export_btn, &export_html_btn, &export_pdf_btn, &diagram_btn, &history_btn] {
+    for button in [
+        &export_btn,
+        &export_html_btn,
+        &export_pdf_btn,
+        &diagram_btn,
+        &history_btn,
+    ] {
         menu.append(button);
         let popover = popover.clone();
         button.connect_clicked(move |_| popover.popdown());
@@ -1847,19 +1916,36 @@ fn build_step5_review(
                     let settings = crate::settings::AppSettings::load();
                     let generation = async {
                         if settings.ai_provider != crate::settings::AiProvider::Claude {
-                            super::super::console::generate_draft(&settings, &prompt, PROVISIONING_SYSTEM_PROMPT).await
+                            super::super::console::generate_draft(
+                                &settings,
+                                &prompt,
+                                PROVISIONING_SYSTEM_PROMPT,
+                            )
+                            .await
                         } else if settings.use_claude_subscription {
                             send_provisioning_subscription(&prompt, &settings.anthropic_model).await
                         } else if !settings.anthropic_api_key.trim().is_empty() {
-                            send_provisioning_api(&settings.anthropic_api_key, &prompt, &settings.anthropic_model).await
+                            send_provisioning_api(
+                                &settings.anthropic_api_key,
+                                &prompt,
+                                &settings.anthropic_model,
+                            )
+                            .await
                         } else {
-                            Err(anyhow::anyhow!("Configure an AI provider in Settings → AI."))
+                            Err(anyhow::anyhow!(
+                                "Configure an AI provider in Settings → AI."
+                            ))
                         }
                     };
-                    let result = match tokio::time::timeout(std::time::Duration::from_secs(300), generation).await {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("Configuration generation timed out after five minutes.")),
-                    };
+                    let result =
+                        match tokio::time::timeout(std::time::Duration::from_secs(300), generation)
+                            .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(anyhow::anyhow!(
+                                "Configuration generation timed out after five minutes."
+                            )),
+                        };
 
                     let config_text = match result {
                         Ok(text) => text,
@@ -1887,7 +1973,8 @@ fn build_step5_review(
                     ws.borrow_mut().generated_config = config_text.clone();
                     buf.set_text(&config_text);
                     let ok = !config_text.starts_with("# Error");
-                    let json = ws.borrow().device_type == "UniFi" && super::validation::is_controller_json(&config_text);
+                    let json = ws.borrow().device_type == "UniFi"
+                        && super::validation::is_controller_json(&config_text);
                     pb.set_sensitive(ok && !json);
                     db.set_sensitive(ok && !json);
                     eb.set_sensitive(ok);
@@ -1943,7 +2030,9 @@ fn build_step5_review(
                     let result = push_config_to_device(&s).await;
 
                     let msg = match result {
-                        Ok(output) => format!("Configuration commands sent. Review the device response:\n{output}"),
+                        Ok(output) => format!(
+                            "Configuration commands sent. Review the device response:\n{output}"
+                        ),
                         Err(e) => format!("Push failed: {e:#}"),
                     };
 
@@ -1990,9 +2079,8 @@ fn build_step5_review(
                 let device_type = s.device_type.clone();
                 rt.spawn(async move {
                     let res = fetch_device_config(&host_id, &device_type).await;
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(
-                        res.map_err(|e| format!("{e}"))
-                    );
+                    *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(res.map_err(|e| format!("{e}")));
                 });
             }
 
@@ -2006,9 +2094,7 @@ fn build_step5_review(
                     btn.set_label("Diff with Device");
                     match result {
                         Ok(device_config) => {
-                            let window = btn
-                                .root()
-                                .and_then(|r| r.downcast::<gtk4::Window>().ok());
+                            let window = btn.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
                             show_diff_dialog(
                                 window.as_ref(),
                                 &device_config,
@@ -2161,9 +2247,12 @@ fn build_step5_review(
                             let pdf_result = std::process::Command::new("wkhtmltopdf")
                                 .args([
                                     "--enable-local-file-access",
-                                    "--page-size", "A4",
-                                    "--margin-top", "10mm",
-                                    "--margin-bottom", "10mm",
+                                    "--page-size",
+                                    "A4",
+                                    "--margin-top",
+                                    "10mm",
+                                    "--margin-bottom",
+                                    "10mm",
                                 ])
                                 .arg(&tmp_html)
                                 .arg(&pdf_path)
@@ -2189,14 +2278,10 @@ fn build_step5_review(
                                     )));
                                 }
                                 Ok(output) => {
-                                    let stderr =
-                                        String::from_utf8_lossy(&output.stderr);
-                                    tracing::error!(
-                                        "PDF converter exited with error: {stderr}"
-                                    );
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    tracing::error!("PDF converter exited with error: {stderr}");
                                     // Fall back: save as HTML instead
-                                    let html_fallback =
-                                        pdf_path.with_extension("html");
+                                    let html_fallback = pdf_path.with_extension("html");
                                     let _ = std::fs::write(&html_fallback, &html);
                                     let _ = tx.send(AppMsg::ShowToast(format!(
                                         "PDF conversion failed. Saved HTML to {}. \
@@ -2206,8 +2291,7 @@ fn build_step5_review(
                                 }
                                 Err(_) => {
                                     // No converter available — save as HTML
-                                    let html_fallback =
-                                        pdf_path.with_extension("html");
+                                    let html_fallback = pdf_path.with_extension("html");
                                     let _ = std::fs::write(&html_fallback, &html);
                                     let _ = tx.send(AppMsg::ShowToast(format!(
                                         "No PDF converter found. Saved HTML to {}. \
@@ -2307,9 +2391,7 @@ fn build_step5_review(
                                             )));
                                         }
                                         Err(e) => {
-                                            tracing::error!(
-                                                "Failed to export SVG diagram: {e}"
-                                            );
+                                            tracing::error!("Failed to export SVG diagram: {e}");
                                         }
                                     }
                                 }
@@ -2351,7 +2433,10 @@ fn build_step5_review(
                 rt.spawn(async move {
                     match list_config_versions_dbus(&customer).await {
                         Ok(json) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(json),
-                        Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("ERROR:{e}")),
+                        Err(e) => {
+                            *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(format!("ERROR:{e}"))
+                        }
                     }
                 });
             }
@@ -3006,14 +3091,21 @@ Generated by SuperManager &mdash; {date}
         wan_type = html_escape(wan_type_display),
         wan_details = wan_details,
         lan_subnet = html_escape(lan_display),
-        mgmt_vlan = if state.management_vlan { "Yes (VLAN 99)" } else { "No" },
+        mgmt_vlan = if state.management_vlan {
+            "Yes (VLAN 99)"
+        } else {
+            "No"
+        },
         vlan_rows = vlan_rows,
         s2s_vpn = yn(state.vpn_site_to_site),
         ra_vpn = yn(state.vpn_remote_access),
         dns = html_escape(&state.dns_servers),
         ntp = html_escape(&state.ntp_server),
         syslog = if state.syslog_enabled {
-            format!("Enabled (target: <code>{}</code>)", html_escape(&state.syslog_target))
+            format!(
+                "Enabled (target: <code>{}</code>)",
+                html_escape(&state.syslog_target)
+            )
         } else {
             "Disabled".to_string()
         },
@@ -3062,17 +3154,22 @@ fn build_generation_prompt(s: &WizardState) -> String {
         "\n## LAN\n\
          - Subnet: {}\n\
          - Management VLAN: {}\n",
-        if s.lan_subnet.is_empty() { "10.0.0.0/24" } else { &s.lan_subnet },
-        if s.management_vlan { "Yes (VLAN 99)" } else { "No" },
+        if s.lan_subnet.is_empty() {
+            "10.0.0.0/24"
+        } else {
+            &s.lan_subnet
+        },
+        if s.management_vlan {
+            "Yes (VLAN 99)"
+        } else {
+            "No"
+        },
     ));
 
     if !s.vlans.is_empty() {
         prompt.push_str("\n## Additional VLANs\n");
         for v in &s.vlans {
-            prompt.push_str(&format!(
-                "- VLAN {}: {} ({})\n",
-                v.id, v.name, v.subnet
-            ));
+            prompt.push_str(&format!("- VLAN {}: {} ({})\n", v.id, v.name, v.subnet));
         }
     }
 
@@ -3110,10 +3207,16 @@ fn build_generation_prompt(s: &WizardState) -> String {
         prompt.push_str("\n## WiFi / FortiAP\n");
         prompt.push_str(&format!("- Staff SSID: {}\n", s.wifi_ssid_staff));
         prompt.push_str(&format!("- Guest SSID: {}\n", s.wifi_ssid_guest));
-        prompt.push_str(&format!("- Security: {}\n",
-            if s.wifi_security.is_empty() { "WPA3-Enterprise" } else { &s.wifi_security }
+        prompt.push_str(&format!(
+            "- Security: {}\n",
+            if s.wifi_security.is_empty() {
+                "WPA3-Enterprise"
+            } else {
+                &s.wifi_security
+            }
         ));
-        prompt.push_str(&format!("- Guest Portal: {}\n",
+        prompt.push_str(&format!(
+            "- Guest Portal: {}\n",
             if s.wifi_guest_portal { "Yes" } else { "No" }
         ));
     }
@@ -3121,11 +3224,21 @@ fn build_generation_prompt(s: &WizardState) -> String {
     // Only include SD-WAN section if enabled (FortiGate only).
     if s.sdwan_enabled && s.device_type == "FortiGate" {
         prompt.push_str("\n## SD-WAN\n");
-        prompt.push_str(&format!("- Health Check Target: {}\n",
-            if s.sdwan_health_target.is_empty() { "8.8.8.8" } else { &s.sdwan_health_target }
+        prompt.push_str(&format!(
+            "- Health Check Target: {}\n",
+            if s.sdwan_health_target.is_empty() {
+                "8.8.8.8"
+            } else {
+                &s.sdwan_health_target
+            }
         ));
-        prompt.push_str(&format!("- Load Balance Mode: {}\n",
-            if s.sdwan_mode.is_empty() { "Source IP" } else { &s.sdwan_mode }
+        prompt.push_str(&format!(
+            "- Load Balance Mode: {}\n",
+            if s.sdwan_mode.is_empty() {
+                "Source IP"
+            } else {
+                &s.sdwan_mode
+            }
         ));
     }
 
@@ -3136,8 +3249,13 @@ fn build_generation_prompt(s: &WizardState) -> String {
         if !s.snmp_trap_target.is_empty() {
             prompt.push_str(&format!("- Trap Target: {}\n", s.snmp_trap_target));
         }
-        prompt.push_str(&format!("- Version: {}\n",
-            if s.snmp_version.is_empty() { "v2c" } else { &s.snmp_version }
+        prompt.push_str(&format!(
+            "- Version: {}\n",
+            if s.snmp_version.is_empty() {
+                "v2c"
+            } else {
+                &s.snmp_version
+            }
         ));
     }
 
@@ -3147,7 +3265,9 @@ fn build_generation_prompt(s: &WizardState) -> String {
     let mut rng = rand::rng();
     let mut gen_pass = |len: usize| -> String {
         const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*";
-        (0..len).map(|_| CHARS[rng.random_range(0..CHARS.len())] as char).collect()
+        (0..len)
+            .map(|_| CHARS[rng.random_range(0..CHARS.len())] as char)
+            .collect()
     };
 
     prompt.push_str(&format!(
@@ -3234,7 +3354,10 @@ async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Re
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("Claude CLI failed (model '{}'): {stderr}\n{stdout}", crate::settings::anthropic_model_id(model));
+        anyhow::bail!(
+            "Claude CLI failed (model '{}'): {stderr}\n{stdout}",
+            crate::settings::anthropic_model_id(model)
+        );
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -3242,7 +3365,10 @@ async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Re
 
 /// Send a provisioning prompt via the Anthropic API (API key mode).
 async fn send_provisioning_api(api_key: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build().unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
     let model = crate::settings::anthropic_model_id(model);
     let body = serde_json::json!({
         "model": model,
@@ -3267,13 +3393,24 @@ async fn send_provisioning_api(api_key: &str, prompt: &str, model: &str) -> anyh
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{}", super::super::console::claude::api_error(status, &text, model));
+        anyhow::bail!(
+            "{}",
+            super::super::console::claude::api_error(status, &text, model)
+        );
     }
 
     let json: serde_json::Value = resp.json().await?;
-    anyhow::ensure!(json["stop_reason"] == "end_turn", "Claude did not finish the configuration; generate again with a narrower request.");
-    let text = json["content"].as_array().into_iter().flatten()
-        .filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n");
+    anyhow::ensure!(
+        json["stop_reason"] == "end_turn",
+        "Claude did not finish the configuration; generate again with a narrower request."
+    );
+    let text = json["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     anyhow::ensure!(!text.trim().is_empty(), "Claude returned no configuration.");
 
     Ok(text)
@@ -3288,15 +3425,26 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
     }
     let device_type = state.device_type.clone();
     let config = state.generated_config.clone();
-    tokio::task::spawn_blocking(move || super::validation::validate_for_push(&device_type, &config))
-        .await.context("Draft validation task failed")??;
+    tokio::task::spawn_blocking(move || {
+        super::validation::validate_for_push(&device_type, &config)
+    })
+    .await
+    .context("Draft validation task failed")??;
 
-    let current = fetch_device_config(&state.target_host_id, &state.device_type).await
+    let current = fetch_device_config(&state.target_host_id, &state.device_type)
+        .await
         .context("Pre-deployment backup failed; no commands were sent")?;
-    anyhow::ensure!(!current.trim().is_empty(), "The device returned an empty configuration; no commands were sent");
-    let backup = save_config_version_dbus(&state.customer_name,
-        &format!("{}-before-push", state.device_type), &current).await
-        .context("Could not save the pre-deployment backup; no commands were sent")?;
+    anyhow::ensure!(
+        !current.trim().is_empty(),
+        "The device returned an empty configuration; no commands were sent"
+    );
+    let backup = save_config_version_dbus(
+        &state.customer_name,
+        &format!("{}-before-push", state.device_type),
+        &current,
+    )
+    .await
+    .context("Could not save the pre-deployment backup; no commands were sent")?;
 
     let conn = zbus::Connection::system()
         .await
@@ -3316,8 +3464,16 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
     let output = checked_push_result(&result)
         .with_context(|| format!("Push did not complete. Pre-deployment backup: {backup}"))?;
     let lower = output.to_ascii_lowercase();
-    if state.device_type == "FortiGate" && ["command fail.", "command parse error", "return code -", "unknown action"]
-        .iter().any(|marker|lower.contains(marker)) {
+    if state.device_type == "FortiGate"
+        && [
+            "command fail.",
+            "command parse error",
+            "return code -",
+            "unknown action",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
         anyhow::bail!("Device rejected commands. Pre-deployment backup: {backup}\n{output}");
     }
     Ok(format!("Pre-deployment backup: {backup}\n{output}"))
@@ -3325,11 +3481,15 @@ async fn push_config_to_device(state: &WizardState) -> anyhow::Result<String> {
 
 fn checked_push_result(result: &str) -> anyhow::Result<String> {
     let result: serde_json::Value = serde_json::from_str(result)?;
-    let code = result["exit_code"].as_i64()
+    let code = result["exit_code"]
+        .as_i64()
         .ok_or_else(|| anyhow::anyhow!("Device response did not include an exit status"))?;
     let stdout = result["stdout"].as_str().unwrap_or("");
     let stderr = result["stderr"].as_str().unwrap_or("");
-    anyhow::ensure!(code == 0, "Device command failed (exit {code}): {stderr}\n{stdout}");
+    anyhow::ensure!(
+        code == 0,
+        "Device command failed (exit {code}): {stderr}\n{stdout}"
+    );
     Ok(format!("{stdout}\n{stderr}").trim().to_owned())
 }
 
@@ -3345,26 +3505,50 @@ mod push_tests {
             // Exercise migration at the request boundary as well as the
             // selected model in both provisioning adapters.
             let answer = crate::ui::console::claude::send_message(
-                &settings.anthropic_api_key, prompt, &tx, vec![],
+                &settings.anthropic_api_key,
+                prompt,
+                &tx,
+                vec![],
                 "Synthetic connection test. No device data.",
-                "claude-sonnet-4-20250514", false,
-            ).await.unwrap();
-            assert!(!answer.last().unwrap()["content"].as_array().unwrap().is_empty());
+                "claude-sonnet-4-20250514",
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(!answer.last().unwrap()["content"]
+                .as_array()
+                .unwrap()
+                .is_empty());
             let answer = super::send_provisioning_api(
-                &settings.anthropic_api_key, prompt, &settings.anthropic_model,
-            ).await.unwrap();
+                &settings.anthropic_api_key,
+                prompt,
+                &settings.anthropic_model,
+            )
+            .await
+            .unwrap();
             assert!(answer.contains("OK"));
-            let answer = super::send_provisioning_subscription(prompt, &settings.anthropic_model).await.unwrap();
+            let answer = super::send_provisioning_subscription(prompt, &settings.anthropic_model)
+                .await
+                .unwrap();
             assert!(answer.contains("OK"));
         };
-        tokio::time::timeout(std::time::Duration::from_secs(120), check).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(120), check)
+            .await
+            .unwrap();
     }
 
     #[test]
     fn device_rejection_is_not_reported_as_success() {
-        assert!(super::checked_push_result(r#"{"exit_code":1,"stdout":"partial","stderr":"denied"}"#).is_err());
+        assert!(super::checked_push_result(
+            r#"{"exit_code":1,"stdout":"partial","stderr":"denied"}"#
+        )
+        .is_err());
         assert!(super::checked_push_result(r#"{"stdout":"missing status"}"#).is_err());
-        assert_eq!(super::checked_push_result(r#"{"exit_code":0,"stdout":"applied","stderr":""}"#).unwrap(), "applied");
+        assert_eq!(
+            super::checked_push_result(r#"{"exit_code":0,"stdout":"applied","stderr":""}"#)
+                .unwrap(),
+            "applied"
+        );
     }
 }
 
@@ -3384,7 +3568,9 @@ async fn save_config_version_dbus(
     use supermgr_core::dbus::DaemonProxy;
     let conn = zbus::Connection::system().await?;
     let proxy = DaemonProxy::new(&conn).await?;
-    let filename = proxy.save_config_version(customer, device_type, config).await?;
+    let filename = proxy
+        .save_config_version(customer, device_type, config)
+        .await?;
     Ok(filename)
 }
 
@@ -3498,8 +3684,13 @@ fn show_history_dialog(
                     let slot = Arc::clone(&result_slot);
                     rt.spawn(async move {
                         match get_config_version_dbus(&filename).await {
-                            Ok(config) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config),
-                            Err(e) => *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}")),
+                            Ok(config) => {
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(config)
+                            }
+                            Err(e) => {
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(format!("# Error: {e}"))
+                            }
                         }
                     });
                 }
@@ -3535,7 +3726,8 @@ fn show_history_dialog(
                                 *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(diff);
                             }
                             Err(e) => {
-                                *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(format!("# Error: {e}"));
+                                *slot.lock().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(format!("# Error: {e}"));
                             }
                         }
                     });
@@ -3699,8 +3891,8 @@ fn parse_batch_csv(text: &str) -> Result<Vec<BatchEntry>, String> {
         None => return Err("Empty CSV input".into()),
     };
 
-    let is_header = first.to_lowercase().contains("customer")
-        || first.to_lowercase().contains("name");
+    let is_header =
+        first.to_lowercase().contains("customer") || first.to_lowercase().contains("name");
     if !is_header {
         if let Some(entry) = parse_csv_line(first)? {
             entries.push(entry);
@@ -3923,17 +4115,14 @@ fn show_batch_dialog(
 
     // Shared state
     let parsed_entries: Rc<RefCell<Vec<BatchEntry>>> = Rc::new(RefCell::new(Vec::new()));
-    let generated_configs: Rc<RefCell<Vec<(String, String)>>> =
-        Rc::new(RefCell::new(Vec::new()));
+    let generated_configs: Rc<RefCell<Vec<(String, String)>>> = Rc::new(RefCell::new(Vec::new()));
 
     // Load CSV button
     {
         let csv_buffer = csv_buffer.clone();
         let dialog_ref = dialog.clone();
         load_btn.connect_clicked(move |_| {
-            let file_dialog = gtk4::FileDialog::builder()
-                .title("Load CSV File")
-                .build();
+            let file_dialog = gtk4::FileDialog::builder().title("Load CSV File").build();
             let csv_buffer = csv_buffer.clone();
             file_dialog.open(
                 Some(&dialog_ref),
@@ -4150,17 +4339,13 @@ fn export_configs_as_zip(
     let cd_offset = offset;
     let mut cd_size: u32 = 0;
     for entry in &central_dir {
-        writer
-            .write_all(entry)
-            .map_err(|e| format!("Write: {e}"))?;
+        writer.write_all(entry).map_err(|e| format!("Write: {e}"))?;
         cd_size += entry.len() as u32;
     }
 
     let num_entries = configs.len() as u16;
     let eocd = build_zip_eocd(num_entries, cd_size, cd_offset);
-    writer
-        .write_all(&eocd)
-        .map_err(|e| format!("Write: {e}"))?;
+    writer.write_all(&eocd).map_err(|e| format!("Write: {e}"))?;
 
     Ok(())
 }
@@ -4263,12 +4448,24 @@ async fn fetch_device_config(host_id: &str, device_type: &str) -> anyhow::Result
 
     let text = checked_push_result(&result)?;
     if device_type == "FortiGate" {
-        anyhow::ensure!(!["command fail.", "command parse error", "return code -", "unknown action"]
-            .iter().any(|marker| text.to_ascii_lowercase().contains(marker)), "Device rejected the configuration read: {text}");
+        anyhow::ensure!(
+            ![
+                "command fail.",
+                "command parse error",
+                "return code -",
+                "unknown action"
+            ]
+            .iter()
+            .any(|marker| text.to_ascii_lowercase().contains(marker)),
+            "Device rejected the configuration read: {text}"
+        );
     }
     let envelope: serde_json::Value = serde_json::from_str(&result)?;
     let config = envelope["stdout"].as_str().unwrap_or("").trim();
-    anyhow::ensure!(!config.is_empty(), "Device returned no configuration: {text}");
+    anyhow::ensure!(
+        !config.is_empty(),
+        "Device returned no configuration: {text}"
+    );
     Ok(config.to_owned())
 }
 

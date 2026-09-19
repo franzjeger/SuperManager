@@ -55,7 +55,9 @@ pub async fn sweep_stale_configs() {
     for prefix in BREW_PATHS {
         for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
             let dir = std::path::Path::new(prefix).join(subdir);
-            let Ok(mut entries) = tokio::fs::read_dir(&dir).await else { continue };
+            let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
+                continue;
+            };
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                     continue;
@@ -242,7 +244,12 @@ pub struct Strongswan {
 
 impl Strongswan {
     pub fn new() -> Self {
-        Self { charon: None, swanctl: None, etc: None, charon_child: None }
+        Self {
+            charon: None,
+            swanctl: None,
+            etc: None,
+            charon_child: None,
+        }
     }
 
     /// Resolve the strongSwan install location lazily. Cached on success.
@@ -311,7 +318,11 @@ impl Strongswan {
             }
         }
 
-        let charon = self.charon.as_ref().expect("resolve() must run first").clone();
+        let charon = self
+            .charon
+            .as_ref()
+            .expect("resolve() must run first")
+            .clone();
         let etc = self.etc.as_ref().expect("resolve() must run first").clone();
 
         // charon-systemd reads /etc/strongswan.conf and the swanctl plugin
@@ -364,7 +375,10 @@ impl Strongswan {
         tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await?;
 
         let conf_path = swanctl_dir.join(format!("conf.d/supermanager-{}.conf", args.profile_id));
-        let secrets_path = swanctl_dir.join(format!("conf.d/supermanager-{}-secrets.conf", args.profile_id));
+        let secrets_path = swanctl_dir.join(format!(
+            "conf.d/supermanager-{}-secrets.conf",
+            args.profile_id
+        ));
 
         let conf = build_swanctl_conf(args);
         // `build_swanctl_conf` returns an empty string when split-tunnel
@@ -427,8 +441,14 @@ impl Strongswan {
             .unwrap_or_default();
 
         let etc = self.etc.as_ref().unwrap().clone();
-        let conf_path = etc.join(format!("swanctl/conf.d/supermanager-{}.conf", args.profile_id));
-        let secrets_path = etc.join(format!("swanctl/conf.d/supermanager-{}-secrets.conf", args.profile_id));
+        let conf_path = etc.join(format!(
+            "swanctl/conf.d/supermanager-{}.conf",
+            args.profile_id
+        ));
+        let secrets_path = etc.join(format!(
+            "swanctl/conf.d/supermanager-{}-secrets.conf",
+            args.profile_id
+        ));
 
         // Extract the server host BEFORE removing the config file — we need
         // it to clean up the kernel host route that charon installed.
@@ -466,7 +486,10 @@ impl Strongswan {
         // list is the last thing still pointing into the dead tunnel.
         crate::dns::clear_vpn_dns();
 
-        Ok(DisconnectResult { ok: true, message: out.lines().last().unwrap_or("").to_owned() })
+        Ok(DisconnectResult {
+            ok: true,
+            message: out.lines().last().unwrap_or("").to_owned(),
+        })
     }
 
     pub async fn status(&mut self, args: &StatusArgs) -> anyhow::Result<StatusResult> {
@@ -620,7 +643,10 @@ fn extract_sa_block(list_sas: &str, profile_id: &str) -> String {
     // A following unindented line starts the next connection's block. The child
     // SA repeats the profile id but indented, so it stays with us.
     let rest = lines.take_while(|l| l.starts_with(char::is_whitespace));
-    std::iter::once(head).chain(rest).collect::<Vec<_>>().join("\n")
+    std::iter::once(head)
+        .chain(rest)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The "established 8s ago, rekeying in 14105s" line, as the detail string.
@@ -669,7 +695,9 @@ fn parse_counter_line(line: &str) -> Option<(u64, u64)> {
     let fields: Vec<&str> = line.split(',').map(str::trim).collect();
     for f in fields {
         let mut parts = f.split_whitespace();
-        let (Some(n), Some(unit)) = (parts.next(), parts.next()) else { continue };
+        let (Some(n), Some(unit)) = (parts.next(), parts.next()) else {
+            continue;
+        };
         let Ok(n) = n.parse::<u64>() else { continue };
         match unit {
             "bytes" => bytes = Some(n),
@@ -751,8 +779,16 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     let body = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<&str> = None;
     for line in body.lines() {
-        if let Some(name) = line.split(':').next().filter(|_| !line.starts_with(char::is_whitespace)) {
-            current = if name.starts_with("utun") { Some(name) } else { None };
+        if let Some(name) = line
+            .split(':')
+            .next()
+            .filter(|_| !line.starts_with(char::is_whitespace))
+        {
+            current = if name.starts_with("utun") {
+                Some(name)
+            } else {
+                None
+            };
             continue;
         }
         let Some(iface) = current else { continue };
@@ -805,9 +841,7 @@ fn diagnose_strongswan_failure(log: &str) -> Option<String> {
 
     // Authentication-side failures — most common operator
     // confusion, deserves the clearest message.
-    if l.contains("eap-ms-chapv2 failed")
-        || l.contains("eap_mschapv2 method failed")
-    {
+    if l.contains("eap-ms-chapv2 failed") || l.contains("eap_mschapv2 method failed") {
         return Some(
             "EAP-MSCHAPv2 authentication failed. Username or \
              password rejected by the server. If your FortiGate / \
@@ -888,9 +922,7 @@ fn diagnose_strongswan_failure(log: &str) -> Option<String> {
                 .to_owned(),
         );
     }
-    if l.contains("unable to install policy")
-        || l.contains("kernel install")
-    {
+    if l.contains("unable to install policy") || l.contains("kernel install") {
         return Some(
             "Tunnel established but the kernel rejected the routing \
              policy. Usually a conflict with an existing route to \
@@ -1049,7 +1081,9 @@ fn split_ts_with_dns(routes: &[String], dns_servers: &[String]) -> Vec<String> {
     let parsed: Vec<ipnet::IpNet> = routes.iter().filter_map(|r| r.parse().ok()).collect();
     let mut out = routes.to_vec();
     for server in dns_servers {
-        let Ok(ip) = server.parse::<std::net::IpAddr>() else { continue };
+        let Ok(ip) = server.parse::<std::net::IpAddr>() else {
+            continue;
+        };
         if !parsed.iter().any(|n| n.contains(&ip)) {
             out.push(ipnet::IpNet::from(ip).to_string());
         }
@@ -1061,7 +1095,9 @@ fn split_ts_with_dns(routes: &[String], dns_servers: &[String]) -> Vec<String> {
 /// dashes, and underscores; anything else gets stripped. Profile UUIDs are
 /// already in this set.
 fn sanitize_name(s: &str) -> String {
-    s.chars().filter(|c| c.is_ascii_hexdigit() || *c == '-' || *c == '_').collect()
+    s.chars()
+        .filter(|c| c.is_ascii_hexdigit() || *c == '-' || *c == '_')
+        .collect()
 }
 
 /// Validate wire inputs before starting charon or touching root-owned files.
@@ -1221,8 +1257,9 @@ fn delete_server_host_route(host: &str) {
         .args(["-q", "delete", host])
         .output();
     match out {
-        Ok(o) if o.status.success() =>
-            tracing::info!("route_cleanup: deleted host route for {host}"),
+        Ok(o) if o.status.success() => {
+            tracing::info!("route_cleanup: deleted host route for {host}")
+        }
         Ok(o) => {
             let msg = String::from_utf8_lossy(&o.stderr);
             // "not in table" is expected when the route was already gone.
@@ -1345,7 +1382,11 @@ fn swanctl_list_sas_established() -> Option<bool> {
         .find(|p| p.exists())?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(std::process::Command::new(&swanctl).arg("--list-sas").output());
+        let _ = tx.send(
+            std::process::Command::new(&swanctl)
+                .arg("--list-sas")
+                .output(),
+        );
     });
     match rx.recv_timeout(std::time::Duration::from_secs(3)) {
         Ok(Ok(o)) if o.status.success() => {
@@ -1397,8 +1438,9 @@ fn delete_split_default(
         .args(["-q", "delete", family, "-net", del_spec])
         .output();
     match out {
-        Ok(o) if o.status.success() =>
-            tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}"),
+        Ok(o) if o.status.success() => {
+            tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}")
+        }
         Ok(o) => {
             let msg = String::from_utf8_lossy(&o.stderr);
             if !msg.contains("not in table") && !msg.contains("No such process") {
@@ -1443,8 +1485,7 @@ fn install_ipv6_leak_block() {
             .args(["-q", "add", "-inet6", "-net", net, "::1", "-blackhole"])
             .output();
         match out {
-            Ok(o) if o.status.success() =>
-                tracing::info!("ipv6_leak_block: blackholed {net}"),
+            Ok(o) if o.status.success() => tracing::info!("ipv6_leak_block: blackholed {net}"),
             Ok(o) => tracing::warn!(
                 "ipv6_leak_block: add {net} failed: {}",
                 String::from_utf8_lossy(&o.stderr)
@@ -1571,7 +1612,9 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
     for line in content.lines() {
         if let Some(rest) = line.trim().strip_prefix("remote_addrs") {
             // Matches both `remote_addrs = host` and `remote_addrs=host`
-            let host = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '=').trim();
+            let host = rest
+                .trim_start_matches(|c: char| c.is_whitespace() || c == '=')
+                .trim();
             if !host.is_empty() {
                 return Ok(host.to_string());
             }
@@ -1855,7 +1898,10 @@ mod tests {
         );
         let block = extract_sa_block(&two, PROFILE);
         assert!(!block.contains("other-profile-id"));
-        assert!(!block.contains("10.9.9.9"), "must not inherit the next SA's virtual IP");
+        assert!(
+            !block.contains("10.9.9.9"),
+            "must not inherit the next SA's virtual IP"
+        );
         assert_eq!(parse_virtual_ip(&block).as_deref(), Some("192.168.250.1"));
     }
 
@@ -1870,7 +1916,11 @@ mod tests {
     #[test]
     fn virtual_ip_absent_yields_none_never_the_port() {
         let no_vip = "conn: #1, ESTABLISHED, IKEv2, a_i* b_r\n  local  'me' @ 192.168.1.5[4500]\n  remote 'gw' @ 1.2.3.4[4500]\n";
-        assert_eq!(parse_virtual_ip(no_vip), None, "[4500] is a port, not an address");
+        assert_eq!(
+            parse_virtual_ip(no_vip),
+            None,
+            "[4500] is a port, not an address"
+        );
     }
 
     #[test]
@@ -1897,8 +1947,11 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
     remote 10.99.0.0/24 10.0.10.0/24
 ";
         let routes = parse_child_remote_ts(split);
-        assert_eq!(routes, vec!["10.0.10.0/24", "10.99.0.0/24"],
-                   "every child SA, space-separated selectors split, first-seen order, no repeats");
+        assert_eq!(
+            routes,
+            vec!["10.0.10.0/24", "10.99.0.0/24"],
+            "every child SA, space-separated selectors split, first-seen order, no repeats"
+        );
     }
 
     #[test]
@@ -1922,31 +1975,29 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         // The live capture: full tunnel ESTABLISHED on utun11, virtual IP
         // assigned, and neither /1 half installed — packets to 0.0.0.0/1
         // fell through to the physical default on en0.
-        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
-            match d {
-                "0.0.0.0/1" | "128.0.0.0/1" => Some("en0".into()),
-                _ => None,
-            }
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| match d {
+            "0.0.0.0/1" | "128.0.0.0/1" => Some("en0".into()),
+            _ => None,
         });
-        assert_eq!(v, Some(false), "ESTABLISHED but routeless must read as not installed");
+        assert_eq!(
+            v,
+            Some(false),
+            "ESTABLISHED but routeless must read as not installed"
+        );
     }
 
     #[test]
     fn verdict_full_tunnel_checks_both_halves() {
         // 0/1 present, 128/1 flushed: half the internet bypasses the tunnel.
-        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
-            match d {
-                "0.0.0.0/1" => Some("utun11".into()),
-                "128.0.0.0/1" => Some("en0".into()),
-                _ => None,
-            }
+        let v = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| match d {
+            "0.0.0.0/1" => Some("utun11".into()),
+            "128.0.0.0/1" => Some("en0".into()),
+            _ => None,
         });
         assert_eq!(v, Some(false));
-        let ok = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| {
-            match d {
-                "0.0.0.0/1" | "128.0.0.0/1" => Some("utun11".into()),
-                _ => None,
-            }
+        let ok = routes_installed_verdict("utun11", &["0.0.0.0/0".into()], |d| match d {
+            "0.0.0.0/1" | "128.0.0.0/1" => Some("utun11".into()),
+            _ => None,
         });
         assert_eq!(ok, Some(true));
     }
@@ -1981,7 +2032,10 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         let none = routes_installed_verdict("utun7", &["::/0".to_string()], |_| None);
         assert_eq!(none, None);
         // No interface resolved -> no claim.
-        assert_eq!(routes_installed_verdict("", &["0.0.0.0/0".into()], |_| None), None);
+        assert_eq!(
+            routes_installed_verdict("", &["0.0.0.0/0".into()], |_| None),
+            None
+        );
     }
 
     #[test]
@@ -2096,8 +2150,14 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         // must not corrupt the secrets file. Newlines get filtered, `"`
         // and `\` get escaped.
         let s = build_swanctl_secrets(&args("h", "u", "pw\nbad", r#"a"b\c"#));
-        assert!(!s.contains("pw\nbad"), "newline in password leaked into config:\n{s}");
-        assert!(s.contains(r#"\"b\\c"#), "PSK quote/backslash not escaped:\n{s}");
+        assert!(
+            !s.contains("pw\nbad"),
+            "newline in password leaked into config:\n{s}"
+        );
+        assert!(
+            s.contains(r#"\"b\\c"#),
+            "PSK quote/backslash not escaped:\n{s}"
+        );
     }
 
     #[test]
@@ -2106,7 +2166,10 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         // entry — strongSwan would treat an empty secret as a literal
         // empty PSK, which then mismatches the server's auth payload.
         let s = build_swanctl_secrets(&args("h", "u", "pw", ""));
-        assert!(!s.contains("ike-"), "empty PSK still emitted ike- entry:\n{s}");
+        assert!(
+            !s.contains("ike-"),
+            "empty PSK still emitted ike- entry:\n{s}"
+        );
         assert!(s.contains("eap-"), "EAP entry still required:\n{s}");
     }
 
@@ -2180,8 +2243,8 @@ mod diagnose_tests {
 
 #[cfg(test)]
 mod traffic_tests {
-    use super::{extract_sa_block, parse_cipher_suite, parse_traffic};
     use super::tests::{PROFILE, REAL_LIST_SAS_FULL_TUNNEL};
+    use super::{extract_sa_block, parse_cipher_suite, parse_traffic};
 
     /// Both read the block main already extracts, against output captured
     /// from a real strongSwan 6.0.6 tunnel — see the fixture's own note.
@@ -2198,7 +2261,10 @@ mod traffic_tests {
     /// slash; the whitespace rule is what keeps them out.
     #[test]
     fn traffic_selectors_are_not_mistaken_for_a_proposal() {
-        assert_eq!(parse_cipher_suite("  local  192.168.250.1/32\n  remote 0.0.0.0/0"), None);
+        assert_eq!(
+            parse_cipher_suite("  local  192.168.250.1/32\n  remote 0.0.0.0/0"),
+            None
+        );
     }
 
     #[test]

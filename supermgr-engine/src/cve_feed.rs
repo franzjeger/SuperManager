@@ -37,7 +37,7 @@ use crate::vuln::Severity;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedEntry {
     pub id: String,
-    pub product_keywords: Vec<String>,  // case-insensitive substrings
+    pub product_keywords: Vec<String>, // case-insensitive substrings
     pub version_substrings: Vec<String>,
     pub severity: Severity,
     pub cvss: f32,
@@ -64,7 +64,7 @@ fn cache_path() -> PathBuf {
     p
 }
 
-#[must_use] 
+#[must_use]
 pub fn load() -> FeedCache {
     let path = cache_path();
     if !path.exists() {
@@ -136,7 +136,10 @@ pub async fn refresh() -> Result<u32> {
     }
     cache.last_fetched_at = Some(Utc::now());
     save(&cache)?;
-    info!("cve_feed: refreshed, +{added} new, {} total", cache.entries.len());
+    info!(
+        "cve_feed: refreshed, +{added} new, {} total",
+        cache.entries.len()
+    );
     Ok(added)
 }
 
@@ -194,7 +197,13 @@ fn parse_vuln(item: &serde_json::Value) -> Option<FeedEntry> {
         return None;
     }
 
-    let short_title = desc.lines().next().unwrap_or(&desc).chars().take(120).collect::<String>();
+    let short_title = desc
+        .lines()
+        .next()
+        .unwrap_or(&desc)
+        .chars()
+        .take(120)
+        .collect::<String>();
     let title = format!("{id}: {short_title}");
 
     // Build a richer recommendation than the previous generic
@@ -234,8 +243,11 @@ fn pick_cvss(metrics: &serde_json::Value) -> Option<(Severity, f32)> {
     for key in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"] {
         if let Some(arr) = metrics.get(key).and_then(|v| v.as_array()) {
             if let Some(first) = arr.first() {
-                let cvss = first.get("cvssData").and_then(|d| d.get("baseScore"))
-                    .and_then(serde_json::Value::as_f64).unwrap_or(5.0) as f32;
+                let cvss = first
+                    .get("cvssData")
+                    .and_then(|d| d.get("baseScore"))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(5.0) as f32;
                 let sev = match cvss {
                     s if s >= 9.0 => Severity::Critical,
                     s if s >= 7.0 => Severity::High,
@@ -253,7 +265,7 @@ fn pick_cvss(metrics: &serde_json::Value) -> Option<(Severity, f32)> {
 /// Match a banner string against feed entries. Returns finding
 /// metadata for hits — caller assembles the actual `Finding`
 /// because it has the `host_ip` + port context.
-#[must_use] 
+#[must_use]
 pub fn match_banner(banner: &str) -> Vec<&'static FeedEntry> {
     // Lazy static-feeling pattern: re-load on each match call —
     // simple, and findings_store is already disk-bound so the
@@ -364,16 +376,26 @@ fn version_token_in(haystack: &str, version: &str) -> bool {
 fn is_too_generic_keyword(k: &str) -> bool {
     matches!(
         k.to_lowercase().as_str(),
-        "web server" | "http server" | "ftp server" | "ftp"
-        | "mail server" | "imap server" | "pop server"
-        | "news server" | "dns server" | "smtp server"
-        | "telnet server" | "telnetd" | "rpc" | "rpcbind"
+        "web server"
+            | "http server"
+            | "ftp server"
+            | "ftp"
+            | "mail server"
+            | "imap server"
+            | "pop server"
+            | "news server"
+            | "dns server"
+            | "smtp server"
+            | "telnet server"
+            | "telnetd"
+            | "rpc"
+            | "rpcbind"
     )
 }
 
 /// Public matcher with explicit cache passed in (avoids leaking
 /// a 'static-cached singleton; matches one-Arc-per-scan pattern).
-#[must_use] 
+#[must_use]
 pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
     let lc = banner.to_lowercase();
     let mut hits: Vec<FeedEntry> = Vec::new();
@@ -453,9 +475,9 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
                     let end = pos + kw_lc.len();
                     let window_end = (end + 50).min(lc.len());
                     let window = &lc[end..window_end];
-                    e.version_substrings.iter().any(|v| {
-                        version_token_in(window, &v.to_lowercase())
-                    })
+                    e.version_substrings
+                        .iter()
+                        .any(|v| version_token_in(window, &v.to_lowercase()))
                 })
             })
         } else {
@@ -514,11 +536,7 @@ mod tests {
     // Legitimate match: keyword + version are adjacent in the banner.
     #[test]
     fn proximity_allows_adjacent_keyword_and_version() {
-        let cache = cache_with(vec![entry(
-            "CVE-2099-9999",
-            &["freebsd"],
-            &["13.2"],
-        )]);
+        let cache = cache_with(vec![entry("CVE-2099-9999", &["freebsd"], &["13.2"])]);
         // FreeBSD 13.2 — exact match, "freebsd" and "13.2" within 30 chars.
         let banner = "SSH-2.0-OpenSSH_9.6 FreeBSD-13.2-RELEASE";
         let hits = match_with_cache(banner, &cache);
@@ -534,11 +552,7 @@ mod tests {
         // but contains "2.4". For this test, use a banner that
         // matches both. Realistically the cve_feed parser would
         // already lowercase + de-underscore the product.
-        let cache = cache_with(vec![entry(
-            "CVE-2017-XXXX",
-            &["apache"],
-            &["2.4"],
-        )]);
+        let cache = cache_with(vec![entry("CVE-2017-XXXX", &["apache"], &["2.4"])]);
         let hits = match_with_cache(banner, &cache);
         assert_eq!(hits.len(), 1);
     }
@@ -546,11 +560,7 @@ mod tests {
     // CVE with no versions + only generic keyword: drop.
     #[test]
     fn generic_keyword_no_version_dropped() {
-        let cache = cache_with(vec![entry(
-            "CVE-1999-1301",
-            &["freebsd"],
-            &[],
-        )]);
+        let cache = cache_with(vec![entry("CVE-1999-1301", &["freebsd"], &[])]);
         let hits = match_with_cache("SSH-2.0-OpenSSH_10.2 FreeBSD-...", &cache);
         assert!(hits.is_empty());
     }
@@ -559,11 +569,7 @@ mod tests {
     #[test]
     fn legacy_unix_names_treated_generic() {
         for name in &["sunos", "irix", "aix", "hp-ux", "openserver"] {
-            let cache = cache_with(vec![entry(
-                "CVE-1999-X",
-                &[name],
-                &[],
-            )]);
+            let cache = cache_with(vec![entry("CVE-1999-X", &[name], &[])]);
             let hits = match_with_cache("Apache/2.4 (Linux)", &cache);
             assert!(hits.is_empty(), "{name} should be treated as generic");
         }
@@ -632,14 +638,14 @@ mod tests {
     // preserves the Apache-2.4-CVE-matches-2.4.x semantic.
     #[test]
     fn specific_keyword_still_matches_2_4_in_2_4_6() {
-        let cache = cache_with(vec![entry(
-            "CVE-2017-XXXX",
-            &["apache"],
-            &["2.4"],
-        )]);
+        let cache = cache_with(vec![entry("CVE-2017-XXXX", &["apache"], &["2.4"])]);
         let banner = "Apache/2.4.6 (Linux)";
         let hits = match_with_cache(banner, &cache);
-        assert_eq!(hits.len(), 1, "specific keyword should keep prefix-match behaviour");
+        assert_eq!(
+            hits.len(),
+            1,
+            "specific keyword should keep prefix-match behaviour"
+        );
     }
 
     // ─── too-generic-keyword tier ──────────────────────────────────
@@ -650,11 +656,7 @@ mod tests {
     // the too-generic tier rejects this.
     #[test]
     fn too_generic_keyword_dropped_regardless_of_version() {
-        let cache = cache_with(vec![entry(
-            "CVE-1999-0175",
-            &["web server"],
-            &["1.0"],
-        )]);
+        let cache = cache_with(vec![entry("CVE-1999-0175", &["web server"], &["1.0"])]);
         let banner = "ioLogik Web Server/1.0";
         let hits = match_with_cache(banner, &cache);
         assert!(
@@ -666,15 +668,18 @@ mod tests {
     #[test]
     fn too_generic_keyword_drops_ftp_and_friends() {
         for kw in &[
-            "web server", "http server", "ftp server", "ftp",
-            "mail server", "imap server", "pop server",
-            "news server", "dns server", "smtp server",
+            "web server",
+            "http server",
+            "ftp server",
+            "ftp",
+            "mail server",
+            "imap server",
+            "pop server",
+            "news server",
+            "dns server",
+            "smtp server",
         ] {
-            let cache = cache_with(vec![entry(
-                "CVE-1999-X",
-                &[kw],
-                &["1.0"],
-            )]);
+            let cache = cache_with(vec![entry("CVE-1999-X", &[kw], &["1.0"])]);
             let banner = format!("Some {kw}/1.0");
             let hits = match_with_cache(&banner, &cache);
             assert!(hits.is_empty(), "{kw} should be dropped");

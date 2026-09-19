@@ -40,7 +40,7 @@ pub struct ToolInfo {
 
 struct Spec {
     name: &'static str,
-    args: &'static [&'static str],     // version probe
+    args: &'static [&'static str], // version probe
     purpose: &'static str,
     brew: Option<&'static str>,
     source: &'static str,
@@ -160,13 +160,19 @@ async fn probe_one(spec: &'static Spec) -> ToolInfo {
     //    install pandoc" forever. Step 2 below covers that.
     let path_result = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::process::Command::new("which").arg(spec.name).output(),
+        tokio::process::Command::new("which")
+            .arg(spec.name)
+            .output(),
     )
     .await;
     let mut path: Option<String> = match path_result {
         Ok(Ok(out)) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         }
         _ => None,
     };
@@ -176,11 +182,11 @@ async fn probe_one(spec: &'static Spec) -> ToolInfo {
     //    wins.
     if path.is_none() {
         const FALLBACK_PREFIXES: &[&str] = &[
-            "/opt/homebrew/bin",     // Apple Silicon brew (default)
-            "/opt/homebrew/sbin",    // Apple Silicon brew (sbin variants)
-            "/usr/local/bin",        // Intel brew (default)
-            "/usr/local/sbin",       // Intel brew (sbin variants)
-            "/opt/local/bin",        // MacPorts
+            "/opt/homebrew/bin",  // Apple Silicon brew (default)
+            "/opt/homebrew/sbin", // Apple Silicon brew (sbin variants)
+            "/usr/local/bin",     // Intel brew (default)
+            "/usr/local/sbin",    // Intel brew (sbin variants)
+            "/opt/local/bin",     // MacPorts
         ];
         for prefix in FALLBACK_PREFIXES {
             let candidate = format!("{prefix}/{}", spec.name);

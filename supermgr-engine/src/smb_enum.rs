@@ -33,7 +33,7 @@ pub struct SmbInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmbShare {
     pub name: String,
-    pub kind: String,    // "Disk", "IPC", "Printer", etc.
+    pub kind: String, // "Disk", "IPC", "Printer", etc.
     pub comment: String,
 }
 
@@ -125,7 +125,10 @@ async fn smbclient_list(host: &str) -> Option<Vec<SmbShare>> {
                 shares.push(SmbShare {
                     name: parts[1].trim().to_owned(),
                     kind: kind.to_owned(),
-                    comment: parts.get(2).map(|s| s.trim().to_owned()).unwrap_or_default(),
+                    comment: parts
+                        .get(2)
+                        .map(|s| s.trim().to_owned())
+                        .unwrap_or_default(),
                 });
             }
         }
@@ -172,10 +175,7 @@ async fn nmblookup(host: &str) -> (Option<String>, Option<String>, Option<String
         if !trim.contains('<') || !trim.contains('>') {
             continue;
         }
-        let name_part: String = trim
-            .chars()
-            .take_while(|c| !c.is_whitespace())
-            .collect();
+        let name_part: String = trim.chars().take_while(|c| !c.is_whitespace()).collect();
         if trim.contains("<00>") && trim.contains("<GROUP>") {
             workgroup = Some(name_part);
         } else if trim.contains("<00>") && netbios_name.is_none() {

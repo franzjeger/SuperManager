@@ -25,7 +25,9 @@ pub(super) fn render_management(
         let card = design::card("This machine");
         if let Some(profile) = &prefs.profile_id {
             let diagnose = button("DNS diagnostics");
-            let profile = profile.clone(); let window = view.window.clone(); let rt = view.rt.clone();
+            let profile = profile.clone();
+            let window = view.window.clone();
+            let rt = view.rt.clone();
             diagnose.connect_clicked(move |_| super::diagnostics::show(&window, &rt, &profile));
             card.set_header_suffix(Some(&diagnose));
         }
@@ -77,7 +79,9 @@ pub(super) fn render_management(
         let card = design::card("Accounts");
         let add = button("Add account…");
         let previous = active.map(|p| p.id.clone()).unwrap_or_default();
-        let window = view.window.clone(); let rt = view.rt.clone(); let tx = view.tx.clone();
+        let window = view.window.clone();
+        let rt = view.rt.clone();
+        let tx = view.tx.clone();
         add.connect_clicked(move |_| super::accounts::show(&window, &rt, &tx, &previous));
         card.set_header_suffix(Some(&add));
         let labels = data
@@ -125,10 +129,16 @@ pub(super) fn render_management(
         card.add(&picker);
         if let Some(active) = active {
             let logout = button("Log out…");
-            let menu = gtk4::MenuButton::builder().icon_name("view-more-symbolic")
-                .tooltip_text("Account actions").valign(gtk4::Align::Center).css_classes(["flat"]).build();
-            let popover = gtk4::Popover::new(); popover.set_child(Some(&logout));
-            menu.set_popover(Some(&popover)); picker.add_suffix(&menu);
+            let menu = gtk4::MenuButton::builder()
+                .icon_name("view-more-symbolic")
+                .tooltip_text("Account actions")
+                .valign(gtk4::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let popover = gtk4::Popover::new();
+            popover.set_child(Some(&logout));
+            menu.set_popover(Some(&popover));
+            picker.add_suffix(&menu);
             logout.connect_clicked(move |_| popover.popdown());
             let id = active.id.clone();
             let window = view.window.clone();

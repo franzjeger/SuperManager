@@ -94,11 +94,9 @@ pub async fn check() -> anyhow::Result<Option<UpdateInfo>> {
         .and_then(|a| a.as_array())
         .context("release has no assets")?;
     let find = |pred: &dyn Fn(&str) -> bool| {
-        assets.iter().find(|a| {
-            a.get("name")
-                .and_then(|n| n.as_str())
-                .is_some_and(pred)
-        })
+        assets
+            .iter()
+            .find(|a| a.get("name").and_then(|n| n.as_str()).is_some_and(pred))
     };
     // Setup bundle first: it chain-installs the WireGuardNT + OpenVPN
     // driver prerequisites. Bare MSI as fallback for releases that only
@@ -127,7 +125,13 @@ pub async fn check() -> anyhow::Result<Option<UpdateInfo>> {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
 
-    Ok(Some(UpdateInfo { version: latest, name, url, sha256_url, size }))
+    Ok(Some(UpdateInfo {
+        version: latest,
+        name,
+        url,
+        sha256_url,
+        size,
+    }))
 }
 
 /// Download the installer to `%TEMP%`, verify its SHA-256 against the
@@ -203,7 +207,10 @@ pub fn launch(path: &std::path::Path) -> anyhow::Result<()> {
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
     let spawned = if is_msi {
-        std::process::Command::new("msiexec").arg("/i").arg(path).spawn()
+        std::process::Command::new("msiexec")
+            .arg("/i")
+            .arg(path)
+            .spawn()
     } else {
         std::process::Command::new(path).spawn()
     };

@@ -26,22 +26,22 @@
 #![deny(missing_docs)]
 
 mod audit;
-mod polkit;
-mod recon;
-mod vpn;
-mod ssh;
-mod daemon;
-mod secrets;
-mod secure_file;
 mod backup_retention;
+mod daemon;
 mod docs;
 mod opnsense;
+mod polkit;
+mod recon;
+mod secrets;
+mod secure_file;
 mod sophos;
+mod ssh;
 mod tailscale;
-mod tailscale_management;
 mod tailscale_accounts;
 mod tailscale_diagnostics;
 mod tailscale_exit;
+mod tailscale_management;
+mod vpn;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -66,8 +66,9 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 1. Logging — fmt layer (stdout) + file layer + ring-buffer layer
     // -----------------------------------------------------------------------
-    let log_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> =
-        Arc::new(std::sync::Mutex::new(std::collections::VecDeque::with_capacity(500)));
+    let log_buffer: Arc<std::sync::Mutex<std::collections::VecDeque<String>>> = Arc::new(
+        std::sync::Mutex::new(std::collections::VecDeque::with_capacity(500)),
+    );
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let (filter, filter_reload_handle) = reload::Layer::new(filter);
@@ -89,7 +90,10 @@ async fn main() -> anyhow::Result<()> {
     let file_layer = match setup_file_layer(&log_dir, &log_path) {
         Ok(layer) => Some(layer),
         Err(e) => {
-            eprintln!("warning: could not set up log file at {}: {e}", log_path.display());
+            eprintln!(
+                "warning: could not set up log file at {}: {e}",
+                log_path.display()
+            );
             None
         }
     };
@@ -98,7 +102,10 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt::layer())
         .with(filter)
         .with(file_layer)
-        .with(RingLayer { buf: Arc::clone(&log_buffer), cap: 500 })
+        .with(RingLayer {
+            buf: Arc::clone(&log_buffer),
+            cap: 500,
+        })
         .init();
 
     // Wrap the reload handle in a closure so DaemonService doesn't need the full generic type.
@@ -108,14 +115,13 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(move |level: &str| {
             let new_filter = EnvFilter::try_new(level)
                 .map_err(|e| format!("invalid log level '{level}': {e}"))?;
-            handle.reload(new_filter).map_err(|e| format!("reload failed: {e}"))
+            handle
+                .reload(new_filter)
+                .map_err(|e| format!("reload failed: {e}"))
         })
     };
 
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        "supermgrd starting"
-    );
+    info!(version = env!("CARGO_PKG_VERSION"), "supermgrd starting");
 
     // -----------------------------------------------------------------------
     // 2. Profile store
@@ -134,8 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 let base = std::env::var("XDG_DATA_HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| {
-                        let home = std::env::var("HOME")
-                            .unwrap_or_else(|_| "/tmp".to_owned());
+                        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                         PathBuf::from(home).join(".local/share")
                     });
                 base.join("supermgrd/profiles")
@@ -144,8 +149,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("profile directory: {}", profile_dir.display());
 
-    let mut daemon_state = DaemonState::new(profile_dir)
-        .context("failed to initialise daemon state")?;
+    let mut daemon_state =
+        DaemonState::new(profile_dir).context("failed to initialise daemon state")?;
     daemon_state
         .load_profiles()
         .context("failed to load profiles")?;
@@ -160,11 +165,18 @@ async fn main() -> anyhow::Result<()> {
     // -----------------------------------------------------------------------
     // 2b. SSH data (keys and hosts)
     // -----------------------------------------------------------------------
-    daemon_state.load_ssh_keys().context("failed to load SSH keys")?;
-    daemon_state.load_hosts().context("failed to load SSH hosts")?;
+    daemon_state
+        .load_ssh_keys()
+        .context("failed to load SSH keys")?;
+    daemon_state
+        .load_hosts()
+        .context("failed to load SSH hosts")?;
     let ssh_key_count = daemon_state.ssh_keys.len();
     let ssh_host_count = daemon_state.hosts.len();
-    info!("loaded {} SSH key(s), {} SSH host(s)", ssh_key_count, ssh_host_count);
+    info!(
+        "loaded {} SSH key(s), {} SSH host(s)",
+        ssh_key_count, ssh_host_count
+    );
 
     // Report credentials whose owning profile/host/key is gone. Deletes
     // before this release removed the record only, so an install of any age
@@ -222,7 +234,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context(format!("failed to acquire D-Bus name '{DBUS_SERVICE}'"))?;
 
-    info!("D-Bus service '{}' registered at '{}'", DBUS_SERVICE, DBUS_OBJECT_PATH);
+    info!(
+        "D-Bus service '{}' registered at '{}'",
+        DBUS_SERVICE, DBUS_OBJECT_PATH
+    );
 
     // -----------------------------------------------------------------------
     // 6. Background monitoring task
@@ -377,7 +392,11 @@ async fn cleanup_stale_interfaces() {
         return;
     }
 
-    info!("{} stale WireGuard interface(s) found: {}", stale.len(), stale.join(", "));
+    info!(
+        "{} stale WireGuard interface(s) found: {}",
+        stale.len(),
+        stale.join(", ")
+    );
 
     for iface in &stale {
         // ---- Step 1: revert systemd-resolved DNS state ---------------------
@@ -451,7 +470,9 @@ fn is_our_wg_interface(name: &str) -> bool {
     bytes.len() == 10
         && bytes[0] == b'w'
         && bytes[1] == b'g'
-        && bytes[2..].iter().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        && bytes[2..]
+            .iter()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
 /// After deleting stale interfaces, verify that an IPv4 default route still
@@ -479,7 +500,10 @@ async fn check_default_route_after_cleanup() {
                      the route via DHCP."
                 );
             } else {
-                info!("default IPv4 route present: {}", stdout.lines().next().unwrap_or("").trim());
+                info!(
+                    "default IPv4 route present: {}",
+                    stdout.lines().next().unwrap_or("").trim()
+                );
             }
         }
         Err(e) => warn!("could not check default route after cleanup: {e}"),
@@ -512,7 +536,9 @@ fn rotate_log_file(log_path: &std::path::Path) {
 fn setup_file_layer<S>(
     log_dir: &std::path::Path,
     log_path: &std::path::Path,
-) -> anyhow::Result<fmt::Layer<S, fmt::format::DefaultFields, fmt::format::Format, std::sync::Arc<std::fs::File>>>
+) -> anyhow::Result<
+    fmt::Layer<S, fmt::format::DefaultFields, fmt::format::Format, std::sync::Arc<std::fs::File>>,
+>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
@@ -534,9 +560,7 @@ where
 
     let file = std::sync::Arc::new(file);
 
-    Ok(fmt::layer()
-        .with_writer(file)
-        .with_ansi(false))
+    Ok(fmt::layer().with_writer(file).with_ansi(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -582,7 +606,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
             }
         }
 
-        let mut v = Visitor { message: String::new(), extras: Vec::new() };
+        let mut v = Visitor {
+            message: String::new(),
+            extras: Vec::new(),
+        };
         event.record(&mut v);
 
         let meta = event.metadata();

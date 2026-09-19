@@ -110,8 +110,9 @@ pub async fn spawn_watchdog(
     let state = STATE
         .get_or_init(|| async {
             let map = match fs::read_to_string(STATE_PATH) {
-                Ok(s) => serde_json::from_str::<HashMap<String, WatchedProfile>>(&s)
-                    .unwrap_or_default(),
+                Ok(s) => {
+                    serde_json::from_str::<HashMap<String, WatchedProfile>>(&s).unwrap_or_default()
+                }
                 Err(_) => HashMap::new(),
             };
             Arc::new(Mutex::new(State { watched: map }))
@@ -135,11 +136,7 @@ pub async fn spawn_watchdog(
     Ok(())
 }
 
-pub async fn enable(
-    profile_id: String,
-    backend: String,
-    args: serde_json::Value,
-) -> Result<()> {
+pub async fn enable(profile_id: String, backend: String, args: serde_json::Value) -> Result<()> {
     let state = STATE.get().context("watchdog not initialised")?.clone();
     let mut g = state.lock().await;
     g.watched.insert(
@@ -166,14 +163,18 @@ pub async fn disable(profile_id: &str) -> Result<()> {
 }
 
 pub async fn list_watched() -> Vec<String> {
-    let Some(state) = STATE.get() else { return Vec::new() };
+    let Some(state) = STATE.get() else {
+        return Vec::new();
+    };
     state.lock().await.watched.keys().cloned().collect()
 }
 
 /// Watched profiles whose stored args cannot be replayed — enrolled but not
 /// yet armed. See `WatchedProfile::is_armed`.
 pub async fn list_unarmed() -> Vec<String> {
-    let Some(state) = STATE.get() else { return Vec::new() };
+    let Some(state) = STATE.get() else {
+        return Vec::new();
+    };
     state
         .lock()
         .await
@@ -192,7 +193,9 @@ pub async fn refresh_args(
     backend: String,
     args: serde_json::Value,
 ) -> Result<()> {
-    let Some(state) = STATE.get() else { return Ok(()) };
+    let Some(state) = STATE.get() else {
+        return Ok(());
+    };
     let mut g = state.lock().await;
     // Preserve the existing watch mode — this only refreshes credentials for a
     // profile that's already watched, and must not silently downgrade an
@@ -246,7 +249,9 @@ pub async fn guard_routes(
 /// entry intact — that's the user's standing intent, not something a single
 /// disconnect revokes (matching the pre-existing Always-on contract).
 pub async fn unguard_routes(profile_id: &str) -> Result<()> {
-    let Some(state) = STATE.get() else { return Ok(()) };
+    let Some(state) = STATE.get() else {
+        return Ok(());
+    };
     let mut g = state.lock().await;
     if matches!(
         g.watched.get(profile_id).map(|w| w.mode),
@@ -385,8 +390,7 @@ async fn wg_connected(p: &WatchedProfile, wg: Arc<Mutex<WireGuard>>) -> bool {
 
 async fn replay_wg(p: &WatchedProfile, wg: Arc<Mutex<WireGuard>>) -> Result<()> {
     let args: crate::wireguard::WgConnectArgs =
-        serde_json::from_value(p.last_connect_args.clone())
-            .context("decode wg args")?;
+        serde_json::from_value(p.last_connect_args.clone()).context("decode wg args")?;
     let mut g = wg.lock().await;
     g.connect(&args).await.map(|_| ())
 }
@@ -404,8 +408,7 @@ async fn ov_connected(p: &WatchedProfile, ov: Arc<Mutex<OpenVpn>>) -> bool {
 
 async fn replay_ov(p: &WatchedProfile, ov: Arc<Mutex<OpenVpn>>) -> Result<()> {
     let args: crate::openvpn::OvpnConnectArgs =
-        serde_json::from_value(p.last_connect_args.clone())
-            .context("decode ovpn args")?;
+        serde_json::from_value(p.last_connect_args.clone()).context("decode ovpn args")?;
     let mut g = ov.lock().await;
     g.connect(&args).await.map(|_| ())
 }
@@ -427,11 +430,10 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
     // "connected". Treat that as not-connected so the watchdog replays the
     // connect and re-installs the routes. Split-tunnel profiles install no
     // 0/1, so only apply this when the profile asked for a full tunnel.
-    let full_tunnel = serde_json::from_value::<crate::strongswan::ConnectArgs>(
-        p.last_connect_args.clone(),
-    )
-    .map(|a| a.full_tunnel)
-    .unwrap_or(false);
+    let full_tunnel =
+        serde_json::from_value::<crate::strongswan::ConnectArgs>(p.last_connect_args.clone())
+            .map(|a| a.full_tunnel)
+            .unwrap_or(false);
     if full_tunnel && !crate::strongswan::full_tunnel_routes_present() {
         tracing::warn!(
             profile = %p.profile_id,
@@ -457,8 +459,7 @@ async fn sw_sa_established(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bo
 
 async fn replay_sw(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> Result<()> {
     let args: crate::strongswan::ConnectArgs =
-        serde_json::from_value(p.last_connect_args.clone())
-            .context("decode ikev2 args")?;
+        serde_json::from_value(p.last_connect_args.clone()).context("decode ikev2 args")?;
     let mut g = sw.lock().await;
     g.connect(&args).await.map(|_| ())
 }

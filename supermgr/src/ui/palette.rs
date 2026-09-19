@@ -76,8 +76,7 @@ impl Rgb {
     /// scheme dark", so this agrees with the rest of the desktop.
     #[must_use]
     pub fn luma(self) -> f64 {
-        (0.299 * f64::from(self.r) + 0.587 * f64::from(self.g) + 0.114 * f64::from(self.b))
-            / 255.0
+        (0.299 * f64::from(self.r) + 0.587 * f64::from(self.g) + 0.114 * f64::from(self.b)) / 255.0
     }
 }
 
@@ -242,8 +241,11 @@ pub fn parse(ini: &str) -> Option<Palette> {
         .and_then(|g| g.get("AccentColor"))
         .and_then(|v| Rgb::parse(v))
         .or_else(|| get("Colors:Selection", "BackgroundNormal"))?;
-    let accent_fg = get("Colors:Selection", "ForegroundNormal")
-        .unwrap_or(Rgb { r: 255, g: 255, b: 255 });
+    let accent_fg = get("Colors:Selection", "ForegroundNormal").unwrap_or(Rgb {
+        r: 255,
+        g: 255,
+        b: 255,
+    });
 
     Some(Palette {
         window_bg,
@@ -254,12 +256,21 @@ pub fn parse(ini: &str) -> Option<Palette> {
         header_fg,
         accent_bg,
         accent_fg,
-        negative: get("Colors:Window", "ForegroundNegative")
-            .unwrap_or(Rgb { r: 218, g: 68, b: 83 }),
-        neutral: get("Colors:Window", "ForegroundNeutral")
-            .unwrap_or(Rgb { r: 246, g: 116, b: 0 }),
-        positive: get("Colors:Window", "ForegroundPositive")
-            .unwrap_or(Rgb { r: 39, g: 174, b: 96 }),
+        negative: get("Colors:Window", "ForegroundNegative").unwrap_or(Rgb {
+            r: 218,
+            g: 68,
+            b: 83,
+        }),
+        neutral: get("Colors:Window", "ForegroundNeutral").unwrap_or(Rgb {
+            r: 246,
+            g: 116,
+            b: 0,
+        }),
+        positive: get("Colors:Window", "ForegroundPositive").unwrap_or(Rgb {
+            r: 39,
+            g: 174,
+            b: 96,
+        }),
     })
 }
 
@@ -506,11 +517,46 @@ ForegroundNormal=255,255,255
     #[test]
     fn a_breeze_dark_scheme_is_read_whole() {
         let p = parse(BREEZE_DARK).expect("a palette");
-        assert_eq!(p.window_bg, Rgb { r: 49, g: 54, b: 59 });
-        assert_eq!(p.view_bg, Rgb { r: 27, g: 30, b: 32 });
-        assert_eq!(p.header_bg, Rgb { r: 42, g: 46, b: 50 });
-        assert_eq!(p.accent_bg, Rgb { r: 61, g: 174, b: 233 });
-        assert_eq!(p.negative, Rgb { r: 218, g: 68, b: 83 });
+        assert_eq!(
+            p.window_bg,
+            Rgb {
+                r: 49,
+                g: 54,
+                b: 59
+            }
+        );
+        assert_eq!(
+            p.view_bg,
+            Rgb {
+                r: 27,
+                g: 30,
+                b: 32
+            }
+        );
+        assert_eq!(
+            p.header_bg,
+            Rgb {
+                r: 42,
+                g: 46,
+                b: 50
+            }
+        );
+        assert_eq!(
+            p.accent_bg,
+            Rgb {
+                r: 61,
+                g: 174,
+                b: 233
+            }
+        );
+        assert_eq!(
+            p.negative,
+            Rgb {
+                r: 218,
+                g: 68,
+                b: 83
+            }
+        );
         assert!(p.is_dark());
     }
 
@@ -555,7 +601,14 @@ BackgroundNormal=5,5,5
         // `Colors:Selection` still holds Breeze's blue while `AccentColor`
         // holds what the user actually picked.
         let ini = format!("{BREEZE_DARK}\n[General]\nAccentColor=255,0,128\n");
-        assert_eq!(parse(&ini).expect("a palette").accent_bg, Rgb { r: 255, g: 0, b: 128 });
+        assert_eq!(
+            parse(&ini).expect("a palette").accent_bg,
+            Rgb {
+                r: 255,
+                g: 0,
+                b: 128
+            }
+        );
     }
 
     #[test]
@@ -570,10 +623,31 @@ BackgroundNormal=5,5,5
 
     #[test]
     fn a_malformed_colour_is_not_guessed_at() {
-        assert_eq!(Rgb::parse("61,174,233"), Some(Rgb { r: 61, g: 174, b: 233 }));
+        assert_eq!(
+            Rgb::parse("61,174,233"),
+            Some(Rgb {
+                r: 61,
+                g: 174,
+                b: 233
+            })
+        );
         // Alpha is carried by some schemes and is not a fourth channel we use.
-        assert_eq!(Rgb::parse("61,174,233,255"), Some(Rgb { r: 61, g: 174, b: 233 }));
-        for bad in ["", "61,174", "61,174,300", "#3daee9", "61,174,233,255,1", "a,b,c"] {
+        assert_eq!(
+            Rgb::parse("61,174,233,255"),
+            Some(Rgb {
+                r: 61,
+                g: 174,
+                b: 233
+            })
+        );
+        for bad in [
+            "",
+            "61,174",
+            "61,174,300",
+            "#3daee9",
+            "61,174,233,255,1",
+            "a,b,c",
+        ] {
             assert_eq!(Rgb::parse(bad), None, "{bad:?} was accepted");
         }
     }
@@ -654,8 +728,14 @@ BackgroundNormal=5,5,5
         // pills would be the one part of the window that still looked like
         // GNOME.
         let css = parse(BREEZE_DARK).expect("a palette").to_css();
-        assert!(css.contains("@define-color success_color #27ae60;"), "{css}");
-        assert!(css.contains("@define-color warning_color #f67400;"), "{css}");
+        assert!(
+            css.contains("@define-color success_color #27ae60;"),
+            "{css}"
+        );
+        assert!(
+            css.contains("@define-color warning_color #f67400;"),
+            "{css}"
+        );
         assert!(css.contains("@define-color error_color #da4453;"), "{css}");
         assert!(css.contains("@define-color accent_color #3daee9;"), "{css}");
     }
@@ -705,16 +785,37 @@ BackgroundNormal=5,5,5
         // user who picked their own accent Breeze's blue instead of it.
         let from_scheme = parse(BREEZE_DARK).expect("a palette");
         let merged = apply_accent_override(from_scheme, "[General]\nAccentColor=201,63,152\n");
-        assert_eq!(merged.accent_bg, Rgb { r: 201, g: 63, b: 152 });
+        assert_eq!(
+            merged.accent_bg,
+            Rgb {
+                r: 201,
+                g: 63,
+                b: 152
+            }
+        );
         // Everything else still comes from the scheme.
-        assert_eq!(merged.window_bg, Rgb { r: 49, g: 54, b: 59 });
+        assert_eq!(
+            merged.window_bg,
+            Rgb {
+                r: 49,
+                g: 54,
+                b: 59
+            }
+        );
     }
 
     #[test]
     fn a_kdeglobals_with_no_accent_leaves_the_schemes_own() {
         let from_scheme = parse(BREEZE_DARK).expect("a palette");
         let merged = apply_accent_override(from_scheme, "[General]\nColorScheme=Breeze Dark\n");
-        assert_eq!(merged.accent_bg, Rgb { r: 61, g: 174, b: 233 });
+        assert_eq!(
+            merged.accent_bg,
+            Rgb {
+                r: 61,
+                g: 174,
+                b: 233
+            }
+        );
     }
 
     #[test]

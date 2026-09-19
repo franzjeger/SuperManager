@@ -77,7 +77,8 @@ impl fmt::Display for AuditEntry {
             // lines with `ISO8601DateFormatter`, which rejects
             // fractional seconds unless explicitly configured for
             // them. Sub-second resolution buys an audit log nothing.
-            self.timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            self.timestamp
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             action,
             self.key_name,
             self.key_fingerprint,
@@ -99,7 +100,11 @@ mod tests {
             action,
             key_name: "my-key".to_owned(),
             key_fingerprint: "SHA256:abc".to_owned(),
-            host_label: if host.is_empty() { String::new() } else { "webserver".to_owned() },
+            host_label: if host.is_empty() {
+                String::new()
+            } else {
+                "webserver".to_owned()
+            },
             hostname: host.to_owned(),
             port,
             success,
@@ -115,7 +120,10 @@ mod tests {
         let line = entry(AuditAction::Push, "10.0.0.1", 22, true).to_string();
         let ts = line.split(" | ").next().unwrap();
         assert_eq!(ts, "2026-03-28T14:30:00Z");
-        assert!(!ts.contains('.'), "fractional seconds break the reader: {ts}");
+        assert!(
+            !ts.contains('.'),
+            "fractional seconds break the reader: {ts}"
+        );
     }
 
     #[test]

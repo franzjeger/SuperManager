@@ -31,8 +31,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use supermgr_core::keyring::SecretStore;
 use supermgr_core::host::Host;
+use supermgr_core::keyring::SecretStore;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -99,8 +99,7 @@ pub async fn api_request(
         .retrieve(&token_label)
         .await
         .context("retrieve API token from keychain")?;
-    let token = String::from_utf8(token_bytes.to_vec())
-        .context("API token is not valid UTF-8")?;
+    let token = String::from_utf8(token_bytes.to_vec()).context("API token is not valid UTF-8")?;
     let token = token.trim().to_owned();
 
     let url = format!("https://{hostname}:{api_port}{path}");
@@ -143,10 +142,7 @@ pub async fn api_request(
     })?;
 
     let status = resp.status().as_u16();
-    let body_text = resp
-        .text()
-        .await
-        .context("read response body")?;
+    let body_text = resp.text().await.context("read response body")?;
     Ok(ApiResponse {
         status,
         body: body_text,
@@ -199,10 +195,7 @@ pub async fn generate_token(
             .retrieve(&pw_ref.0)
             .await
             .context("retrieve admin password")?;
-        Some(
-            String::from_utf8(bytes.to_vec())
-                .context("admin password is not valid UTF-8")?,
-        )
+        Some(String::from_utf8(bytes.to_vec()).context("admin password is not valid UTF-8")?)
     } else {
         None
     };
@@ -228,7 +221,9 @@ pub async fn generate_token(
     let output = {
         let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         session
-            .shell_interact(&line_refs, /* delay_ms */ 0, /* timeout_secs */ 30)
+            .shell_interact(
+                &line_refs, /* delay_ms */ 0, /* timeout_secs */ 30,
+            )
             .await
             .context("FortiGate interactive shell failed")?
     };
@@ -251,14 +246,15 @@ pub async fn generate_token(
             // Truncate the dumped output so a wall of FortiOS banner
             // doesn't drown the actual error reason.
             let preview = output.lines().take(20).collect::<Vec<_>>().join("\n");
-            anyhow!(
-                "could not parse new API key from FortiGate output. First 20 lines:\n{preview}"
-            )
+            anyhow!("could not parse new API key from FortiGate output. First 20 lines:\n{preview}")
         })?;
 
     // Persist under a deterministic label keyed by host id so multiple
     // hosts can have independent tokens without name collisions.
-    let label = format!("ssh/{host_id}/fortigate-api-token", host_id = host.id.simple());
+    let label = format!(
+        "ssh/{host_id}/fortigate-api-token",
+        host_id = host.id.simple()
+    );
     secrets
         .store(&label, token.as_bytes())
         .await
@@ -310,8 +306,7 @@ pub async fn get_token(
             .clone()
     };
     let bytes = secrets.retrieve(&label).await.context("retrieve token")?;
-    let s = String::from_utf8(bytes.to_vec())
-        .context("token is not valid UTF-8")?;
+    let s = String::from_utf8(bytes.to_vec()).context("token is not valid UTF-8")?;
     Ok(s.trim().to_owned())
 }
 
@@ -429,7 +424,7 @@ pub struct DashboardSnapshot {
 #[derive(Debug, serde::Serialize)]
 pub struct DashboardStatus {
     pub model: String,
-    pub version: String,    // e.g. "v7.4.3,build0123"
+    pub version: String, // e.g. "v7.4.3,build0123"
     pub hostname: String,
     pub serial: String,
     pub uptime_seconds: u64,
@@ -481,7 +476,14 @@ pub async fn get_dashboard(
     host_id: uuid::Uuid,
 ) -> Result<DashboardSnapshot> {
     let (status_r, resource_r, interfaces_r, vpn_r) = tokio::join!(
-        api_request(state, secrets, host_id, "GET", "/api/v2/monitor/system/status", ""),
+        api_request(
+            state,
+            secrets,
+            host_id,
+            "GET",
+            "/api/v2/monitor/system/status",
+            ""
+        ),
         api_request(
             state,
             secrets,
@@ -490,8 +492,22 @@ pub async fn get_dashboard(
             "/api/v2/monitor/system/resource/usage?scope=global",
             "",
         ),
-        api_request(state, secrets, host_id, "GET", "/api/v2/monitor/system/interface", ""),
-        api_request(state, secrets, host_id, "GET", "/api/v2/monitor/vpn/ipsec", ""),
+        api_request(
+            state,
+            secrets,
+            host_id,
+            "GET",
+            "/api/v2/monitor/system/interface",
+            ""
+        ),
+        api_request(
+            state,
+            secrets,
+            host_id,
+            "GET",
+            "/api/v2/monitor/vpn/ipsec",
+            ""
+        ),
     );
 
     let status = status_r.ok().and_then(|r| {
@@ -557,7 +573,10 @@ fn parse_status(body: &str) -> Option<DashboardStatus> {
         version: r.get("version")?.as_str().unwrap_or("unknown").to_owned(),
         hostname: r.get("hostname")?.as_str().unwrap_or("unknown").to_owned(),
         serial: r.get("serial")?.as_str().unwrap_or("unknown").to_owned(),
-        uptime_seconds: r.get("uptime").and_then(serde_json::Value::as_u64).unwrap_or(0),
+        uptime_seconds: r
+            .get("uptime")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
     })
 }
 

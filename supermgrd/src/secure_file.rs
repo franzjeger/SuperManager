@@ -229,7 +229,11 @@ mod tests {
         // As root any uid can be given the file; unprivileged, only our own.
         let dir = scratch();
         let me = nix::unistd::getuid().as_raw();
-        let target = if nix::unistd::getuid().is_root() { 12345 } else { me };
+        let target = if nix::unistd::getuid().is_root() {
+            12345
+        } else {
+            me
+        };
         let path = dir.path().join("key");
 
         write_private(&path, b"k", Some(target)).unwrap();
@@ -256,8 +260,12 @@ mod tests {
     #[ignore = "run scripts/test-ssh-credential-service.py as root with this test binary"]
     fn bounded_service_credential_handoff() {
         assert!(nix::unistd::getuid().is_root());
-        let path = std::path::PathBuf::from(std::env::var("SUPERMGR_TEST_CREDENTIAL_PATH").unwrap());
-        let uid: u32 = std::env::var("SUPERMGR_TEST_CALLER_UID").unwrap().parse().unwrap();
+        let path =
+            std::path::PathBuf::from(std::env::var("SUPERMGR_TEST_CREDENTIAL_PATH").unwrap());
+        let uid: u32 = std::env::var("SUPERMGR_TEST_CALLER_UID")
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_ne!(uid, 0);
         let result = create_private(&path, b"synthetic test key", Some(uid));
         if std::env::var("SUPERMGR_TEST_EXPECT_HANDOFF").unwrap() == "1" {
@@ -291,7 +299,12 @@ mod tests {
         for (name, mode) in [("private", 0o700), ("traversable", 0o711)] {
             let path = dir.path().join(name);
             ensure_private_dir(&path, mode).unwrap();
-            assert_eq!(mode_of(&path), mode, "{name} created at {:o}", mode_of(&path));
+            assert_eq!(
+                mode_of(&path),
+                mode,
+                "{name} created at {:o}",
+                mode_of(&path)
+            );
         }
     }
 

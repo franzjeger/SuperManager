@@ -131,10 +131,7 @@ async fn maybe_refresh_cve_feed() {
 
 /// Set or clear an engagement's schedule. Returns the updated
 /// engagement after save.
-pub fn set_schedule(
-    engagement_id: &str,
-    cadence: Option<Cadence>,
-) -> anyhow::Result<Engagement> {
+pub fn set_schedule(engagement_id: &str, cadence: Option<Cadence>) -> anyhow::Result<Engagement> {
     let mut e = engagement::load(engagement_id)?;
     e.schedule = cadence.map(|c| engagement::Schedule {
         cadence: c,

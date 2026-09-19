@@ -7,7 +7,11 @@ use crate::protocol::{self, Response};
 use crate::server::{get_uuid_param, EngineServer};
 
 impl EngineServer {
-    pub(crate) async fn handle_unifi_set_inform(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_unifi_set_inform(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let host_id = match get_uuid_param(&params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
@@ -43,23 +47,11 @@ impl EngineServer {
         };
         let username = match params.get("username").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing username".to_owned(),
-                )
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing username".to_owned()),
         };
         let password = match params.get("password").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing password".to_owned(),
-                )
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing password".to_owned()),
         };
         match crate::unifi::set_controller(
             &self.state,
@@ -167,8 +159,7 @@ impl EngineServer {
         params: serde_json::Value,
     ) -> Response {
         use crate::unifi_controllers::{
-            password_login, test_connection, PasswordLoginOutcome, UnifiAuthMethod,
-            UnifiController,
+            password_login, test_connection, PasswordLoginOutcome, UnifiAuthMethod, UnifiController,
         };
         use supermgr_core::vpn::profile::SecretRef;
 
@@ -226,7 +217,11 @@ impl EngineServer {
             let st = self.state.lock().await;
             if let Some(id) = supplied_id {
                 if let Some(existing) = st.unifi_controllers.get(&id) {
-                    (existing.id, existing.created_at, existing.creds_ref.0.clone())
+                    (
+                        existing.id,
+                        existing.created_at,
+                        existing.creds_ref.0.clone(),
+                    )
                 } else {
                     (id, now, format!("unifi/controller/{}", id.simple()))
                 }
@@ -270,16 +265,14 @@ impl EngineServer {
         // (sysinfo); password path may need to detour through
         // an MFA challenge that the GUI completes asynchronously.
         match auth_method {
-            UnifiAuthMethod::ApiKey => {
-                match test_connection(&self.secrets, &controller).await {
-                    Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
-                    Err(e) => Response::err(
-                        id,
-                        protocol::INTERNAL_ERROR,
-                        format!("controller test failed: {e:#}"),
-                    ),
-                }
-            }
+            UnifiAuthMethod::ApiKey => match test_connection(&self.secrets, &controller).await {
+                Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
+                Err(e) => Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("controller test failed: {e:#}"),
+                ),
+            },
             UnifiAuthMethod::Password => {
                 match password_login(&self.secrets, &controller).await {
                     Ok(PasswordLoginOutcome::Ok(_)) => {
@@ -294,16 +287,18 @@ impl EngineServer {
                             ),
                         }
                     }
-                    Ok(PasswordLoginOutcome::MfaRequired { client, authenticators }) => {
+                    Ok(PasswordLoginOutcome::MfaRequired {
+                        client,
+                        authenticators,
+                    }) => {
                         // Park the in-flight challenge so the
                         // GUI can complete it via send+complete.
-                        let challenge_id =
-                            crate::unifi_controllers::park_pending_save(
-                                controller,
-                                client,
-                                authenticators.clone(),
-                            )
-                            .await;
+                        let challenge_id = crate::unifi_controllers::park_pending_save(
+                            controller,
+                            client,
+                            authenticators.clone(),
+                        )
+                        .await;
                         Response::ok(
                             id,
                             serde_json::json!({
@@ -352,11 +347,7 @@ impl EngineServer {
                 )
             }
         };
-        match crate::unifi_controllers::send_mfa_email_for_challenge(
-            &challenge_id,
-            &auth_id,
-        )
-        .await
+        match crate::unifi_controllers::send_mfa_email_for_challenge(&challenge_id, &auth_id).await
         {
             Ok(()) => Response::ok(id, serde_json::json!({ "sent": true })),
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
@@ -383,16 +374,10 @@ impl EngineServer {
         };
         let code = match params.get("code").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing code".to_owned())
-            }
+            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing code".to_owned()),
         };
-        match crate::unifi_controllers::complete_pending_save(
-            &self.secrets,
-            &challenge_id,
-            &code,
-        )
-        .await
+        match crate::unifi_controllers::complete_pending_save(&self.secrets, &challenge_id, &code)
+            .await
         {
             Ok((controller, sysinfo)) => self.persist_verified(id, controller, sysinfo).await,
             Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
@@ -414,11 +399,7 @@ impl EngineServer {
             st.unifi_controllers
                 .insert(final_controller.id, final_controller.clone());
             if let Err(e) = st.save_unifi_controller(&final_controller) {
-                return Response::err(
-                    id,
-                    protocol::INTERNAL_ERROR,
-                    format!("persist: {e:#}"),
-                );
+                return Response::err(id, protocol::INTERNAL_ERROR, format!("persist: {e:#}"));
             }
         }
         Response::ok(
@@ -441,7 +422,9 @@ impl EngineServer {
         };
         let creds_label = {
             let st = self.state.lock().await;
-            st.unifi_controllers.get(&cid).map(|c| c.creds_ref.0.clone())
+            st.unifi_controllers
+                .get(&cid)
+                .map(|c| c.creds_ref.0.clone())
         };
         if let Some(label) = creds_label {
             let _ = self.secrets.delete(&label).await;
@@ -449,11 +432,7 @@ impl EngineServer {
         let mut st = self.state.lock().await;
         st.unifi_controllers.remove(&cid);
         if let Err(e) = st.delete_unifi_controller_file(cid) {
-            return Response::err(
-                id,
-                protocol::INTERNAL_ERROR,
-                format!("delete file: {e:#}"),
-            );
+            return Response::err(id, protocol::INTERNAL_ERROR, format!("delete file: {e:#}"));
         }
         Response::ok(id, serde_json::json!({ "deleted": true }))
     }
@@ -471,11 +450,13 @@ impl EngineServer {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
                 Some(c) => c,
-                None => return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "controller not found".to_owned(),
-                ),
+                None => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        "controller not found".to_owned(),
+                    )
+                }
             }
         };
         match crate::unifi_controllers::test_connection(&self.secrets, &controller).await {
@@ -506,11 +487,13 @@ impl EngineServer {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
                 Some(c) => c,
-                None => return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "controller not found".to_owned(),
-                ),
+                None => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        "controller not found".to_owned(),
+                    )
+                }
             }
         };
         match crate::unifi_controllers::list_devices(&self.secrets, &controller).await {
@@ -539,16 +522,21 @@ impl EngineServer {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing mac".to_owned()),
         };
-        let extra = params.get("extra").cloned().unwrap_or(serde_json::json!({}));
+        let extra = params
+            .get("extra")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let controller = {
             let st = self.state.lock().await;
             match st.unifi_controllers.get(&cid).cloned() {
                 Some(c) => c,
-                None => return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "controller not found".to_owned(),
-                ),
+                None => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        "controller not found".to_owned(),
+                    )
+                }
             }
         };
         match crate::unifi_controllers::devmgr_command(

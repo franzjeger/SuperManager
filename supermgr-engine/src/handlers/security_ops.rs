@@ -4,21 +4,35 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_remediation_script(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_remediation_script(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         // Two modes: single finding key, or batch by host_ip.
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned()),
         };
-        let host_filter = params.get("host").and_then(|v| v.as_str()).map(str::to_owned);
-        let key_filter = params.get("key").and_then(|v| v.as_str()).map(str::to_owned);
+        let host_filter = params
+            .get("host")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let key_filter = params
+            .get("key")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
 
         let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
         let selected: Vec<crate::vuln::Finding> = findings
             .into_iter()
             .filter(|f| {
-                if let Some(k) = &key_filter { return f.key == *k; }
-                if let Some(h) = &host_filter { return f.finding.host_ip == *h; }
+                if let Some(k) = &key_filter {
+                    return f.key == *k;
+                }
+                if let Some(h) = &host_filter {
+                    return f.finding.host_ip == *h;
+                }
                 true
             })
             .filter_map(|f| {
@@ -30,22 +44,31 @@ impl EngineServer {
             .collect();
 
         if selected.is_empty() {
-            return Response::ok(id, serde_json::json!({
-                "script": "",
-                "applied": 0,
-                "message": "No open findings match the scope."
-            }));
+            return Response::ok(
+                id,
+                serde_json::json!({
+                    "script": "",
+                    "applied": 0,
+                    "message": "No open findings match the scope."
+                }),
+            );
         }
-        let host = host_filter.clone().unwrap_or_else(|| selected[0].host_ip.clone());
+        let host = host_filter
+            .clone()
+            .unwrap_or_else(|| selected[0].host_ip.clone());
         let script = crate::remediation::batch_script(&host, &selected);
-        let recipes_available = selected.iter()
+        let recipes_available = selected
+            .iter()
             .filter(|f| crate::remediation::script_for_finding(f).is_some())
             .count();
-        Response::ok(id, serde_json::json!({
-            "script": script,
-            "applied": recipes_available,
-            "total_findings": selected.len(),
-        }))
+        Response::ok(
+            id,
+            serde_json::json!({
+                "script": script,
+                "applied": recipes_available,
+                "total_findings": selected.len(),
+            }),
+        )
     }
 
     pub(crate) async fn handle_security_test_default_creds(
@@ -55,9 +78,7 @@ impl EngineServer {
     ) -> Response {
         let host = match params.get("host").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing host".to_owned())
-            }
+            None => return Response::err(id, protocol::INVALID_PARAMS, "missing host".to_owned()),
         };
         let port = params
             .get("port")

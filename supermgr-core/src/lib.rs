@@ -17,25 +17,25 @@
 
 #![warn(missing_docs)]
 
-#[cfg(target_os = "linux")]
-pub mod dbus;
-#[cfg(target_os = "windows")]
-pub mod pipe;
-#[cfg(unix)]
-pub mod mac;
-pub mod protocol;
+pub mod backup;
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub mod client;
 pub mod compliance;
 pub mod customer;
-pub mod recon;
+#[cfg(target_os = "linux")]
+pub mod dbus;
 pub mod error;
 pub mod findings;
 pub mod findings_store;
 pub mod host;
-pub mod backup;
 pub mod keyring;
+#[cfg(unix)]
+pub mod mac;
 pub mod paths;
+#[cfg(target_os = "windows")]
+pub mod pipe;
+pub mod protocol;
+pub mod recon;
 pub mod secret_lifecycle;
 pub mod severity;
 pub mod ssh;

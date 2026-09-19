@@ -36,15 +36,15 @@ pub async fn connect() -> Result<DaemonClient, String> {
 /// Connect to the Windows service over its named pipe.
 #[cfg(target_os = "windows")]
 pub async fn connect() -> Result<DaemonClient, String> {
-    crate::pipe::PipeClient::open()
-        .await
-        .map_err(|e| format!("named-pipe connect failed (is the SuperManager service running?): {e}"))
+    crate::pipe::PipeClient::open().await.map_err(|e| {
+        format!("named-pipe connect failed (is the SuperManager service running?): {e}")
+    })
 }
 
 /// Connect to the macOS daemon over its Unix socket.
 #[cfg(target_os = "macos")]
 pub async fn connect() -> Result<DaemonClient, String> {
-    crate::mac::MacClient::open()
-        .await
-        .map_err(|e| format!("unix-socket connect failed (is the supermgrd-mac service running?): {e}"))
+    crate::mac::MacClient::open().await.map_err(|e| {
+        format!("unix-socket connect failed (is the supermgrd-mac service running?): {e}")
+    })
 }

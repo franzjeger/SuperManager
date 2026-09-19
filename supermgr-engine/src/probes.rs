@@ -34,87 +34,87 @@ use tokio::time::timeout;
 /// remote access). Avoids the long tail of esoteric services
 /// that rarely yield value.
 pub const COMMON_PORTS: &[u16] = &[
-    21,    // FTP
-    22,    // SSH
-    23,    // Telnet
-    25,    // SMTP
-    53,    // DNS
-    67,    // DHCP
-    69,    // TFTP
-    80,    // HTTP
-    81,    // HTTP-alt (mikrotik, etc.)
-    88,    // Kerberos
-    110,   // POP3
-    111,   // RPC
-    123,   // NTP
-    135,   // MS-RPC
-    137,   // NetBIOS-NS
-    138,   // NetBIOS-DGM
-    139,   // NetBIOS-SSN
-    143,   // IMAP
-    161,   // SNMP
-    389,   // LDAP
-    443,   // HTTPS
-    445,   // SMB
-    465,   // SMTPS
-    500,   // IPsec/IKE
-    514,   // syslog
-    515,   // LPD/printer
-    548,   // AFP
-    554,   // RTSP
-    587,   // SMTP-submission
-    631,   // IPP
-    636,   // LDAPS
-    873,   // rsync
-    902,   // VMware
-    989,   // FTPS-data
-    990,   // FTPS-control
-    993,   // IMAPS
-    995,   // POP3S
-    1080,  // SOCKS
-    1194,  // OpenVPN
-    1433,  // MSSQL
-    1434,  // MSSQL-monitor
-    1521,  // Oracle
-    1701,  // L2TP
-    1723,  // PPTP
-    1812,  // RADIUS-auth
-    1813,  // RADIUS-acct
-    2049,  // NFS
-    2082,  // cPanel
-    2083,  // cPanel-ssl
-    2222,  // SSH-alt
-    2375,  // Docker
-    2376,  // Docker-tls
-    3000,  // Grafana / various web
-    3128,  // Squid proxy
-    3268,  // LDAP-Global-Catalog
-    3306,  // MySQL
-    3389,  // RDP
-    3478,  // STUN
-    4444,  // Metasploit (red flag)
-    4500,  // IPsec-NAT-T
-    4789,  // VXLAN
-    5000,  // UPnP / Synology DSM
-    5001,  // Synology DSM-https
-    5060,  // SIP
-    5061,  // SIPS
-    5222,  // XMPP-client
-    5269,  // XMPP-server
-    5353,  // mDNS
-    5432,  // PostgreSQL
-    5500,  // VNC server-listen
-    5601,  // Kibana
-    5672,  // AMQP/RabbitMQ
-    5800,  // VNC over HTTP
-    5900,  // VNC
-    5985,  // WinRM
-    5986,  // WinRM-ssl
-    6379,  // Redis
-    6443,  // Kubernetes API
-    6789,  // UniFi-discovery (TCP fallback) — keep in scan list
-           // so adopted UniFi devices that locked everything
-           // else down still surface on a sweep.
+    21,   // FTP
+    22,   // SSH
+    23,   // Telnet
+    25,   // SMTP
+    53,   // DNS
+    67,   // DHCP
+    69,   // TFTP
+    80,   // HTTP
+    81,   // HTTP-alt (mikrotik, etc.)
+    88,   // Kerberos
+    110,  // POP3
+    111,  // RPC
+    123,  // NTP
+    135,  // MS-RPC
+    137,  // NetBIOS-NS
+    138,  // NetBIOS-DGM
+    139,  // NetBIOS-SSN
+    143,  // IMAP
+    161,  // SNMP
+    389,  // LDAP
+    443,  // HTTPS
+    445,  // SMB
+    465,  // SMTPS
+    500,  // IPsec/IKE
+    514,  // syslog
+    515,  // LPD/printer
+    548,  // AFP
+    554,  // RTSP
+    587,  // SMTP-submission
+    631,  // IPP
+    636,  // LDAPS
+    873,  // rsync
+    902,  // VMware
+    989,  // FTPS-data
+    990,  // FTPS-control
+    993,  // IMAPS
+    995,  // POP3S
+    1080, // SOCKS
+    1194, // OpenVPN
+    1433, // MSSQL
+    1434, // MSSQL-monitor
+    1521, // Oracle
+    1701, // L2TP
+    1723, // PPTP
+    1812, // RADIUS-auth
+    1813, // RADIUS-acct
+    2049, // NFS
+    2082, // cPanel
+    2083, // cPanel-ssl
+    2222, // SSH-alt
+    2375, // Docker
+    2376, // Docker-tls
+    3000, // Grafana / various web
+    3128, // Squid proxy
+    3268, // LDAP-Global-Catalog
+    3306, // MySQL
+    3389, // RDP
+    3478, // STUN
+    4444, // Metasploit (red flag)
+    4500, // IPsec-NAT-T
+    4789, // VXLAN
+    5000, // UPnP / Synology DSM
+    5001, // Synology DSM-https
+    5060, // SIP
+    5061, // SIPS
+    5222, // XMPP-client
+    5269, // XMPP-server
+    5353, // mDNS
+    5432, // PostgreSQL
+    5500, // VNC server-listen
+    5601, // Kibana
+    5672, // AMQP/RabbitMQ
+    5800, // VNC over HTTP
+    5900, // VNC
+    5985, // WinRM
+    5986, // WinRM-ssl
+    6379, // Redis
+    6443, // Kubernetes API
+    6789, // UniFi-discovery (TCP fallback) — keep in scan list
+    // so adopted UniFi devices that locked everything
+    // else down still surface on a sweep.
     7000,  // various
     7001,  // weblogic
     8000,  // Web-alt
@@ -147,8 +147,8 @@ pub const COMMON_PORTS: &[u16] = &[
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortProbe {
     pub port: u16,
-    pub service: String,         // "ssh" / "http" / "https" / etc.
-    pub banner: Option<String>,  // raw banner if grabbed
+    pub service: String,        // "ssh" / "http" / "https" / etc.
+    pub banner: Option<String>, // raw banner if grabbed
     pub server_header: Option<String>,
     pub title: Option<String>,
     pub powered_by: Option<String>,
@@ -214,7 +214,11 @@ pub struct TlsInfo {
 pub async fn tcp_check(host: &str, port: u16, timeout_ms: u64) -> bool {
     let target = format!("{host}:{port}");
     matches!(
-        timeout(Duration::from_millis(timeout_ms), TcpStream::connect(&target)).await,
+        timeout(
+            Duration::from_millis(timeout_ms),
+            TcpStream::connect(&target)
+        )
+        .await,
         Ok(Ok(_))
     )
 }
@@ -257,7 +261,9 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
                 probe.powered_by = http.powered_by;
                 probe.banner = http.first_line;
                 probe.fingerprints = http.fingerprints;
-                probe.extra_findings.extend(waf_findings(host, port, &http.waf, false));
+                probe
+                    .extra_findings
+                    .extend(waf_findings(host, port, &http.waf, false));
                 probe.waf = http.waf;
             }
             // Web path enumeration — runs in parallel internally,
@@ -273,7 +279,9 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
                 probe.title = http.title;
                 probe.powered_by = http.powered_by;
                 probe.fingerprints = http.fingerprints;
-                probe.extra_findings.extend(waf_findings(host, port, &http.waf, true));
+                probe
+                    .extra_findings
+                    .extend(waf_findings(host, port, &http.waf, true));
                 probe.waf = http.waf;
             }
             let (paths, findings) = crate::web_paths::enumerate(host, port, true).await;
@@ -450,7 +458,11 @@ pub async fn http_probe(host: &str, port: u16, tls: bool) -> Result<HttpResult> 
     // knows whether they're talking to the edge or the origin.
     let header_pairs: Vec<(String, String)> = headers
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|val| (k.as_str().to_owned(), val.to_owned())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|val| (k.as_str().to_owned(), val.to_owned()))
+        })
         .collect();
     let cookie_names: Vec<String> = headers
         .get_all("set-cookie")
@@ -488,17 +500,24 @@ fn waf_findings(
         .map(|w| {
             let evidence = w.evidence.join(", ");
             crate::vuln::Finding {
-                id: format!("recon.waf-{}", w.vendor.to_lowercase().replace([' ', '(', ')', '/'], "-")),
+                id: format!(
+                    "recon.waf-{}",
+                    w.vendor.to_lowercase().replace([' ', '(', ')', '/'], "-")
+                ),
                 host_ip: host.to_owned(),
                 port: Some(port),
                 service: Some(if tls { "https".into() } else { "http".into() }),
                 severity: crate::vuln::Severity::Info,
-                title: format!("{} {} identified", w.vendor, match w.kind {
-                    crate::waf_detect::WafKind::Cdn => "CDN",
-                    crate::waf_detect::WafKind::Waf => "WAF",
-                    crate::waf_detect::WafKind::LoadBalancer => "load balancer",
-                    crate::waf_detect::WafKind::ReverseProxy => "reverse proxy",
-                }),
+                title: format!(
+                    "{} {} identified",
+                    w.vendor,
+                    match w.kind {
+                        crate::waf_detect::WafKind::Cdn => "CDN",
+                        crate::waf_detect::WafKind::Waf => "WAF",
+                        crate::waf_detect::WafKind::LoadBalancer => "load balancer",
+                        crate::waf_detect::WafKind::ReverseProxy => "reverse proxy",
+                    }
+                ),
                 detail: format!(
                     "Response signatures matched {}: {evidence}. \
                      This is informational context — when an edge \
@@ -547,7 +566,10 @@ fn fingerprint_web(
 
     // Helper: pull header value as string.
     let h = |name: &str| -> Option<String> {
-        headers.get(name).and_then(|v| v.to_str().ok()).map(str::to_owned)
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
     };
     let cookies: Vec<String> = headers
         .get_all("set-cookie")
@@ -559,10 +581,13 @@ fn fingerprint_web(
 
     // -- WordPress -------------------------------------------------------
     let wp_meta_re = regex_lite_extract(body, r#"<meta name="generator" content="WordPress "#);
-    if body_lc.contains("/wp-content/") || body_lc.contains("/wp-includes/")
-        || cookie_blob.contains("wordpress_logged_in") || wp_meta_re.is_some() {
-        let ver = extract_meta_generator_version(body, "WordPress")
-            .unwrap_or_else(|| "unknown".into());
+    if body_lc.contains("/wp-content/")
+        || body_lc.contains("/wp-includes/")
+        || cookie_blob.contains("wordpress_logged_in")
+        || wp_meta_re.is_some()
+    {
+        let ver =
+            extract_meta_generator_version(body, "WordPress").unwrap_or_else(|| "unknown".into());
         out.push(format!("WordPress {ver}"));
     }
 
@@ -578,18 +603,23 @@ fn fingerprint_web(
             out.push(format!("Drupal {ver}"));
         }
     } else if body_lc.contains("drupal.settings") || body_lc.contains("/sites/default/files/") {
-        let ver = extract_meta_generator_version(body, "Drupal").unwrap_or_else(|| "unknown".into());
+        let ver =
+            extract_meta_generator_version(body, "Drupal").unwrap_or_else(|| "unknown".into());
         out.push(format!("Drupal {ver}"));
     }
 
     // -- Joomla ----------------------------------------------------------
     if body_lc.contains("/components/com_") || body_lc.contains("media/system/js/mootools") {
-        let ver = extract_meta_generator_version(body, "Joomla").unwrap_or_else(|| "unknown".into());
+        let ver =
+            extract_meta_generator_version(body, "Joomla").unwrap_or_else(|| "unknown".into());
         out.push(format!("Joomla {ver}"));
     }
 
     // -- Confluence / Atlassian -----------------------------------------
-    if let Some(s) = h("x-confluence-request-time") { let _ = s; out.push("Confluence unknown".into()); }
+    if let Some(s) = h("x-confluence-request-time") {
+        let _ = s;
+        out.push("Confluence unknown".into());
+    }
     if body_lc.contains("/confluence/") && body_lc.contains("atlassian") {
         // Try to find a build number in HTML comments.
         let ver = body
@@ -602,7 +632,9 @@ fn fingerprint_web(
             out.push(format!("Confluence {ver}"));
         }
     }
-    if body_lc.contains("\"jira\"") && (body_lc.contains("atlassian") || body_lc.contains("ajs-version-number")) {
+    if body_lc.contains("\"jira\"")
+        && (body_lc.contains("atlassian") || body_lc.contains("ajs-version-number"))
+    {
         out.push("Jira unknown".into());
     }
 
@@ -642,7 +674,11 @@ fn extract_meta_generator_version(body: &str, product: &str) -> Option<String> {
     // token like " 6.4.2" or " 6.4.2 (https://...)"
     let trimmed = token.trim();
     let ver = trimmed.split_whitespace().next()?;
-    if ver.is_empty() { None } else { Some(ver.to_owned()) }
+    if ver.is_empty() {
+        None
+    } else {
+        Some(ver.to_owned())
+    }
 }
 
 /// Tiny regex-lite — substring presence check used to avoid
@@ -711,11 +747,21 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
         cipher_supported(host, port, "EXP"),
         cipher_supported(host, port, "aNULL"),
     );
-    if rc4.unwrap_or(false)   { info.weak_ciphers_accepted.push("RC4".into()); }
-    if des3.unwrap_or(false)  { info.weak_ciphers_accepted.push("3DES".into()); }
-    if anull.unwrap_or(false) { info.weak_ciphers_accepted.push("NULL".into()); }
-    if exp.unwrap_or(false)   { info.weak_ciphers_accepted.push("EXPORT".into()); }
-    if anon.unwrap_or(false)  { info.weak_ciphers_accepted.push("ANONYMOUS".into()); }
+    if rc4.unwrap_or(false) {
+        info.weak_ciphers_accepted.push("RC4".into());
+    }
+    if des3.unwrap_or(false) {
+        info.weak_ciphers_accepted.push("3DES".into());
+    }
+    if anull.unwrap_or(false) {
+        info.weak_ciphers_accepted.push("NULL".into());
+    }
+    if exp.unwrap_or(false) {
+        info.weak_ciphers_accepted.push("EXPORT".into());
+    }
+    if anon.unwrap_or(false) {
+        info.weak_ciphers_accepted.push("ANONYMOUS".into());
+    }
 
     // Protocol matrix — flag if the server speaks protocols
     // older than TLS 1.2.
@@ -724,9 +770,15 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
         protocol_supported(host, port, "-tls1"),
         protocol_supported(host, port, "-tls1_1"),
     );
-    if ssl3.unwrap_or(false)  { info.protocols_accepted.push("SSLv3".into()); }
-    if tls10.unwrap_or(false) { info.protocols_accepted.push("TLSv1.0".into()); }
-    if tls11.unwrap_or(false) { info.protocols_accepted.push("TLSv1.1".into()); }
+    if ssl3.unwrap_or(false) {
+        info.protocols_accepted.push("SSLv3".into());
+    }
+    if tls10.unwrap_or(false) {
+        info.protocols_accepted.push("TLSv1.0".into());
+    }
+    if tls11.unwrap_or(false) {
+        info.protocols_accepted.push("TLSv1.1".into());
+    }
 
     Ok(info)
 }
@@ -759,9 +811,12 @@ async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
     let mut child = tokio::process::Command::new("openssl")
         .args([
             "s_client",
-            "-connect", &target,
-            "-servername", host,
-            "-cipher", family,
+            "-connect",
+            &target,
+            "-servername",
+            host,
+            "-cipher",
+            family,
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -774,7 +829,7 @@ async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
     }
     let output = match timeout(Duration::from_secs(4), child.wait_with_output()).await {
         Ok(Ok(o)) => o,
-        _ => return Ok(false),  // timeout / spawn error = treat as not supported
+        _ => return Ok(false), // timeout / spawn error = treat as not supported
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -854,9 +909,9 @@ fn extract_negotiated_cipher(output: &str) -> Option<String> {
 fn cipher_matches_family(cipher_name: &str, family: &str) -> bool {
     let name = cipher_name.to_uppercase();
     match family {
-        "RC4"   => name.contains("RC4"),
-        "3DES"  => name.contains("3DES") || name.contains("DES-CBC3"),
-        "NULL"  => name.contains("NULL"),
+        "RC4" => name.contains("RC4"),
+        "3DES" => name.contains("3DES") || name.contains("DES-CBC3"),
+        "NULL" => name.contains("NULL"),
         "EXP" | "EXPORT" => name.contains("EXP"),
         "aNULL" | "ANULL" => {
             name.contains("ADH") || name.contains("AECDH") || name.contains("ANON")
@@ -873,8 +928,10 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
     let mut child = tokio::process::Command::new("openssl")
         .args([
             "s_client",
-            "-connect", &target,
-            "-servername", host,
+            "-connect",
+            &target,
+            "-servername",
+            host,
             proto_flag,
         ])
         .stdin(std::process::Stdio::piped())
@@ -896,7 +953,8 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
         String::from_utf8_lossy(&output.stderr)
     )
     .to_lowercase();
-    if combined.contains("alert") || combined.contains("handshake failure")
+    if combined.contains("alert")
+        || combined.contains("handshake failure")
         || combined.contains("unsupported protocol")
         || combined.contains("(none)")
     {
@@ -923,9 +981,19 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
         } else if let Some(rest) = trim.strip_prefix("Cipher    : ") {
             cipher = rest.to_owned();
         } else if let Some(rest) = trim.strip_prefix("subject=") {
-            subject = Some(rest.trim_start_matches('/').replace(", ", "/").trim().to_owned());
+            subject = Some(
+                rest.trim_start_matches('/')
+                    .replace(", ", "/")
+                    .trim()
+                    .to_owned(),
+            );
         } else if let Some(rest) = trim.strip_prefix("issuer=") {
-            issuer = Some(rest.trim_start_matches('/').replace(", ", "/").trim().to_owned());
+            issuer = Some(
+                rest.trim_start_matches('/')
+                    .replace(", ", "/")
+                    .trim()
+                    .to_owned(),
+            );
         } else if let Some(rest) = trim.strip_prefix("notAfter=") {
             expires_iso = Some(rest.trim().to_owned());
         }
@@ -944,9 +1012,8 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
         }
     }
 
-    let self_signed = subject.as_deref().is_some()
-        && issuer.as_deref().is_some()
-        && subject == issuer;
+    let self_signed =
+        subject.as_deref().is_some() && issuer.as_deref().is_some() && subject == issuer;
 
     Ok(TlsInfo {
         version,
@@ -956,8 +1023,8 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
         cert_san: san,
         cert_expires_iso: expires_iso,
         self_signed,
-        weak_ciphers_accepted: Vec::new(),  // populated by tls_audit
-        protocols_accepted: Vec::new(),     // populated by tls_audit
+        weak_ciphers_accepted: Vec::new(), // populated by tls_audit
+        protocols_accepted: Vec::new(),    // populated by tls_audit
     })
 }
 
@@ -970,10 +1037,14 @@ pub async fn snmp_sysdescr(host: &str) -> Result<String> {
     for community in &["public", "private"] {
         let res = tokio::process::Command::new("snmpget")
             .args([
-                "-v", "2c",
-                "-c", community,
-                "-t", "2",
-                "-r", "0",
+                "-v",
+                "2c",
+                "-c",
+                community,
+                "-t",
+                "2",
+                "-r",
+                "0",
                 host,
                 "1.3.6.1.2.1.1.1.0",
             ])
@@ -1062,7 +1133,10 @@ New, (NONE), Cipher is (NONE)
         assert!(cipher_matches_family("ECDHE-RSA-NULL-SHA", "NULL"));
         // Strong cipher must NOT match.
         assert!(!cipher_matches_family("AEAD-AES256-GCM-SHA384", "NULL"));
-        assert!(!cipher_matches_family("ECDHE-RSA-AES256-GCM-SHA384", "NULL"));
+        assert!(!cipher_matches_family(
+            "ECDHE-RSA-AES256-GCM-SHA384",
+            "NULL"
+        ));
     }
 
     #[test]
@@ -1097,7 +1171,10 @@ New, (NONE), Cipher is (NONE)
         assert!(cipher_matches_family("ADH-AES256-SHA", "ANULL"));
         assert!(!cipher_matches_family("AES256-SHA", "aNULL"));
         // ECDHE is NOT anonymous (it has authentication).
-        assert!(!cipher_matches_family("ECDHE-RSA-AES256-GCM-SHA384", "aNULL"));
+        assert!(!cipher_matches_family(
+            "ECDHE-RSA-AES256-GCM-SHA384",
+            "aNULL"
+        ));
     }
 
     #[test]

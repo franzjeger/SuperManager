@@ -56,10 +56,12 @@ fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
     p
 }
 
-#[must_use] 
+#[must_use]
 pub fn load(customer_slug: &str, host_ip: &str) -> HostBaseline {
     let path = baseline_path(customer_slug, host_ip);
-    if !path.exists() { return HostBaseline::default(); }
+    if !path.exists() {
+        return HostBaseline::default();
+    }
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
         Err(_) => HostBaseline::default(),
@@ -130,7 +132,8 @@ pub fn reconcile_host(
                      mis-routed scan. Investigate before adding to baseline."
                 ),
                 recommendation: "Confirm the service is intentional. If it is, the port will \
-                                 stabilise into the baseline after the next scan.".into(),
+                                 stabilise into the baseline after the next scan."
+                    .into(),
                 cve: None,
                 cvss: Some(5.0),
             });
@@ -155,7 +158,8 @@ pub fn reconcile_host(
                      in the latest scan. Service may be stopped or the host may be down."
                 ),
                 recommendation: "Verify the service is intentionally stopped. If permanent, \
-                                 the next clean scan will remove it from the baseline.".into(),
+                                 the next clean scan will remove it from the baseline."
+                    .into(),
                 cve: None,
                 cvss: Some(2.0),
             });
@@ -182,7 +186,7 @@ pub fn reconcile_host(
     };
     save(customer_slug, host_ip, &new_baseline).ok();
 
-    let _ = baseline.stable_since.is_some();  // touch to avoid dead-code lint
+    let _ = baseline.stable_since.is_some(); // touch to avoid dead-code lint
     Ok(findings)
 }
 
@@ -205,7 +209,10 @@ mod tests {
     fn first_scan_produces_no_findings() {
         let scope = unique_scope();
         let findings = reconcile_host(&scope, "10.0.0.1", &[22, 80, 443]).unwrap();
-        assert!(findings.is_empty(), "first scan establishes baseline silently");
+        assert!(
+            findings.is_empty(),
+            "first scan establishes baseline silently"
+        );
         cleanup(&scope);
     }
 
@@ -217,7 +224,10 @@ mod tests {
         // Second scan: same ports → promoted to stable. Still no
         // findings because nothing changed.
         let findings = reconcile_host(&scope, "10.0.0.1", &[22, 80]).unwrap();
-        assert!(findings.is_empty(), "stable baseline should not produce findings");
+        assert!(
+            findings.is_empty(),
+            "stable baseline should not produce findings"
+        );
         let baseline = load(&scope, "10.0.0.1");
         assert!(baseline.stable_ports.contains(&22));
         assert!(baseline.stable_ports.contains(&80));
@@ -229,7 +239,7 @@ mod tests {
         let scope = unique_scope();
         reconcile_host(&scope, "10.0.0.1", &[22, 80]).unwrap();
         reconcile_host(&scope, "10.0.0.1", &[22, 80]).unwrap(); // promote to stable
-        // Third scan: port 4444 appears.
+                                                                // Third scan: port 4444 appears.
         let findings = reconcile_host(&scope, "10.0.0.1", &[22, 80, 4444]).unwrap();
         assert_eq!(findings.len(), 1, "exactly one new-port finding");
         assert_eq!(findings[0].id, "anomaly.new-port");
@@ -242,7 +252,7 @@ mod tests {
         let scope = unique_scope();
         reconcile_host(&scope, "10.0.0.1", &[22, 80, 443]).unwrap();
         reconcile_host(&scope, "10.0.0.1", &[22, 80, 443]).unwrap(); // stable
-        // 443 disappears.
+                                                                     // 443 disappears.
         let findings = reconcile_host(&scope, "10.0.0.1", &[22, 80]).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "anomaly.missing-port");
@@ -265,7 +275,10 @@ mod tests {
         // Same port appears again → promoted to stable, no new
         // finding (the port is now baseline-normal).
         let f2 = reconcile_host(&scope, "10.0.0.1", &[22, 80, 4444]).unwrap();
-        assert!(f2.is_empty(), "port that's been seen twice shouldn't re-fire");
+        assert!(
+            f2.is_empty(),
+            "port that's been seen twice shouldn't re-fire"
+        );
         cleanup(&scope);
     }
 

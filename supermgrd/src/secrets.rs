@@ -79,8 +79,7 @@ async fn read_map() -> Result<HashMap<String, String>> {
     let text = tokio::fs::read_to_string(&path)
         .await
         .with_context(|| format!("read secrets file {}", path.display()))?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("parse secrets file {}", path.display()))
+    serde_json::from_str(&text).with_context(|| format!("parse secrets file {}", path.display()))
 }
 
 /// Write the map to disk atomically with mode `0600`.
@@ -118,7 +117,7 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
     file.write_all(text.as_bytes())
         .await
         .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
-    
+
     // Ensure all data is flushed to disk before rename
     file.sync_all()
         .await
@@ -269,14 +268,14 @@ mod tests {
 
         store_secret(label, value).await.expect("store_secret");
 
-        let retrieved = retrieve_secret(label)
-            .await
-            .expect("retrieve_secret");
+        let retrieved = retrieve_secret(label).await.expect("retrieve_secret");
         assert_eq!(retrieved, value);
 
         // --- Overwrite: storing again replaces the value ---
         store_secret(label, b"new-value").await.expect("overwrite");
-        let retrieved = retrieve_secret(label).await.expect("retrieve after overwrite");
+        let retrieved = retrieve_secret(label)
+            .await
+            .expect("retrieve after overwrite");
         assert_eq!(retrieved, b"new-value");
 
         // --- Delete: label is removed ---

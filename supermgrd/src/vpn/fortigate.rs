@@ -39,8 +39,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 
 use supermgr_core::{
-    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     error::BackendError,
+    vpn::backend::{BackendStatus, Capabilities, VpnBackend},
     vpn::profile::{FortiGateConfig, Profile, ProfileConfig},
     vpn::state::TunnelStats,
 };
@@ -59,10 +59,8 @@ use crate::secrets;
 ///
 /// The more specific path is checked first because on some distros (e.g. Fedora)
 /// both directories exist but only the `/etc/strongswan/` prefixed one is used.
-const SWANCTL_CONF_DIR_CANDIDATES: &[&str] = &[
-    "/etc/strongswan/swanctl/conf.d",
-    "/etc/swanctl/conf.d",
-];
+const SWANCTL_CONF_DIR_CANDIDATES: &[&str] =
+    &["/etc/strongswan/swanctl/conf.d", "/etc/swanctl/conf.d"];
 
 /// Returns the first swanctl conf.d directory that exists on the system,
 /// or falls back to the first candidate if none exist.
@@ -206,8 +204,7 @@ fn classify_initiate_failure(message: &str) -> BackendError {
         .any(|marker| upper.contains(marker))
     {
         BackendError::AuthenticationFailed(
-            "The FortiGate rejected the credentials. Check the username, password and PSK."
-                .into(),
+            "The FortiGate rejected the credentials. Check the username, password and PSK.".into(),
         )
     } else if upper.contains("TIMEOUT") || upper.contains("TIMED OUT") {
         BackendError::Timeout { seconds: 30 }
@@ -224,12 +221,9 @@ fn classify_initiate_failure(message: &str) -> BackendError {
              profile, and the peer ID configured on the FortiGate."
                 .into(),
         )
-    } else if upper.contains("NO_PROPOSAL_CHOSEN")
-        || upper.contains("NO MATCHING PROPOSAL")
-    {
+    } else if upper.contains("NO_PROPOSAL_CHOSEN") || upper.contains("NO MATCHING PROPOSAL") {
         BackendError::NegotiationFailed(
-            "The FortiGate and SuperManager could not agree on IKE/IPsec security settings."
-                .into(),
+            "The FortiGate and SuperManager could not agree on IKE/IPsec security settings.".into(),
         )
     } else if upper.contains("PERMISSION DENIED") || upper.contains("EPERM") {
         BackendError::Permission(
@@ -269,10 +263,8 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
         info!("running: {}", cmd_str);
     }
 
-    let out_future = tokio::process::Command::new("swanctl")
-        .args(args)
-        .output();
-        
+    let out_future = tokio::process::Command::new("swanctl").args(args).output();
+
     let out = tokio::time::timeout(std::time::Duration::from_secs(15), out_future)
         .await
         .map_err(|_| BackendError::Interface("swanctl command timed out after 15 seconds".into()))?
@@ -302,8 +294,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
         .lines()
         .filter(|l| {
             !(l.contains("plugin '")
-                && (l.contains("failed to load")
-                    || l.contains("no plugin file available")))
+                && (l.contains("failed to load") || l.contains("no plugin file available")))
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -836,8 +827,14 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
     // Full-tunnel: route all DNS queries through VPN.
     let domains: Vec<(String, bool)> = vec![("~.".to_owned(), true)];
 
-    match proxy.call_method("SetLinkDNS", &(ifindex, &dns_addrs)).await {
-        Ok(_) => info!("SetLinkDNS({iface_name}, {} server(s)) — ok", dns_addrs.len()),
+    match proxy
+        .call_method("SetLinkDNS", &(ifindex, &dns_addrs))
+        .await
+    {
+        Ok(_) => info!(
+            "SetLinkDNS({iface_name}, {} server(s)) — ok",
+            dns_addrs.len()
+        ),
         Err(e) => {
             // A system without systemd-resolved is a configuration, not a
             // failure: charon's resolve plugin writes the pushed servers to
@@ -858,7 +855,10 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
         }
     }
 
-    match proxy.call_method("SetLinkDomains", &(ifindex, &domains)).await {
+    match proxy
+        .call_method("SetLinkDomains", &(ifindex, &domains))
+        .await
+    {
         Ok(_) => info!("SetLinkDomains({iface_name}, {:?}) — ok", domains),
         Err(e) => error!(
             "SetLinkDomains for {iface_name} failed: {e} (DNS active; domain routing not set)"
@@ -927,8 +927,9 @@ impl VpnBackend for FortiGateBackend {
         );
 
         // ── Step 0: Retrieve credentials from secrets file ───────────────────
-        let password_bytes =
-            secrets::retrieve_secret(fg_cfg.password.label()).await.map_err(|e| {
+        let password_bytes = secrets::retrieve_secret(fg_cfg.password.label())
+            .await
+            .map_err(|e| {
                 error!(
                     "credential not found in keyring — please re-import the profile \
                      (label '{}': {e})",
@@ -940,18 +941,20 @@ impl VpnBackend for FortiGateBackend {
                     fg_cfg.password.label()
                 ))
             })?;
-        let psk_bytes = secrets::retrieve_secret(fg_cfg.psk.label()).await.map_err(|e| {
-            error!(
-                "credential not found in keyring — please re-import the profile \
+        let psk_bytes = secrets::retrieve_secret(fg_cfg.psk.label())
+            .await
+            .map_err(|e| {
+                error!(
+                    "credential not found in keyring — please re-import the profile \
                  (label '{}': {e})",
-                fg_cfg.psk.label()
-            );
-            BackendError::SecretMissing(format!(
-                "credential not found in keyring — please re-import the profile \
+                    fg_cfg.psk.label()
+                );
+                BackendError::SecretMissing(format!(
+                    "credential not found in keyring — please re-import the profile \
                  (label '{}')",
-                fg_cfg.psk.label()
-            ))
-        })?;
+                    fg_cfg.psk.label()
+                ))
+            })?;
         let password = std::str::from_utf8(&password_bytes)
             .map_err(|_| BackendError::Key("password bytes are not valid UTF-8".into()))?
             .to_owned();
@@ -968,8 +971,14 @@ impl VpnBackend for FortiGateBackend {
                     .into(),
             ));
         }
-        let config_text =
-            generate_swanctl_config(&conn_name, &profile_id_simple, fg_cfg, &password, &psk, profile.full_tunnel);
+        let config_text = generate_swanctl_config(
+            &conn_name,
+            &profile_id_simple,
+            fg_cfg,
+            &password,
+            &psk,
+            profile.full_tunnel,
+        );
         let config_path = PathBuf::from(swanctl_conf_dir()).join(format!("{conn_name}.conf"));
 
         info!("writing swanctl config to {}", config_path.display());
@@ -977,20 +986,22 @@ impl VpnBackend for FortiGateBackend {
         // It was written at the umask — 0644 — and kept private only by the
         // mode strongSwan's packaging happens to give conf.d, which is a
         // distribution decision rather than something this daemon controls.
-        crate::secure_file::write_private(&config_path, config_text.as_bytes(), None).map_err(|e| {
-            let dir = swanctl_conf_dir();
-            let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
-                format!(" — the daemon must run as root to write to {dir}/")
-            } else if e.kind() == std::io::ErrorKind::NotFound {
-                format!(" — {dir}/ does not exist; install strongswan-swanctl")
-            } else {
-                String::new()
-            };
-            BackendError::Subprocess {
-                command: "write swanctl config".into(),
-                message: format!("{}: {e}{hint}", config_path.display()),
-            }
-        })?;
+        crate::secure_file::write_private(&config_path, config_text.as_bytes(), None).map_err(
+            |e| {
+                let dir = swanctl_conf_dir();
+                let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(" — the daemon must run as root to write to {dir}/")
+                } else if e.kind() == std::io::ErrorKind::NotFound {
+                    format!(" — {dir}/ does not exist; install strongswan-swanctl")
+                } else {
+                    String::new()
+                };
+                BackendError::Subprocess {
+                    command: "write swanctl config".into(),
+                    message: format!("{}: {e}{hint}", config_path.display()),
+                }
+            },
+        )?;
 
         // ── Step 2: Reload strongSwan (load-all picks up connections + secrets)
         let out = run_swanctl(&["--load-all"]).await?;
@@ -1097,14 +1108,7 @@ impl VpnBackend for FortiGateBackend {
 
         // strongSwan installs XFRM policies and the tunnel default route upon
         // CHILD_SA establishment.  We do not touch the default route.
-        let out = run_swanctl(&[
-            "--initiate",
-            "--child",
-            &conn_name,
-            "--timeout",
-            "30",
-        ])
-        .await?;
+        let out = run_swanctl(&["--initiate", "--child", &conn_name, "--timeout", "30"]).await?;
         if !out.status.success() {
             // Clean up host routes and config on failure.
             for cidr in &endpoint_host_routes {
@@ -1122,9 +1126,7 @@ impl VpnBackend for FortiGateBackend {
             let meaningful: Vec<&str> = stderr
                 .lines()
                 .filter(|l| {
-                    !l.contains("plugin")
-                        && !l.contains("CAP_DAC_OVERRIDE")
-                        && !l.trim().is_empty()
+                    !l.contains("plugin") && !l.contains("CAP_DAC_OVERRIDE") && !l.trim().is_empty()
                 })
                 .collect();
             let message = if meaningful.is_empty() {
@@ -1156,44 +1158,46 @@ impl VpnBackend for FortiGateBackend {
         // SA came up. Used by every rollback path below so the cleanup logic
         // stays in one place. Each step is best-effort — if it fails we still
         // try the next so the system gets back as close to clean as possible.
-        let rollback_after_initiate = |conn_name: &str,
-                                       endpoint_host_routes: &[String],
-                                       tunnel_routes: &[String],
-                                       saved_default_route: &Option<String>,
-                                       config_path: &PathBuf| {
-            let conn_name = conn_name.to_owned();
-            let endpoint_host_routes = endpoint_host_routes.to_vec();
-            let tunnel_routes = tunnel_routes.to_vec();
-            let saved_default_route = saved_default_route.clone();
-            let config_path = config_path.clone();
-            async move {
-                let _ = run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "5"]).await;
-                for spec in &tunnel_routes {
-                    let mut cmd = tokio::process::Command::new("ip");
-                    cmd.arg("route").arg("del");
-                    for word in spec.split_whitespace() {
-                        cmd.arg(word);
+        let rollback_after_initiate =
+            |conn_name: &str,
+             endpoint_host_routes: &[String],
+             tunnel_routes: &[String],
+             saved_default_route: &Option<String>,
+             config_path: &PathBuf| {
+                let conn_name = conn_name.to_owned();
+                let endpoint_host_routes = endpoint_host_routes.to_vec();
+                let tunnel_routes = tunnel_routes.to_vec();
+                let saved_default_route = saved_default_route.clone();
+                let config_path = config_path.clone();
+                async move {
+                    let _ =
+                        run_swanctl(&["--terminate", "--ike", &conn_name, "--timeout", "5"]).await;
+                    for spec in &tunnel_routes {
+                        let mut cmd = tokio::process::Command::new("ip");
+                        cmd.arg("route").arg("del");
+                        for word in spec.split_whitespace() {
+                            cmd.arg(word);
+                        }
+                        let _ = cmd.output().await;
                     }
-                    let _ = cmd.output().await;
-                }
-                if let Some(saved) = saved_default_route {
-                    let mut cmd = tokio::process::Command::new("ip");
-                    cmd.arg("route").arg("add");
-                    for word in saved.split_whitespace() {
-                        cmd.arg(word);
+                    if let Some(saved) = saved_default_route {
+                        let mut cmd = tokio::process::Command::new("ip");
+                        cmd.arg("route").arg("add");
+                        for word in saved.split_whitespace() {
+                            cmd.arg(word);
+                        }
+                        let _ = cmd.output().await;
                     }
-                    let _ = cmd.output().await;
+                    for cidr in &endpoint_host_routes {
+                        let _ = tokio::process::Command::new("ip")
+                            .args(["route", "del", cidr])
+                            .output()
+                            .await;
+                    }
+                    let _ = tokio::fs::remove_file(&config_path).await;
+                    let _ = run_swanctl(&["--load-all"]).await;
                 }
-                for cidr in &endpoint_host_routes {
-                    let _ = tokio::process::Command::new("ip")
-                        .args(["route", "del", cidr])
-                        .output()
-                        .await;
-                }
-                let _ = tokio::fs::remove_file(&config_path).await;
-                let _ = run_swanctl(&["--load-all"]).await;
-            }
-        };
+            };
 
         // ── Step 6: Log virtual IP from list-sas ─────────────────────────────
         match run_swanctl(&["--list-sas"]).await {
@@ -1201,7 +1205,9 @@ impl VpnBackend for FortiGateBackend {
                 let list_stdout = String::from_utf8_lossy(&list_out.stdout);
                 match parse_virtual_ip(&list_stdout) {
                     Some(vip) => info!("mode-config assigned virtual IP: {}", vip),
-                    None => info!("no virtual IP in --list-sas output (split-tunnel or parse miss)"),
+                    None => {
+                        info!("no virtual IP in --list-sas output (split-tunnel or parse miss)")
+                    }
                 }
             }
             Err(e) => {
@@ -1258,11 +1264,17 @@ impl VpnBackend for FortiGateBackend {
                     .await
                     .map_err(BackendError::Io)?;
                 let cap_out = String::from_utf8_lossy(&cap.stdout);
-                saved_default_route = cap_out.lines().next().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+                saved_default_route = cap_out
+                    .lines()
+                    .next()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
 
                 if let Some(ref saved) = saved_default_route {
                     if let Some((gw, _dev)) = parse_gateway(saved) {
-                        info!("installing full-tunnel default: via {gw} dev {outbound_dev} src {vip}");
+                        info!(
+                            "installing full-tunnel default: via {gw} dev {outbound_dev} src {vip}"
+                        );
 
                         // `ip route replace` is a single atomic netlink op:
                         // RTM_NEWROUTE with NLM_F_REPLACE, evaluated under the
@@ -1277,11 +1289,17 @@ impl VpnBackend for FortiGateBackend {
                         // before propagating the error.
                         let replace_out = match tokio::process::Command::new("ip")
                             .args([
-                                "route", "replace", "default",
-                                "via", &gw,
-                                "dev", outbound_dev,
-                                "src", &vip.to_string(),
-                                "metric", "50",
+                                "route",
+                                "replace",
+                                "default",
+                                "via",
+                                &gw,
+                                "dev",
+                                outbound_dev,
+                                "src",
+                                &vip.to_string(),
+                                "metric",
+                                "50",
                             ])
                             .output()
                             .await
@@ -1329,17 +1347,22 @@ impl VpnBackend for FortiGateBackend {
                 // any profile DNS server they don't cover — or the assigned
                 // resolver ends up with a negotiated selector but no kernel
                 // route, which is the same dead nameserver dressed differently.
-                for route_cidr in
-                    &supermgr_core::vpn::profile::split_ts_with_dns(&fg_cfg.routes, &fg_cfg.dns_servers)
-                {
+                for route_cidr in &supermgr_core::vpn::profile::split_ts_with_dns(
+                    &fg_cfg.routes,
+                    &fg_cfg.dns_servers,
+                ) {
                     let cidr = route_cidr.to_string();
                     info!("installing split-tunnel route: {cidr} dev {outbound_dev} src {vip}");
 
                     let add_out = tokio::process::Command::new("ip")
                         .args([
-                            "route", "add", &cidr,
-                            "dev", outbound_dev,
-                            "src", &vip.to_string(),
+                            "route",
+                            "add",
+                            &cidr,
+                            "dev",
+                            outbound_dev,
+                            "src",
+                            &vip.to_string(),
                         ])
                         .output()
                         .await
@@ -1447,7 +1470,14 @@ impl VpnBackend for FortiGateBackend {
 
     #[instrument(skip(self))]
     async fn disconnect(&self) -> Result<(), BackendError> {
-        let (conn_name, config_path, endpoint_host_routes, dns_ifindex, tunnel_routes, saved_default_route) = {
+        let (
+            conn_name,
+            config_path,
+            endpoint_host_routes,
+            dns_ifindex,
+            tunnel_routes,
+            saved_default_route,
+        ) = {
             let state = self.state.lock().await;
             match state.connection_name.clone() {
                 Some(name) => (
@@ -1521,13 +1551,13 @@ impl VpnBackend for FortiGateBackend {
             for word in spec.split_whitespace() {
                 cmd.arg(word);
             }
-            let out = cmd
-                .output()
-                .await
-                .map_err(BackendError::Io)?;
+            let out = cmd.output().await.map_err(BackendError::Io)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                warn!("ip route del {spec} → {} (may already be gone)", stderr.trim());
+                warn!(
+                    "ip route del {spec} → {} (may already be gone)",
+                    stderr.trim()
+                );
             }
         }
 
@@ -1656,8 +1686,6 @@ impl VpnBackend for FortiGateBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-
 
     // -- Remote identity and PSK lookup -----------------------------------
 
@@ -1807,7 +1835,10 @@ mod tests {
         let children_at = conf.find("children").expect("children block");
         let delay_at = conf.find("dpd_delay").expect("dpd_delay");
         let action_at = conf.find("dpd_action").expect("dpd_action");
-        assert!(delay_at < children_at, "dpd_delay belongs on the connection");
+        assert!(
+            delay_at < children_at,
+            "dpd_delay belongs on the connection"
+        );
         assert!(action_at > children_at, "dpd_action belongs on the child");
     }
 
@@ -1833,7 +1864,10 @@ mod tests {
         // routes and 10.20.200.1 as DNS. Without a host selector for the
         // resolver, it matches no policy and every lookup times out for ~5 s.
         let mut cfg = fg("");
-        cfg.routes = vec!["10.20.3.0/24".parse().unwrap(), "10.20.21.0/24".parse().unwrap()];
+        cfg.routes = vec![
+            "10.20.3.0/24".parse().unwrap(),
+            "10.20.21.0/24".parse().unwrap(),
+        ];
         cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
         let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
         assert!(
@@ -1849,7 +1883,10 @@ mod tests {
         cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
         let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
         assert!(conf.contains("remote_ts = 10.20.200.0/24\n"), "{conf}");
-        assert!(!conf.contains("10.20.200.1/32"), "already covered — no duplicate:\n{conf}");
+        assert!(
+            !conf.contains("10.20.200.1/32"),
+            "already covered — no duplicate:\n{conf}"
+        );
     }
 
     #[test]
@@ -1887,7 +1924,10 @@ mod tests {
         // working tunnel moves because we added a field.
         let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
         assert!(conf.contains("id = alice"), "{conf}");
-        assert!(!conf.contains(r#"id = """#), "must not emit an empty identity");
+        assert!(
+            !conf.contains(r#"id = """#),
+            "must not emit an empty identity"
+        );
     }
 
     #[test]
@@ -1904,8 +1944,14 @@ mod tests {
         // strongSwan discards the whole connection and the tunnel fails to load
         // with nothing pointing at the password as the cause.
         let conf = generate_swanctl_config("c", "p", &fg(""), r#"pa"ss"#, r#"p"sk"#, true);
-        assert!(conf.contains(r#"secret = "p\"sk""#), "PSK not escaped:\n{conf}");
-        assert!(conf.contains(r#"secret = "pa\"ss""#), "password not escaped:\n{conf}");
+        assert!(
+            conf.contains(r#"secret = "p\"sk""#),
+            "PSK not escaped:\n{conf}"
+        );
+        assert!(
+            conf.contains(r#"secret = "pa\"ss""#),
+            "password not escaped:\n{conf}"
+        );
 
         // Every quote in the rendered file is either a delimiter or escaped.
         for (i, line) in conf.lines().enumerate() {
@@ -1963,7 +2009,10 @@ error: connecting to 'default' URI failed: No such file or directory
         let err = swanctl_failure("swanctl --load-all", CHARON_DOWN_STDERR);
         let msg = err.to_string();
         assert!(matches!(err, BackendError::Prerequisite(_)), "{msg}");
-        assert!(msg.contains("systemctl enable --now strongswan.service"), "{msg}");
+        assert!(
+            msg.contains("systemctl enable --now strongswan.service"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -1986,7 +2035,9 @@ error: connecting to 'default' URI failed: No such file or directory
 
     #[test]
     fn charon_unreachable_does_not_fire_on_unrelated_failures() {
-        assert!(!charon_unreachable("establishing CHILD_SA supermgr-abc failed"));
+        assert!(!charon_unreachable(
+            "establishing CHILD_SA supermgr-abc failed"
+        ));
         assert!(charon_unreachable(CHARON_DOWN_STDERR));
     }
 
@@ -1994,8 +2045,14 @@ error: connecting to 'default' URI failed: No such file or directory
     fn a_bare_child_sa_failure_is_not_called_unreachable() {
         let raw = "initiate failed: establishing CHILD_SA 'supermgr-a132dcaa7713' failed";
         let error = classify_initiate_failure(raw);
-        assert!(matches!(error, BackendError::NegotiationFailed(_)), "{error}");
-        assert!(!error.to_string().contains("supermgr-a132dcaa7713"), "{error}");
+        assert!(
+            matches!(error, BackendError::NegotiationFailed(_)),
+            "{error}"
+        );
+        assert!(
+            !error.to_string().contains("supermgr-a132dcaa7713"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2119,5 +2176,3 @@ error: connecting to 'default' URI failed: No such file or directory
         assert_eq!(parse_sa_bytes(out), (50, 0));
     }
 }
-
-

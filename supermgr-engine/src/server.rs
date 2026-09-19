@@ -14,8 +14,8 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
-use supermgr_core::keyring::SecretStore;
 use supermgr_core::host::{AuthMethod, Host};
+use supermgr_core::keyring::SecretStore;
 
 use crate::operations::OperationRegistry;
 use crate::protocol::{self, Request, Response};
@@ -79,7 +79,9 @@ impl EngineServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let server = Arc::clone(&self);
-                    let permit = if let Ok(p) = Arc::clone(&conn_sema).try_acquire_owned() { p } else {
+                    let permit = if let Ok(p) = Arc::clone(&conn_sema).try_acquire_owned() {
+                        p
+                    } else {
                         warn!("connection refused: 256 concurrent clients reached");
                         continue;
                     };
@@ -98,10 +100,7 @@ impl EngineServer {
     }
 
     /// Handle a single client connection.
-    async fn handle_connection(
-        &self,
-        mut stream: tokio::net::UnixStream,
-    ) -> anyhow::Result<()> {
+    async fn handle_connection(&self, mut stream: tokio::net::UnixStream) -> anyhow::Result<()> {
         debug!("new client connected");
 
         loop {
@@ -157,12 +156,16 @@ impl EngineServer {
             "list_profiles" => self.handle_list_profiles(id).await,
             "vpn_get_profile" => self.handle_vpn_get_profile(id, req.params).await,
             "vpn_add_ikev2_profile" => self.handle_vpn_add_ikev2_profile(id, req.params).await,
-            "vpn_update_ikev2_profile" => self.handle_vpn_update_ikev2_profile(id, req.params).await,
+            "vpn_update_ikev2_profile" => {
+                self.handle_vpn_update_ikev2_profile(id, req.params).await
+            }
             "vpn_delete_profile" => self.handle_vpn_delete_profile(id, req.params).await,
             "vpn_import_wireguard" => self.handle_vpn_import_wireguard(id, req.params).await,
             "vpn_import_openvpn" => self.handle_vpn_import_openvpn(id, req.params).await,
             "vpn_import_azure" => self.handle_vpn_import_azure(id, req.params).await,
-            "vpn_render_wireguard_conf" => self.handle_vpn_render_wireguard_conf(id, req.params).await,
+            "vpn_render_wireguard_conf" => {
+                self.handle_vpn_render_wireguard_conf(id, req.params).await
+            }
             "vpn_render_azure_ovpn" => self.handle_vpn_render_azure_ovpn(id, req.params).await,
             "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id).await,
             "vpn_set_routing" => self.handle_vpn_set_routing(id, req.params).await,
@@ -203,17 +206,14 @@ impl EngineServer {
             // -- FortiGate REST API methods --
             "fortigate_api" => self.handle_fortigate_api(id, req.params).await,
             "fortigate_generate_api_token" => {
-                self.handle_fortigate_generate_api_token(id, req.params).await
+                self.handle_fortigate_generate_api_token(id, req.params)
+                    .await
             }
-            "fortigate_get_api_token" => {
-                self.handle_fortigate_get_api_token(id, req.params).await
-            }
+            "fortigate_get_api_token" => self.handle_fortigate_get_api_token(id, req.params).await,
             "fortigate_test_connection" => {
                 self.handle_fortigate_test_connection(id, req.params).await
             }
-            "fortigate_get_dashboard" => {
-                self.handle_fortigate_get_dashboard(id, req.params).await
-            }
+            "fortigate_get_dashboard" => self.handle_fortigate_get_dashboard(id, req.params).await,
 
             // -- Compliance methods --
             "compliance_run" => self.handle_compliance_run(id, req.params).await,
@@ -233,67 +233,48 @@ impl EngineServer {
             "customer_save" => self.handle_customer_save(id, req.params).await,
             "customer_delete" => self.handle_customer_delete(id, req.params).await,
             "customer_report" => self.handle_customer_report(id, req.params).await,
-            "provisioning_list_templates" => {
-                self.handle_provisioning_list_templates(id).await
-            }
-            "provisioning_render" => {
-                self.handle_provisioning_render(id, req.params).await
-            }
+            "provisioning_list_templates" => self.handle_provisioning_list_templates(id).await,
+            "provisioning_render" => self.handle_provisioning_render(id, req.params).await,
             "provisioning_diff_preview" => {
                 self.handle_provisioning_diff_preview(id, req.params).await
             }
             "provisioning_pre_deploy_backup" => {
-                self.handle_provisioning_pre_deploy_backup(id, req.params).await
+                self.handle_provisioning_pre_deploy_backup(id, req.params)
+                    .await
             }
-            "provisioning_deploy" => {
-                self.handle_provisioning_deploy(id, req.params).await
-            }
+            "provisioning_deploy" => self.handle_provisioning_deploy(id, req.params).await,
             "provisioning_list_deployments" => {
-                self.handle_provisioning_list_deployments(id, req.params).await
+                self.handle_provisioning_list_deployments(id, req.params)
+                    .await
             }
-            "provisioning_rollback" => {
-                self.handle_provisioning_rollback(id, req.params).await
-            }
+            "provisioning_rollback" => self.handle_provisioning_rollback(id, req.params).await,
 
             // -- UniFi methods --
             "unifi_set_inform" => self.handle_unifi_set_inform(id, req.params).await,
-            "unifi_set_controller" => {
-                self.handle_unifi_set_controller(id, req.params).await
-            }
-            "unifi_clear_controller" => {
-                self.handle_unifi_clear_controller(id, req.params).await
-            }
+            "unifi_set_controller" => self.handle_unifi_set_controller(id, req.params).await,
+            "unifi_clear_controller" => self.handle_unifi_clear_controller(id, req.params).await,
             "unifi_test" => self.handle_unifi_test(id, req.params).await,
             "unifi_api" => self.handle_unifi_api(id, req.params).await,
 
             // -- Standalone UniFi controller registry --
             "unifi_controller_list" => self.handle_unifi_controller_list(id).await,
-            "unifi_controller_save" => {
-                self.handle_unifi_controller_save(id, req.params).await
-            }
-            "unifi_controller_delete" => {
-                self.handle_unifi_controller_delete(id, req.params).await
-            }
-            "unifi_controller_test" => {
-                self.handle_unifi_controller_test(id, req.params).await
-            }
+            "unifi_controller_save" => self.handle_unifi_controller_save(id, req.params).await,
+            "unifi_controller_delete" => self.handle_unifi_controller_delete(id, req.params).await,
+            "unifi_controller_test" => self.handle_unifi_controller_test(id, req.params).await,
             "unifi_controller_devices" => {
                 self.handle_unifi_controller_devices(id, req.params).await
             }
-            "unifi_controller_devmgr" => {
-                self.handle_unifi_controller_devmgr(id, req.params).await
-            }
+            "unifi_controller_devmgr" => self.handle_unifi_controller_devmgr(id, req.params).await,
             "unifi_controller_mfa_send" => {
                 self.handle_unifi_controller_mfa_send(id, req.params).await
             }
             "unifi_controller_mfa_complete" => {
-                self.handle_unifi_controller_mfa_complete(id, req.params).await
+                self.handle_unifi_controller_mfa_complete(id, req.params)
+                    .await
             }
 
             // -- Device-type override store --
-            "device_type_overrides_list" => {
-                self.handle_device_type_overrides_list(id).await
-            }
+            "device_type_overrides_list" => self.handle_device_type_overrides_list(id).await,
             "device_type_override_set" => {
                 self.handle_device_type_override_set(id, req.params).await
             }
@@ -302,26 +283,15 @@ impl EngineServer {
             "engagement_list" => self.handle_engagement_list(id).await,
             "engagement_save" => self.handle_engagement_save(id, req.params).await,
             "engagement_delete" => self.handle_engagement_delete(id, req.params).await,
-            "discovery_passive_scan" => {
-                self.handle_discovery_passive_scan(id, req.params).await
-            }
-            "discovery_inventory" => {
-                self.handle_discovery_inventory(id, req.params).await
-            }
-            "discovery_active_scan" => {
-                self.handle_discovery_active_scan(id, req.params).await
-            }
-            "discovery_findings" => {
-                self.handle_discovery_findings(id, req.params).await
-            }
-            "discovery_dns_axfr" => {
-                self.handle_discovery_dns_axfr(id, req.params).await
-            }
-            "discovery_analyse_pcap" => {
-                self.handle_discovery_analyse_pcap(id, req.params).await
-            }
+            "discovery_passive_scan" => self.handle_discovery_passive_scan(id, req.params).await,
+            "discovery_inventory" => self.handle_discovery_inventory(id, req.params).await,
+            "discovery_active_scan" => self.handle_discovery_active_scan(id, req.params).await,
+            "discovery_findings" => self.handle_discovery_findings(id, req.params).await,
+            "discovery_dns_axfr" => self.handle_discovery_dns_axfr(id, req.params).await,
+            "discovery_analyse_pcap" => self.handle_discovery_analyse_pcap(id, req.params).await,
             "security_test_default_creds" => {
-                self.handle_security_test_default_creds(id, req.params).await
+                self.handle_security_test_default_creds(id, req.params)
+                    .await
             }
 
             // -- Track A: findings management --
@@ -336,9 +306,7 @@ impl EngineServer {
             "notify_set_webhook" => self.handle_notify_set_webhook(id, req.params).await,
             "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, req.params).await,
             "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, req.params).await,
-            "engagement_set_schedule" => {
-                self.handle_engagement_set_schedule(id, req.params).await
-            }
+            "engagement_set_schedule" => self.handle_engagement_set_schedule(id, req.params).await,
             "api_version" => Response::ok(
                 id,
                 serde_json::json!({
@@ -360,7 +328,11 @@ impl EngineServer {
             "activity_timeline" => self.handle_activity_timeline(id, req.params).await,
             "remediation_script" => self.handle_remediation_script(id, req.params).await,
 
-            _ => Response::err(id, protocol::METHOD_NOT_FOUND, format!("unknown method: {}", req.method)),
+            _ => Response::err(
+                id,
+                protocol::METHOD_NOT_FOUND,
+                format!("unknown method: {}", req.method),
+            ),
         }
     }
 
@@ -371,7 +343,10 @@ impl EngineServer {
     /// Connect to an SSH host using its stored credentials. Trampolines
     /// into the free-function form so spawned tasks (which can't easily
     /// borrow `&self`) can share the same code path.
-    pub(crate) async fn connect_to_host(&self, host_id: uuid::Uuid) -> Result<(Host, SshSession), String> {
+    pub(crate) async fn connect_to_host(
+        &self,
+        host_id: uuid::Uuid,
+    ) -> Result<(Host, SshSession), String> {
         connect_to_host_owned(&self.state, &self.secrets, host_id).await
     }
 
@@ -441,7 +416,6 @@ pub async fn connect_to_host_owned_typed(
     host_id: uuid::Uuid,
 ) -> Result<(Host, SshSession), crate::error::EngineError> {
     use crate::error::EngineError;
-    
 
     let (host, known_hosts) = {
         let st = state.lock().await;
@@ -455,12 +429,14 @@ pub async fn connect_to_host_owned_typed(
 
     let session = match host.auth_method {
         AuthMethod::Password => {
-            let password_ref = host.auth_password_ref.as_ref().ok_or_else(|| {
-                EngineError::Other(anyhow::anyhow!("no password configured"))
-            })?;
-            let password_bytes = secrets.retrieve(&password_ref.0).await.map_err(|e| {
-                EngineError::Other(anyhow::anyhow!("retrieve password: {e}"))
-            })?;
+            let password_ref = host
+                .auth_password_ref
+                .as_ref()
+                .ok_or_else(|| EngineError::Other(anyhow::anyhow!("no password configured")))?;
+            let password_bytes = secrets
+                .retrieve(&password_ref.0)
+                .await
+                .map_err(|e| EngineError::Other(anyhow::anyhow!("retrieve password: {e}")))?;
             let password = String::from_utf8_lossy(&password_bytes).to_string();
             SshSession::connect_password(
                 &host.hostname,
@@ -478,9 +454,9 @@ pub async fn connect_to_host_owned_typed(
         // `cert_pem_for_host` for why a missing cert degrades to plain
         // key auth rather than failing here.
         AuthMethod::Key | AuthMethod::Certificate => {
-            let key_id = host.auth_key_id.ok_or_else(|| {
-                EngineError::Other(anyhow::anyhow!("no SSH key configured"))
-            })?;
+            let key_id = host
+                .auth_key_id
+                .ok_or_else(|| EngineError::Other(anyhow::anyhow!("no SSH key configured")))?;
             let privkey_pem = {
                 let st = state.lock().await;
                 let ssh_key = st.ssh_keys.get(&key_id).ok_or_else(|| {
@@ -643,7 +619,10 @@ pub async fn connect_to_host_owned(
 // See the note on `resolve_findings_scope`: boxing `Response` is a
 // wide change for an unmeasured win.
 #[allow(clippy::result_large_err)]
-pub(crate) fn get_uuid_param(params: &serde_json::Value, name: &str) -> Result<uuid::Uuid, Response> {
+pub(crate) fn get_uuid_param(
+    params: &serde_json::Value,
+    name: &str,
+) -> Result<uuid::Uuid, Response> {
     let s = params
         .get(name)
         .and_then(|v| v.as_str())
@@ -923,7 +902,10 @@ mod tests {
              would strip a certificate host's certificate"
         );
         assert!(host.pinned, "merge_host_update reset the pin flag");
-        assert!(host.vpn_profile_id.is_some(), "merge_host_update wiped vpn_profile_id");
+        assert!(
+            host.vpn_profile_id.is_some(),
+            "merge_host_update wiped vpn_profile_id"
+        );
     }
 
     #[test]
@@ -964,7 +946,10 @@ mod tests {
             "another_unknown": 42,
         });
         merge_host_update(&mut host, &incoming);
-        assert_eq!(host.label, original_label, "unknown fields should be a no-op");
+        assert_eq!(
+            host.label, original_label,
+            "unknown fields should be a no-op"
+        );
     }
 
     #[test]

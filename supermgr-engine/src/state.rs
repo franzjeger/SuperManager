@@ -193,8 +193,9 @@ impl DaemonState {
     // -----------------------------------------------------------------------
 
     pub fn load_unifi_controllers(&mut self) -> anyhow::Result<()> {
-        load_toml_dir(&self.unifi_controller_dir, |text, path| {
-            match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
+        load_toml_dir(
+            &self.unifi_controller_dir,
+            |text, path| match toml::from_str::<crate::unifi_controllers::UnifiController>(&text) {
                 Ok(ctrl) => {
                     info!("loaded UniFi controller '{}' from {:?}", ctrl.label, path);
                     self.unifi_controllers.insert(ctrl.id, ctrl);
@@ -202,8 +203,8 @@ impl DaemonState {
                 Err(e) => {
                     warn!("skipping malformed UniFi controller {:?}: {}", path, e);
                 }
-            }
-        })
+            },
+        )
     }
 
     pub fn save_unifi_controller(
@@ -222,10 +223,7 @@ impl DaemonState {
 // TOML persistence helpers
 // ---------------------------------------------------------------------------
 
-fn load_toml_dir(
-    dir: &PathBuf,
-    mut on_entry: impl FnMut(String, PathBuf),
-) -> anyhow::Result<()> {
+fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
         return Ok(());

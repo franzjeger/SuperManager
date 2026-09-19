@@ -35,7 +35,9 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use supermgr_core::protocol::{PipeRequest, PipeResponse, RpcError, MAX_FRAME_BYTES, PIPE_NAME, PROTOCOL_VERSION};
+use supermgr_core::protocol::{
+    PipeRequest, PipeResponse, RpcError, MAX_FRAME_BYTES, PIPE_NAME, PROTOCOL_VERSION,
+};
 
 use super::{daemon::DaemonState, dispatch, pipe_acl::PipeSecurity};
 
@@ -63,9 +65,8 @@ fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurit
     }
     // SAFETY: `security` outlives the call; `attrs_ptr` returns a valid
     // SECURITY_ATTRIBUTES heap pointer for the duration of `security`.
-    let server = unsafe {
-        options.create_with_security_attributes_raw(PIPE_NAME, security.attrs_ptr())
-    }?;
+    let server =
+        unsafe { options.create_with_security_attributes_raw(PIPE_NAME, security.attrs_ptr()) }?;
     Ok((server, security))
 }
 
@@ -133,9 +134,12 @@ async fn handle_connection(
         if n > MAX_FRAME_BYTES {
             // Defensive — the buffered reader has no hard ceiling on
             // line length on its own. Reject oversized frames.
-            let _ = write_error(reader.get_mut(), 0, RpcError::Protocol(
-                format!("frame exceeds {MAX_FRAME_BYTES} bytes"),
-            )).await;
+            let _ = write_error(
+                reader.get_mut(),
+                0,
+                RpcError::Protocol(format!("frame exceeds {MAX_FRAME_BYTES} bytes")),
+            )
+            .await;
             return Ok(());
         }
 
@@ -143,23 +147,35 @@ async fn handle_connection(
         let req: PipeRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let _ = write_error(reader.get_mut(), 0, RpcError::Protocol(
-                    format!("malformed request: {e}"),
-                )).await;
+                let _ = write_error(
+                    reader.get_mut(),
+                    0,
+                    RpcError::Protocol(format!("malformed request: {e}")),
+                )
+                .await;
                 continue;
             }
         };
 
         if req.v != PROTOCOL_VERSION {
-            let _ = write_error(reader.get_mut(), req.id, RpcError::Protocol(
-                format!("unsupported protocol version {}, daemon speaks {}", req.v, PROTOCOL_VERSION),
-            )).await;
+            let _ = write_error(
+                reader.get_mut(),
+                req.id,
+                RpcError::Protocol(format!(
+                    "unsupported protocol version {}, daemon speaks {}",
+                    req.v, PROTOCOL_VERSION
+                )),
+            )
+            .await;
             continue;
         }
 
         let response = dispatch::dispatch(&state, &req).await;
         let frame = match serde_json::to_vec(&response) {
-            Ok(mut v) => { v.push(b'\n'); v }
+            Ok(mut v) => {
+                v.push(b'\n');
+                v
+            }
             Err(e) => {
                 warn!("response serialise failed: {e}");
                 continue;
@@ -172,11 +188,7 @@ async fn handle_connection(
 
 /// Send a single error response with the given id. Used for early-stage
 /// protocol failures where we couldn't even parse the request.
-async fn write_error(
-    pipe: &mut NamedPipeServer,
-    id: u64,
-    err: RpcError,
-) -> std::io::Result<()> {
+async fn write_error(pipe: &mut NamedPipeServer, id: u64, err: RpcError) -> std::io::Result<()> {
     let resp = PipeResponse {
         v: PROTOCOL_VERSION,
         id,

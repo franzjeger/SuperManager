@@ -505,15 +505,21 @@ pub struct ProfileSummary {
 impl From<&Profile> for ProfileSummary {
     fn from(p: &Profile) -> Self {
         let split_routes = match &p.config {
-            ProfileConfig::WireGuard(wg) => {
-                wg.split_routes.iter().map(std::string::ToString::to_string).collect()
-            }
-            ProfileConfig::FortiGate(fg) => {
-                fg.routes.iter().map(std::string::ToString::to_string).collect()
-            }
-            ProfileConfig::ForticlientSslvpn(fc) => {
-                fc.routes.iter().map(std::string::ToString::to_string).collect()
-            }
+            ProfileConfig::WireGuard(wg) => wg
+                .split_routes
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            ProfileConfig::FortiGate(fg) => fg
+                .routes
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            ProfileConfig::ForticlientSslvpn(fc) => fc
+                .routes
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             _ => Vec::new(),
         };
         Self {
@@ -523,8 +529,7 @@ impl From<&Profile> for ProfileSummary {
             auto_connect: p.auto_connect,
             full_tunnel: p.full_tunnel,
             split_routes,
-            last_connected_secs: p.last_connected_at
-                .map(|dt| dt.timestamp().max(0) as u64),
+            last_connected_secs: p.last_connected_at.map(|dt| dt.timestamp().max(0) as u64),
             host: match &p.config {
                 ProfileConfig::FortiGate(fg) => Some(fg.host.clone()),
                 ProfileConfig::ForticlientSslvpn(fc) => Some(fc.host.clone()),
@@ -849,8 +854,7 @@ pub fn import_wireguard_conf(
             match key {
                 "PublicKey" => peer.public_key = value.to_owned(),
                 "PresharedKey" => {
-                    let label =
-                        format!("{secret_label}/psk/{}", &value[..8.min(value.len())]);
+                    let label = format!("{secret_label}/psk/{}", &value[..8.min(value.len())]);
                     psks.push((label.clone(), value.to_owned()));
                     peer.preshared_key = Some(SecretRef::new(label));
                 }
@@ -921,12 +925,11 @@ pub fn import_wireguard_conf(
         peers.push(p);
     }
 
-    let raw_private_key = raw_private_key.ok_or_else(|| {
-        crate::error::ProfileError::ImportFailed {
+    let raw_private_key =
+        raw_private_key.ok_or_else(|| crate::error::ProfileError::ImportFailed {
             path: "<wireguard conf>".into(),
             reason: "missing PrivateKey in [Interface]".into(),
-        }
-    })?;
+        })?;
 
     let cfg = WireGuardConfig {
         private_key: SecretRef::new(secret_label),
@@ -1081,7 +1084,9 @@ pub fn uncovered_dns_hosts(covered: &[IpNet], dns_servers: &[IpAddr]) -> Vec<IpN
 mod tests {
     use super::*;
 
-    fn ip(s: &str) -> IpNet { s.parse().unwrap() }
+    fn ip(s: &str) -> IpNet {
+        s.parse().unwrap()
+    }
 
     #[test]
     fn full_tunnel_passes_the_peer_list_through() {
@@ -1135,7 +1140,11 @@ mod tests {
         let dns = vec!["10.20.200.1".parse().unwrap()];
         assert_eq!(
             split_ts_with_dns(&routes, &dns),
-            vec![ip("10.20.3.0/24"), ip("10.20.21.0/24"), ip("10.20.200.1/32")]
+            vec![
+                ip("10.20.3.0/24"),
+                ip("10.20.21.0/24"),
+                ip("10.20.200.1/32")
+            ]
         );
     }
 
@@ -1167,12 +1176,18 @@ mod tests {
     fn uncovered_dns_hosts_returns_only_the_missing_prefixes() {
         let covered = vec![ip("10.0.0.0/8")];
         let dns = vec!["10.0.0.53".parse().unwrap(), "192.168.7.1".parse().unwrap()];
-        assert_eq!(uncovered_dns_hosts(&covered, &dns), vec![ip("192.168.7.1/32")]);
+        assert_eq!(
+            uncovered_dns_hosts(&covered, &dns),
+            vec![ip("192.168.7.1/32")]
+        );
     }
 
     #[test]
     fn uncovered_dns_hosts_dedupes_repeated_servers() {
-        let dns = vec!["192.168.7.1".parse().unwrap(), "192.168.7.1".parse().unwrap()];
+        let dns = vec![
+            "192.168.7.1".parse().unwrap(),
+            "192.168.7.1".parse().unwrap(),
+        ];
         assert_eq!(uncovered_dns_hosts(&[], &dns), vec![ip("192.168.7.1/32")]);
     }
 
@@ -1231,10 +1246,7 @@ PersistentKeepalive = 25
             import_wireguard_conf(conf, "test/wg").expect("parse WireGuard conf");
 
         // Private key is extracted
-        assert_eq!(
-            key.take(),
-            "cGhvbnktcHJpdmF0ZS1rZXktYmFzZTY0LXRlc3Q="
-        );
+        assert_eq!(key.take(), "cGhvbnktcHJpdmF0ZS1rZXktYmFzZTY0LXRlc3Q=");
 
         // Interface fields
         assert_eq!(cfg.private_key.label(), "test/wg");
@@ -1246,10 +1258,7 @@ PersistentKeepalive = 25
         // Peer fields
         assert_eq!(cfg.peers.len(), 1);
         let peer = &cfg.peers[0];
-        assert_eq!(
-            peer.public_key,
-            "cGVlci1wdWJsaWMta2V5LWJhc2U2NC10ZXN0AA=="
-        );
+        assert_eq!(peer.public_key, "cGVlci1wdWJsaWMta2V5LWJhc2U2NC10ZXN0AA==");
         assert_eq!(peer.endpoint.as_deref(), Some("vpn.example.com:51820"));
         assert_eq!(peer.allowed_ips.len(), 1);
         assert_eq!(peer.persistent_keepalive, Some(25));

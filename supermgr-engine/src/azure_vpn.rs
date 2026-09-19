@@ -101,8 +101,8 @@ pub fn parse_azure_vpn_config(xml: &str) -> Result<AzureVpnConfig, String> {
     let gateway_fqdn = extract_gateway_fqdn(xml)
         .ok_or_else(|| "missing <gatewayfqdn> / <vpngateway> / <FQDN>".to_owned())?;
 
-    let tenant_id = extract_tenant_id(xml)
-        .ok_or_else(|| "missing <tenant> / <azuretenant>".to_owned())?;
+    let tenant_id =
+        extract_tenant_id(xml).ok_or_else(|| "missing <tenant> / <azuretenant>".to_owned())?;
 
     // `<audience>` is rare in customer-issued configs — Microsoft's
     // exporter usually omits it. Default to the public-client GUID
@@ -205,8 +205,7 @@ fn extract_gateway_fqdn(xml: &str) -> Option<String> {
 /// exports store it as a URL (`https://login.microsoftonline.com/<guid>/`);
 /// we extract the GUID segment when that's the case.
 fn extract_tenant_id(xml: &str) -> Option<String> {
-    let raw = extract_tag(xml, "tenant")
-        .or_else(|| extract_tag(xml, "azuretenant"))?;
+    let raw = extract_tag(xml, "tenant").or_else(|| extract_tag(xml, "azuretenant"))?;
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -273,9 +272,9 @@ fn extract_ca_cert_pem(xml: &str) -> String {
 /// goal is just to avoid wrapping a thumbprint or other XML in
 /// PEM headers and shipping nonsense to `OpenVPN`.
 fn is_base64_like(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
-    })
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
 }
 
 /// Find the first inner-text occurrence of `<tag>...</tag>` (or any
@@ -315,7 +314,7 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
         }
         if let Some(end_rel) = lower[after_open..].find(&close_lower2) {
             let end = after_open + end_rel - 1; // back up one for the `<` of `</`
-            // Walk back to the start of the `</`
+                                                // Walk back to the start of the `</`
             if let Some(lt) = xml[..end].rfind("</") {
                 return Some(xml[after_open..lt].to_owned());
             }
@@ -518,7 +517,9 @@ fn extract_all_dns(xml: &str) -> Vec<IpAddr> {
 pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
     let mut out = String::with_capacity(cfg.ca_cert_pem.len() + cfg.server_secret_hex.len() + 1024);
 
-    out.push_str("# SuperManager-rendered Azure VPN profile (OpenVPN 2.x, MSP-Toolkit-V2 layout)\n");
+    out.push_str(
+        "# SuperManager-rendered Azure VPN profile (OpenVPN 2.x, MSP-Toolkit-V2 layout)\n",
+    );
     out.push_str("client\n");
     out.push_str("dev tun\n");
     out.push_str("proto tcp\n");
@@ -572,7 +573,11 @@ pub fn render_azure_ovpn(cfg: &AzureVpnConfig, full_tunnel: bool) -> String {
                     out.push_str(&format!("route {} {}\n", v4.network(), v4.netmask()));
                 }
                 ipnet::IpNet::V6(v6) => {
-                    out.push_str(&format!("route-ipv6 {}/{}\n", v6.network(), v6.prefix_len()));
+                    out.push_str(&format!(
+                        "route-ipv6 {}/{}\n",
+                        v6.network(),
+                        v6.prefix_len()
+                    ));
                 }
             }
         }
@@ -681,9 +686,15 @@ mod tests {
 
     #[test]
     fn missing_gateway_fails_with_named_field() {
-        let xml = SAMPLE_XML.replace("<gatewayfqdn>azuregateway-test.vpn.azure.com</gatewayfqdn>", "");
+        let xml = SAMPLE_XML.replace(
+            "<gatewayfqdn>azuregateway-test.vpn.azure.com</gatewayfqdn>",
+            "",
+        );
         let err = parse_azure_vpn_config(&xml).expect_err("should fail");
-        assert!(err.contains("gatewayfqdn"), "error names the missing field: {err}");
+        assert!(
+            err.contains("gatewayfqdn"),
+            "error names the missing field: {err}"
+        );
     }
 
     /// Microsoft's current schema: `<vpngateway>` is a container
@@ -718,7 +729,10 @@ mod tests {
         // Tenant URL is unwrapped to bare GUID.
         assert_eq!(cfg.tenant_id, "11111111-2222-3333-4444-555555555555");
         // Cert was thumbprint-only (no base64 body) — PEM is empty.
-        assert!(cfg.ca_cert_pem.is_empty(), "thumbprint-only cert leaves PEM blank");
+        assert!(
+            cfg.ca_cert_pem.is_empty(),
+            "thumbprint-only cert leaves PEM blank"
+        );
     }
 
     #[test]
@@ -764,10 +778,7 @@ mod tests {
 
     #[test]
     fn missing_tenant_fails() {
-        let xml = SAMPLE_XML.replace(
-            "<tenant>11111111-2222-3333-4444-555555555555</tenant>",
-            "",
-        );
+        let xml = SAMPLE_XML.replace("<tenant>11111111-2222-3333-4444-555555555555</tenant>", "");
         let err = parse_azure_vpn_config(&xml).expect_err("should fail");
         assert!(err.contains("tenant"));
     }
@@ -823,11 +834,15 @@ mod tests {
         // black-holes all public internet + DNS. Only explicit full_tunnel=true
         // may redirect.
         let split = render_azure_ovpn(&cfg, false);
-        assert!(!split.contains("redirect-gateway"),
-            "split tunnel with no config routes must rely on pushed routes, not redirect-gateway");
+        assert!(
+            !split.contains("redirect-gateway"),
+            "split tunnel with no config routes must rely on pushed routes, not redirect-gateway"
+        );
         let full = render_azure_ovpn(&cfg, true);
-        assert!(full.contains("redirect-gateway def1"),
-            "explicit full_tunnel must still redirect");
+        assert!(
+            full.contains("redirect-gateway def1"),
+            "explicit full_tunnel must still redirect"
+        );
     }
 
     #[test]
@@ -888,7 +903,11 @@ mod tests {
             .expect("embedded DigiCert PEM body must be valid base64");
         // Expect a non-trivial DER blob — DigiCert Global Root CA
         // is ~947 bytes.
-        assert!(der.len() > 800, "DER decode produced suspiciously small output: {} bytes", der.len());
+        assert!(
+            der.len() > 800,
+            "DER decode produced suspiciously small output: {} bytes",
+            der.len()
+        );
         // SHA-1 of the DER bytes is the cert thumbprint.
         let sha1 = sha1_hex(&der);
         assert_eq!(
@@ -919,7 +938,7 @@ mod tests {
                 w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
             }
             for i in 16..80 {
-                w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1);
+                w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
             }
             let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
             for i in 0..80 {
@@ -929,7 +948,12 @@ mod tests {
                     40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
                     _ => (b ^ c ^ d, 0xca62c1d6),
                 };
-                let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
+                let temp = a
+                    .rotate_left(5)
+                    .wrapping_add(f)
+                    .wrapping_add(e)
+                    .wrapping_add(k)
+                    .wrapping_add(w[i]);
                 e = d;
                 d = c;
                 c = b.rotate_left(30);
@@ -942,7 +966,10 @@ mod tests {
             h[3] = h[3].wrapping_add(d);
             h[4] = h[4].wrapping_add(e);
         }
-        format!("{:08x}{:08x}{:08x}{:08x}{:08x}", h[0], h[1], h[2], h[3], h[4])
+        format!(
+            "{:08x}{:08x}{:08x}{:08x}{:08x}",
+            h[0], h[1], h[2], h[3], h[4]
+        )
     }
 
     #[test]
@@ -957,12 +984,16 @@ mod tests {
   </servervalidation>
 </AzVpnProfile>"#;
         let cfg = parse_azure_vpn_config(xml).expect("should parse");
-        assert!(cfg.ca_cert_pem.is_empty(),
-            "thumbprint-only config has no inline PEM");
+        assert!(
+            cfg.ca_cert_pem.is_empty(),
+            "thumbprint-only config has no inline PEM"
+        );
         let body = render_azure_ovpn(&cfg, true);
-        assert!(body.contains("DigiCert Global Root CA")
-            || body.contains("MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjAN"),
-            "renderer must embed the DigiCert PEM when no inline CA is supplied");
+        assert!(
+            body.contains("DigiCert Global Root CA")
+                || body.contains("MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjAN"),
+            "renderer must embed the DigiCert PEM when no inline CA is supplied"
+        );
     }
 
     #[test]

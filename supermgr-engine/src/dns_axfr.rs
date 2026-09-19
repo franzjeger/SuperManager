@@ -99,7 +99,7 @@ async fn attempt_axfr(domain: &str, ns: &str) -> Option<AxfrTransfer> {
     .await
     {
         Ok(Ok(o)) => o,
-        _ => return None,  // timeout or spawn error
+        _ => return None, // timeout or spawn error
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);

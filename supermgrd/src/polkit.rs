@@ -169,9 +169,7 @@ pub async fn authorize(
         .get_connection_unix_user(sender.to_owned().into())
         .await
         .map_err(|e| {
-            fdo::Error::AccessDenied(format!(
-                "cannot determine the caller of '{action}': {e}"
-            ))
+            fdo::Error::AccessDenied(format!("cannot determine the caller of '{action}': {e}"))
         })?;
     if uid == 0 {
         tracing::debug!(caller = %sender, action, "authorized root caller");
@@ -193,13 +191,7 @@ pub async fn authorize(
     let subject = ("system-bus-name", subject_details);
 
     let (authorized, challenge, _details) = authority
-        .check_authorization(
-            &subject,
-            action,
-            HashMap::new(),
-            ALLOW_USER_INTERACTION,
-            "",
-        )
+        .check_authorization(&subject, action, HashMap::new(), ALLOW_USER_INTERACTION, "")
         .await
         .map_err(|e| {
             tracing::error!(error = %e, action, "polkit check failed — denying");
@@ -475,7 +467,11 @@ mod tests {
     #[test]
     fn tailscale_repair_and_login_are_gated() {
         let daemon = include_str!("daemon.rs");
-        for method in ["async fn tailscale_repair(", "async fn tailscale_login(", "async fn tailscale_begin_login("] {
+        for method in [
+            "async fn tailscale_repair(",
+            "async fn tailscale_login(",
+            "async fn tailscale_begin_login(",
+        ] {
             let body: String = daemon
                 .split(method)
                 .nth(1)

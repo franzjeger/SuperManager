@@ -52,7 +52,9 @@ pub enum AiProvider {
 }
 
 /// Default Anthropic model, overridable in Settings.
-pub fn default_anthropic_model() -> String { anthropic_model_id("").into() }
+pub fn default_anthropic_model() -> String {
+    anthropic_model_id("").into()
+}
 
 /// Recover the retired original default, including old saved settings.
 /// Preserve other explicit model IDs instead of guessing from a 404.
@@ -63,12 +65,16 @@ pub fn anthropic_model_id(configured: &str) -> &str {
     }
 }
 
-fn deserialize_anthropic_model<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+fn deserialize_anthropic_model<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let model = String::deserialize(deserializer)?;
     Ok(anthropic_model_id(&model).to_owned())
 }
 /// Default OpenAI API model, overridable in Settings.
-pub fn default_openai_model() -> String { "gpt-6-astra".into() }
+pub fn default_openai_model() -> String {
+    "gpt-6-astra".into()
+}
 
 /// Serialisable application settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +91,10 @@ pub struct AppSettings {
     #[serde(default = "default_openai_model")]
     pub openai_model: String,
     /// Claude model ID, shared by the API and subscription CLI.
-    #[serde(default = "default_anthropic_model", deserialize_with = "deserialize_anthropic_model")]
+    #[serde(
+        default = "default_anthropic_model",
+        deserialize_with = "deserialize_anthropic_model"
+    )]
     pub anthropic_model: String,
     /// Which colour scheme to use.
     #[serde(default)]
@@ -113,7 +122,6 @@ pub struct AppSettings {
     pub auto_lock_minutes: u64,
 
     // ---- Webhook / notification settings ----
-
     /// Webhook URL for outgoing notifications (Slack, Teams, Discord).
     /// Empty string means disabled.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -126,14 +134,12 @@ pub struct AppSettings {
     pub webhook_on_vpn_disconnect: bool,
 
     // ---- UniFi Cloud (ui.com Site Manager) ----
-
     /// API key for the UI.com Site Manager API (https://unifi.ui.com).
     /// Create at Settings > API Keys in Site Manager.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unifi_cloud_api_key: String,
 
     // ---- Remote Desktop ----
-
     /// Preferred RDP client: "auto", "remmina", "xfreerdp3", "xfreerdp".
     #[serde(default = "default_rdp_client")]
     pub rdp_client: String,
@@ -161,7 +167,10 @@ mod model_tests {
         let saved = serde_json::json!({"anthropic_model":"  custom-accessible-model  "});
         let settings: AppSettings = serde_json::from_value(saved).unwrap();
         assert_eq!(settings.anthropic_model, "custom-accessible-model");
-        assert_eq!(serde_json::to_value(settings).unwrap()["anthropic_model"], "custom-accessible-model");
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["anthropic_model"],
+            "custom-accessible-model"
+        );
     }
 }
 
@@ -215,7 +224,12 @@ pub struct LayoutSettings {
 
 impl Default for LayoutSettings {
     fn default() -> Self {
-        Self { window_width: 1280, window_height: 800, maximized: false, sidebar_widths: Default::default() }
+        Self {
+            window_width: 1280,
+            window_height: 800,
+            maximized: false,
+            sidebar_widths: Default::default(),
+        }
     }
 }
 

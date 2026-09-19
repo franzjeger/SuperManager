@@ -81,16 +81,14 @@ fn handle_tools_list(id: &Value) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".into(),
         id: id.clone(),
-        result: Some(json!({ "tools": supermgr_mcp::available_tools(std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_none()) })),
+        result: Some(
+            json!({ "tools": supermgr_mcp::available_tools(std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_none()) }),
+        ),
         error: None,
     }
 }
 
-async fn handle_tools_call(
-    proxy: &DaemonClient,
-    id: &Value,
-    params: &Value,
-) -> JsonRpcResponse {
+async fn handle_tools_call(proxy: &DaemonClient, id: &Value, params: &Value) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
@@ -147,9 +145,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("supermgr-mcp starting");
 
-    let proxy = client::connect()
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let proxy = client::connect().await.map_err(anyhow::Error::msg)?;
 
     info!("connected to supermgrd");
 
@@ -245,7 +241,10 @@ mod tests {
         // client has nothing to render and no schema to validate against.
         for tool in tool_definitions().as_array().expect("array") {
             let name = tool.get("name").and_then(Value::as_str);
-            assert!(name.is_some_and(|n| !n.is_empty()), "tool without a name: {tool}");
+            assert!(
+                name.is_some_and(|n| !n.is_empty()),
+                "tool without a name: {tool}"
+            );
             let name = name.unwrap();
 
             let description = tool.get("description").and_then(Value::as_str);
@@ -268,7 +267,11 @@ mod tests {
         let before = names.len();
         names.sort();
         names.dedup();
-        assert_eq!(before, names.len(), "duplicate tool name in tool_definitions");
+        assert_eq!(
+            before,
+            names.len(),
+            "duplicate tool name in tool_definitions"
+        );
     }
 
     #[test]
@@ -324,7 +327,9 @@ mod tests {
                     "{name}.{field} has no type — nothing tells the model what to send"
                 );
                 assert!(
-                    spec.get("description").and_then(Value::as_str).is_some_and(|d| !d.is_empty()),
+                    spec.get("description")
+                        .and_then(Value::as_str)
+                        .is_some_and(|d| !d.is_empty()),
                     "{name}.{field} has no description"
                 );
             }
@@ -362,8 +367,14 @@ mod tests {
         let advertised = advertised_tool_names();
         let mut linux_only = false;
         for line in dispatch_body.lines() {
-            if line.trim() == "#[cfg(target_os = \"linux\")]" { linux_only = true; continue; }
-            if linux_only && !cfg!(target_os = "linux") { linux_only = false; continue; }
+            if line.trim() == "#[cfg(target_os = \"linux\")]" {
+                linux_only = true;
+                continue;
+            }
+            if linux_only && !cfg!(target_os = "linux") {
+                linux_only = false;
+                continue;
+            }
             linux_only = false;
             let trimmed = line.trim();
             let Some(rest) = trimmed.strip_prefix('"') else {
@@ -389,9 +400,15 @@ mod tests {
         let response = handle_initialize(&json!(1));
         let result = response.result.expect("initialize returns a result");
         assert!(response.error.is_none());
-        assert_eq!(response.id, json!(1), "the request id must come back unchanged");
+        assert_eq!(
+            response.id,
+            json!(1),
+            "the request id must come back unchanged"
+        );
         assert!(
-            result["protocolVersion"].as_str().is_some_and(|v| !v.is_empty()),
+            result["protocolVersion"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty()),
             "a client with no protocolVersion cannot negotiate"
         );
         assert_eq!(result["serverInfo"]["name"], json!("supermgr-mcp"));
@@ -438,10 +455,16 @@ mod tests {
             jsonrpc: "2.0".into(),
             id: json!(7),
             result: None,
-            error: Some(JsonRpcError { code: -32601, message: "nope".into() }),
+            error: Some(JsonRpcError {
+                code: -32601,
+                message: "nope".into(),
+            }),
         };
         let encoded = serde_json::to_value(&err).expect("serialise");
-        assert!(encoded.get("result").is_none(), "no result key on a failure");
+        assert!(
+            encoded.get("result").is_none(),
+            "no result key on a failure"
+        );
         assert_eq!(encoded["error"]["code"], json!(-32601));
     }
 

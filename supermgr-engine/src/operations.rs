@@ -71,7 +71,7 @@ pub struct OperationRegistry {
 }
 
 impl OperationRegistry {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -79,7 +79,11 @@ impl OperationRegistry {
     /// Register a new operation and hand back a guard. The guard
     /// auto-unregisters on drop, so handlers never have to
     /// remember to clean up.
-    pub fn start(self: &Arc<Self>, kind: impl Into<String>, label: impl Into<String>) -> OperationGuard {
+    pub fn start(
+        self: &Arc<Self>,
+        kind: impl Into<String>,
+        label: impl Into<String>,
+    ) -> OperationGuard {
         let id = Uuid::new_v4().simple().to_string();
         let cancel = Arc::new(AtomicBool::new(false));
         let info = OperationInfo {
@@ -153,19 +157,19 @@ pub struct OperationGuard {
 }
 
 impl OperationGuard {
-    #[must_use] 
+    #[must_use]
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Acquire)
     }
 
     /// Hand out a clone of the cancel flag to a worker task.
     /// Workers should `load(Ordering::Acquire)` between batches.
-    #[must_use] 
+    #[must_use]
     pub fn cancel_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancel)
     }

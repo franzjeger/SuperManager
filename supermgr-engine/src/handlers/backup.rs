@@ -58,7 +58,11 @@ impl EngineServer {
     /// the same backup overwrites rather than duplicating. Secrets are
     /// written first so a profile is never briefly live with a missing
     /// key.
-    pub(crate) async fn handle_backup_import(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_backup_import(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let Some(data) = params.get("backup").and_then(|v| v.as_str()) else {
             return Response::err(id, protocol::INVALID_PARAMS, "missing backup".to_owned());
         };

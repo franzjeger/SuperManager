@@ -11,7 +11,9 @@ pub mod wireguard;
 
 use std::sync::Arc;
 
-use supermgr_core::{vpn::backend::VpnBackend, vpn::profile::Profile, vpn::state::TunnelStats, CoreError};
+use supermgr_core::{
+    vpn::backend::VpnBackend, vpn::profile::Profile, vpn::state::TunnelStats, CoreError,
+};
 
 /// Read TX/RX byte counters for a network interface from sysfs.
 ///
@@ -53,12 +55,8 @@ pub fn backend_for_profile(
     use supermgr_core::vpn::profile::ProfileConfig;
 
     match &profile.config {
-        ProfileConfig::WireGuard(_) => {
-            Ok(Arc::new(wireguard::WireGuardBackend::new()))
-        }
-        ProfileConfig::FortiGate(_) => {
-            Ok(Arc::new(fortigate::FortiGateBackend::new()))
-        }
+        ProfileConfig::WireGuard(_) => Ok(Arc::new(wireguard::WireGuardBackend::new())),
+        ProfileConfig::FortiGate(_) => Ok(Arc::new(fortigate::FortiGateBackend::new())),
         ProfileConfig::OpenVpn(_) => {
             Ok(Arc::new(openvpn::OpenVpnBackend::new()) as Arc<dyn VpnBackend>)
         }

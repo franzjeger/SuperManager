@@ -23,12 +23,7 @@
 //!    and wait for the process to exit; fall back to `Child::kill` if
 //!    it doesn't terminate within 5 s.
 
-use std::{
-    net::SocketAddr,
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{
@@ -143,10 +138,7 @@ async fn pick_free_port() -> Result<u16, VpnError> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(VpnError::Io)?;
-    let port = listener
-        .local_addr()
-        .map_err(VpnError::Io)?
-        .port();
+    let port = listener.local_addr().map_err(VpnError::Io)?.port();
     // Drop the listener so OpenVPN can bind the port. There's a tiny
     // race window where another process could grab it; in practice
     // local management ports are quiet enough that this is acceptable.
@@ -179,28 +171,27 @@ impl OpenVpnBackend {
         // `C:\ProgramData\SuperManager\runtime\openvpn-<id>.auth`, and
         // ProgramData leaves that file readable by every authenticated local
         // user for as long as the tunnel is up.
-        let auth_creds: Option<(String, String)> = if let (Some(username), Some(password_ref)) =
-            (&cfg.username, &cfg.password)
-        {
-            let store = self.secret_store.as_ref().ok_or_else(|| {
-                VpnError::MissingDependency(
-                    "OpenVPN profile uses auth-user-pass but the backend has no secret store"
-                        .into(),
-                )
-            })?;
-            let password = store
-                .retrieve(password_ref.label())
-                .await
-                .map_err(|e| VpnError::MissingDependency(format!(
-                    "OpenVPN password lookup ({}): {e}", password_ref.label()
-                )))?;
-            let password_str = std::str::from_utf8(&password).map_err(|_| {
-                VpnError::MissingDependency("stored OpenVPN password is not valid UTF-8".into())
-            })?;
-            Some((username.clone(), password_str.to_owned()))
-        } else {
-            None
-        };
+        let auth_creds: Option<(String, String)> =
+            if let (Some(username), Some(password_ref)) = (&cfg.username, &cfg.password) {
+                let store = self.secret_store.as_ref().ok_or_else(|| {
+                    VpnError::MissingDependency(
+                        "OpenVPN profile uses auth-user-pass but the backend has no secret store"
+                            .into(),
+                    )
+                })?;
+                let password = store.retrieve(password_ref.label()).await.map_err(|e| {
+                    VpnError::MissingDependency(format!(
+                        "OpenVPN password lookup ({}): {e}",
+                        password_ref.label()
+                    ))
+                })?;
+                let password_str = std::str::from_utf8(&password).map_err(|_| {
+                    VpnError::MissingDependency("stored OpenVPN password is not valid UTF-8".into())
+                })?;
+                Some((username.clone(), password_str.to_owned()))
+            } else {
+                None
+            };
 
         let mut command = Command::new(&openvpn_exe);
         // Set the working directory to the directory containing openvpn.exe.
@@ -280,7 +271,11 @@ impl OpenVpnBackend {
         write_mgmt(&mut writer, "state on\n").await?;
         write_mgmt(&mut writer, "hold release\n").await?;
 
-        let success = timeout(HANDSHAKE_TIMEOUT, wait_for_connected(&mut reader, &mut writer, auth_creds.as_ref())).await;
+        let success = timeout(
+            HANDSHAKE_TIMEOUT,
+            wait_for_connected(&mut reader, &mut writer, auth_creds.as_ref()),
+        )
+        .await;
         match success {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -336,9 +331,8 @@ impl OpenVpnBackend {
 #[async_trait]
 impl VpnBackend for OpenVpnBackend {
     async fn connect(&self, profile_json: &str) -> Result<(), VpnError> {
-        let profile: Profile = serde_json::from_str(profile_json).map_err(|e| {
-            VpnError::MissingDependency(format!("parse OpenVPN profile JSON: {e}"))
-        })?;
+        let profile: Profile = serde_json::from_str(profile_json)
+            .map_err(|e| VpnError::MissingDependency(format!("parse OpenVPN profile JSON: {e}")))?;
         self.bring_up(&profile).await
     }
 
@@ -373,7 +367,10 @@ async fn connect_mgmt(addr: SocketAddr) -> Result<TcpStream, std::io::Error> {
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::TimedOut, "management socket did not open")
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "management socket did not open",
+        )
     }))
 }
 
@@ -387,10 +384,7 @@ fn mgmt_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-async fn write_mgmt(
-    w: &mut tokio::net::tcp::OwnedWriteHalf,
-    line: &str,
-) -> Result<(), VpnError> {
+async fn write_mgmt(w: &mut tokio::net::tcp::OwnedWriteHalf, line: &str) -> Result<(), VpnError> {
     w.write_all(line.as_bytes()).await.map_err(VpnError::Io)
 }
 
@@ -441,8 +435,16 @@ async fn wait_for_connected(
             // terminate the argument early.
             match auth_creds {
                 Some((user, pass)) => {
-                    write_mgmt(writer, &format!("username \"Auth\" \"{}\"\n", mgmt_escape(user))).await?;
-                    write_mgmt(writer, &format!("password \"Auth\" \"{}\"\n", mgmt_escape(pass))).await?;
+                    write_mgmt(
+                        writer,
+                        &format!("username \"Auth\" \"{}\"\n", mgmt_escape(user)),
+                    )
+                    .await?;
+                    write_mgmt(
+                        writer,
+                        &format!("password \"Auth\" \"{}\"\n", mgmt_escape(pass)),
+                    )
+                    .await?;
                 }
                 None => {
                     return Err(VpnError::Subprocess {
@@ -473,7 +475,6 @@ async fn tear_down(mut active: OvpnActive) {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -66,7 +66,7 @@ pub enum OverrideScope {
 }
 
 impl OverrideScope {
-    #[must_use] 
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Mac => "mac",
@@ -96,7 +96,7 @@ impl DeviceTypeOverrides {
     /// Tolerates the legacy flat `[overrides]` table shape
     /// from earlier builds — those entries migrate into
     /// `by_mac` on the next save.
-    #[must_use] 
+    #[must_use]
     pub fn open(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join("device_type_overrides.toml");
         let mut inner = Inner::default();
@@ -177,8 +177,12 @@ impl DeviceTypeOverrides {
                 OverrideScope::Oui => &mut guard.by_oui,
             };
             match device_type {
-                Some(t) => { target.insert(normalised, t.to_owned()); }
-                None => { target.remove(&normalised); }
+                Some(t) => {
+                    target.insert(normalised, t.to_owned());
+                }
+                None => {
+                    target.remove(&normalised);
+                }
             }
         }
         self.persist().await
@@ -200,15 +204,12 @@ impl DeviceTypeOverrides {
             by_mac: snap.by_mac,
             by_oui: snap.by_oui,
         };
-        let text = toml::to_string_pretty(&on_disk)
-            .context("serialize device-type overrides")?;
+        let text = toml::to_string_pretty(&on_disk).context("serialize device-type overrides")?;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {parent:?}"))?;
+            std::fs::create_dir_all(parent).with_context(|| format!("mkdir {parent:?}"))?;
         }
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text.as_bytes())
-            .with_context(|| format!("write {tmp:?}"))?;
+        std::fs::write(&tmp, text.as_bytes()).with_context(|| format!("write {tmp:?}"))?;
         std::fs::rename(&tmp, &self.path)
             .with_context(|| format!("rename {tmp:?} -> {:?}", self.path))?;
         Ok(())

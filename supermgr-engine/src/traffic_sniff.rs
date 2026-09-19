@@ -123,12 +123,13 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
         Duration::from_mins(1),
         tokio::process::Command::new("tcpdump")
             .args([
-                "-r", &pcap_path.to_string_lossy(),
-                "-A",         // ASCII payload dump
-                "-nn",        // numeric host + port (no DNS resolve)
-                "-tttt",      // ISO-like timestamps
-                "-v",         // include IP-level info
-                "-q",         // quiet protocol decoding (keeps output compact)
+                "-r",
+                &pcap_path.to_string_lossy(),
+                "-A",    // ASCII payload dump
+                "-nn",   // numeric host + port (no DNS resolve)
+                "-tttt", // ISO-like timestamps
+                "-v",    // include IP-level info
+                "-q",    // quiet protocol decoding (keeps output compact)
             ])
             .output(),
     )
@@ -164,8 +165,7 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
     }
 
     // Stable iteration order for deterministic finding output.
-    let mut clusters: Vec<((String, &'static str), Vec<&Event>)> =
-        by_cluster.into_iter().collect();
+    let mut clusters: Vec<((String, &'static str), Vec<&Event>)> = by_cluster.into_iter().collect();
     clusters.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut findings: Vec<Finding> = Vec::new();
@@ -247,10 +247,7 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
     // still useful, we just lose the TLS-client coverage.
     match crate::pcap_binary::detect_tls_downgrade_clients(pcap_path).await {
         Ok(extra) => findings.extend(extra),
-        Err(e) => tracing::warn!(
-            "TLS downgrade scan failed on {}: {e}",
-            pcap_path.display()
-        ),
+        Err(e) => tracing::warn!("TLS downgrade scan failed on {}: {e}", pcap_path.display()),
     }
 
     Ok(TrafficAuditResult {
@@ -307,7 +304,8 @@ const PROTO_HTTP_BASIC: ProtocolDef = ProtocolDef {
     name: "HTTP basic-auth",
     severity: Severity::High,
     cvss: 7.5,
-    recommendation: "Either move the affected endpoint behind HTTPS only (Strict-Transport-Security + \
+    recommendation:
+        "Either move the affected endpoint behind HTTPS only (Strict-Transport-Security + \
         HTTP→HTTPS redirect), or replace basic-auth with a token/OAuth/SAML flow that doesn't \
         re-transmit credentials on every request.",
 };
@@ -502,18 +500,17 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
     }
 
     // Telnet: any payload on port 23 = cleartext exposure
-    if (header.dst_port == 23 || header.src_port == 23)
-        && !payload.trim().is_empty() {
-            out.push(Event {
-                timestamp: header.timestamp.clone(),
-                src_ip: header.src_ip.clone(),
-                src_port: header.src_port,
-                dst_ip: header.dst_ip.clone(),
-                dst_port: header.dst_port,
-                protocol: PROTO_TELNET,
-                redacted_excerpt: "(telnet payload — see .pcap for content)".into(),
-            });
-        }
+    if (header.dst_port == 23 || header.src_port == 23) && !payload.trim().is_empty() {
+        out.push(Event {
+            timestamp: header.timestamp.clone(),
+            src_ip: header.src_ip.clone(),
+            src_port: header.src_port,
+            dst_ip: header.dst_ip.clone(),
+            dst_port: header.dst_port,
+            protocol: PROTO_TELNET,
+            redacted_excerpt: "(telnet payload — see .pcap for content)".into(),
+        });
+    }
 
     // HTTP basic auth: case-insensitive "Authorization: Basic"
     if header.dst_port == 80
@@ -705,7 +702,13 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
         let snippet = &payload[idx..snippet_end];
         let preview = snippet
             .chars()
-            .map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '.' })
+            .map(|c| {
+                if c.is_ascii_graphic() || c == ' ' {
+                    c
+                } else {
+                    '.'
+                }
+            })
             .collect::<String>();
         out.push(Event {
             timestamp: header.timestamp.clone(),
@@ -733,8 +736,7 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
     // cleartext seen" as the finding; the operator can open the
     // pcap in Wireshark for credential-level detail if needed.
     if header.dst_port == 1883 || header.src_port == 1883 {
-        let has_mqtt = payload.contains("MQTT")
-            || payload.contains("MQIsdp");
+        let has_mqtt = payload.contains("MQTT") || payload.contains("MQIsdp");
         if has_mqtt {
             out.push(Event {
                 timestamp: header.timestamp.clone(),
@@ -952,7 +954,7 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
 /// Helper to produce the engagement evidence directory path.
 /// Given an `engagement_id`, returns
 /// `<data-dir>/findings_store/<engagement_id>/captures/`.
-#[must_use] 
+#[must_use]
 pub fn engagement_evidence_dir(engagement_id: &str) -> PathBuf {
     let mut p = crate::secrets::default_data_dir();
     p.push("findings_store");
@@ -1119,7 +1121,10 @@ AUTH PLAIN dXNlcgB1c2VyAHBhc3M=
 .....binary tls bytes....
 ";
         let events = scan_events(text);
-        assert!(events.is_empty(), "no cleartext = no events; got {events:?}");
+        assert!(
+            events.is_empty(),
+            "no cleartext = no events; got {events:?}"
+        );
     }
 
     // ─── SNMP community-string extraction ──────────────────────────
@@ -1171,7 +1176,10 @@ AUTH PLAIN dXNlcgB1c2VyAHBhc3M=
   SNMPv2c C=\"public\" GetRequest(28) .1.3.6.1.2.1.1.5.0
 ";
         let events = scan_events(text);
-        let snmp: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "snmp-community").collect();
+        let snmp: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "snmp-community")
+            .collect();
         assert_eq!(snmp.len(), 1);
         assert!(snmp[0].redacted_excerpt.contains("public"));
         assert_eq!(snmp[0].src_ip, "192.0.2.5");
@@ -1245,7 +1253,10 @@ Content-Length: 38\r
 username=admin&password=correcthorse
 ";
         let events = scan_events(text);
-        let post: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "http-form-post").collect();
+        let post: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "http-form-post")
+            .collect();
         assert_eq!(post.len(), 1, "should find one POST event");
         assert!(post[0].redacted_excerpt.contains("password=sha256:"));
         assert!(!post[0].redacted_excerpt.contains("correcthorse"));
@@ -1265,7 +1276,10 @@ username=admin&password=correcthorse
 ....NTLMSSP.....\u{0001}.....more bytes.....
 ";
         let events = scan_events(text);
-        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        let ntlm: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "ntlm-handshake")
+            .collect();
         assert_eq!(ntlm.len(), 1);
         assert!(ntlm[0].redacted_excerpt.contains("NTLMSSP"));
     }
@@ -1285,7 +1299,10 @@ WWW-Authenticate: NTLM\r
 NTLMSSP....type-1 negotiate message bytes
 ";
         let events = scan_events(text);
-        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        let ntlm: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "ntlm-handshake")
+            .collect();
         assert_eq!(ntlm.len(), 1);
     }
 
@@ -1296,7 +1313,10 @@ NTLMSSP....type-1 negotiate message bytes
 ....regular https payload bytes that happen to mention NTL or LMS or even NT M but not the magic
 ";
         let events = scan_events(text);
-        let ntlm: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "ntlm-handshake").collect();
+        let ntlm: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "ntlm-handshake")
+            .collect();
         assert!(ntlm.is_empty(), "no NTLMSSP magic = no event");
     }
 
@@ -1312,7 +1332,10 @@ NTLMSSP....type-1 negotiate message bytes
 \u{0010}.\u{0004}MQTT.\u{0002}.<.client-id-here.
 ";
         let events = scan_events(text);
-        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        let mqtt: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "mqtt-cleartext")
+            .collect();
         assert_eq!(mqtt.len(), 1);
         assert!(mqtt[0].redacted_excerpt.contains("MQTT CONNECT"));
     }
@@ -1325,7 +1348,10 @@ NTLMSSP....type-1 negotiate message bytes
 \u{0010}.\u{0006}MQIsdp.\u{0003}.<.client.
 ";
         let events = scan_events(text);
-        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        let mqtt: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "mqtt-cleartext")
+            .collect();
         assert_eq!(mqtt.len(), 1);
     }
 
@@ -1340,7 +1366,10 @@ NTLMSSP....type-1 negotiate message bytes
 ....tls bytes... mqtt in some unrelated text ....
 ";
         let events = scan_events(text);
-        let mqtt: Vec<&Event> = events.iter().filter(|e| e.protocol.id == "mqtt-cleartext").collect();
+        let mqtt: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.protocol.id == "mqtt-cleartext")
+            .collect();
         assert!(mqtt.is_empty(), "non-1883 ports don't flag");
     }
 

@@ -225,12 +225,14 @@ impl PipeClient {
 
     /// List all VPN profiles as a JSON array.
     pub async fn list_profiles(&self) -> Result<String, PipeError> {
-        self.invoke_json_string("list_profiles", serde_json::json!({})).await
+        self.invoke_json_string("list_profiles", serde_json::json!({}))
+            .await
     }
 
     /// Connect to the named profile.
     pub async fn connect(&self, profile_id: &str) -> Result<(), PipeError> {
-        self.invoke_unit("connect", serde_json::json!({ "profile_id": profile_id })).await
+        self.invoke_unit("connect", serde_json::json!({ "profile_id": profile_id }))
+            .await
     }
 
     /// Disconnect the active profile.
@@ -240,20 +242,21 @@ impl PipeClient {
 
     /// Current VPN status JSON.
     pub async fn get_status(&self) -> Result<String, PipeError> {
-        self.invoke_json_string("get_status", serde_json::json!({})).await
+        self.invoke_json_string("get_status", serde_json::json!({}))
+            .await
     }
 
     /// Delete a profile by id.
     pub async fn delete_profile(&self, profile_id: &str) -> Result<(), PipeError> {
-        self.invoke_unit("delete_profile", serde_json::json!({ "profile_id": profile_id })).await
+        self.invoke_unit(
+            "delete_profile",
+            serde_json::json!({ "profile_id": profile_id }),
+        )
+        .await
     }
 
     /// Import a WireGuard `wg-quick` config. Returns the new profile id.
-    pub async fn import_wireguard(
-        &self,
-        conf_text: &str,
-        name: &str,
-    ) -> Result<String, PipeError> {
+    pub async fn import_wireguard(&self, conf_text: &str, name: &str) -> Result<String, PipeError> {
         self.invoke_json_string(
             "import_wireguard",
             serde_json::json!({ "conf_text": conf_text, "name": name }),
@@ -343,12 +346,14 @@ impl PipeClient {
 
     /// List all managed SSH keys as a JSON array.
     pub async fn ssh_list_keys(&self) -> Result<String, PipeError> {
-        self.invoke_json_string("ssh_list_keys", serde_json::json!({})).await
+        self.invoke_json_string("ssh_list_keys", serde_json::json!({}))
+            .await
     }
 
     /// Delete an SSH key by id.
     pub async fn ssh_delete_key(&self, key_id: &str) -> Result<(), PipeError> {
-        self.invoke_unit("ssh_delete_key", serde_json::json!({ "key_id": key_id })).await
+        self.invoke_unit("ssh_delete_key", serde_json::json!({ "key_id": key_id }))
+            .await
     }
 
     /// Export the public half of a key in OpenSSH `authorized_keys` format.
@@ -364,22 +369,26 @@ impl PipeClient {
 
     /// List all managed hosts as a JSON array.
     pub async fn list_hosts(&self) -> Result<String, PipeError> {
-        self.invoke_json_string("list_hosts", serde_json::json!({})).await
+        self.invoke_json_string("list_hosts", serde_json::json!({}))
+            .await
     }
 
     /// Get a single host's JSON.
     pub async fn get_host(&self, host_id: &str) -> Result<String, PipeError> {
-        self.invoke_json_string("get_host", serde_json::json!({ "host_id": host_id })).await
+        self.invoke_json_string("get_host", serde_json::json!({ "host_id": host_id }))
+            .await
     }
 
     /// Add a new host from its JSON serialisation. Returns the assigned id.
     pub async fn add_host(&self, host_json: &str) -> Result<String, PipeError> {
-        self.invoke_json_string("add_host", serde_json::json!({ "host_json": host_json })).await
+        self.invoke_json_string("add_host", serde_json::json!({ "host_json": host_json }))
+            .await
     }
 
     /// Delete a host by id.
     pub async fn delete_host(&self, host_id: &str) -> Result<(), PipeError> {
-        self.invoke_unit("delete_host", serde_json::json!({ "host_id": host_id })).await
+        self.invoke_unit("delete_host", serde_json::json!({ "host_id": host_id }))
+            .await
     }
 
     /// Execute a shell command on a remote host via SSH. Returns JSON
@@ -407,19 +416,12 @@ impl PipeClient {
 
     /// Toggle the favourite/pin flag for a host. Returns the new state.
     pub async fn toggle_host_pin(&self, host_id: &str) -> Result<String, PipeError> {
-        self.invoke_json_string(
-            "toggle_host_pin",
-            serde_json::json!({ "host_id": host_id }),
-        )
-        .await
+        self.invoke_json_string("toggle_host_pin", serde_json::json!({ "host_id": host_id }))
+            .await
     }
 
     /// Store a host's SSH password in the credential store.
-    pub async fn ssh_set_password(
-        &self,
-        host_id: &str,
-        password: &str,
-    ) -> Result<(), PipeError> {
+    pub async fn ssh_set_password(&self, host_id: &str, password: &str) -> Result<(), PipeError> {
         self.invoke_unit(
             "ssh_set_password",
             serde_json::json!({ "host_id": host_id, "password": password }),

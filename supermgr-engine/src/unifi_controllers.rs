@@ -163,9 +163,7 @@ pub async fn send_mfa_email_for_challenge(
         (c.client.clone(), c.controller.url.clone())
     })
     .await
-    .ok_or_else(|| {
-        anyhow!("MFA challenge not found or expired (5-min TTL)")
-    })?;
+    .ok_or_else(|| anyhow!("MFA challenge not found or expired (5-min TTL)"))?;
     let (client, url) = snapshot;
     mfa_send_email(&client, &url, authenticator_id).await
 }
@@ -179,16 +177,11 @@ pub async fn complete_pending_save(
     challenge_id: &str,
     code: &str,
 ) -> Result<(UnifiController, UnifiSysInfo)> {
-    let challenge = take_mfa_challenge(challenge_id).await.ok_or_else(|| {
-        anyhow!("MFA challenge not found or expired (5-min TTL)")
-    })?;
-    let _client = mfa_complete_login(
-        secrets,
-        &challenge.controller,
-        challenge.client,
-        code,
-    )
-    .await?;
+    let challenge = take_mfa_challenge(challenge_id)
+        .await
+        .ok_or_else(|| anyhow!("MFA challenge not found or expired (5-min TTL)"))?;
+    let _client =
+        mfa_complete_login(secrets, &challenge.controller, challenge.client, code).await?;
     let sysinfo = test_connection(secrets, &challenge.controller).await?;
     let mut verified = challenge.controller;
     verified.verified_at = Some(chrono::Utc::now());
@@ -213,7 +206,6 @@ pub enum UnifiAuthMethod {
     #[default]
     Password,
 }
-
 
 /// A configured `UniFi` controller. The struct is the canonical
 /// on-disk record (one TOML file per controller); the
@@ -269,7 +261,7 @@ impl UnifiController {
     /// use classic /api as the default because it has the
     /// widest compatibility, and let callers override by passing
     /// `path` starting with `/proxy/...` if they know better.
-    #[must_use] 
+    #[must_use]
     pub fn site_url(&self, path: &str) -> String {
         let base = self.url.trim_end_matches('/');
         let p = path.trim_start_matches('/');
@@ -502,9 +494,7 @@ pub async fn password_login(
                         .get("name")
                         .and_then(|v| v.as_str())
                         .map(str::to_owned)
-                        .or_else(|| {
-                            row.get("email").and_then(|v| v.as_str()).map(str::to_owned)
-                        })
+                        .or_else(|| row.get("email").and_then(|v| v.as_str()).map(str::to_owned))
                         .or_else(|| {
                             row.get("provider_friendly_name")
                                 .and_then(|v| v.as_str())
@@ -584,7 +574,9 @@ pub async fn mfa_complete_login(
     client: reqwest::Client,
     code: &str,
 ) -> Result<reqwest::Client> {
-    let secret = secrets.retrieve(&controller.creds_ref.0).await
+    let secret = secrets
+        .retrieve(&controller.creds_ref.0)
+        .await
         .context("load controller password from keychain")?;
     let password = std::str::from_utf8(secret.as_ref())
         .context("password is not valid UTF-8")?
@@ -652,8 +644,8 @@ async fn list_devices_classic(
             text.chars().take(300).collect::<String>()
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .context("parse /stat/device JSON")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).context("parse /stat/device JSON")?;
     let data = parsed
         .get("data")
         .and_then(|v| v.as_array())
@@ -670,8 +662,15 @@ async fn list_devices_classic(
             ip: row.get("ip").and_then(|v| v.as_str()).map(str::to_owned),
             model: row.get("model").and_then(|v| v.as_str()).map(str::to_owned),
             name: row.get("name").and_then(|v| v.as_str()).map(str::to_owned),
-            state: state_label(row.get("state").and_then(serde_json::Value::as_i64).unwrap_or(0)),
-            version: row.get("version").and_then(|v| v.as_str()).map(str::to_owned),
+            state: state_label(
+                row.get("state")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0),
+            ),
+            version: row
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned),
             adopted: row.get("adopted").and_then(serde_json::Value::as_bool),
             inform_url: row
                 .get("inform_url")
@@ -719,7 +718,10 @@ async fn list_devices_integration(
             offset,
             page_size,
         );
-        let resp = client.get(&url).send().await
+        let resp = client
+            .get(&url)
+            .send()
+            .await
             .with_context(|| format!("GET {url}"))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
@@ -729,8 +731,8 @@ async fn list_devices_integration(
                 text.chars().take(300).collect::<String>()
             ));
         }
-        let parsed: serde_json::Value = serde_json::from_str(&text)
-            .context("parse integration /devices JSON")?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).context("parse integration /devices JSON")?;
         let data = parsed
             .get("data")
             .and_then(|v| v.as_array())
@@ -750,7 +752,8 @@ async fn list_devices_integration(
             let Some(mac) = mac else { continue };
             let state_str = row
                 .get("state")
-                .and_then(|v| v.as_str()).map_or_else(|| "unknown".into(), str::to_owned);
+                .and_then(|v| v.as_str())
+                .map_or_else(|| "unknown".into(), str::to_owned);
             let device = UnifiManagedDevice {
                 mac,
                 ip: row
@@ -758,14 +761,8 @@ async fn list_devices_integration(
                     .or_else(|| row.get("ip"))
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
-                model: row
-                    .get("model")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                name: row
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
+                model: row.get("model").and_then(|v| v.as_str()).map(str::to_owned),
+                name: row.get("name").and_then(|v| v.as_str()).map(str::to_owned),
                 state: normalise_integration_state(&state_str),
                 version: row
                     .get("firmwareVersion")
@@ -830,8 +827,8 @@ async fn resolve_integration_site_id(
             text.chars().take(300).collect::<String>()
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .context("parse integration /sites JSON")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).context("parse integration /sites JSON")?;
     let sites = parsed
         .get("data")
         .and_then(|v| v.as_array())
@@ -857,7 +854,11 @@ async fn resolve_integration_site_id(
             return Ok(id.to_owned());
         }
     }
-    if let Some(first) = sites.first().and_then(|s| s.get("id")).and_then(|v| v.as_str()) {
+    if let Some(first) = sites
+        .first()
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str())
+    {
         return Ok(first.to_owned());
     }
     Err(anyhow!("no sites returned from controller"))
@@ -905,8 +906,8 @@ fn state_label(code: i64) -> String {
 /// at the boundary so a typo can't fire an unintended action.
 pub fn validate_devmgr_command(cmd: &str) -> Result<&str> {
     match cmd {
-        "adopt" | "forget" | "restart" | "locate" | "unset-locate" | "upgrade"
-        | "move" | "delete-device" | "set-inform" => Ok(cmd),
+        "adopt" | "forget" | "restart" | "locate" | "unset-locate" | "upgrade" | "move"
+        | "delete-device" | "set-inform" => Ok(cmd),
         _ => Err(anyhow!("unsupported devmgr command: {cmd}")),
     }
 }
@@ -995,8 +996,7 @@ async fn test_via_classic_api(
     if status >= 400 {
         return Err(anyhow!("sysinfo returned {status}: {text}"));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .context("parse sysinfo JSON")?;
+    let parsed: serde_json::Value = serde_json::from_str(&text).context("parse sysinfo JSON")?;
     let data = parsed
         .get("data")
         .and_then(|v| v.as_array())
@@ -1012,10 +1012,7 @@ async fn test_via_classic_api(
             .get("hostname")
             .and_then(|v| v.as_str())
             .map(str::to_owned),
-        name: data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+        name: data.get("name").and_then(|v| v.as_str()).map(str::to_owned),
     })
 }
 
@@ -1055,8 +1052,8 @@ async fn test_via_integration_api(
             text.chars().take(300).collect::<String>()
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .context("parse integration API /info JSON")?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&text).context("parse integration API /info JSON")?;
     Ok(UnifiSysInfo {
         version: parsed
             .get("applicationVersion")
@@ -1105,7 +1102,11 @@ pub async fn cross_reference(
         let ctrl = ctrl.clone();
         let secrets = Arc::clone(secrets);
         handles.push(tokio::spawn(async move {
-            (ctrl.id, ctrl.label.clone(), list_devices(&secrets, &ctrl).await)
+            (
+                ctrl.id,
+                ctrl.label.clone(),
+                list_devices(&secrets, &ctrl).await,
+            )
         }));
     }
     let mut out: HashMap<String, ControllerStateRef> = HashMap::new();

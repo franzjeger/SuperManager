@@ -23,7 +23,11 @@ impl EngineServer {
     /// from the edit dialog, but we'll synthesize one if needed
     /// so JSON-RPC clients without slug-derivation logic still
     /// work.
-    pub(crate) async fn handle_customer_save(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) async fn handle_customer_save(
+        &self,
+        id: u64,
+        params: serde_json::Value,
+    ) -> Response {
         let display_name = match params
             .get("display_name")
             .and_then(|v| v.as_str())

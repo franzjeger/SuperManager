@@ -69,7 +69,12 @@ pub fn run() -> anyhow::Result<()> {
     // the "Quick disconnect" menu item.
     let _tray = tray::spawn(window.as_weak(), connection.clone(), rt_handle.clone());
 
-    bind_callbacks(&window, connection.clone(), host_cache.clone(), rt_handle.clone());
+    bind_callbacks(
+        &window,
+        connection.clone(),
+        host_cache.clone(),
+        rt_handle.clone(),
+    );
 
     // Initial full refresh fire-and-forget.
     {
@@ -205,11 +210,7 @@ async fn poll_status(conn: &ConnectionSlot, weak: slint::Weak<AppWindow>) {
 /// Pull keys + hosts + profiles from the daemon and push them into the UI.
 /// Caches the full host list so the search callback can filter without
 /// hitting the daemon again.
-async fn refresh_all(
-    conn: &ConnectionSlot,
-    host_cache: &HostCache,
-    weak: slint::Weak<AppWindow>,
-) {
+async fn refresh_all(conn: &ConnectionSlot, host_cache: &HostCache, weak: slint::Weak<AppWindow>) {
     let client = {
         let guard = conn.lock().await;
         guard.clone()
@@ -326,7 +327,10 @@ fn bind_callbacks(
             let key_type = key_type.to_string();
             rt.spawn(async move {
                 with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
-                    match c.ssh_generate_key(&key_type, &name, &description, "[]").await {
+                    match c
+                        .ssh_generate_key(&key_type, &name, &description, "[]")
+                        .await
+                    {
                         Ok(_) => {
                             push_status(&weak, "SSH key generated.");
                             refresh_all(&conn, &host_cache, weak.clone()).await;
@@ -403,7 +407,11 @@ fn bind_callbacks(
                 let group = group.to_string();
                 let device_type = device_type.to_string();
                 let auth_method = auth_method.to_string();
-                let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 22 };
+                let port_u16: u16 = if port > 0 && port < 65536 {
+                    port as u16
+                } else {
+                    22
+                };
                 rt.spawn(async move {
                     if hostname.is_empty() || label.is_empty() {
                         push_error(&weak, "Label and hostname are required.".into());
@@ -525,8 +533,11 @@ fn bind_callbacks(
             let password = password.to_string();
             let psk = psk.to_string();
             rt.spawn(async move {
-                if name.is_empty() || host.is_empty() || username.is_empty()
-                    || password.is_empty() || psk.is_empty()
+                if name.is_empty()
+                    || host.is_empty()
+                    || username.is_empty()
+                    || password.is_empty()
+                    || psk.is_empty()
                 {
                     push_error(
                         &weak,
@@ -535,7 +546,10 @@ fn bind_callbacks(
                     return;
                 }
                 with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
-                    match c.import_fortigate(&name, &host, &username, &password, &psk).await {
+                    match c
+                        .import_fortigate(&name, &host, &username, &password, &psk)
+                        .await
+                    {
                         Ok(_) => {
                             push_status(&weak, "FortiGate IKEv2 profile imported.");
                             refresh_all(&conn, &host_cache, weak.clone()).await;
@@ -561,9 +575,14 @@ fn bind_callbacks(
             let host = host.to_string();
             let username = username.to_string();
             let password = password.to_string();
-            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 443 };
+            let port_u16: u16 = if port > 0 && port < 65536 {
+                port as u16
+            } else {
+                443
+            };
             rt.spawn(async move {
-                if name.is_empty() || host.is_empty() || username.is_empty() || password.is_empty() {
+                if name.is_empty() || host.is_empty() || username.is_empty() || password.is_empty()
+                {
                     push_error(
                         &weak,
                         "Name, host, username, and password are required.".into(),
@@ -758,7 +777,9 @@ fn bind_callbacks(
             rt.spawn(async move {
                 with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
                     let result = c.ssh_execute_command(&host_id, &command).await;
-                    let _ = weak.upgrade_in_event_loop(|w| { w.set_host_cmd_running(false); });
+                    let _ = weak.upgrade_in_event_loop(|w| {
+                        w.set_host_cmd_running(false);
+                    });
                     match result {
                         Ok(json) => {
                             let (stdout, stderr, exit) = parse_exec_result(&json);
@@ -806,7 +827,11 @@ fn bind_callbacks(
             let conn = conn.clone();
             let host_id = host_id.to_string();
             let token = token.to_string();
-            let port_u16: u16 = if port > 0 && port < 65536 { port as u16 } else { 443 };
+            let port_u16: u16 = if port > 0 && port < 65536 {
+                port as u16
+            } else {
+                443
+            };
             rt.spawn(async move {
                 with_client!(conn, weak, |c: Arc<client::DaemonClient>| async move {
                     match c.ssh_set_api_token(&host_id, &token, port_u16).await {
@@ -923,7 +948,10 @@ fn bind_callbacks(
                     Ok(Some(i)) => i,
                     Ok(None) => {
                         let _ = weak.upgrade_in_event_loop(|w| w.set_update_available(false));
-                        status(&weak, format!("Already up to date ({}).", update::CURRENT_VERSION));
+                        status(
+                            &weak,
+                            format!("Already up to date ({}).", update::CURRENT_VERSION),
+                        );
                         busy.store(false, Ordering::SeqCst);
                         return;
                     }
@@ -1000,7 +1028,11 @@ fn parse_keys(j: &str) -> Vec<KeyRow> {
                 .iter()
                 .map(|item| KeyRow {
                     id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    name: item.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     key_type: item
                         .get("key_type")
                         .and_then(|v| v.as_str())
@@ -1061,7 +1093,10 @@ fn parse_hosts(j: &str) -> Vec<HostRow> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .into(),
-                    pinned: item.get("pinned").and_then(|v| v.as_bool()).unwrap_or(false),
+                    pinned: item
+                        .get("pinned")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
                 })
                 .collect()
         })
@@ -1073,11 +1108,23 @@ fn parse_host_detail(j: &str) -> HostDetail {
     HostDetail {
         id: v.get("id").and_then(|x| x.as_str()).unwrap_or("").into(),
         label: v.get("label").and_then(|x| x.as_str()).unwrap_or("").into(),
-        hostname: v.get("hostname").and_then(|x| x.as_str()).unwrap_or("").into(),
+        hostname: v
+            .get("hostname")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
         port: v.get("port").and_then(|x| x.as_i64()).unwrap_or(22) as i32,
-        username: v.get("username").and_then(|x| x.as_str()).unwrap_or("").into(),
+        username: v
+            .get("username")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
         group: v.get("group").and_then(|x| x.as_str()).unwrap_or("").into(),
-        customer: v.get("customer").and_then(|x| x.as_str()).unwrap_or("").into(),
+        customer: v
+            .get("customer")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .into(),
         device_type: v
             .get("device_type")
             .and_then(|x| x.as_str())
@@ -1160,13 +1207,21 @@ fn parse_profiles(j: &str) -> Vec<ProfileRow> {
                 .iter()
                 .map(|item| ProfileRow {
                     id: item.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
-                    name: item.get("name").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    name: item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     backend: item
                         .get("backend")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .into(),
-                    host: item.get("host").and_then(|v| v.as_str()).unwrap_or("").into(),
+                    host: item
+                        .get("host")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .into(),
                     username: item
                         .get("username")
                         .and_then(|v| v.as_str())

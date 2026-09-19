@@ -498,10 +498,7 @@ async fn check_one(
         // all serve HTML. A real heapdump / zip / tar.gz never
         // comes back as text/*; if it does, this is a false
         // positive and we drop the rule on the floor.
-        let content_type_lc = content_type
-            .as_deref()
-            .unwrap_or("")
-            .to_lowercase();
+        let content_type_lc = content_type.as_deref().unwrap_or("").to_lowercase();
         let is_text_response = content_type_lc.starts_with("text/")
             || content_type_lc.starts_with("application/xml")
             || content_type_lc.starts_with("application/xhtml")
@@ -556,7 +553,10 @@ async fn check_one(
             service: None,
             severity: rule.severity,
             title: rule.title.to_owned(),
-            detail: format!("{} URL: `{}` returned {} ({} bytes).", rule.detail, url, status, size),
+            detail: format!(
+                "{} URL: `{}` returned {} ({} bytes).",
+                rule.detail, url, status, size
+            ),
             recommendation: rule.recommendation.to_owned(),
             cve: None,
             cvss: Some(rule.cvss),

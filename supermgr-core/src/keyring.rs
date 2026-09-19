@@ -153,24 +153,15 @@ impl SecretStore for LibsecretStore {
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
-        collection
-            .unlock()
-            .await
-            .map_err(|e| {
-                SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
-            })?;
+        collection.unlock().await.map_err(|e| {
+            SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
+        })?;
 
         let mut attrs = HashMap::new();
         attrs.insert(ATTR_KEY, label);
 
         collection
-            .create_item(
-                label,
-                attrs,
-                secret,
-                true,
-                "application/octet-stream",
-            )
+            .create_item(label, attrs, secret, true, "application/octet-stream")
             .await
             .map_err(|e| SecretError::StoreFailed {
                 label: label.to_owned(),
@@ -190,12 +181,9 @@ impl SecretStore for LibsecretStore {
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
-        collection
-            .unlock()
-            .await
-            .map_err(|e| {
-                SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
-            })?;
+        collection.unlock().await.map_err(|e| {
+            SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
+        })?;
 
         let mut attrs = HashMap::new();
         attrs.insert(ATTR_KEY, label);
@@ -230,12 +218,9 @@ impl SecretStore for LibsecretStore {
             .await
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
-        collection
-            .unlock()
-            .await
-            .map_err(|e| {
-                SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
-            })?;
+        collection.unlock().await.map_err(|e| {
+            SecretError::ServiceUnavailable(format!("collection unlock failed: {e}"))
+        })?;
 
         let mut attrs = HashMap::new();
         attrs.insert(ATTR_KEY, label);
@@ -246,12 +231,10 @@ impl SecretStore for LibsecretStore {
             .map_err(|e| SecretError::ServiceUnavailable(e.to_string()))?;
 
         for item in items {
-            item.delete()
-                .await
-                .map_err(|e| SecretError::StoreFailed {
-                    label: label.to_owned(),
-                    reason: e.to_string(),
-                })?;
+            item.delete().await.map_err(|e| SecretError::StoreFailed {
+                label: label.to_owned(),
+                reason: e.to_string(),
+            })?;
         }
 
         Ok(())
@@ -293,16 +276,17 @@ impl Default for KeychainStore {
 #[async_trait]
 impl SecretStore for KeychainStore {
     async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
-        use security_framework::passwords::{set_generic_password, delete_generic_password};
+        use security_framework::passwords::{delete_generic_password, set_generic_password};
 
         // Delete existing item first (set_generic_password fails on duplicates)
         let _ = delete_generic_password(KEYCHAIN_SERVICE, label);
 
-        set_generic_password(KEYCHAIN_SERVICE, label, secret)
-            .map_err(|e| SecretError::StoreFailed {
+        set_generic_password(KEYCHAIN_SERVICE, label, secret).map_err(|e| {
+            SecretError::StoreFailed {
                 label: label.to_owned(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         Ok(())
     }
@@ -310,17 +294,16 @@ impl SecretStore for KeychainStore {
     async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
         use security_framework::passwords::get_generic_password;
 
-        let bytes = get_generic_password(KEYCHAIN_SERVICE, label)
-            .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("-25300") || msg.contains("ItemNotFound") {
-                    SecretError::NotFound {
-                        label: label.to_owned(),
-                    }
-                } else {
-                    SecretError::ServiceUnavailable(msg)
+        let bytes = get_generic_password(KEYCHAIN_SERVICE, label).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("-25300") || msg.contains("ItemNotFound") {
+                SecretError::NotFound {
+                    label: label.to_owned(),
                 }
-            })?;
+            } else {
+                SecretError::ServiceUnavailable(msg)
+            }
+        })?;
 
         Ok(ZeroizingSecret::from_vec(bytes))
     }
@@ -328,11 +311,10 @@ impl SecretStore for KeychainStore {
     async fn delete(&self, label: &str) -> Result<(), SecretError> {
         use security_framework::passwords::delete_generic_password;
 
-        delete_generic_password(KEYCHAIN_SERVICE, label)
-            .map_err(|e| SecretError::StoreFailed {
-                label: label.to_owned(),
-                reason: e.to_string(),
-            })?;
+        delete_generic_password(KEYCHAIN_SERVICE, label).map_err(|e| SecretError::StoreFailed {
+            label: label.to_owned(),
+            reason: e.to_string(),
+        })?;
 
         Ok(())
     }
@@ -405,9 +387,8 @@ impl CredentialManagerStore {
     /// cheap and stateless, so we open a fresh entry per operation rather
     /// than caching handles across awaits.
     fn entry(label: &str) -> Result<WinKeyringEntry, SecretError> {
-        WinKeyringEntry::new(WIN_KEYRING_SERVICE, label).map_err(|e| {
-            SecretError::ServiceUnavailable(format!("keyring entry construct: {e}"))
-        })
+        WinKeyringEntry::new(WIN_KEYRING_SERVICE, label)
+            .map_err(|e| SecretError::ServiceUnavailable(format!("keyring entry construct: {e}")))
     }
 
     // ------------------------------------------------------------------
@@ -418,10 +399,12 @@ impl CredentialManagerStore {
     async fn write_one(label: String, secret: Vec<u8>) -> Result<(), SecretError> {
         tokio::task::spawn_blocking(move || {
             let entry = Self::entry(&label)?;
-            entry.set_secret(&secret).map_err(|e| SecretError::StoreFailed {
-                label: label.clone(),
-                reason: e.to_string(),
-            })
+            entry
+                .set_secret(&secret)
+                .map_err(|e| SecretError::StoreFailed {
+                    label: label.clone(),
+                    reason: e.to_string(),
+                })
         })
         .await
         .map_err(|e| SecretError::ServiceUnavailable(format!("spawn_blocking: {e}")))?
@@ -433,9 +416,9 @@ impl CredentialManagerStore {
             let entry = Self::entry(&label)?;
             match entry.get_secret() {
                 Ok(b) => Ok(b),
-                Err(keyring::Error::NoEntry) => {
-                    Err(SecretError::NotFound { label: label.clone() })
-                }
+                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
+                    label: label.clone(),
+                }),
                 Err(e) => Err(SecretError::ServiceUnavailable(e.to_string())),
             }
         })
@@ -449,9 +432,9 @@ impl CredentialManagerStore {
             let entry = Self::entry(&label)?;
             match entry.delete_credential() {
                 Ok(()) => Ok(()),
-                Err(keyring::Error::NoEntry) => {
-                    Err(SecretError::NotFound { label: label.clone() })
-                }
+                Err(keyring::Error::NoEntry) => Err(SecretError::NotFound {
+                    label: label.clone(),
+                }),
                 Err(e) => Err(SecretError::StoreFailed {
                     label: label.clone(),
                     reason: e.to_string(),
@@ -570,7 +553,10 @@ mod tests {
     /// start with the prefix, so they read back as a single blob.
     #[test]
     fn a_real_secret_is_not_a_marker() {
-        assert_eq!(parse_chunk_count(b"-----BEGIN OPENSSH PRIVATE KEY-----"), None);
+        assert_eq!(
+            parse_chunk_count(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+            None
+        );
         assert_eq!(parse_chunk_count(b"hunter2"), None);
         assert_eq!(parse_chunk_count(b""), None);
     }

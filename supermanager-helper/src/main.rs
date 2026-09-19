@@ -110,13 +110,21 @@ struct RpcError {
 
 impl Response {
     fn ok(id: u64, value: serde_json::Value) -> Self {
-        Self { jsonrpc: "2.0", result: Some(value), error: None, id }
+        Self {
+            jsonrpc: "2.0",
+            result: Some(value),
+            error: None,
+            id,
+        }
     }
     fn err(id: u64, code: i32, message: impl Into<String>) -> Self {
         Self {
             jsonrpc: "2.0",
             result: None,
-            error: Some(RpcError { code, message: message.into() }),
+            error: Some(RpcError {
+                code,
+                message: message.into(),
+            }),
             id,
         }
     }
@@ -390,14 +398,18 @@ async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
 fn set_socket_permissions(path: &PathBuf) -> anyhow::Result<()> {
     use std::ffi::CString;
 
-    let cpath = CString::new(path.as_os_str().as_encoded_bytes())
-        .context("path contains nul byte")?;
+    let cpath =
+        CString::new(path.as_os_str().as_encoded_bytes()).context("path contains nul byte")?;
     // group "admin" is gid 80 on every Mac since forever, but look it up
     // properly anyway.
     let admin_gid = unsafe {
         let name = CString::new("admin").unwrap();
         let g = libc::getgrnam(name.as_ptr());
-        if g.is_null() { 80 } else { (*g).gr_gid }
+        if g.is_null() {
+            80
+        } else {
+            (*g).gr_gid
+        }
     };
     let rc = unsafe { libc::chown(cpath.as_ptr(), 0, admin_gid) };
     if rc != 0 {
@@ -408,10 +420,7 @@ fn set_socket_permissions(path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_connection(
-    mut stream: UnixStream,
-    controllers: Controllers,
-) -> anyhow::Result<()> {
+async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> anyhow::Result<()> {
     debug!("client connected");
 
     loop {
@@ -455,7 +464,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
     }
     debug!(method = %req.method, "dispatch");
     match req.method.as_str() {
-        "ping" => Response::ok(id, serde_json::json!({"pong": true, "version": env!("CARGO_PKG_VERSION")})),
+        "ping" => Response::ok(
+            id,
+            serde_json::json!({"pong": true, "version": env!("CARGO_PKG_VERSION")}),
+        ),
 
         // Dev convenience: exit non-zero so launchd's KeepAlive (Crashed=true)
         // respawns us from the bundle-managed BundleProgram path. This lets
@@ -541,8 +553,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Ok(m) if m.len() == src_size => {}
                 Ok(m) => {
                     let _ = std::fs::remove_file(&tmp_target);
-                    return Response::err(id, -32000, format!(
-                        "size mismatch after copy: src={src_size} tmp={}", m.len()));
+                    return Response::err(
+                        id,
+                        -32000,
+                        format!("size mismatch after copy: src={src_size} tmp={}", m.len()),
+                    );
                 }
                 Err(e) => {
                     return Response::err(id, -32000, format!("stat tmp: {e}"));
@@ -566,7 +581,9 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             tracing::info!("deploy_self: replaced {target} with {src_size} bytes from {src}");
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                tracing::info!("deploy_self complete — exiting so launchd respawns from new binary");
+                tracing::info!(
+                    "deploy_self complete — exiting so launchd respawns from new binary"
+                );
                 std::process::exit(1);
             });
             Response::ok(id, serde_json::json!({"deployed": true, "size": src_size}))
@@ -583,13 +600,21 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     match sw.connect(&args).await {
                         Ok(s) => {
                             let _ = auto_reconnect::refresh_args(
-                                &pid, "ikev2".to_string(), raw_args.clone()).await;
+                                &pid,
+                                "ikev2".to_string(),
+                                raw_args.clone(),
+                            )
+                            .await;
                             // A manual full-tunnel connect enrols the profile for
                             // route-only healing (no-op if it's already Always-on).
                             // Split tunnels install no 0/1, so nothing to guard.
                             if args.full_tunnel {
                                 let _ = auto_reconnect::guard_routes(
-                                    pid.clone(), "ikev2".to_string(), raw_args).await;
+                                    pid.clone(),
+                                    "ikev2".to_string(),
+                                    raw_args,
+                                )
+                                .await;
                             }
                             Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                         }
@@ -600,22 +625,24 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
         }
 
-        "vpn_disconnect" => match serde_json::from_value::<strongswan::DisconnectArgs>(req.params) {
-            Ok(args) => {
-                let pid = args.profile_id.clone();
-                let mut sw = strongswan.lock().await;
-                match sw.disconnect(&args).await {
-                    Ok(s) => {
-                        // A deliberate disconnect ends any route-guard intent for
-                        // this profile (leaves an explicit Always-on entry alone).
-                        let _ = auto_reconnect::unguard_routes(&pid).await;
-                        Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+        "vpn_disconnect" => {
+            match serde_json::from_value::<strongswan::DisconnectArgs>(req.params) {
+                Ok(args) => {
+                    let pid = args.profile_id.clone();
+                    let mut sw = strongswan.lock().await;
+                    match sw.disconnect(&args).await {
+                        Ok(s) => {
+                            // A deliberate disconnect ends any route-guard intent for
+                            // this profile (leaves an explicit Always-on entry alone).
+                            let _ = auto_reconnect::unguard_routes(&pid).await;
+                            Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                        }
+                        Err(e) => Response::err(id, -32000, format!("disconnect failed: {e:#}")),
                     }
-                    Err(e) => Response::err(id, -32000, format!("disconnect failed: {e:#}")),
                 }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        }
 
         // Last N bytes of `/var/log/supermanager-helper.log` so the GUI can
         // surface "why did connect fail?" directly instead of telling the
@@ -653,7 +680,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         // -- WireGuard --
-
         "wg_connect" => {
             let raw_args = req.params.clone();
             match serde_json::from_value::<wireguard::WgConnectArgs>(req.params) {
@@ -663,7 +689,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     match wg.connect(&args).await {
                         Ok(s) => {
                             let _ = auto_reconnect::refresh_args(
-                                &pid, "wireguard".to_string(), raw_args).await;
+                                &pid,
+                                "wireguard".to_string(),
+                                raw_args,
+                            )
+                            .await;
                             Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                         }
                         Err(e) => Response::err(id, -32000, format!("wg_connect failed: {e:#}")),
@@ -673,16 +703,18 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
         }
 
-        "wg_disconnect" => match serde_json::from_value::<wireguard::WgDisconnectArgs>(req.params) {
-            Ok(args) => {
-                let mut wg = wireguard.lock().await;
-                match wg.disconnect(&args).await {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                    Err(e) => Response::err(id, -32000, format!("wg_disconnect failed: {e:#}")),
+        "wg_disconnect" => {
+            match serde_json::from_value::<wireguard::WgDisconnectArgs>(req.params) {
+                Ok(args) => {
+                    let mut wg = wireguard.lock().await;
+                    match wg.disconnect(&args).await {
+                        Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                        Err(e) => Response::err(id, -32000, format!("wg_disconnect failed: {e:#}")),
+                    }
                 }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        }
 
         "wg_status" => match serde_json::from_value::<wireguard::WgStatusArgs>(req.params) {
             Ok(args) => {
@@ -696,7 +728,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         // -- OpenVPN --
-
         "ovpn_connect" => {
             let raw_args = req.params.clone();
             match serde_json::from_value::<openvpn::OvpnConnectArgs>(req.params) {
@@ -705,8 +736,9 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                     let mut ov = openvpn.lock().await;
                     match ov.connect(&args).await {
                         Ok(s) => {
-                            let _ = auto_reconnect::refresh_args(
-                                &pid, "openvpn".to_string(), raw_args).await;
+                            let _ =
+                                auto_reconnect::refresh_args(&pid, "openvpn".to_string(), raw_args)
+                                    .await;
                             Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                         }
                         Err(e) => Response::err(id, -32000, format!("ovpn_connect failed: {e:#}")),
@@ -716,16 +748,20 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
         }
 
-        "ovpn_disconnect" => match serde_json::from_value::<openvpn::OvpnDisconnectArgs>(req.params) {
-            Ok(args) => {
-                let mut ov = openvpn.lock().await;
-                match ov.disconnect(&args).await {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                    Err(e) => Response::err(id, -32000, format!("ovpn_disconnect failed: {e:#}")),
+        "ovpn_disconnect" => {
+            match serde_json::from_value::<openvpn::OvpnDisconnectArgs>(req.params) {
+                Ok(args) => {
+                    let mut ov = openvpn.lock().await;
+                    match ov.disconnect(&args).await {
+                        Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                        Err(e) => {
+                            Response::err(id, -32000, format!("ovpn_disconnect failed: {e:#}"))
+                        }
+                    }
                 }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        }
 
         "ovpn_status" => match serde_json::from_value::<openvpn::OvpnStatusArgs>(req.params) {
             Ok(args) => {
@@ -742,42 +778,56 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // Synchronous (not async) because they shell out to launchctl
         // + write small files; the Tokio runtime is overkill and the
         // calls finish in <100 ms.
-        "tailscaled_install" => match serde_json::from_value::<tailscale::InstallArgs>(req.params) {
-            Ok(args) => match tailscale::install(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("tailscaled_install failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscaled_install" => {
+            match serde_json::from_value::<tailscale::InstallArgs>(req.params) {
+                Ok(args) => match tailscale::install(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => {
+                        Response::err(id, -32000, format!("tailscaled_install failed: {e:#}"))
+                    }
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
-        "tailscaled_uninstall" => match serde_json::from_value::<tailscale::UninstallArgs>(req.params) {
-            Ok(args) => match tailscale::uninstall(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("tailscaled_uninstall failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscaled_uninstall" => {
+            match serde_json::from_value::<tailscale::UninstallArgs>(req.params) {
+                Ok(args) => match tailscale::uninstall(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => {
+                        Response::err(id, -32000, format!("tailscaled_uninstall failed: {e:#}"))
+                    }
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
-        "tailscaled_status" => match serde_json::from_value::<tailscale::DaemonStatusArgs>(req.params) {
-            Ok(args) => match tailscale::status(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("tailscaled_status failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscaled_status" => {
+            match serde_json::from_value::<tailscale::DaemonStatusArgs>(req.params) {
+                Ok(args) => match tailscale::status(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("tailscaled_status failed: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // Panic-reset: clear exit-node + accept-routes, then renew
         // DHCP on the active interface. Used when an exit-node
         // selection has bricked routing and the user can't reach
         // the internet to even open a browser. Always available;
         // doesn't depend on tailscaled being responsive.
-        "tailscale_panic_reset" => match serde_json::from_value::<tailscale::PanicResetArgs>(req.params) {
-            Ok(args) => match tailscale::panic_reset(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("tailscale_panic_reset failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_panic_reset" => {
+            match serde_json::from_value::<tailscale::PanicResetArgs>(req.params) {
+                Ok(args) => match tailscale::panic_reset(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => {
+                        Response::err(id, -32000, format!("tailscale_panic_reset failed: {e:#}"))
+                    }
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // MagicDNS resolver-file backstop. Open-source tailscaled
         // on macOS doesn't install the per-domain nameserver file
@@ -785,75 +835,89 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // write it from the helper so MagicDNS names actually
         // resolve through the system resolver. See helper
         // `install_magicdns_resolver` for full reasoning.
-        "tailscale_install_magicdns_resolver" => match serde_json::from_value::<tailscale::MagicdnsResolverArgs>(req.params) {
-            Ok(args) => match tailscale::install_magicdns_resolver(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_install_magicdns_resolver" => {
+            match serde_json::from_value::<tailscale::MagicdnsResolverArgs>(req.params) {
+                Ok(args) => match tailscale::install_magicdns_resolver(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // Exit-node split-default routes. tailscaled-on-macOS
         // doesn't install these itself — see tailscale.rs for
         // the rant. Caller (AppState.setExitNodeWithSafety)
         // pairs install with the existing internet probe so
         // we can auto-revert if traffic dies.
-        "tailscale_install_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-            Ok(args) => {
-                // Read the caller's intent before `args` is consumed below.
-                let auto = args.auto_exit_node;
-                match tailscale::install_exit_routes(args) {
-                Ok(s) => {
-                    // Routes are up — record the user's intent so the reconciler
-                    // can re-establish them after sleep/wake or a blip.
-                    //
-                    // `current_exit_node` reports the peer tailscaled resolved
-                    // to. For a pinned selection that IS the intent. For
-                    // `auto:any` it is only an observation, so it gets recorded
-                    // as such and the reconciler re-asserts `auto:any` rather
-                    // than pinning this particular peer.
-                    let (node_id, node_ip) = tailscale::current_exit_node();
-                    if auto {
-                        tailscale_state::set_desired_auto(&node_id, &node_ip);
-                    } else {
-                        tailscale_state::set_desired(&node_id, &node_ip);
+        "tailscale_install_exit_routes" => {
+            match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
+                Ok(args) => {
+                    // Read the caller's intent before `args` is consumed below.
+                    let auto = args.auto_exit_node;
+                    match tailscale::install_exit_routes(args) {
+                        Ok(s) => {
+                            // Routes are up — record the user's intent so the reconciler
+                            // can re-establish them after sleep/wake or a blip.
+                            //
+                            // `current_exit_node` reports the peer tailscaled resolved
+                            // to. For a pinned selection that IS the intent. For
+                            // `auto:any` it is only an observation, so it gets recorded
+                            // as such and the reconciler re-asserts `auto:any` rather
+                            // than pinning this particular peer.
+                            let (node_id, node_ip) = tailscale::current_exit_node();
+                            if auto {
+                                tailscale_state::set_desired_auto(&node_id, &node_ip);
+                            } else {
+                                tailscale_state::set_desired(&node_id, &node_ip);
+                            }
+                            Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                        }
+                        Err(e) => {
+                            Response::err(id, -32000, format!("install_exit_routes failed: {e:#}"))
+                        }
                     }
-                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
                 }
-                Err(e) => Response::err(id, -32000, format!("install_exit_routes failed: {e:#}")),
-                }
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        }
 
-        "tailscale_remove_exit_routes" => match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-            Ok(args) => match tailscale::remove_exit_routes(args) {
-                Ok(s) => {
-                    // This RPC is the INTENTIONAL clear (user cleared the exit
-                    // node) — stop self-heal. The watchdog's blip recovery goes
-                    // through panic_reset (clear_pref=false), which does NOT
-                    // touch the desired-state, so a transient drop never wipes
-                    // intent.
-                    tailscale_state::clear_desired();
-                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
-                }
-                Err(e) => Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_remove_exit_routes" => {
+            match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
+                Ok(args) => match tailscale::remove_exit_routes(args) {
+                    Ok(s) => {
+                        // This RPC is the INTENTIONAL clear (user cleared the exit
+                        // node) — stop self-heal. The watchdog's blip recovery goes
+                        // through panic_reset (clear_pref=false), which does NOT
+                        // touch the desired-state, so a transient drop never wipes
+                        // intent.
+                        tailscale_state::clear_desired();
+                        Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                    }
+                    Err(e) => {
+                        Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}"))
+                    }
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // Pre-flight test for exit-node selection. Installs a
         // single /32 route via tailscaled's utun, probes a known
         // public IP, cleans up. Used by AppState to decide
         // whether the chosen peer actually forwards before
         // committing to full split-default routes.
-        "tailscale_test_exit_reachability" => match serde_json::from_value::<tailscale::TestExitArgs>(req.params) {
-            Ok(args) => match tailscale::test_exit_reachability(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("test_exit_reachability failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_test_exit_reachability" => {
+            match serde_json::from_value::<tailscale::TestExitArgs>(req.params) {
+                Ok(args) => match tailscale::test_exit_reachability(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => {
+                        Response::err(id, -32000, format!("test_exit_reachability failed: {e:#}"))
+                    }
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // TEST-ONLY: strip the default route so we can verify
         // the route guardian's recovery in isolation. Available
@@ -863,43 +927,55 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // recover when macOS's resolver gets stuck on an
         // unreachable nameserver. Always available — DNS rescue
         // is a baseline capability.
-        "tailscale_set_dns_servers" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-            Ok(args) => match tailscale::set_dns_servers(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("set_dns_servers failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_set_dns_servers" => {
+            match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
+                Ok(args) => match tailscale::set_dns_servers(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("set_dns_servers failed: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // Forcibly write live DNS state via scutil. Bypasses
         // configd merge logic — for situations where
         // `networksetup` writes to Setup but configd refuses to
         // propagate to State (e.g., a stale IPv6 RA RDNSS
         // nameserver shadowing the manual config).
-        "tailscale_force_dns_state" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-            Ok(args) => match tailscale::force_dns_state(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("force_dns_state failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_force_dns_state" => {
+            match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
+                Ok(args) => match tailscale::force_dns_state(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("force_dns_state failed: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
         // Configure the DNS fallback list used by the DNS health
         // watchdog. Persisted to /var/lib/supermanager/dns_fallbacks.json
         // so a helper restart keeps the user's preference.
-        "tailscale_set_dns_fallbacks" => match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-            Ok(args) => match dns_health_watchdog::set_fallbacks(args.servers) {
-                Ok(_) => Response::ok(id, serde_json::json!({
-                    "fallbacks": dns_health_watchdog::current_fallbacks()
-                })),
-                Err(e) => Response::err(id, -32000, format!("set_dns_fallbacks failed: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
+        "tailscale_set_dns_fallbacks" => {
+            match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
+                Ok(args) => match dns_health_watchdog::set_fallbacks(args.servers) {
+                    Ok(_) => Response::ok(
+                        id,
+                        serde_json::json!({
+                            "fallbacks": dns_health_watchdog::current_fallbacks()
+                        }),
+                    ),
+                    Err(e) => Response::err(id, -32000, format!("set_dns_fallbacks failed: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
 
-        "tailscale_get_dns_fallbacks" => Response::ok(id, serde_json::json!({
-            "fallbacks": dns_health_watchdog::current_fallbacks()
-        })),
+        "tailscale_get_dns_fallbacks" => Response::ok(
+            id,
+            serde_json::json!({
+                "fallbacks": dns_health_watchdog::current_fallbacks()
+            }),
+        ),
 
         // Pause connectivity-watchdog escalation. Critical for
         // exit-node transitions: setting/clearing the pref +
@@ -908,7 +984,9 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // resets), and the watchdog would otherwise panic_reset
         // them mid-flight, undoing the user's selection.
         "tailscale_pause_watchdog" => {
-            let secs = req.params.get("seconds")
+            let secs = req
+                .params
+                .get("seconds")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(30);
             connectivity_watchdog::pause_for(secs);
@@ -937,7 +1015,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Some(s) => s.to_string(),
                 None => return Response::err(id, -32602, "missing backend"),
             };
-            let args = req.params.get("connect_args").cloned()
+            let args = req
+                .params
+                .get("connect_args")
+                .cloned()
                 .unwrap_or(serde_json::Value::Null);
             match auto_reconnect::enable(profile_id.clone(), backend, args).await {
                 Ok(_) => Response::ok(id, serde_json::json!({"enabled": profile_id})),
@@ -962,15 +1043,19 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // keep working. A profile in both is enrolled but cannot be
             // replayed yet, which the GUI must not present as protected.
             let unarmed = auto_reconnect::list_unarmed().await;
-            Response::ok(id, serde_json::json!({
-                "watched": watched,
-                "unarmed": unarmed,
-            }))
+            Response::ok(
+                id,
+                serde_json::json!({
+                    "watched": watched,
+                    "unarmed": unarmed,
+                }),
+            )
         }
 
         // Kill-switch: install pf rules that block all egress
         // except via the named tunnel interface + LAN. Idempotent.
-        "kill_switch_enable" => match serde_json::from_value::<kill_switch::EnableArgs>(req.params) {
+        "kill_switch_enable" => match serde_json::from_value::<kill_switch::EnableArgs>(req.params)
+        {
             Ok(args) => match kill_switch::enable(args) {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("kill_switch_enable: {e:#}")),
@@ -978,21 +1063,21 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
         },
 
-        "kill_switch_disable" => match serde_json::from_value::<kill_switch::DisableArgs>(req.params) {
-            Ok(args) => match kill_switch::disable(args) {
-                Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("kill_switch_disable: {e:#}")),
-            },
-            Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
-        },
-
-        #[cfg(feature = "dev-rpc")]
-        "debug_strip_default_route" => {
-            match route_guardian::debug_strip_default_route() {
-                Ok(_) => Response::ok(id, serde_json::json!({"stripped": true})),
-                Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
+        "kill_switch_disable" => {
+            match serde_json::from_value::<kill_switch::DisableArgs>(req.params) {
+                Ok(args) => match kill_switch::disable(args) {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("kill_switch_disable: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }
+
+        #[cfg(feature = "dev-rpc")]
+        "debug_strip_default_route" => match route_guardian::debug_strip_default_route() {
+            Ok(_) => Response::ok(id, serde_json::json!({"stripped": true})),
+            Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
+        },
 
         // Passive traffic capture for cleartext-protocol audit.
         // Runs tcpdump as root (the helper's natural privilege)
@@ -1003,12 +1088,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         //
         // See `traffic_capture::run` for the full validation
         // logic; the helper just calls into it.
-        "traffic_capture" => {
-            match traffic_capture::run(req.params).await {
-                Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
-                Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
-            }
-        }
+        "traffic_capture" => match traffic_capture::run(req.params).await {
+            Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
+            Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
+        },
 
         // ── System sleep / wake ──────────────────────────────────────────
         //

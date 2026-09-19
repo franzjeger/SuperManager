@@ -48,7 +48,7 @@ pub enum ActivityKind {
 /// Build a unified timeline for `customer_slug`. Returns events
 /// sorted newest-first, capped at `limit` so the UI doesn't have
 /// to handle paging.
-#[must_use] 
+#[must_use]
 pub fn timeline(customer_slug: &str, limit: usize) -> Vec<ActivityEvent> {
     let mut out: Vec<ActivityEvent> = Vec::new();
 
@@ -110,10 +110,7 @@ fn from_findings_store(customer_slug: &str) -> Vec<ActivityEvent> {
             detail: format!(
                 "First detected on {}{}",
                 f.finding.host_ip,
-                f.finding
-                    .port
-                    .map(|p| format!(":{p}"))
-                    .unwrap_or_default()
+                f.finding.port.map(|p| format!(":{p}")).unwrap_or_default()
             ),
             ref_id: Some(f.key.clone()),
         });

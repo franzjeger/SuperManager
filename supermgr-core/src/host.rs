@@ -305,7 +305,10 @@ mod tests {
         assert_eq!(summary.device_type, DeviceType::Linux);
         assert_eq!(summary.auth_method, AuthMethod::Key);
         assert_eq!(summary.auth_key_id, Some(Uuid::nil()));
-        assert!(summary.has_api, "api_token_ref is Some so has_api should be true");
+        assert!(
+            summary.has_api,
+            "api_token_ref is Some so has_api should be true"
+        );
         assert_eq!(summary.api_port, Some(443));
         assert!(summary.has_unifi_controller);
         assert!(summary.pinned);

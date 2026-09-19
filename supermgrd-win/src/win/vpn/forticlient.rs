@@ -169,20 +169,15 @@ impl ForticlientBackend {
                 "FortiClient backend has no secret store; cannot resolve the password".into(),
             )
         })?;
-        let password_bytes = store
-            .retrieve(cfg.password.label())
-            .await
-            .map_err(|e| {
-                VpnError::MissingDependency(format!(
-                    "FortiClient password lookup ({}): {e}",
-                    cfg.password.label()
-                ))
-            })?;
+        let password_bytes = store.retrieve(cfg.password.label()).await.map_err(|e| {
+            VpnError::MissingDependency(format!(
+                "FortiClient password lookup ({}): {e}",
+                cfg.password.label()
+            ))
+        })?;
         let password = std::str::from_utf8(&password_bytes)
             .map_err(|_| {
-                VpnError::MissingDependency(
-                    "stored FortiClient password is not valid UTF-8".into(),
-                )
+                VpnError::MissingDependency("stored FortiClient password is not valid UTF-8".into())
             })?
             .to_owned();
 
@@ -229,20 +224,14 @@ impl ForticlientBackend {
 
         // Stream both stdout and stderr onto a single channel so we can
         // watch for either the success marker or a fatal error in lockstep.
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| VpnError::Subprocess {
-                code: -1,
-                stderr: "no stdout pipe from openfortivpn".into(),
-            })?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| VpnError::Subprocess {
-                code: -1,
-                stderr: "no stderr pipe from openfortivpn".into(),
-            })?;
+        let stdout = child.stdout.take().ok_or_else(|| VpnError::Subprocess {
+            code: -1,
+            stderr: "no stdout pipe from openfortivpn".into(),
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| VpnError::Subprocess {
+            code: -1,
+            stderr: "no stderr pipe from openfortivpn".into(),
+        })?;
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let tx_err = tx.clone();
@@ -402,10 +391,7 @@ fn extract_ppp_iface(line: &str) -> Option<String> {
         let rest = &line[start + "Setup interface: Wintun via ".len()..];
         if let Some(idx) = rest.find(" as ") {
             let after = &rest[idx + " as ".len()..];
-            let alias: String = after
-                .chars()
-                .take_while(|c| !c.is_whitespace())
-                .collect();
+            let alias: String = after.chars().take_while(|c| !c.is_whitespace()).collect();
             if !alias.is_empty() {
                 return Some(alias);
             }

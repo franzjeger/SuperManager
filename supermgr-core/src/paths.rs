@@ -103,29 +103,37 @@ mod tests {
 
     #[test]
     fn xdg_absolute_is_used() {
-        assert_eq!(xdg_data_base(Some("/data"), Some("/home/x")),
-                   PathBuf::from("/data"));
+        assert_eq!(
+            xdg_data_base(Some("/data"), Some("/home/x")),
+            PathBuf::from("/data")
+        );
     }
 
     /// The bug: a set-but-empty `XDG_DATA_HOME` must fall back, not yield "".
     #[test]
     fn xdg_empty_falls_back_to_home() {
-        assert_eq!(xdg_data_base(Some(""), Some("/home/x")),
-                   PathBuf::from("/home/x/.local/share"));
+        assert_eq!(
+            xdg_data_base(Some(""), Some("/home/x")),
+            PathBuf::from("/home/x/.local/share")
+        );
     }
 
     #[test]
     fn xdg_unset_falls_back_to_home() {
-        assert_eq!(xdg_data_base(None, Some("/home/x")),
-                   PathBuf::from("/home/x/.local/share"));
+        assert_eq!(
+            xdg_data_base(None, Some("/home/x")),
+            PathBuf::from("/home/x/.local/share")
+        );
     }
 
     /// XDG spec: a relative `XDG_DATA_HOME` is ignored — honouring it would
     /// reintroduce the relative-path divergence by another door.
     #[test]
     fn xdg_relative_is_ignored() {
-        assert_eq!(xdg_data_base(Some("relative/share"), Some("/home/x")),
-                   PathBuf::from("/home/x/.local/share"));
+        assert_eq!(
+            xdg_data_base(Some("relative/share"), Some("/home/x")),
+            PathBuf::from("/home/x/.local/share")
+        );
     }
 
     #[test]
@@ -141,8 +149,10 @@ mod tests {
 
     #[test]
     fn xdg_home_empty_string_treated_as_unset() {
-        assert_eq!(xdg_data_base(None, Some("")),
-                   PathBuf::from("/tmp/.local/share"));
+        assert_eq!(
+            xdg_data_base(None, Some("")),
+            PathBuf::from("/tmp/.local/share")
+        );
     }
     use super::*;
 
@@ -173,9 +183,6 @@ mod tests {
             s.ends_with("SuperManager"),
             "{p:?} does not end at the SuperManager root"
         );
-        assert!(
-            !s.contains("/tmp"),
-            "{p:?} still uses the unix fallback"
-        );
+        assert!(!s.contains("/tmp"), "{p:?} still uses the unix fallback");
     }
 }

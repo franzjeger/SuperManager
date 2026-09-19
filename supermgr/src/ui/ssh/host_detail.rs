@@ -12,7 +12,7 @@ use serde_json::Value;
 use tracing::{error, info, warn};
 
 use supermgr_core::dbus::DaemonProxy;
-use supermgr_core::host::{AuthMethod, PortForward, HostSummary};
+use supermgr_core::host::{AuthMethod, HostSummary, PortForward};
 use supermgr_core::ssh::DeviceType;
 
 use crate::app::AppMsg;
@@ -471,14 +471,24 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
 // ---------------------------------------------------------------------------
 
 /// Configuration checks only: no authentication, probes or secret reads.
-pub fn connection_issue(host: &HostSummary, hosts: &[HostSummary], keys: &[supermgr_core::ssh::key::SshKeySummary]) -> Option<(uuid::Uuid, String)> {
+pub fn connection_issue(
+    host: &HostSummary,
+    hosts: &[HostSummary],
+    keys: &[supermgr_core::ssh::key::SshKeySummary],
+) -> Option<(uuid::Uuid, String)> {
     let mut current = host;
     let mut visited = std::collections::HashSet::new();
     loop {
         if !visited.insert(current.id) {
-            return Some((current.id, "The jump-host chain contains a loop. Edit the jump-host connection.".into()));
+            return Some((
+                current.id,
+                "The jump-host chain contains a loop. Edit the jump-host connection.".into(),
+            ));
         }
-        if matches!(current.auth_method, AuthMethod::Key | AuthMethod::Certificate) {
+        if matches!(
+            current.auth_method,
+            AuthMethod::Key | AuthMethod::Certificate
+        ) {
             if let Some(id) = current.auth_key_id {
                 if !keys.iter().any(|key| key.id == id) {
                     return Some((current.id, format!("{} uses an SSH key that no longer exists. Select an available key in Edit host.", current.label)));
@@ -496,7 +506,12 @@ pub fn connection_issue(host: &HostSummary, hosts: &[HostSummary], keys: &[super
 }
 
 /// Update the host detail panel to show the given host.
-pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_hosts: &[HostSummary], keys: &[supermgr_core::ssh::key::SshKeySummary]) {
+pub fn update_ssh_host_detail(
+    detail: &SshHostDetail,
+    host: &HostSummary,
+    all_hosts: &[HostSummary],
+    keys: &[supermgr_core::ssh::key::SshKeySummary],
+) {
     detail.host_label_lbl.set_label(&host.label);
 
     if host.group.is_empty() {
@@ -509,7 +524,9 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
     detail.hostname_row.set_subtitle(&host.hostname);
     detail.port_row.set_subtitle(&host.port.to_string());
     detail.username_row.set_subtitle(&host.username);
-    detail.device_type_row.set_subtitle(&host.device_type.to_string());
+    detail
+        .device_type_row
+        .set_subtitle(&host.device_type.to_string());
 
     let auth_str = match host.auth_method {
         AuthMethod::Password => "Password",
@@ -517,23 +534,32 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
         AuthMethod::Certificate => "Certificate",
     };
     let auth_description = if let Some(key_id) = host.auth_key_id {
-        keys.iter().find(|key| key.id == key_id)
+        keys.iter()
+            .find(|key| key.id == key_id)
             .map(|key| format!("{auth_str} · {}", key.name))
             .unwrap_or_else(|| format!("{auth_str} · Missing assigned key"))
-    } else if host.auth_method == AuthMethod::Key { "SSH agent or local keys".into() }
-    else { auth_str.into() };
+    } else if host.auth_method == AuthMethod::Key {
+        "SSH agent or local keys".into()
+    } else {
+        auth_str.into()
+    };
     detail.auth_method_row.set_subtitle(&auth_description);
     let issue = connection_issue(host, all_hosts, keys);
     let message = issue.as_ref().map(|(_, message)| message.as_str());
-    detail.connection_issue_host.set(issue.as_ref().map(|(id, _)| *id));
+    detail
+        .connection_issue_host
+        .set(issue.as_ref().map(|(id, _)| *id));
     detail.connection_notice.set_title(message.unwrap_or(""));
     detail.connection_notice.set_revealed(issue.is_some());
     detail.connect_btn.set_sensitive(issue.is_none());
-    detail.connect_btn.set_tooltip_text(Some(message.unwrap_or("Open SSH session in terminal")));
+    detail
+        .connect_btn
+        .set_tooltip_text(Some(message.unwrap_or("Open SSH session in terminal")));
 
     // Show jump host name if configured.
     if let Some(jump_id) = host.proxy_jump {
-        let jump_name = all_hosts.iter()
+        let jump_name = all_hosts
+            .iter()
             .find(|h| h.id == jump_id)
             .map(|h| format!("{} ({})", h.label, h.hostname))
             .unwrap_or_else(|| jump_id.to_string());
@@ -556,7 +582,9 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
     detail.push_key_api_btn.set_visible(is_fortigate_api);
 
     // Show "Set Inform" button for UniFi devices.
-    detail.set_inform_btn.set_visible(host.device_type == DeviceType::UniFi);
+    detail
+        .set_inform_btn
+        .set_visible(host.device_type == DeviceType::UniFi);
 
     // Show RDP / VNC buttons when ports are configured.
     detail.rdp_btn.set_visible(host.rdp_port.is_some());
@@ -572,11 +600,20 @@ pub fn update_ssh_host_detail(detail: &SshHostDetail, host: &HostSummary, all_ho
         detail.fg_cpu_row.set_subtitle("Loading\u{2026}");
         detail.fg_memory_row.set_subtitle("Loading\u{2026}");
         detail.fg_api_token_row.set_subtitle("••••••••");
-        detail.fg_show_token_btn.set_icon_name("view-reveal-symbolic");
+        detail
+            .fg_show_token_btn
+            .set_icon_name("view-reveal-symbolic");
     }
 
     // Populate port forwards listbox.
-    populate_port_forwards_list(&detail.pf_listbox, &host.port_forwards, None, None, None, None);
+    populate_port_forwards_list(
+        &detail.pf_listbox,
+        &host.port_forwards,
+        None,
+        None,
+        None,
+        None,
+    );
 
     detail.detail_stack.set_visible_child_name("detail");
 }
@@ -618,9 +655,15 @@ pub fn populate_port_forwards_list(
         let is_active = active_fwd_id.is_some();
 
         let title = if let Some(ref desc) = pf.description {
-            format!("{desc}  (:{} \u{2192} {}:{})", pf.local_port, pf.remote_host, pf.remote_port)
+            format!(
+                "{desc}  (:{} \u{2192} {}:{})",
+                pf.local_port, pf.remote_host, pf.remote_port
+            )
         } else {
-            format!(":{} \u{2192} {}:{}", pf.local_port, pf.remote_host, pf.remote_port)
+            format!(
+                ":{} \u{2192} {}:{}",
+                pf.local_port, pf.remote_host, pf.remote_port
+            )
         };
 
         let row = adw::ActionRow::builder()
@@ -659,13 +702,16 @@ pub fn populate_port_forwards_list(
                     rt.spawn(async move {
                         match crate::dbus_client::dbus_ssh_stop_port_forward(fwd_id).await {
                             Ok(()) => {
-                                if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                                if let Ok(json) =
+                                    crate::dbus_client::dbus_ssh_list_port_forwards().await
+                                {
                                     let _ = tx.send(AppMsg::PortForwardsRefreshed(json));
                                 }
                                 let _ = tx.send(AppMsg::ShowToast("Tunnel stopped".to_string()));
                             }
                             Err(e) => {
-                                let _ = tx.send(AppMsg::OperationFailed(format!("stop tunnel: {e}")));
+                                let _ =
+                                    tx.send(AppMsg::OperationFailed(format!("stop tunnel: {e}")));
                             }
                         }
                     });
@@ -691,16 +737,24 @@ pub fn populate_port_forwards_list(
                     let tx = tx.clone();
                     rt.spawn(async move {
                         match crate::dbus_client::dbus_ssh_start_port_forward(
-                            host_id, local_port, remote_host, remote_port,
-                        ).await {
+                            host_id,
+                            local_port,
+                            remote_host,
+                            remote_port,
+                        )
+                        .await
+                        {
                             Ok(_fwd_id) => {
-                                if let Ok(json) = crate::dbus_client::dbus_ssh_list_port_forwards().await {
+                                if let Ok(json) =
+                                    crate::dbus_client::dbus_ssh_list_port_forwards().await
+                                {
                                     let _ = tx.send(AppMsg::PortForwardsRefreshed(json));
                                 }
                                 let _ = tx.send(AppMsg::ShowToast("Tunnel started".to_string()));
                             }
                             Err(e) => {
-                                let _ = tx.send(AppMsg::OperationFailed(format!("start tunnel: {e}")));
+                                let _ =
+                                    tx.send(AppMsg::OperationFailed(format!("start tunnel: {e}")));
                             }
                         }
                     });
@@ -809,7 +863,9 @@ pub fn show_add_port_forward_dialog(
     // Cancel.
     {
         let dialog = dialog.clone();
-        cancel_btn.connect_clicked(move |_| { dialog.close(); });
+        cancel_btn.connect_clicked(move |_| {
+            dialog.close();
+        });
     }
 
     // Submit.
@@ -825,7 +881,11 @@ pub fn show_add_port_forward_dialog(
             let remote_port: u16 = remote_port_row.text().parse().unwrap_or(0);
             let desc = {
                 let t = desc_row.text().to_string();
-                if t.is_empty() { None } else { Some(t) }
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t)
+                }
             };
 
             existing_forwards.borrow_mut().push(PortForward {
@@ -841,17 +901,17 @@ pub fn show_add_port_forward_dialog(
             let tx = tx.clone();
 
             rt.spawn(async move {
-                let result = crate::dbus_client::dbus_ssh_update_host(
-                    host_id,
-                    update.to_string(),
-                ).await;
+                let result =
+                    crate::dbus_client::dbus_ssh_update_host(host_id, update.to_string()).await;
                 match result {
-                    Ok(()) => {
-                        match crate::dbus_client::dbus_ssh_list_hosts().await {
-                            Ok(hosts) => { let _ = tx.send(AppMsg::SshHostsRefreshed(hosts)); }
-                            Err(e) => { let _ = tx.send(AppMsg::OperationFailed(format!("refresh hosts: {e}"))); }
+                    Ok(()) => match crate::dbus_client::dbus_ssh_list_hosts().await {
+                        Ok(hosts) => {
+                            let _ = tx.send(AppMsg::SshHostsRefreshed(hosts));
                         }
-                    }
+                        Err(e) => {
+                            let _ = tx.send(AppMsg::OperationFailed(format!("refresh hosts: {e}")));
+                        }
+                    },
                     Err(e) => {
                         let _ = tx.send(AppMsg::OperationFailed(format!("add forward: {e}")));
                     }
@@ -958,7 +1018,9 @@ pub fn refresh_fortigate_dashboard(
         match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio::net::TcpStream::connect(&addr),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(_)) => {} // reachable, proceed
             _ => {
                 // Not reachable — show "Unreachable" without error toast.
@@ -978,10 +1040,12 @@ pub fn refresh_fortigate_dashboard(
                 .fortigate_api(&host_id, "GET", "/api/v2/monitor/system/status", "")
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let mut data: Value = serde_json::from_str(&resp)
-                .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
-            info!("FortiGate status top-level: {:?}",
-                data.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            let mut data: Value =
+                serde_json::from_str(&resp).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+            info!(
+                "FortiGate status top-level: {:?}",
+                data.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
             if let Some(r) = data.get("results") {
                 info!("FortiGate status results: {r}");
             }
@@ -1009,8 +1073,7 @@ pub fn refresh_fortigate_dashboard(
             if !found_resource {
                 if let Some(results) = data.get("results") {
                     let has_cpu = results.get("cpu").is_some();
-                    let has_mem = results.get("mem").is_some()
-                        || results.get("ram").is_some();
+                    let has_mem = results.get("mem").is_some() || results.get("ram").is_some();
                     if has_cpu || has_mem {
                         data["resource"] = results.clone();
                     }
@@ -1050,10 +1113,7 @@ pub fn refresh_fortigate_dashboard(
 
         match result {
             Ok(data) => {
-                let _ = tx.send(AppMsg::FortigateStatus {
-                    host_id,
-                    data,
-                });
+                let _ = tx.send(AppMsg::FortigateStatus { host_id, data });
             }
             Err(e) => {
                 warn!("FortiGate dashboard fetch failed for {host_id}: {e}");
@@ -1160,7 +1220,6 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
 /// The SSH command is wrapped so the terminal stays open if the connection
 /// fails or the user wants to reconnect — the shell prompt remains active.
 pub fn launch_ssh_terminal(ssh_cmd: &str) {
-
     // Wrap in a shell that keeps the terminal open after SSH exits.
     // The user gets dropped into a shell and can re-run the command or
     // inspect errors without the window vanishing.
@@ -1173,15 +1232,15 @@ pub fn launch_ssh_terminal(ssh_cmd: &str) {
     //          argument unless using `--` with recent versions.  The safest
     //          is to pass a single shell invocation.
     let terminals: &[(&str, &[&str])] = &[
-        ("konsole",         &["--noclose", "-e", "/bin/sh", "-c"]),
-        ("gnome-terminal",  &["--", "sh", "-c"]),
-        ("kgx",             &["--", "sh", "-c"]),
-        ("xfce4-terminal",  &["--hold", "-e", "sh -c"]),
-        ("alacritty",       &["--hold", "-e", "sh", "-c"]),
-        ("kitty",           &["sh", "-c"]),
-        ("foot",            &["sh", "-c"]),
-        ("wezterm",         &["start", "--", "sh", "-c"]),
-        ("xterm",           &["-hold", "-e", "sh", "-c"]),
+        ("konsole", &["--noclose", "-e", "/bin/sh", "-c"]),
+        ("gnome-terminal", &["--", "sh", "-c"]),
+        ("kgx", &["--", "sh", "-c"]),
+        ("xfce4-terminal", &["--hold", "-e", "sh -c"]),
+        ("alacritty", &["--hold", "-e", "sh", "-c"]),
+        ("kitty", &["sh", "-c"]),
+        ("foot", &["sh", "-c"]),
+        ("wezterm", &["start", "--", "sh", "-c"]),
+        ("xterm", &["-hold", "-e", "sh", "-c"]),
     ];
 
     for (term, prefix_args) in terminals {
@@ -1210,7 +1269,12 @@ pub fn launch_ssh_terminal(ssh_cmd: &str) {
 /// Launch an RDP session to the given host.
 ///
 /// Tries common RDP clients: xfreerdp3, xfreerdp, remmina, gnome-connections.
-pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&str>) -> Result<String, String> {
+pub fn launch_rdp(
+    hostname: &str,
+    port: u16,
+    username: &str,
+    password: Option<&str>,
+) -> Result<String, String> {
     let preferred = crate::settings::AppSettings::load().rdp_client;
     let all_clients = [
         ("remmina", {
@@ -1268,7 +1332,10 @@ pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&s
     let candidates: Vec<&(&str, Vec<String>)> = if preferred == "auto" {
         all_clients.iter().collect()
     } else {
-        all_clients.iter().filter(|(name, _)| *name == preferred).collect()
+        all_clients
+            .iter()
+            .filter(|(name, _)| *name == preferred)
+            .collect()
     };
 
     for (client, args) in candidates {
@@ -1292,7 +1359,9 @@ pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&s
     }
 
     if preferred != "auto" {
-        Err(format!("RDP client '{preferred}' not found — install it or switch to Auto in Settings"))
+        Err(format!(
+            "RDP client '{preferred}' not found — install it or switch to Auto in Settings"
+        ))
     } else {
         Err("No RDP client found — install freerdp or remmina".into())
     }
@@ -1304,7 +1373,10 @@ pub fn launch_rdp(hostname: &str, port: u16, username: &str, password: Option<&s
 pub fn launch_vnc(hostname: &str, port: u16) -> Result<String, String> {
     let clients: &[(&str, Vec<String>)] = &[
         ("vncviewer", vec![format!("{hostname}:{port}")]),
-        ("remmina", vec!["-c".into(), format!("vnc://{hostname}:{port}")]),
+        (
+            "remmina",
+            vec!["-c".into(), format!("vnc://{hostname}:{port}")],
+        ),
     ];
 
     for (client, args) in clients {
@@ -1331,10 +1403,7 @@ pub fn launch_vnc(hostname: &str, port: u16) -> Result<String, String> {
 /// Check whether an executable is on PATH.
 fn which_exists(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(name).is_file())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
         .unwrap_or(false)
 }
 
@@ -1358,18 +1427,15 @@ pub fn run_fortigate_compliance(
                 .fortigate_compliance_check(&host_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let data: Value = serde_json::from_str(&resp)
-                .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+            let data: Value =
+                serde_json::from_str(&resp).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
             Ok::<Value, anyhow::Error>(data)
         }
         .await;
 
         match result {
             Ok(data) => {
-                let _ = tx.send(AppMsg::FortigateCompliance {
-                    host_id,
-                    data,
-                });
+                let _ = tx.send(AppMsg::FortigateCompliance { host_id, data });
             }
             Err(e) => {
                 warn!("FortiGate compliance check failed for {host_id}: {e}");
@@ -1421,7 +1487,6 @@ pub fn show_compliance_dialog(parent: &adw::ApplicationWindow, data: &Value) {
     dialog.present(Some(parent));
 }
 
-
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
@@ -1433,16 +1498,21 @@ mod configuration_tests {
     }
     #[test]
     fn missing_jump_credentials_offer_to_edit_the_jump_host() {
-        let mut target = host(1); let mut jump = host(2);
-        target.proxy_jump = Some(jump.id); jump.auth_key_id = Some(uuid::Uuid::from_u128(10));
-        let (id, message) = connection_issue(&target, &[target.clone(), jump.clone()], &[]).unwrap();
-        assert_eq!(id, jump.id); assert!(message.contains("key that no longer exists"));
+        let mut target = host(1);
+        let mut jump = host(2);
+        target.proxy_jump = Some(jump.id);
+        jump.auth_key_id = Some(uuid::Uuid::from_u128(10));
+        let (id, message) =
+            connection_issue(&target, &[target.clone(), jump.clone()], &[]).unwrap();
+        assert_eq!(id, jump.id);
+        assert!(message.contains("key that no longer exists"));
         jump.auth_method = AuthMethod::Password;
         assert!(connection_issue(&target, &[jump], &[]).is_none());
     }
     #[test]
     fn missing_or_cyclic_jump_hosts_are_actionable_but_agent_auth_is_valid() {
-        let mut target = host(1); let mut jump = host(2);
+        let mut target = host(1);
+        let mut jump = host(2);
         assert!(connection_issue(&target, &[], &[]).is_none());
         target.proxy_jump = Some(jump.id);
         assert_eq!(connection_issue(&target, &[], &[]).unwrap().0, target.id);
