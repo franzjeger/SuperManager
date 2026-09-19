@@ -15,9 +15,9 @@
 //!    default browser, await the redirect, exchange the code for an
 //!    access + refresh token.
 //! 3. **Tempfiles** — write `tls-auth.key`, `auth.txt`, `client.ovpn` to
-//!    `%PROGRAMDATA%\SuperManager\runtime\azure-<id>\`. The directory's
-//!    ACL inherits from `%PROGRAMDATA%\SuperManager\` (SYSTEM +
-//!    Administrators full control, Authenticated Users read+execute).
+//!    a fresh directory under `%PROGRAMDATA%\SuperManager\runtime\`.
+//!    A protected ACL grants access only to SYSTEM and Administrators from
+//!    creation; a guard removes the files on failed connect or disconnect.
 //! 4. **OpenVPN** — spawn `openvpn.exe --config client.ovpn`, capture
 //!    stdout/stderr, wait for `Initialization Sequence Completed` (or
 //!    a fatal error / timeout).
@@ -86,7 +86,7 @@ struct AzActive {
     adapter_name: Option<String>,
     /// Temp directory holding the generated .ovpn + tls-auth key +
     /// auth-user-pass file. Cleaned up on disconnect.
-    tmp_dir: PathBuf,
+    tmp_dir: crate::win::paths::PrivateRuntimeDir,
     /// Whether we pushed DNS that needs reverting.
     dns_overridden: bool,
 }
@@ -191,12 +191,12 @@ impl Ikev2Backend {
         info!(upn, "Azure: authenticated");
 
         // ── Step 2 — Tempfiles ──────────────────────────────────────────────
-        let tmp_dir = runtime_dir(&profile.id);
-        std::fs::create_dir_all(&tmp_dir).map_err(VpnError::Io)?;
+        let tmp_dir = crate::win::paths::create_private_runtime_dir(&profile.id)
+            .map_err(VpnError::Io)?;
 
-        let key_path = tmp_dir.join("tls-auth.key");
-        let auth_path = tmp_dir.join("auth.txt");
-        let ovpn_path = tmp_dir.join("client.ovpn");
+        let key_path = tmp_dir.path().join("tls-auth.key");
+        let auth_path = tmp_dir.path().join("auth.txt");
+        let ovpn_path = tmp_dir.path().join("client.ovpn");
 
         std::fs::write(&key_path, hex_to_openvpn_key(&cfg.server_secret_hex))
             .map_err(VpnError::Io)?;
@@ -217,7 +217,8 @@ impl Ikev2Backend {
             .arg("--config")
             .arg(&ovpn_path)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         let mut child = command.spawn().map_err(VpnError::Io)?;
         info!(?openvpn_exe, config = %ovpn_path.display(), "spawned openvpn for Azure tunnel");
 
@@ -254,7 +255,6 @@ impl Ikev2Backend {
             }
             if line.contains("AUTH_FAILED") {
                 let _ = child.kill().await;
-                cleanup_tmp(&tmp_dir);
                 stdout_task.abort();
                 return Err(VpnError::PermissionDenied("Azure auth rejected by gateway"));
             }
@@ -266,7 +266,6 @@ impl Ikev2Backend {
 
         if !connected {
             let _ = child.kill().await;
-            cleanup_tmp(&tmp_dir);
             return Err(VpnError::Subprocess {
                 code: -1,
                 stderr: format!(
@@ -316,18 +315,7 @@ async fn tear_down(mut active: AzActive) {
             }
         }
     }
-    cleanup_tmp(&active.tmp_dir);
-}
-
-fn cleanup_tmp(tmp_dir: &std::path::Path) {
-    if let Err(e) = std::fs::remove_dir_all(tmp_dir) {
-        warn!("remove Azure tmp dir {}: {e}", tmp_dir.display());
-    }
-}
-
-fn runtime_dir(profile_id: &uuid::Uuid) -> PathBuf {
-    PathBuf::from(r"C:\ProgramData\SuperManager\runtime")
-        .join(format!("azure-{}", profile_id.simple()))
+    drop(active.tmp_dir);
 }
 
 // ---------------------------------------------------------------------------
