@@ -36,7 +36,7 @@ enum Dependencies {
     /// shows up on some machines; `/usr/local/sbin` is where the app's
     /// own bundled tailscaled lands.
     static let searchPaths = [
-        "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+        "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/opt/local/bin", "/opt/local/sbin",
         "/usr/local/sbin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
 
@@ -72,12 +72,40 @@ enum Dependencies {
              formula: nil,
              // Microsoft's gateway rejects OpenVPN 2.x in the Entra
              // flow, and upstream ships no bottle — it has to be built.
-             manualNote: "No Homebrew formula exists. Build it with "
-                 + "./contrib/build-openvpn3-mac.sh from a checkout "
-                 + "(takes several minutes)."),
+             manualNote: "Build OpenVPN 3 in Terminal. This takes several minutes "
+                 + "and asks for your password to finish installation."),
     ]
 
     static var missing: [Tool] { all.filter { !$0.isInstalled } }
+
+    /// For a tool Homebrew can't supply (`formula == nil`), the shell
+    /// command that builds and installs it. Run in Terminal, not
+    /// captured in-app: the OpenVPN 3 build takes minutes and ends in a
+    /// `sudo install`, so its progress and password prompt have to be
+    /// visible. `nil` when brew can do the job instead.
+    static func terminalBuildCommand(for id: String) -> String? {
+        switch id {
+        case "openvpn3":
+            // The documented --with-openvpn3 path: installs the build
+            // deps (cmake, asio, jsoncpp, openssl@3, lz4) and runs
+            // contrib/build-openvpn3-mac.sh.
+            // Download completely before execution, and keep Terminal's
+            // stdin available for the installer's confirmation prompts.
+            return """
+                installer=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/supermanager-installer.XXXXXX") || exit 1
+                /usr/bin/curl -fsSL https://raw.githubusercontent.com/franzjeger/SuperManager/main/scripts/install.sh -o "$installer"
+                status=$?
+                if [ "$status" -eq 0 ]; then
+                    /bin/bash "$installer" --deps-only --with-openvpn3
+                    status=$?
+                fi
+                /bin/rm -f "$installer"
+                (exit "$status")
+                """
+        default:
+            return nil
+        }
+    }
 
     // MARK: - Installing
 
