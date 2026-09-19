@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 
 const ANCHOR_NAME: &str = "com.sybr.supermanager.killswitch";
 const ANCHOR_FILE: &str = "/etc/pf.anchors/com.sybr.supermanager.killswitch";
@@ -58,9 +58,7 @@ pub struct Result_ {
 /// pf if it isn't already running. Idempotent.
 pub fn enable(args: EnableArgs) -> Result<Result_> {
     let iface = args.tunnel_interface;
-    if !iface.starts_with("utun") {
-        bail!("invalid tunnel_interface '{iface}' — must be utun*");
-    }
+    validate_interface(&iface)?;
 
     // Build the anchor's pf rules. Order matters in pf: explicit
     // pass before block, last-matching wins (without `quick`).
@@ -107,7 +105,7 @@ block return in all
 
     // Make sure pf is enabled. `pfctl -E` is idempotent — returns
     // 0 with "pf enabled" or "pf already enabled".
-    let _ = Command::new("/sbin/pfctl").arg("-E").output();
+    checked_pfctl_output(Command::new("/sbin/pfctl").arg("-E").output(), "enable pf")?;
 
     // Load our anchor's rules. `-a <anchor>` loads into the
     // anchor namespace without touching the main ruleset.
@@ -164,6 +162,7 @@ fn install_referrer_if_missing() -> Result<()> {
         .args(["-sr"])
         .output()
         .context("pfctl -sr")?;
+    let current = checked_pfctl_output(Ok(current), "read pf rules")?;
     let stdout = String::from_utf8_lossy(&current.stdout);
     if stdout.contains(&format!("anchor \"{ANCHOR_NAME}\"")) {
         return Ok(());
@@ -172,15 +171,18 @@ fn install_referrer_if_missing() -> Result<()> {
     // single line referring to our anchor.
     let pf_conf = "/etc/pf.conf";
     let body = fs::read_to_string(pf_conf).context("reading /etc/pf.conf")?;
-    let line = format!("\nanchor \"{ANCHOR_NAME}\"\nload anchor \"{ANCHOR_NAME}\" from \"{ANCHOR_FILE}\"\n");
+    let line = format!(
+        "\nanchor \"{ANCHOR_NAME}\"\nload anchor \"{ANCHOR_NAME}\" from \"{ANCHOR_FILE}\"\n"
+    );
     if !body.contains(&format!("anchor \"{ANCHOR_NAME}\"")) {
         let new_body = format!("{body}{line}");
         fs::write(pf_conf, new_body).context("writing /etc/pf.conf")?;
     }
     // Reload the full ruleset so the new anchor reference takes effect.
-    let _ = Command::new("/sbin/pfctl")
-        .args(["-f", pf_conf])
-        .output();
+    checked_pfctl_output(
+        Command::new("/sbin/pfctl").args(["-f", pf_conf]).output(),
+        "activate kill-switch anchor reference",
+    )?;
     Ok(())
 }
 
@@ -197,4 +199,66 @@ fn remove_referrer_if_present() -> Result<()> {
         let _ = Command::new("/sbin/pfctl").args(["-f", pf_conf]).output();
     }
     Ok(())
+}
+
+/// Interface names are interpolated into pf rules: accept only a utun index.
+fn validate_interface(iface: &str) -> Result<()> {
+    let Some(index) = iface.strip_prefix("utun") else {
+        bail!("invalid tunnel_interface — expected utun<N>");
+    };
+    if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("invalid tunnel_interface — expected utun<N>");
+    }
+    Ok(())
+}
+
+/// A failed command must never turn into a successful kill-switch response.
+fn checked_pfctl_output(output: std::io::Result<Output>, action: &str) -> Result<Output> {
+    let output = output.with_context(|| format!("pfctl: {action}"))?;
+    if !output.status.success() {
+        bail!(
+            "pfctl could not {action}; kill-switch protection is not confirmed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn interface_validation_rejects_rule_injection() {
+        for valid in ["utun0", "utun12"] {
+            assert!(validate_interface(valid).is_ok());
+        }
+        for invalid in [
+            "utun",
+            "en0",
+            "utun1\npass quick all",
+            "utun1 all",
+            "utun１",
+            "utun-1",
+        ] {
+            assert!(validate_interface(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn pf_activation_errors_are_reported() {
+        let failure = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"permission denied".to_vec(),
+        };
+        let error = checked_pfctl_output(Ok(failure), "enable pf").unwrap_err();
+        assert!(error.to_string().contains("permission denied"));
+        assert!(checked_pfctl_output(
+            Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+            "enable pf"
+        )
+        .is_err());
+    }
 }
