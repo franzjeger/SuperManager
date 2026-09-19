@@ -38,6 +38,7 @@ enum HelperInstaller {
     enum InstallError: Error, LocalizedError {
         case registrationFailed(String)
         case bundlePathUnavailable
+        case bundledMetadataUnavailable
         case manualInstallFailed(String)
         case unsupportedPlatform
 
@@ -47,6 +48,8 @@ enum HelperInstaller {
                 return "Helper registration failed: \(m)"
             case .bundlePathUnavailable:
                 return "Could not find helper binary inside app bundle"
+            case .bundledMetadataUnavailable:
+                return "Could not verify the bundled helper build. Reinstall the app before installing its helper."
             case .manualInstallFailed(let m):
                 return "Helper install failed: \(m)"
             case .unsupportedPlatform:
@@ -60,7 +63,7 @@ enum HelperInstaller {
     /// means the helper is up and listening on its socket within ~1 s.
     ///
     /// **Idempotency contract:** if the helper is *already* installed and
-    /// reachable, `install()` is a fast no-op — no SMAppService call, no
+    /// reachable with the bundled build, `install()` is a fast no-op — no SMAppService call, no
     /// osascript admin prompt. Earlier versions skipped this check, so a
     /// poll race or transient socket blip would re-trigger the entire
     /// install dance (and the user got hit with a password prompt every
@@ -69,17 +72,21 @@ enum HelperInstaller {
     static func install() async throws {
         guard #available(macOS 13.0, *) else { throw InstallError.unsupportedPlatform }
 
-        // FAST PATH: helper is already running and listening. We confirm
-        // by attempting an actual socket connection (cheap — sub-millisecond
-        // when the helper is up) instead of trusting the file-existence
-        // check, which can be stale after a bootout.
-        if await HelperClient.shared.isReachable() {
-            let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-            if let installedVersion = try? await HelperClient.shared.helperVersion(),
-               installedVersion == bundledVersion {
-                return
-            }
+        let bundledHelper = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/com.sybr.supermanager.helper")
+        guard FileManager.default.isExecutableFile(atPath: bundledHelper.path) else {
+            throw InstallError.bundlePathUnavailable
         }
+        // The app and helper have independent version numbers. Compare
+        // the running helper with the actual bundled binary, including
+        // its build identity and RPC capabilities, before skipping install.
+        let bundled: HelperBuildInfo
+        do {
+            bundled = try await HelperBuildInfo.read(from: bundledHelper)
+        } catch {
+            throw InstallError.bundledMetadataUnavailable
+        }
+        if await installedHelperMatches(bundled) { return }
 
         // Try the modern API first. Skip silently if it errors — the
         // fallback handles the "ad-hoc signed" case that SMAppService
@@ -87,8 +94,7 @@ enum HelperInstaller {
         if (try? trySMAppService()) != nil {
             // Wait for socket to come up.
             for _ in 0 ..< 30 {
-                let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-                if let v = try? await HelperClient.shared.helperVersion(), v == bundledVersion {
+                if await installedHelperMatches(bundled) {
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(100))
@@ -97,7 +103,13 @@ enum HelperInstaller {
             // Fall through to manual install which will replace the plist.
         }
 
-        try await manualInstall()
+        try await manualInstall(bundledHelper: bundledHelper, expected: bundled)
+    }
+
+    private static func installedHelperMatches(_ expected: HelperBuildInfo) async -> Bool {
+        guard let response = try? await HelperClient.shared.helperVersion(),
+              let deployed = HelperBuildInfo(json: response) else { return false }
+        return deployed.matches(expected)
     }
 
     /// Modern path. Throws on failure so the caller can fall back.
@@ -118,15 +130,7 @@ enum HelperInstaller {
     /// locations and bootstrap them, all under one `osascript with
     /// administrator privileges` call so the user enters their password
     /// exactly once.
-    private static func manualInstall() async throws {
-        guard let bundleURL = Bundle.main.bundleURL.path.removingPercentEncoding else {
-            throw InstallError.bundlePathUnavailable
-        }
-        let bundledHelper = "\(bundleURL)/Contents/MacOS/com.sybr.supermanager.helper"
-        guard FileManager.default.fileExists(atPath: bundledHelper) else {
-            throw InstallError.bundlePathUnavailable
-        }
-
+    private static func manualInstall(bundledHelper: URL, expected: HelperBuildInfo) async throws {
         // Plist is generated rather than copied so we can rewrite the
         // `BundleProgram` (relative path used by SMAppService) into a
         // `Program` (absolute path) for launchd's traditional bootstrap.
@@ -145,7 +149,7 @@ enum HelperInstaller {
         printf '%s' \(q(plistB64)) | /usr/bin/base64 -d > \(q(systemPlistPath))
         chown root:wheel \(q(systemPlistPath))
         chmod 644 \(q(systemPlistPath))
-        cp \(q(bundledHelper)) \(q(systemBinaryPath))
+        cp \(q(bundledHelper.path)) \(q(systemBinaryPath))
         chown root:wheel \(q(systemBinaryPath))
         chmod 755 \(q(systemBinaryPath))
         # Replace any existing daemon registration; bootout is a no-op the
@@ -186,14 +190,13 @@ enum HelperInstaller {
         // launchctl is async — wait for the socket to come up before
         // returning so the caller can immediately make IPC calls.
         for _ in 0 ..< 50 {
-            let bundledVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-            if let v = try? await HelperClient.shared.helperVersion(), v == bundledVersion {
+            if await installedHelperMatches(expected) {
                 return
             }
             try? await Task.sleep(for: .milliseconds(100))
         }
         throw InstallError.manualInstallFailed(
-            "helper plist installed but socket never appeared; check /var/log/supermanager-helper.log"
+            "helper installed but a matching build did not become ready; check /var/log/supermanager-helper.log"
         )
     }
 

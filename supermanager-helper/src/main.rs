@@ -122,6 +122,55 @@ impl Response {
     }
 }
 
+/// The CLI and RPC must describe the same build and capabilities so the
+/// GUI can verify the running helper against the bundled executable.
+fn helper_version_info() -> serde_json::Value {
+    let methods = vec![
+        "helper_version",
+        "restart",
+        #[cfg(feature = "dev-rpc")]
+        "deploy_self",
+        "tail_log",
+        "vpn_connect",
+        "vpn_disconnect",
+        "vpn_status",
+        "wg_connect",
+        "wg_disconnect",
+        "wg_status",
+        "ovpn_connect",
+        "ovpn_disconnect",
+        "ovpn_status",
+        "tailscaled_install",
+        "tailscaled_uninstall",
+        "tailscaled_status",
+        "tailscale_panic_reset",
+        "tailscale_install_magicdns_resolver",
+        "tailscale_install_exit_routes",
+        "tailscale_remove_exit_routes",
+        "tailscale_test_exit_reachability",
+        "tailscale_set_dns_servers",
+        "tailscale_force_dns_state",
+        "tailscale_set_dns_fallbacks",
+        "tailscale_get_dns_fallbacks",
+        "tailscale_pause_watchdog",
+        "tailscale_resume_watchdog",
+        "auto_reconnect_enable",
+        "auto_reconnect_disable",
+        "auto_reconnect_list",
+        "kill_switch_enable",
+        "kill_switch_disable",
+        "traffic_capture",
+        "system_sleep",
+        "system_wake",
+    ];
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
+        "methods": methods,
+        "dev_rpc": cfg!(feature = "dev-rpc"),
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -144,13 +193,7 @@ async fn main() -> anyhow::Result<()> {
     // this prints and exits, needs no privileges, and must stay cheap
     // enough to call on every launch.
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!(
-            "{}",
-            serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
-            })
-        );
+        println!("{}", helper_version_info());
         return Ok(());
     }
 
@@ -429,52 +472,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // The GUI checks the methods it intends to call against this
         // list rather than assuming a version-number monotonicity —
         // dev branches can ship out of order.
-        "helper_version" => {
-            let methods = vec![
-                "helper_version",
-                "restart",
-                #[cfg(feature = "dev-rpc")]
-                "deploy_self",
-                "tail_log",
-                "vpn_connect",
-                "vpn_disconnect",
-                "vpn_status",
-                "wg_connect",
-                "wg_disconnect",
-                "wg_status",
-                "ovpn_connect",
-                "ovpn_disconnect",
-                "ovpn_status",
-                "tailscaled_install",
-                "tailscaled_uninstall",
-                "tailscaled_status",
-                "tailscale_panic_reset",
-                "tailscale_install_magicdns_resolver",
-                "tailscale_install_exit_routes",
-                "tailscale_remove_exit_routes",
-                "tailscale_test_exit_reachability",
-                "tailscale_set_dns_servers",
-                "tailscale_force_dns_state",
-                "tailscale_set_dns_fallbacks",
-                "tailscale_get_dns_fallbacks",
-                "tailscale_pause_watchdog",
-                "tailscale_resume_watchdog",
-                "auto_reconnect_enable",
-                "auto_reconnect_disable",
-                "auto_reconnect_list",
-                "kill_switch_enable",
-                "kill_switch_disable",
-                "traffic_capture",
-                "system_sleep",
-                "system_wake",
-            ];
-            Response::ok(id, serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
-                "methods": methods,
-                "dev_rpc": cfg!(feature = "dev-rpc"),
-            }))
-        }
+        "helper_version" => Response::ok(id, helper_version_info()),
 
         // talk to the socket.
         "restart" => {
