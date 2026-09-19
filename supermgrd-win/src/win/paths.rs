@@ -36,9 +36,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, OPEN_EXISTING,
-    READ_CONTROL, WRITE_DAC,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, OPEN_EXISTING,
 };
+use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 
 /// Protected DACLs: no ProgramData write permissions may be inherited. Setting
 /// the owner to Administrators also prevents a creating user's implicit right
@@ -89,7 +89,22 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
         };
         let dir = root.join(sub);
         let _handle = secure_directory(&dir, sddl, true)?;
-        secure_existing_children(&dir, sddl)?;
+    }
+    // Include top-level state such as known_hosts.json and older/custom
+    // directories. The private runtime subtree must never receive the
+    // configuration tree's read permission for authenticated users.
+    for entry in std::fs::read_dir(&root)? {
+        let entry = entry?;
+        let sddl = if entry.file_name().to_string_lossy().eq_ignore_ascii_case("runtime") {
+            SECRET_SDDL
+        } else {
+            ROOT_SDDL
+        };
+        let (handle, is_dir) = open_trusted_path(&entry.path())?;
+        set_dacl(&handle, sddl)?;
+        if is_dir {
+            secure_existing_children(&entry.path(), sddl)?;
+        }
     }
     Ok(root)
 }
@@ -189,7 +204,12 @@ fn open_trusted_path(path: &Path) -> io::Result<(OwnedHandle, bool)> {
     let raw = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+            // SetSecurityInfo must not recursively change an unchecked
+            // child (including a planted hardlink) before we validate it.
+            // MAXIMUM_ALLOWED disables that automatic propagation; the
+            // explicit traversal below secures each trusted object itself.
+            // https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
+            MAXIMUM_ALLOWED,
             FILE_SHARE_READ,
             ptr::null(),
             OPEN_EXISTING,
@@ -483,6 +503,39 @@ mod tests {
         assert!(ensure_root_at(&base).is_err());
         std::fs::remove_file(linked).unwrap();
         ensure_root_at(&base).unwrap();
+
+        let known_hosts = root.join("known_hosts.json");
+        let writer = std::fs::File::create(&known_hosts).unwrap();
+        assert!(ensure_root_at(&base).is_err(), "top-level writers must be rejected");
+        drop(writer);
+        ensure_root_at(&base).unwrap();
+        std::fs::remove_file(&known_hosts).unwrap();
+
+        // A hardlink in the state root must not cause automatic DACL
+        // propagation to expose a private file outside the state tree.
+        let external = base.join("private-external");
+        drop(secure_directory(&external, SECRET_SDDL, false).unwrap());
+        let external_token = external.join("token.txt");
+        std::fs::write(&external_token, "fixture-secret").unwrap();
+        std::fs::hard_link(&external_token, &known_hosts).unwrap();
+        assert!(ensure_root_at(&base).is_err(), "top-level hardlinks must be rejected");
+        std::fs::remove_file(&known_hosts).unwrap();
+        assert_eq!(
+            effective_rights(&file_descriptor(&external_token), WinAuthenticatedUserSid),
+            0,
+            "rejected linked file must retain its private ACL"
+        );
+
+        let active = create_private_runtime_dir_at(&root, &profile).unwrap();
+        let active_token = active.path().join("auth.txt");
+        std::fs::write(&active_token, "fixture-secret").unwrap();
+        ensure_root_at(&base).unwrap();
+        assert_eq!(
+            effective_rights(&file_descriptor(&active_token), WinAuthenticatedUserSid),
+            0,
+            "startup migration must preserve private runtime ACLs"
+        );
+        drop(active);
         std::fs::remove_dir_all(base).unwrap();
     }
 
