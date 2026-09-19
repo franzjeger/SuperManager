@@ -38,7 +38,7 @@ async fn spawn_server() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().expect("temp dir");
     let socket_path = dir.path().join("test.sock").to_string_lossy().into_owned();
 
-    let state = DaemonState::new(dir.path().to_path_buf());
+    let state = DaemonState::new(dir.path().to_path_buf()).expect("open test trust store");
     let secrets: Arc<dyn supermgr_core::keyring::SecretStore> = Arc::new(
         FileSecretStore::new(dir.path().join("secrets.json")),
     );

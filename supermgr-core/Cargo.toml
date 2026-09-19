@@ -17,6 +17,8 @@ serde          = { workspace = true }
 serde_json     = { workspace = true }
 anyhow         = { workspace = true }
 toml           = { workspace = true }
+# Private atomic replacements for SSH trust records
+tempfile       = "3"
 # SHA-256 fingerprints for the SSH known-hosts store
 sha2           = { workspace = true }
 ssh-key        = { workspace = true }
@@ -48,7 +50,6 @@ nix            = { version = "0.30", features = ["user"] }
 keyring        = { version = "3.6", default-features = false, features = ["windows-native"] }
 
 [dev-dependencies]
-tempfile       = "3"
 # `secret_lifecycle` states its guarantee as an invariant over arbitrary
 # installs — build any mix of profiles/hosts/keys, delete any one of them,
 # assert nothing is left unowned. Enumerating those combinations by hand
