@@ -11,6 +11,7 @@
 //! Callers that need to construct a client typically want the
 //! [`connect`] helper rather than touching the per-platform constructor.
 
+/// Client for the privileged daemon on the current platform.
 #[cfg(target_os = "linux")]
 pub type DaemonClient = crate::dbus::DaemonProxy<'static>;
 
@@ -20,6 +21,7 @@ pub use crate::pipe::PipeClient as DaemonClient;
 #[cfg(target_os = "macos")]
 pub use crate::mac::MacClient as DaemonClient;
 
+/// Connect to the Linux daemon over the system D-Bus.
 #[cfg(target_os = "linux")]
 pub async fn connect() -> Result<DaemonClient, String> {
     let conn = zbus::Connection::system()
@@ -31,6 +33,7 @@ pub async fn connect() -> Result<DaemonClient, String> {
         .map_err(|e| format!("failed to create DaemonProxy: {e}"))
 }
 
+/// Connect to the Windows service over its named pipe.
 #[cfg(target_os = "windows")]
 pub async fn connect() -> Result<DaemonClient, String> {
     crate::pipe::PipeClient::open()
@@ -38,6 +41,7 @@ pub async fn connect() -> Result<DaemonClient, String> {
         .map_err(|e| format!("named-pipe connect failed (is the SuperManager service running?): {e}"))
 }
 
+/// Connect to the macOS daemon over its Unix socket.
 #[cfg(target_os = "macos")]
 pub async fn connect() -> Result<DaemonClient, String> {
     crate::mac::MacClient::open()

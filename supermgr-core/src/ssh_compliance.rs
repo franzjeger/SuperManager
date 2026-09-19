@@ -833,6 +833,9 @@ pub fn check_titles() -> Vec<&'static str> {
 mod tests {
     use super::*;
 
+    // Executes the remote POSIX shell scripts with synthetic inputs. The
+    // expectations and catalogue remain covered on every platform below.
+    #[cfg(unix)]
     #[test]
     fn kernel_scripts_distinguish_observed_values_from_read_failures() {
         for (id, accepted) in [
