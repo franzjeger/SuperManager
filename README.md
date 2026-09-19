@@ -224,44 +224,40 @@ installer asks for `sudo` to place system files and start the daemon.
 
 #### Who may talk to the daemon (Linux)
 
-`supermgrd` runs as root on the D-Bus system bus, and its bus policy lets any
-local user send it messages — that is how the unprivileged GUI reaches it.
-Authorization is therefore the daemon's job, not the bus's.
+`supermgrd` runs as root on the system bus. The D-Bus policy accepts root and
+members of the `supermgr` group; all other callers are denied. The installer
+creates this group and adds the invoking user. Log out and back in after a
+new group membership so the GUI's D-Bus connection has the updated groups.
 
-Two actions, at different levels, because the risk and the frequency differ:
+The daemon applies polkit authorization to credential access, configuration
+changes, remote operations and machine-wide routing/repair:
 
-| Action | Methods | Default |
+| Action suffix (`org.supermgr.daemon.`) | Operations | Policy default |
 |---|---|---|
-| `org.supermgr.daemon.secrets` | `SshExportPrivateKey`, `SshGetPassword`, `ExportProfile`, `ExportAll` (the whole secret store), `GetWebhookConfig` | `auth_admin` |
-| `org.supermgr.daemon.ssh-connect` | `SshConnectCommand` | `auth_admin_keep` |
+| `secrets` | Credential reads/exports and portable backup import/export | `auth_admin` |
+| `manage` | Profile, host and key changes; connection state and settings | `auth_admin_keep` |
+| `execute` | Remote commands, appliance APIs, key deployment and diagnostics | `auth_admin_keep` |
+| `ssh-connect` | Stage credentials and open an SSH session | `auth_admin_keep` |
+| `tailscale-exit-node` | Select or clear machine-wide exit-node routing | `auth_admin_keep` |
+| `tailscale-repair` | Install, start or repair the local Tailscale stack | `auth_admin_keep` |
 
-`auth_admin` means administrator authentication **every time**, with no
-session-wide grace period. `auth_admin_keep` asks once and then holds the
-grant for the rest of the session. Neither is reachable from an inactive or
-remote session.
+The installed `49-supermgr-operators.rules` grants `manage`, `execute` and
+`ssh-connect` to active, local members of `supermgr` without repeated prompts.
+Group membership is therefore an administrative trust decision: these users
+can operate managed devices using the daemon's stored credentials. Credential
+exports and Tailscale routing/repair retain their separate authentication rules.
 
-`SshConnectCommand` gets its own action because it discloses the same material
-as `SshExportPrivateKey` — it stages the host's password or private key on
-disk for your `ssh` to read — but it is also the Connect button. At
-`auth_admin` that is a password prompt for every SSH session you open, and a
-control that makes the tool unusable gets switched off. Raise it to
-`auth_admin` in the policy file if your threat model calls for it; nothing in
-the daemon depends on the weaker setting.
+`auth_admin` requires administrator authentication for each request;
+`auth_admin_keep` allows polkit to cache an authorization temporarily. Inactive
+and remote sessions are denied by the shipped policy. Read-only status polling
+avoids interactive authorization; login status/cancellation is bound to the
+initiating UID and attempt ID.
 
-Those staged credential files are mode 0600 and owned by the calling user, in
-a directory nobody else can create entries in. Every secret the daemon writes
-— VPN keys and passwords included — gets its mode in the same syscall that
-creates the file, rather than being narrowed afterwards.
-
-This **fails closed**: if polkit is not installed or cannot be reached, the
-gated methods are refused rather than allowed. Install
-`contrib/polkit/org.supermgr.Daemon.policy` (the installer does this for you)
-— without it, polkit has no rule for the action and denies by default. That
-is also why `polkit` is a hard dependency and not an optional one.
-
-The remaining methods are not yet gated. See issue #109 for the shape of the
-rest, and for the caveat that none of this has yet been exercised against a
-live polkit daemon.
+Guarded methods fail closed when polkit is unavailable. The installer deploys
+both the action definitions and operator rule. Staged SSH credentials are
+created with mode 0600 and owned by the requesting user. Run
+`node scripts/test-polkit-rule.mjs` to check operator permissions and installer
+coverage; `scripts/verify-polkit.sh` performs the live authorization checks.
 
 #### SSH host keys
 

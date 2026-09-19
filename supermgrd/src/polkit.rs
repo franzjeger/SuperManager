@@ -2,13 +2,10 @@
 //!
 //! # Why this exists
 //!
-//! `supermgrd` runs as root on the **system** bus, and its bus policy lets
-//! any local user send it messages — that is the normal arrangement for a
-//! system service, because the unprivileged GUI has to be able to reach it.
-//! What was missing is the other half: the daemon never asked *who* was
-//! calling. Every method was reachable by every local account, including
-//! the ones that hand back SSH private keys, stored host passwords, and a
-//! full secret export.
+//! `supermgrd` runs as root on the system bus. D-Bus admits root and members
+//! of the supermgr group; polkit then authorizes guarded operations. The
+//! installed operator rule grants routine manage/execute/SSH actions to
+//! active local group members. Secrets and routing retain separate policies.
 //!
 //! Polkit is the mechanism Linux provides for exactly this shape of
 //! problem — a privileged service deciding whether an unprivileged caller
@@ -40,8 +37,8 @@ pub const ACTION_SECRETS: &str = "org.supermgr.daemon.secrets";
 
 /// Open an SSH session to a managed host.
 ///
-/// Held at `auth_admin_keep`: one authentication, then a grace period
-/// covering the rest of the session.
+/// Defaults to `auth_admin_keep`, with temporary authorization caching.
+/// The installed operator rule permits active local supermgr members.
 ///
 /// # Why not `ACTION_SECRETS`
 ///
@@ -68,8 +65,8 @@ pub const ACTION_SSH_CONNECT: &str = "org.supermgr.daemon.ssh-connect";
 ///
 /// Profile/host/key CRUD, credential writes, VPN state changes, imports and
 /// local configuration changes belong here.  The shipped policy uses
-/// `auth_admin_keep`: the first change in an active desktop session prompts,
-/// subsequent changes in the same administration session do not.
+/// `auth_admin_keep`, with temporary authorization caching. The operator
+/// rule permits active local supermgr members without prompting.
 pub const ACTION_MANAGE: &str = "org.supermgr.daemon.manage";
 
 /// Perform an authenticated operation against a managed remote device.
@@ -86,15 +83,10 @@ pub const ACTION_EXECUTE: &str = "org.supermgr.daemon.execute";
 /// a VPN profile sits, and the split is worth stating rather than leaving as
 /// an inconsistency.
 ///
-/// The bus policy lets **any** local account talk to this daemon —
-/// `context="default"` with a bare `allow send_destination`. An exit node
-/// routes every packet this machine sends through a host of the caller's
-/// choosing, so ungated it would let any local user silently redirect
-/// another user's traffic through a machine they control. That is a
-/// different shape of problem from starting a VPN the admin already
-/// configured, and a separate action is what lets an administrator tighten
-/// it to `auth_admin` without making ordinary profile management equally
-/// cumbersome.
+/// Group membership permits contacting the daemon, but machine-wide routing
+/// requires this additional authorization. The routine operator rule does
+/// not grant it. An administrator can require `auth_admin` here without
+/// changing ordinary profile management.
 ///
 /// `auth_admin_keep` for the same reason as SSH connect: the operator
 /// comparing two exit nodes would otherwise authenticate on every attempt,

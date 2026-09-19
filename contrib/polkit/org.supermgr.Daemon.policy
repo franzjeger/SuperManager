@@ -6,10 +6,10 @@
 <!--
   Polkit actions for the SuperManager daemon.
 
-  `supermgrd` runs as root on the system bus and its bus policy lets any
-  local user send it messages, because the unprivileged GUI has to be able
-  to reach it. Polkit is what decides whether a given caller may perform a
-  given action once the message arrives.
+  `supermgrd` runs as root on the system bus. D-Bus admits root and members
+  of the supermgr group. Polkit then authorizes each guarded operation.
+  The companion operator rule grants routine manage/execute/SSH actions to
+  active local group members; secrets and routing retain separate policies.
 
   Install to /usr/share/polkit-1/actions/. The action ids here must match
   the constants in supermgrd/src/polkit.rs — there is a test that checks
@@ -98,14 +98,10 @@
       Its own action rather than org.supermgr.daemon.manage, where bringing
       a VPN profile up and down sits, and the split is deliberate.
 
-      The bus policy for this daemon allows context="default", i.e. every
-      local account. An exit node sends every packet this machine emits
-      through a host the caller picked. Ungated, any local user could
-      silently redirect another user's traffic through a machine they
-      control — which is a different thing from starting a VPN an admin
-      already configured and stored credentials for. A separate action is
-      what lets an administrator raise this one to auth_admin without
-      making ordinary profile management equally cumbersome.
+      Group membership grants access to the bus, but machine-wide routing
+      requires this additional authorization. The routine operator rule
+      deliberately excludes it. An administrator can raise this action to
+      auth_admin without changing ordinary profile management.
 
       auth_admin_keep, not auth_admin: choosing between exit nodes means
       trying one, checking it, trying another. A prompt per attempt is the
