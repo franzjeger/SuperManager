@@ -316,7 +316,7 @@ impl ForticlientBackend {
         // DNS push, best-effort. If openfortivpn already negotiated DNS
         // through PPP we don't override.
         let mut dns_overridden = false;
-        if !cfg.dns_servers.is_empty() {
+        if profile.push_dns && !cfg.dns_servers.is_empty() {
             if let Some(name) = iface.as_deref() {
                 match push_dns(name, &cfg.dns_servers).await {
                     Ok(()) => dns_overridden = true,
