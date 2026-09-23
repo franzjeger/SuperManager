@@ -52,7 +52,11 @@
       <MsiPackage Id="WireGuardForWindows"
                   SourceFile="vendor\wireguard-installer.msi"
                   Visible="yes"
-                  Permanent="yes" />
+                  Permanent="yes">
+        <!-- WireGuard otherwise launches its UI and aborts maintenance
+             with 1602 instead of completing the bundle's repair. -->
+        <MsiProperty Name="DO_NOT_LAUNCH" Value="1" />
+      </MsiPackage>
 
       <!-- OpenVPN Community Edition: embedded and pinned the same way. -->
       <MsiPackage Id="OpenVpnCommunity"
