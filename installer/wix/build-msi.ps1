@@ -77,7 +77,7 @@ if (Test-Path $openfortivpnPath) {
     $includeOpenfortivpn = "yes"
 } else {
     Write-Host "vendor\openfortivpn.exe absent -- MSI will be built without the SSL VPN client bundled."
-    Write-Host "(See vendor\README.md for the download URL.)"
+    Write-Host "(See vendor\README.md for the Windows SSL VPN limitation.)"
 }
 
 Push-Location $repoRoot

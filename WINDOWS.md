@@ -45,7 +45,7 @@ any host.
 ## Installing
 
 Download **[SuperManager-Setup.exe](https://github.com/franzjeger/SuperManager/releases/latest/download/SuperManager-Setup.exe)** and open it. Approve the Windows administrator prompt, then choose Install. It is a single
-executable that chain-installs everything SuperManager needs:
+executable that installs the app and its supported VPN dependencies:
 
 1. Microsoft Visual C++ x64 runtime (when missing or older)
 2. WireGuard for Windows and the WireGuardNT DLL beside SuperManager
@@ -66,7 +66,7 @@ Every release must pass a Windows installation test covering the service,
 app startup, RPC, OpenVPN executable, WireGuard driver creation, repair,
 uninstall and preservation of user state.
 
-If you already manage WireGuard and OpenVPN out-of-band (e.g. via
+If you already manage Visual C++ x64, WireGuard and OpenVPN out-of-band (e.g. via
 Group Policy / Intune), grab the bare **`SuperManager-<version>.msi`**
 instead — same payload as the bundle minus the chained installers.
 
@@ -145,7 +145,10 @@ WireGuardNT and OpenVPN Community installers as prerequisites.
 #   wix extension add WixToolset.Util.wixext/5.0.2 --global
 #   wix extension add WixToolset.BootstrapperApplications.wixext/5.0.2 --global
 
-# Bare MSI (just SuperManager, assumes drivers already installed):
+# Stage the native DLL and prerequisite installers:
+.\scripts\windows\Get-VendorFiles.ps1
+
+# Bare MSI (assumes runtime and VPN clients already installed):
 .\installer\wix\build-msi.ps1
 
 # Burn bundle (auto-installs WireGuard + OpenVPN alongside SuperManager):
@@ -219,10 +222,10 @@ Application event log.
 - **WireGuard import**: parses `wg-quick` `.conf` files end-to-end, persists private key + PSKs to Credential Manager, writes the profile TOML.
 - **WireGuard connect/disconnect** via `wireguard-nt` (requires the official WireGuardNT driver installed). Creates the adapter, applies config, assigns IPs and `AllowedIPs` routes via `Adapter::set_default_route`, brings the interface up, pushes DNS via `Set-DnsClientServerAddress`, applies MTU override via `Set-NetIPInterface`. Disconnect drops the adapter (kernel removes the interface) and reverts DNS. Gracefully reports a typed error when `wireguard.dll` isn't present.
 - **OpenVPN connect/disconnect** via subprocess. Spawns `openvpn.exe` (located via `OPENVPN_EXE` env var, `%PATH%`, or the default install path), opens its management socket on `127.0.0.1`, authenticates with a random per-connection token, waits for `>STATE:...,CONNECTED,SUCCESS` or a `>FATAL:` event. Disconnect sends `signal SIGTERM` over the management socket and falls back to `Child::kill` after 5 s. Resolves auth-user-pass from Credential Manager and cleans up the credentials file on disconnect.
-- **IKEv2 connect/disconnect** (FortiGate profiles + any standards-compliant IKEv2 endpoint) via Windows' built-in RAS stack: `Add-VpnConnection` to register, `rasdial` to dial, polled `(Get-VpnConnection ...).ConnectionStatus` until `Connected`. Disconnect via `rasdial /disconnect` + `Remove-VpnConnection`. PSK + EAP password resolved from Credential Manager.
+- **IKEv2 connect/disconnect** (FortiGate profiles + any standards-compliant IKEv2 endpoint) via Windows' built-in RAS stack: `Add-VpnConnection` to register, `rasdial` to dial, polled `(Get-VpnConnection ...).ConnectionStatus` until `Connected`. Disconnect via `rasdial /disconnect` + `Remove-VpnConnection`. The EAP password is resolved from Credential Manager. Native Windows IKEv2 requires certificate-based gateway authentication; PSK-only gateways are not supported.
 - **Azure Point-to-Site VPN** via Entra ID PKCE auth + generated `.ovpn`: token refresh from Credential Manager → fallback browser flow (PKCE code+challenge, loopback redirect listener) → access-token exchange → write `tls-auth.key` + `auth.txt` + `client.ovpn` to `%PROGRAMDATA%\SuperManager\runtime\azure-<id>\` → spawn `openvpn.exe` → wait for `Initialization Sequence Completed` → push DNS to the TAP/Wintun adapter via `Set-DnsClientServerAddress`. Refresh tokens are cached in Credential Manager so subsequent connects skip the browser flow.
-- **FortiGate IKEv2** via Windows RAS — `Add-VpnConnection -TunnelType Ikev2 -AuthenticationMethod Eap -L2tpPsk <psk>` then `rasdial <name> <user> <password>`, polled to `Connected`. PSK + EAP password resolved from Credential Manager. GUI import form on the VPN tab; RPC method `import_fortigate`. No third-party client required — Windows ships everything needed.
-- **FortiGate SSL VPN** via `openfortivpn.exe` (skeleton): spawn the open-source FortiGate SSL VPN client with the user's password fed on stdin (never argv), watch stdout for `Tunnel is up and running.` or a fatal `Could not authenticate`/`Connection refused` marker, sniff the PPP/Wintun interface name out of the log lines so DNS push targets the right alias. New profile import via `import_forticlient_sslvpn` RPC. `OPENFORTIVPN_EXE` env var, `%PATH%`, and `%ProgramFiles%\SuperManager\bin\openfortivpn.exe` are probed in order. **No upstream Windows binary exists**, so the FortiClient SSL VPN backend surfaces `MissingDependency` at connect time unless an admin provides their own build. Use the FortiGate IKEv2 backend above for the common case.
+- **FortiGate IKEv2** via Windows RAS uses `Add-VpnConnection -TunnelType Ikev2 -AuthenticationMethod Eap` and `rasdial`. The gateway must support Windows native IKEv2 authentication. A Mac profile using a pre-shared gateway key is not automatically compatible; Windows' `-L2tpPsk` option applies to L2TP, not IKEv2.
+- **FortiGate SSL VPN** via `openfortivpn.exe` (skeleton): spawn the open-source FortiGate SSL VPN client with the user's password fed on stdin (never argv), watch stdout for `Tunnel is up and running.` or a fatal `Could not authenticate`/`Connection refused` marker, sniff the PPP/Wintun interface name out of the log lines so DNS push targets the right alias. New profile import via `import_forticlient_sslvpn` RPC. `OPENFORTIVPN_EXE` env var, `%PATH%`, and `%ProgramFiles%\SuperManager\bin\openfortivpn.exe` are probed in order. **No upstream Windows binary exists**, so the FortiClient SSL VPN backend surfaces `MissingDependency` at connect time unless an admin provides their own build. IKEv2 is an alternative only when the gateway supports Windows native authentication.
 - **Connect/disconnect routing**: dispatcher picks the matching backend from `ProfileConfig` discriminator; `get_status` walks the active backends and returns the one with an open tunnel.
 - **FortiGate REST API**: `fortigate_api`, `fortigate_push_ssh_key`, `fortigate_backup_config`. Bearer-token auth resolved from Credential Manager; backups saved to `%PROGRAMDATA%\SuperManager\backups\<host>_<timestamp>.conf`. HTTP semantics + error mapping identical to the Linux daemon.
 - **UniFi Controller REST API**: `unifi_api` (cookie-based session via `POST /api/auth/login`), `unifi_set_inform` (SSH `set-inform <url>` against UniFi-adopted devices).
@@ -278,10 +281,9 @@ polishing and code-signing for distribution — see the roadmap below.
     lands, users see a SmartScreen prompt → "Run anyway" once per
     install (documented in the SmartScreen section above; SHA-256 of
     each release artifact is published as `.sha256` for hash verification).
-14. Build openfortivpn from source in CI (MSYS2 or Cygwin toolchain)
-    so FortiGate **SSL VPN** profiles also work out-of-the-box. The
-    other four VPN backends (WireGuard, OpenVPN, Azure P2S, FortiGate
-    IKEv2) all install bundled today.
+14. Integrate and validate a supported Windows FortiGate **SSL VPN** client.
+    Upstream openfortivpn does not provide a Windows client; this is not
+    solved by adding a missing download to the installer.
 
 Each item is independent; see the `TODO` comments in the corresponding
 module for the precise next step.

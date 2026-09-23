@@ -1,19 +1,9 @@
 //! FortiClient SSL VPN backend (Windows) — drives `openfortivpn`.
 //!
 //! [openfortivpn](https://github.com/adrienverge/openfortivpn) is the
-//! open-source reverse-engineered FortiGate SSL VPN client. The Windows
-//! port runs as a console process; we spawn it, feed it the password on
-//! stdin, then read stdout for the `Tunnel is up and running.` marker
-//! that signals a usable tunnel.
-//!
-//! # Why not the official FortiClient binary?
-//!
-//! The Fortinet FortiClient is free for VPN-only mode but has no
-//! supported scripting interface and changes its config layout between
-//! versions. `openfortivpn` is a single static binary with a
-//! well-documented CLI and no GUI; it's also what most "FortiGate VPN
-//! on Linux without FortiClient" guides recommend. The Windows build
-//! comes from the upstream MinGW CI and is what we'd bundle in the MSI.
+//! open-source FortiGate SSL VPN client. Upstream does not provide a
+//! Windows build. This backend is experimental and unavailable in the
+//! standard installer until a compatible Windows client is integrated.
 //!
 //! # Lifecycle
 //!
@@ -30,7 +20,7 @@
 //!
 //! # TODO
 //!
-//! (No pending tasks for FortiClient backend at this time.)
+//! Integrate and validate a supported Windows SSL VPN client.
 
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
@@ -52,8 +42,8 @@ use super::{VpnBackend, VpnError};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Fallback locations probed when `OPENFORTIVPN_EXE` is unset and the
-/// binary isn't on `%PATH%`. The MSI installer drops it in the first
-/// path; the second matches a manual `choco install openfortivpn`.
+/// binary is not on `%PATH%`. These are legacy/custom deployment paths;
+/// the standard installer does not supply a Windows openfortivpn binary.
 const DEFAULT_LOCATIONS: &[&str] = &[
     r"C:\Program Files\SuperManager\bin\openfortivpn.exe",
     r"C:\ProgramData\chocolatey\bin\openfortivpn.exe",
@@ -372,9 +362,9 @@ fn locate_openfortivpn() -> Result<PathBuf, VpnError> {
         }
     }
     Err(VpnError::MissingDependency(
-        "openfortivpn.exe not found. The SuperManager MSI bundles it under \
-         %ProgramFiles%\\SuperManager\\bin\\openfortivpn.exe; set OPENFORTIVPN_EXE \
-         if you have a portable copy elsewhere."
+        "FortiClient SSL VPN is unavailable in this Windows release. \
+         A compatible Windows VPN client has not been integrated; \
+         reinstalling SuperManager will not add one."
             .into(),
     ))
 }
