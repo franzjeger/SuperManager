@@ -34,10 +34,14 @@ pub struct DaemonState {
     /// second time.
     pub known_hosts: KnownHostsStore,
     /// VPN backend instances. Each backend tracks its own
-    /// `Option<active-tunnel>` state internally; the dispatcher routes
+    /// `Option<active-tunnel>` state internally; the session routes
     /// connect/disconnect to the right backend based on the profile's
     /// `ProfileConfig` discriminator.
     pub vpn: VpnBackends,
+    /// The tunnel the daemon is responsible for and what it is doing —
+    /// the state `get_status` reports, and the only way in to `connect`
+    /// and `disconnect`.
+    pub session: Arc<vpn::session::Session>,
 }
 
 /// Container for the four VPN backends. Concrete types (not `Arc<dyn ...>`)
@@ -62,12 +66,18 @@ impl DaemonState {
         let profile_store =
             Arc::new(ProfileStore::load_from(root.join("profiles")).context("load profile store")?);
         let known_hosts = KnownHostsStore::load_from(&root).context("load known_hosts store")?;
+        // Shared by the Azure backend, which publishes a sign-in URL into
+        // it, and the session, which reports it for the GUI to open.
+        let auth_prompt: vpn::session::AuthPrompt = Arc::default();
         let vpn_backends = VpnBackends {
             wireguard: Arc::new(vpn::wireguard::WireGuardBackend::new(secret_store.clone())),
             openvpn: Arc::new(vpn::openvpn::OpenVpnBackend::with_store(
                 secret_store.clone(),
             )),
-            ikev2: Arc::new(vpn::ikev2::Ikev2Backend::with_store(secret_store.clone())),
+            ikev2: Arc::new(vpn::ikev2::Ikev2Backend::with_store(
+                secret_store.clone(),
+                auth_prompt.clone(),
+            )),
             fortigate: Arc::new(vpn::fortigate::FortiGateBackend::with_store(
                 secret_store.clone(),
             )),
@@ -81,6 +91,7 @@ impl DaemonState {
             profile_store,
             known_hosts,
             vpn: vpn_backends,
+            session: Arc::new(vpn::session::Session::new(auth_prompt)),
         })
     }
 }
@@ -105,6 +116,22 @@ pub async fn run(shutdown: Arc<Notify>) -> anyhow::Result<()> {
 
     shutdown.notified().await;
     info!("shutdown signal received");
+
+    // Take the tunnel down with the service. Nothing else will: openvpn.exe
+    // outlives its parent on Windows, and a RAS dial belongs to RAS. A
+    // tunnel left up by a stopped service is one no GUI can see or close.
+    if let Err(e) = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        state.session.disconnect(&state),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(supermgr_core::protocol::RpcError::Backend(
+            "timed out".into(),
+        ))
+    }) {
+        warn!("closing the tunnel on shutdown: {e}");
+    }
 
     // Give the pipe server a beat to finish in-flight requests before we
     // abort. In practice it observes the same Notify and exits cleanly.

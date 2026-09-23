@@ -26,7 +26,7 @@ use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+    io::AsyncWriteExt as _,
     process::{Child, Command},
     sync::Mutex,
     time::timeout,
@@ -36,7 +36,7 @@ use tracing::{info, warn};
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::vpn::profile::{Profile, ProfileConfig};
 
-use super::{VpnBackend, VpnError};
+use super::{output, VpnBackend, VpnError};
 
 /// Soft cap on bring-up time.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -70,6 +70,8 @@ struct FcActive {
     iface: Option<String>,
     /// Whether we pushed DNS that needs reverting.
     dns_overridden: bool,
+    /// What the client has been printing, for when it stops by itself.
+    tail: output::Tail,
 }
 
 /// Windows openfortivpn backend.
@@ -90,6 +92,17 @@ impl ForticlientBackend {
     /// Whether a tunnel is currently up.
     pub async fn is_active(&self) -> bool {
         self.active.lock().await.is_some()
+    }
+
+    /// Why the tunnel's client exited, if it has. `None` while it runs, and
+    /// when there is no tunnel.
+    pub async fn exited(&self) -> Option<String> {
+        let mut guard = self.active.lock().await;
+        let active = guard.as_mut()?;
+        match active.child.try_wait() {
+            Ok(Some(status)) => Some(output::exit_reason("SSL VPN", status, &active.tail)),
+            _ => None,
+        }
     }
 }
 
@@ -194,7 +207,10 @@ impl ForticlientBackend {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // A connect cancelled mid-handshake must not leave the client
+            // running with the adapter.
+            .kill_on_drop(true);
 
         let mut child = command.spawn().map_err(VpnError::Io)?;
         info!(?openfortivpn_exe, gateway, user = %cfg.username, "spawned openfortivpn");
@@ -210,31 +226,10 @@ impl ForticlientBackend {
             drop(stdin);
         }
 
-        // Stream both stdout and stderr onto a single channel so we can
-        // watch for either the success marker or a fatal error in lockstep.
-        let stdout = child.stdout.take().ok_or_else(|| VpnError::Subprocess {
-            code: -1,
-            stderr: "no stdout pipe from openfortivpn".into(),
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| VpnError::Subprocess {
-            code: -1,
-            stderr: "no stderr pipe from openfortivpn".into(),
-        })?;
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let tx_err = tx.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let _ = tx.send(line);
-            }
-        });
-        let stderr_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let _ = tx_err.send(format!("err:{line}"));
-            }
-        });
+        // Both streams onto one channel, so the success marker and a fatal
+        // error are watched in lockstep — and read for the client's whole
+        // life, so it never blocks on a full pipe.
+        let (tail, mut rx) = output::capture(&mut child);
 
         let mut iface: Option<String> = None;
         let mut connected = false;
@@ -267,8 +262,6 @@ impl ForticlientBackend {
                     let fp = fp.trim();
                     if !fp.is_empty() {
                         let _ = child.kill().await;
-                        stdout_task.abort();
-                        stderr_task.abort();
                         return Err(VpnError::TofuCertificateRequired(fp.to_string()));
                     }
                 }
@@ -277,9 +270,7 @@ impl ForticlientBackend {
 
         if !connected {
             let _ = child.kill().await;
-            stdout_task.abort();
-            stderr_task.abort();
-            return Err(match last_err {
+            return Err(match last_err.or_else(|| tail.reason()) {
                 Some(msg)
                     if msg.contains("Authentication failed")
                         || msg.contains("Could not authenticate") =>
@@ -299,9 +290,8 @@ impl ForticlientBackend {
             });
         }
 
-        // Drain the rest of the output in the background so openfortivpn
-        // doesn't block when its stderr buffer fills.
-        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        // Stop listening; `output` keeps reading until the client exits.
+        drop(rx);
         info!(profile_id = %profile.id, iface = ?iface, "openfortivpn tunnel up");
 
         // DNS push, best-effort. If openfortivpn already negotiated DNS
@@ -323,6 +313,7 @@ impl ForticlientBackend {
             child,
             iface,
             dns_overridden,
+            tail,
         });
         Ok(())
     }
@@ -343,6 +334,15 @@ async fn tear_down(mut active: FcActive) {
             }
         }
     }
+}
+
+/// Whether an SSL VPN client can be found, and what to tell the operator
+/// when it cannot.
+pub fn availability() -> Result<(), String> {
+    locate_openfortivpn().map(|_| ()).map_err(|e| match e {
+        VpnError::MissingDependency(message) => message,
+        other => other.to_string(),
+    })
 }
 
 fn locate_openfortivpn() -> Result<PathBuf, VpnError> {

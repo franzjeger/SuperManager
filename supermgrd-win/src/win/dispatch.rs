@@ -62,7 +62,13 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
         "disconnect" => handle_disconnect(state).await,
         "get_status" => handle_get_status(state).await,
         "delete_profile" => handle_delete_profile(state, &req.args).await,
+        "rename_profile" => handle_rename_profile(state, &req.args).await,
+        "set_push_dns" => handle_set_push_dns(state, &req.args).await,
+        "set_full_tunnel" => handle_set_full_tunnel(state, &req.args).await,
+        "vpn_capabilities" => Ok(handle_vpn_capabilities()),
         "import_wireguard" => handle_import_wireguard(state, &req.args).await,
+        "import_openvpn" => handle_import_openvpn(state, &req.args).await,
+        "import_azure_vpn" => handle_import_azure_vpn(state, &req.args).await,
         "import_forticlient_sslvpn" => handle_import_forticlient_sslvpn(state, &req.args).await,
         "import_fortigate" => handle_import_fortigate(state, &req.args).await,
 
@@ -142,9 +148,9 @@ fn stub(method: &'static str) -> Result<Value, RpcError> {
 }
 
 // ---------------------------------------------------------------------------
-// VPN handlers — stubs until the Windows VPN backends land. The trait and
-// concrete WireGuard/OpenVPN/IKEv2/FortiGate implementations live under
-// `crate::vpn`.
+// VPN handlers. Connecting and disconnecting go through the session
+// (`vpn::session`), which owns the tunnel's state and runs the backends;
+// the handlers here only find the profile and report.
 // ---------------------------------------------------------------------------
 
 async fn handle_list_profiles(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
@@ -154,207 +160,122 @@ async fn handle_list_profiles(state: &Arc<DaemonState>) -> Result<Value, RpcErro
     Ok(Value::String(json))
 }
 
-async fn handle_connect(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
-    use super::vpn::VpnBackend as _;
-    use supermgr_core::vpn::profile::ProfileConfig;
+/// A profile id from the request, as a UUID.
+fn arg_profile_id(args: &Value) -> Result<uuid::Uuid, RpcError> {
+    let id = arg_id(args, "profile_id")?;
+    uuid::Uuid::parse_str(id).map_err(|e| RpcError::Protocol(format!("invalid profile_id: {e}")))
+}
 
-    let profile_id_str = arg_str(args, "profile_id")?;
-    let profile_id = uuid::Uuid::parse_str(profile_id_str)
-        .map_err(|e| RpcError::Other(format!("invalid profile_id uuid: {e}")))?;
+/// Start connecting a profile.
+///
+/// Returns as soon as the bring-up has started — in milliseconds, where it
+/// used to hold the caller's pipe for the whole handshake. Progress, the
+/// outcome, and the reason for a failure are in `get_status`.
+async fn handle_connect(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    let profile_id = arg_profile_id(args)?;
     let profile = state
         .profile_store
         .get(profile_id)
         .await
         .map_err(|_| RpcError::NotFound(format!("profile {profile_id}")))?;
-
-    let profile_json = serde_json::to_string(&profile)
-        .map_err(|e| RpcError::Other(format!("serialise profile: {e}")))?;
-
-    match &profile.config {
-        ProfileConfig::WireGuard(_) => state
-            .vpn
-            .wireguard
-            .connect(&profile_json)
-            .await
-            .map_err(map_vpn_err)?,
-        ProfileConfig::OpenVpn(_) => state
-            .vpn
-            .openvpn
-            .connect(&profile_json)
-            .await
-            .map_err(map_vpn_err)?,
-        ProfileConfig::AzureVpn(_) => state
-            .vpn
-            .ikev2
-            .connect(&profile_json)
-            .await
-            .map_err(map_vpn_err)?,
-        ProfileConfig::FortiGate(_) => state
-            .vpn
-            .fortigate
-            .connect(&profile_json)
-            .await
-            .map_err(map_vpn_err)?,
-        ProfileConfig::ForticlientSslvpn(_) => {
-            match state.vpn.forticlient.connect(&profile_json).await {
-                Ok(()) => {}
-                Err(super::vpn::VpnError::TofuCertificateRequired(fp)) => {
-                    tracing::info!(profile_id = %profile.id, fp = %fp, "TOFU: trusting gateway certificate on first use");
-                    let mut p = profile.clone();
-                    if let ProfileConfig::ForticlientSslvpn(cfg) = &mut p.config {
-                        cfg.trusted_cert = Some(fp);
-                    }
-                    if let Err(e) = state.profile_store.save(p.clone()).await {
-                        tracing::warn!("failed to persist TOFU certificate: {}", e);
-                    }
-                    let p_json = serde_json::to_string(&p).unwrap_or(profile_json);
-                    state
-                        .vpn
-                        .forticlient
-                        .connect(&p_json)
-                        .await
-                        .map_err(map_vpn_err)?
-                }
-                Err(e) => return Err(map_vpn_err(e)),
-            }
-        }
-        ProfileConfig::Generic(_) => {
-            return Err(RpcError::Backend(
-                "Generic VPN profiles have no Windows backend".into(),
-            ));
-        }
-    }
-    Ok(json!({ "status": "connected", "profile_id": profile_id.to_string() }))
+    state
+        .session
+        .begin_connect(Arc::clone(state), profile)
+        .await?;
+    Ok(json!({ "status": "connecting", "profile_id": profile_id.to_string() }))
 }
 
+/// Disconnect the tunnel, or cancel a connect still in progress. Also how
+/// the GUI clears an error: afterwards the state is `disconnected`.
 async fn handle_disconnect(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
-    use super::vpn::VpnBackend as _;
-
-    // We know there is at most one tunnel up at a time, so we ask each
-    // backend whether it's active and route the call to the matching
-    // one. Cheaper than tracking "which backend is active" on the
-    // daemon, and the dispatch surface stays trivial.
-    if state.vpn.wireguard.is_active().await {
-        return state
-            .vpn
-            .wireguard
-            .disconnect()
-            .await
-            .map(|()| Value::Null)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.openvpn.is_active().await {
-        return state
-            .vpn
-            .openvpn
-            .disconnect()
-            .await
-            .map(|()| Value::Null)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.fortigate.is_active().await {
-        return state
-            .vpn
-            .fortigate
-            .disconnect()
-            .await
-            .map(|()| Value::Null)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.ikev2.is_active().await {
-        return state
-            .vpn
-            .ikev2
-            .disconnect()
-            .await
-            .map(|()| Value::Null)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.forticlient.is_active().await {
-        return state
-            .vpn
-            .forticlient
-            .disconnect()
-            .await
-            .map(|()| Value::Null)
-            .map_err(map_vpn_err);
-    }
+    state.session.disconnect(state).await?;
     Ok(Value::Null)
 }
 
+/// The session's state, in the Linux daemon's `VpnState` shape plus the
+/// backend label and, while an Azure connect waits, the sign-in URL.
+///
+/// A JSON string, like every other structured result on this pipe, so
+/// `PipeClient::get_status` hands both platforms' callers the same text.
 async fn handle_get_status(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
-    use super::vpn::VpnBackend as _;
-
-    // Return the status of whichever backend is currently active.
-    // Fall back to WireGuard's "Disconnected" status when nothing is up
-    // so the GUI gets a well-formed JSON either way.
-    if state.vpn.wireguard.is_active().await {
-        return state
-            .vpn
-            .wireguard
-            .status()
-            .await
-            .map(Value::String)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.openvpn.is_active().await {
-        return state
-            .vpn
-            .openvpn
-            .status()
-            .await
-            .map(Value::String)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.fortigate.is_active().await {
-        return state
-            .vpn
-            .fortigate
-            .status()
-            .await
-            .map(Value::String)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.ikev2.is_active().await {
-        return state
-            .vpn
-            .ikev2
-            .status()
-            .await
-            .map(Value::String)
-            .map_err(map_vpn_err);
-    }
-    if state.vpn.forticlient.is_active().await {
-        return state
-            .vpn
-            .forticlient
-            .status()
-            .await
-            .map(Value::String)
-            .map_err(map_vpn_err);
-    }
-    let wg = state.vpn.wireguard.status().await.map_err(map_vpn_err)?;
-    Ok(Value::String(wg))
+    Ok(Value::String(state.session.snapshot().await.to_string()))
 }
 
-/// Map a [`super::vpn::VpnError`] to the transport's [`RpcError`] taxonomy.
-fn map_vpn_err(e: super::vpn::VpnError) -> RpcError {
-    use super::vpn::VpnError;
-    match e {
-        VpnError::NotImplemented(what) => {
-            RpcError::Backend(format!("not implemented on Windows: {what}"))
+/// Which backends can actually run on this machine, and why not when one
+/// cannot.
+///
+/// The GUI asks before offering an import: a profile type whose client is
+/// missing used to import fine and then fail on every connect.
+fn handle_vpn_capabilities() -> Value {
+    use super::vpn::{forticlient, openvpn, wireguard};
+
+    fn entry(check: Result<(), String>) -> Value {
+        match check {
+            Ok(()) => json!({ "available": true }),
+            Err(reason) => json!({ "available": false, "reason": reason }),
         }
-        VpnError::TofuCertificateRequired(fingerprint) => {
-            RpcError::Backend(format!("VPN certificate approval required: {fingerprint}"))
-        }
-        VpnError::MissingDependency(msg) => RpcError::Backend(format!("missing dependency: {msg}")),
-        VpnError::Win32(msg) => RpcError::Backend(format!("win32: {msg}")),
-        VpnError::Subprocess { code, stderr } => {
-            RpcError::Backend(format!("subprocess exited {code}: {stderr}"))
-        }
-        VpnError::PermissionDenied(msg) => RpcError::PermissionDenied(msg.to_owned()),
-        VpnError::Io(e) => RpcError::Backend(format!("io: {e}")),
     }
+    let openvpn = openvpn::availability();
+    Value::String(
+        json!({
+            "wireguard": entry(wireguard::availability()),
+            "openvpn": entry(openvpn.clone()),
+            // Azure P2S runs the same openvpn.exe.
+            "azure": entry(openvpn),
+            // Windows' own IKEv2 client; nothing to install.
+            "fortigate": entry(Ok(())),
+            "forticlient": entry(forticlient::availability()),
+        })
+        .to_string(),
+    )
+}
+
+/// Rename a profile. Same contract as the Linux daemon's `rename_profile`.
+async fn handle_rename_profile(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    let id = arg_profile_id(args)?;
+    let new_name = arg_str(args, "new_name")?.trim();
+    if new_name.is_empty() {
+        return Err(RpcError::Other("profile name must not be empty".into()));
+    }
+    let mut profile = state
+        .profile_store
+        .get(id)
+        .await
+        .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
+    new_name.clone_into(&mut profile.name);
+    profile.updated_at = chrono::Utc::now();
+    state
+        .profile_store
+        .save(profile)
+        .await
+        .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
+    Ok(Value::Null)
+}
+
+/// Whether connecting a profile also points Windows at the VPN's DNS
+/// servers. Takes effect on the next connect.
+///
+/// Without it a split tunnel resolves nothing on the far side: the
+/// tunnel is up and every internal name still goes to the LAN's resolver.
+async fn handle_set_push_dns(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    let id = arg_profile_id(args)?;
+    let enabled = args
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RpcError::Protocol("missing bool arg: enabled".into()))?;
+    let mut profile = state
+        .profile_store
+        .get(id)
+        .await
+        .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
+    profile.push_dns = enabled;
+    profile.updated_at = chrono::Utc::now();
+    state
+        .profile_store
+        .save(profile)
+        .await
+        .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
+    Ok(Value::Null)
 }
 
 async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
@@ -375,6 +296,15 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
         .await
         .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
 
+    // As on Linux: a tunnel that is up, or coming up, keeps its profile.
+    // Deleting it would clear the credentials the backend is still using
+    // and leave a tunnel the GUI can no longer name.
+    if state.session.is_busy_with(id).await {
+        return Err(RpcError::Backend(
+            "This profile is connected or connecting — disconnect it first".into(),
+        ));
+    }
+
     state.profile_store.delete(id).await.map_err(|e| match e {
         super::profile_store::StoreError::NotFound(_) => {
             RpcError::NotFound(format!("profile {id}"))
@@ -383,6 +313,65 @@ async fn handle_delete_profile(state: &Arc<DaemonState>, args: &Value) -> Result
     })?;
 
     clear_owned_secrets(state, &profile, &format!("profile {id}")).await;
+    remove_imported_config(&profile).await;
+    Ok(Value::Null)
+}
+
+/// Delete the `.ovpn` an OpenVPN import wrote, along with its profile.
+///
+/// Only a file in the daemon's own private config directory: a profile
+/// that points at a config somewhere else — one copied from another
+/// machine, or written by hand — refers to a file this daemon did not
+/// create and has no business removing.
+async fn remove_imported_config(profile: &supermgr_core::vpn::profile::Profile) {
+    use supermgr_core::vpn::profile::ProfileConfig;
+
+    let ProfileConfig::OpenVpn(cfg) = &profile.config else {
+        return;
+    };
+    let Ok(dir) = super::paths::private_config_dir() else {
+        return;
+    };
+    let path = std::path::Path::new(&cfg.config_file);
+    if path.parent() != Some(dir.as_path()) {
+        return;
+    }
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!(
+                "profile {}: config {} not removed: {e}",
+                profile.id,
+                path.display()
+            );
+        }
+    }
+}
+
+/// Whether connecting a profile sends all traffic through the tunnel, or
+/// only what the tunnel routes. Takes effect on the next connect.
+///
+/// Meaningful for the backends that decide it themselves — Azure and the
+/// SSL VPN. WireGuard and OpenVPN take it from their own config
+/// (`AllowedIPs`, `redirect-gateway`), and Windows' IKEv2 client always
+/// sends everything.
+async fn handle_set_full_tunnel(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    let id = arg_profile_id(args)?;
+    let enabled = args
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RpcError::Protocol("missing bool arg: enabled".into()))?;
+    let mut profile = state
+        .profile_store
+        .get(id)
+        .await
+        .map_err(|_| RpcError::NotFound(format!("profile {id}")))?;
+    profile.full_tunnel = enabled;
+    profile.updated_at = chrono::Utc::now();
+    state
+        .profile_store
+        .save(profile)
+        .await
+        .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
     Ok(Value::Null)
 }
 
@@ -435,6 +424,10 @@ async fn handle_import_wireguard(
             .map_err(|e| RpcError::Secret(format!("store PSK {label}: {e}")))?;
     }
 
+    // A `DNS =` line is part of what the config asks for, and the official
+    // WireGuard client applies it. Importing it switched off meant internal
+    // names never resolved over a split tunnel — "connected, nothing works".
+    let push_dns = !wg_cfg.dns.is_empty();
     let profile = Profile {
         id: profile_id,
         name: name.to_owned(),
@@ -442,7 +435,7 @@ async fn handle_import_wireguard(
         full_tunnel: true,
         last_connected_at: None,
         kill_switch: false,
-        push_dns: false,
+        push_dns,
         customer: String::new(),
         config: ProfileConfig::WireGuard(wg_cfg),
         updated_at: chrono::Utc::now(),
@@ -454,6 +447,126 @@ async fn handle_import_wireguard(
         .await
         .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
 
+    Ok(Value::String(profile_id.to_string()))
+}
+
+/// Import an OpenVPN client config.
+///
+/// Mirrors the Linux daemon's `import_openvpn`: the text is validated, kept
+/// whole as a file the profile points at, and a username and password —
+/// when both are given — go to Credential Manager, where the backend
+/// answers the server's credential prompt from.
+///
+/// The file goes in the private `ovpn` directory, not beside the profile
+/// TOMLs: those are readable by every signed-in user, and a client config
+/// usually carries its private key inline.
+async fn handle_import_openvpn(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+    use supermgr_core::vpn::profile::{OpenVpnConfig, Profile, ProfileConfig, SecretRef};
+
+    let conf_text = arg_str(args, "conf_text")?;
+    let name = arg_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err(RpcError::Other("profile name must not be empty".into()));
+    }
+    let username = args
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let password = args.get("password").and_then(Value::as_str).unwrap_or("");
+
+    supermgr_core::vpn::import::validate_ovpn_config(conf_text)
+        .map_err(|e| RpcError::Other(format!("not a usable OpenVPN client config: {e}")))?;
+
+    let profile_id = uuid::Uuid::new_v4();
+    let dir = super::paths::private_config_dir()
+        .map_err(|e| RpcError::Other(format!("prepare the OpenVPN config directory: {e}")))?;
+    let config_path = dir.join(format!("{profile_id}.ovpn"));
+    tokio::fs::write(&config_path, conf_text)
+        .await
+        .map_err(|e| RpcError::Other(format!("write the OpenVPN config: {e}")))?;
+
+    let (opt_username, opt_password) = if !username.is_empty() && !password.is_empty() {
+        let label = format!("supermgr/ovpn/{}/password", profile_id.simple());
+        if let Err(e) = state.secret_store.store(&label, password.as_bytes()).await {
+            let _ = tokio::fs::remove_file(&config_path).await;
+            return Err(RpcError::Secret(format!("store OpenVPN password: {e}")));
+        }
+        (Some(username.to_owned()), Some(SecretRef::new(label)))
+    } else {
+        (None, None)
+    };
+
+    let profile = Profile {
+        id: profile_id,
+        name: name.to_owned(),
+        auto_connect: false,
+        full_tunnel: true,
+        last_connected_at: None,
+        kill_switch: false,
+        push_dns: false,
+        customer: String::new(),
+        config: ProfileConfig::OpenVpn(OpenVpnConfig {
+            config_file: config_path.to_string_lossy().into_owned(),
+            username: opt_username,
+            password: opt_password,
+        }),
+        updated_at: chrono::Utc::now(),
+    };
+    if let Err(e) = state.profile_store.save(profile.clone()).await {
+        let _ = tokio::fs::remove_file(&config_path).await;
+        clear_owned_secrets(state, &profile, "unsaved OpenVPN import").await;
+        return Err(RpcError::Other(format!("persist profile: {e}")));
+    }
+    Ok(Value::String(profile_id.to_string()))
+}
+
+/// Import an Azure VPN (Entra ID) profile from the `azurevpnconfig.xml` in
+/// the gateway's profile package, plus its `VpnSettings.xml` when there is
+/// one. Same parser as the Linux daemon.
+///
+/// Imported as a split tunnel: the gateway pushes the routes for the
+/// networks behind it, which is what the Azure VPN Client uses too. Sending
+/// everything through a P2S gateway takes internet access with it unless
+/// the gateway was built for forced tunnelling, and that is the operator's
+/// call to make with `set_full_tunnel`, not a default.
+async fn handle_import_azure_vpn(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
+    use supermgr_core::vpn::profile::{Profile, ProfileConfig};
+
+    let azure_xml = arg_str(args, "azure_xml")?;
+    let vpn_settings_xml = args
+        .get("vpn_settings_xml")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let name = arg_str(args, "name")?.trim();
+    if name.is_empty() {
+        return Err(RpcError::Other("profile name must not be empty".into()));
+    }
+
+    let cfg = supermgr_core::vpn::import::parse_azure_xml(azure_xml, vpn_settings_xml)
+        .map_err(|e| RpcError::Other(format!("not a usable Azure VPN profile: {e}")))?;
+
+    let profile_id = uuid::Uuid::new_v4();
+    let profile = Profile {
+        id: profile_id,
+        name: name.to_owned(),
+        auto_connect: false,
+        full_tunnel: false,
+        last_connected_at: None,
+        kill_switch: false,
+        push_dns: false,
+        customer: String::new(),
+        config: ProfileConfig::AzureVpn(cfg),
+        updated_at: chrono::Utc::now(),
+    };
+    state
+        .profile_store
+        .save(profile)
+        .await
+        .map_err(|e| RpcError::Other(format!("persist profile: {e}")))?;
     Ok(Value::String(profile_id.to_string()))
 }
 
@@ -533,11 +646,16 @@ async fn handle_import_forticlient_sslvpn(
     Ok(Value::String(profile_id.to_string()))
 }
 
-/// Import a FortiGate IKEv2 IPsec profile. Stores the EAP password + group
-/// PSK in Credential Manager, persists a `FortiGateConfig` profile that
-/// the FortiGateBackend then dials via Windows RAS (`Add-VpnConnection`
-/// + `rasdial`) — no third-party client needed on a standards-compliant
-/// FortiGate deployment (EAP-MSCHAPv2 + PSK).
+/// Import a FortiGate IKEv2 IPsec profile. Stores the EAP password (and a
+/// PSK, if one is given) in Credential Manager, persists a
+/// `FortiGateConfig` profile that the FortiGateBackend then dials via
+/// Windows RAS (`Add-VpnConnection` + `rasdial`) — no third-party client
+/// needed on a standards-compliant FortiGate deployment (EAP-MSCHAPv2).
+///
+/// The PSK is optional here: Windows' IKEv2 client authenticates with EAP
+/// and never uses it. It is kept when supplied so the same profile still
+/// works if it is exported to the Linux daemon, whose strongSwan path
+/// does. Demanding it made operators invent one to get past the form.
 async fn handle_import_fortigate(
     state: &Arc<DaemonState>,
     args: &Value,
@@ -551,7 +669,7 @@ async fn handle_import_fortigate(
     let host = arg_str(args, "host")?;
     let username = arg_str(args, "username")?;
     let password = arg_str(args, "password")?;
-    let psk = arg_str(args, "psk")?;
+    let psk = args.get("psk").and_then(Value::as_str).unwrap_or("");
 
     let profile_id = uuid::Uuid::new_v4();
     let pw_label = format!("supermgr/fg/{}/password", profile_id.simple());
@@ -562,11 +680,13 @@ async fn handle_import_fortigate(
         .store(&pw_label, password.as_bytes())
         .await
         .map_err(|e| RpcError::Secret(format!("store FortiGate password: {e}")))?;
-    state
-        .secret_store
-        .store(&psk_label, psk.as_bytes())
-        .await
-        .map_err(|e| RpcError::Secret(format!("store FortiGate PSK: {e}")))?;
+    if !psk.is_empty() {
+        state
+            .secret_store
+            .store(&psk_label, psk.as_bytes())
+            .await
+            .map_err(|e| RpcError::Secret(format!("store FortiGate PSK: {e}")))?;
+    }
 
     let cfg = FortiGateConfig {
         host: host.to_owned(),
@@ -1073,18 +1193,4 @@ async fn handle_sophos_xml_api(state: &Arc<DaemonState>, args: &Value) -> Result
         appliance::sophos_xml_api(&state.root, state.secret_store.clone(), host_id, inner_xml)
             .await?;
     Ok(Value::String(resp))
-}
-
-#[cfg(test)]
-mod vpn_error_tests {
-    use super::*;
-    #[test]
-    fn certificate_error_preserves_fingerprint_without_becoming_success() {
-        let result = map_vpn_err(super::super::vpn::VpnError::TofuCertificateRequired(
-            "sha256:example".into(),
-        ));
-        assert!(
-            matches!(result, RpcError::Backend(message) if message.contains("sha256:example") && message.contains("approval required"))
-        );
-    }
 }

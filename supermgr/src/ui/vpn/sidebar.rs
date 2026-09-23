@@ -518,6 +518,7 @@ mod tests {
             username: None,
             dns_servers: Vec::new(),
             kill_switch: false,
+            push_dns: false,
             customer: String::new(),
             local_id: String::new(),
         }
