@@ -286,10 +286,19 @@ impl WireGuardBackend {
         // had never seen — "Network 7", filed as Public. The official
         // WireGuard client derives its GUID from the tunnel for the same
         // reason.
+        //
+        // The adapter's name goes FIRST, whatever the crate calls its
+        // parameters. `create(wg, pool, name, guid)` passes them straight
+        // through to `WireGuardCreateAdapter(Name, TunnelType, GUID)`: the
+        // "pool" is the adapter's name and the "name" its tunnel type, an
+        // order left over from WireGuardNT's older pool API. Passed the way
+        // the crate names them, every adapter was called "SuperManager", so
+        // the DNS and MTU settings addressed to this name found no adapter,
+        // and the interface the status reported did not exist.
         let adapter = wireguard_nt::Adapter::create(
             &wg,
-            "SuperManager",
             &adapter_name,
+            "SuperManager",
             Some(profile.id.as_u128()),
         )
         .map_err(|e| VpnError::Win32(format!("create WireGuard adapter: {e}")))?;

@@ -275,6 +275,15 @@ function Save-Diagnostics {
     & $out 'wireguard-log.txt' { Invoke-WireGuard /dumplog }
 }
 
+# The same, in the job log: the uploaded artifact is not always at hand
+# when a run is being looked at.
+function Show-Diagnostics {
+    foreach ($file in Get-ChildItem $LogDir -File | Where-Object Name -ne 'test-vpn.transcript.txt') {
+        Write-Host "----- $($file.Name) (last 150 lines) -----"
+        Get-Content $file.FullName -Tail 150 | ForEach-Object { Write-Host $_ }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # The test
 # ---------------------------------------------------------------------------
@@ -506,8 +515,11 @@ $($pki.Server.Key)
     $failed = $false
     Write-Host 'VPN end-to-end passed: WireGuard (import, connect, adapter, address, route, DNS, handshake, traffic, delete refused, switch, disconnect, service stop) and OpenVPN (cancel, timeout, connect, disconnect).'
 } finally {
-    if ($failed) { Write-Host '==> Failed; saving diagnostics' }
     Save-Diagnostics
+    if ($failed) {
+        Write-Host '==> Failed; diagnostics follow'
+        Show-Diagnostics
+    }
     try { Invoke-Rpc 'disconnect' | Out-Null } catch { Write-Host "cleanup: disconnect: $_" }
     foreach ($id in @($profiles)) {
         try { Invoke-Rpc 'delete_profile' @{ profile_id = $id } | Out-Null } catch { Write-Host "cleanup: delete $id`: $_" }
