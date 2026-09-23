@@ -272,9 +272,9 @@ Common ones:
 - *Cannot listen on http://localhost:2023* (Azure): another program — the
   Azure VPN Client, typically — holds the port the sign-in returns to.
 
-The service logs to the Application event log (source *SuperManager*); run
-it with `--console` (below) to watch it live, with the VPN clients' own
-output at `RUST_LOG=vpn_client=debug`.
+The service logs to the Application event log (source *SuperManager*,
+information and above); run it with `--console` (below) to watch it live,
+with the VPN clients' own output at `RUST_LOG=vpn_client=debug`.
 
 ## Developer / console mode
 
@@ -332,6 +332,33 @@ cargo run -p supermgrd-win -- --console
 
 The first terminal logs every dispatched method; the second prints the
 JSON-RPC responses end-to-end.
+
+### VPN end to end, in CI
+
+Every push runs `scripts/windows/test-vpn.ps1` on the Windows runner,
+against the service the bundle just installed. It stands up real servers
+on the runner — a WireGuard tunnel through WireGuard for Windows, and an
+OpenVPN server with a throwaway PKI — and drives the service over its
+pipe the way the app does:
+
+- **WireGuard**: import (a DNS line and AllowedIPs with host bits set),
+  connect, then check the adapter, its address, the AllowedIPs route, the
+  DNS server, the server's handshake, and bytes arriving at the server
+  through the tunnel; deleting the connected profile is refused;
+  switching profiles removes the first adapter; disconnecting removes the
+  second; stopping the service takes a connected tunnel down.
+- **OpenVPN**: a connect to a server that never answers can be cancelled
+  and leaves no `openvpn.exe` behind; left alone, it gives up after 45 s
+  with a reason; against the local server it connects, is listed by the
+  server, gets an address, and disconnects cleanly.
+
+Both ends share one IP stack, so no reply can come back through a tunnel;
+traffic is proven one way, by the bytes the server decrypts. The test is
+destructive (adapters, a tunnel service, firewall rules) and refuses to
+run outside GitHub Actions. On failure its logs — the service's own
+Application-log entries, adapters, routes, DNS, `wg show`, the OpenVPN
+server log — are in the `windows-installer-test-logs` artifact, under
+`vpn\`.
 
 ## What is stubbed (intentionally)
 

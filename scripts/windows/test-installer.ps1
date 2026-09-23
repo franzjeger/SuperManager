@@ -45,6 +45,12 @@ try {
     if ($null -eq $reply -or $reply.id -ne 1 -or $reply.error) { throw 'Installed daemon RPC failed.' }
 } finally { $pipe.Dispose() }
 
+# Real tunnels through the installed service, against servers stood up on
+# this runner: see test-vpn.ps1. A child process, like the driver probe, so
+# nothing it loads outlives it into the repair below.
+& "$PSHOME\pwsh.exe" -NoProfile -File "$PSScriptRoot\test-vpn.ps1" -LogDir (Join-Path $logs 'vpn')
+if ($LASTEXITCODE -ne 0) { throw 'VPN end-to-end test failed; see vpn\ in the installer test logs.' }
+
 $gui = Start-Process (Join-Path $bin 'supermgr-win.exe') -PassThru
 try {
     if ($gui.WaitForExit(7000)) { throw "Installed GUI exited during startup ($($gui.ExitCode))." }
@@ -59,4 +65,4 @@ Invoke-Setup 'uninstall'
 if (Get-Service SuperManager -ErrorAction SilentlyContinue) { throw 'Uninstall left the service registered.' }
 if ((Get-Content $sentinel) -ne 'preserve user state') { throw 'Uninstall removed user state.' }
 Remove-Item $sentinel
-Write-Host 'Installer lifecycle passed: dependencies, driver, daemon RPC, GUI startup, repair, uninstall, preserved state.'
+Write-Host 'Installer lifecycle passed: dependencies, driver, daemon RPC, VPN end to end, GUI startup, repair, uninstall, preserved state.'

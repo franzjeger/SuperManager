@@ -38,7 +38,10 @@ ssh-key         = { workspace = true }
 thiserror       = { workspace = true }
 tokio           = { workspace = true }
 toml            = { workspace = true }
-tracing         = { workspace = true }
+# `log`: under the SCM no tracing subscriber is installed, and this makes
+# every tracing event a `log` record for the Event Log writer (see
+# `service_main`). Without it the service logged nothing at all.
+tracing         = { workspace = true, features = ["log"] }
 tracing-subscriber = { workspace = true }
 uuid            = { workspace = true }
 zeroize         = { workspace = true }
