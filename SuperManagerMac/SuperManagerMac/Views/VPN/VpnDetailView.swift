@@ -1402,27 +1402,12 @@ struct VpnDetailView: View {
             return
         }
         do {
-            // Re-check reachability synchronously RIGHT NOW. The polled
-            // `helperReachable` flag updates every 3 s; if the user
-            // clicks Connect during a transient window we'd otherwise
-            // call HelperInstaller.install() — which can prompt for the
-            // admin password. By probing the socket here first, we skip
-            // the install path entirely whenever the helper is actually
-            // up, regardless of what the polled flag says. This is the
-            // single fix that eliminated the "50 password popups per
-            // connect" behaviour the user reported.
-            let reachableNow = await HelperClient.shared.isReachable()
-            if reachableNow {
-                helperReachable = true
-            } else {
-                try await HelperInstaller.install()
-                try? await Task.sleep(for: .milliseconds(700))
-                helperReachable = await HelperClient.shared.isReachable()
-                if !helperReachable {
-                    actionError = Self.helperNotRunningMessage
-                    return
-                }
-            }
+            // Reachability alone can leave an old helper running after an
+            // app update. install() verifies the bundled build and is a fast
+            // no-op when it already matches; upgrades use the normal macOS
+            // authorization path once.
+            try await HelperInstaller.install()
+            helperReachable = true
 
             let password = try VPNKeychain.getString(account: cfg.password)
             let psk = cfg.psk.isEmpty ? "" : (try VPNKeychain.getString(account: cfg.psk))

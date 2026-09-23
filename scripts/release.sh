@@ -147,6 +147,8 @@ sed -i '' "s|CFBundleVersion: .*|CFBundleVersion: \"$VERSION\"|" \
 
 # Build directly from this checkout even when a developer's Xcode build phase
 # skips cargo locally. Fresh GitHub runners have no prebuilt target/release files.
+echo "→ Testing VPN helper startup and recovery"
+(cd "$REPO_ROOT" && cargo test --locked -p supermanager-helper)
 echo "→ Building Rust release binaries from Git sources"
 (cd "$REPO_ROOT" && cargo build --release -p supermgrd-mac -p supermanager-helper)
 

@@ -22,7 +22,7 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 /// Best-effort cleanup of `supermanager-*` swanctl configs and secrets
@@ -331,17 +331,51 @@ impl Strongswan {
         let mut cmd = Command::new(&charon);
         cmd.env("STRONGSWAN_CONF", etc.join("strongswan.conf"))
             .env("SWANCTL_DIR", etc.join("swanctl"))
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {}", charon.display()))?;
+        // Keep a bounded startup diagnostic, and continue draining stderr
+        // after startup so a full pipe can never block charon.
+        let diagnostic = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let captured = diagnostic.clone();
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let reader = tokio::spawn(async move {
+            let mut chunk = [0u8; 2048];
+            while let Ok(count) = stderr.read(&mut chunk).await {
+                if count == 0 {
+                    break;
+                }
+                tracing::info!(
+                    "charon: {}",
+                    String::from_utf8_lossy(&chunk[..count]).trim()
+                );
+                let mut tail = captured.lock().unwrap();
+                tail.extend_from_slice(&chunk[..count]);
+                let excess = tail.len().saturating_sub(8192);
+                tail.drain(..excess);
+            }
+        });
+        if let Err(error) = wait_for_charon(
+            &mut child,
+            self.swanctl.as_ref().expect("resolve() must run first"),
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        {
+            let _ = child.kill().await;
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), reader).await;
+            let tail = diagnostic.lock().unwrap();
+            let details = String::from_utf8_lossy(&tail);
+            return Err(anyhow!(
+                "{error:#}\n\nVPN engine startup details:\n{}",
+                details.trim()
+            ));
+        }
         self.charon_child = Some(child);
 
-        // charon needs a moment to bind its vici socket. swanctl will spin
-        // briefly and reconnect if it fails, but giving it ~500ms here makes
-        // the first --load-all reliable.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         Ok(())
     }
 
@@ -809,8 +843,55 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     None
 }
 
+/// Poll the actual control channel instead of assuming that a process is
+/// ready 500 ms after spawn. Never load credentials until charon answers.
+async fn wait_for_charon(
+    child: &mut tokio::process::Child,
+    swanctl: &Path,
+    timeout: std::time::Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Err(anyhow!(
+                "The local VPN engine stopped during startup ({status})."
+            ));
+        }
+        let probe =
+            run_with_timeout(swanctl, &["--stats"], std::time::Duration::from_millis(500)).await;
+        if probe.is_ok() {
+            if let Some(status) = child.try_wait()? {
+                return Err(anyhow!(
+                    "The local VPN engine stopped during startup ({status})."
+                ));
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "The local VPN engine did not become ready. {}",
+                probe.unwrap_err()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new(bin).args(args).output().await?;
+    let mut command = Command::new(bin);
+    // Use the same Homebrew configuration as the supervised charon process.
+    // Environment inherited from launchd must not select a different socket.
+    if let Some(prefix) = bin.parent().and_then(Path::parent) {
+        let etc = [prefix.join("etc"), prefix.join("opt/strongswan/etc")]
+            .into_iter()
+            .find(|path| path.exists());
+        if let Some(etc) = etc {
+            command
+                .env("STRONGSWAN_CONF", etc.join("strongswan.conf"))
+                .env("SWANCTL_DIR", etc.join("swanctl"));
+        }
+    }
+    let output = command.args(args).kill_on_drop(true).output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     if !output.status.success() {
@@ -838,6 +919,11 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
 /// hits wins, so more specific patterns come first.
 fn diagnose_strongswan_failure(log: &str) -> Option<String> {
     let l = log.to_ascii_lowercase();
+
+    // This is the local control socket, not a refusal by the VPN gateway.
+    if l.contains("connecting to") && l.contains("uri failed") {
+        return Some("The local VPN engine is not ready or its control socket is unavailable. No connection to the VPN server was attempted.".to_owned());
+    }
 
     // Authentication-side failures — most common operator
     // confusion, deserves the clearest message.
@@ -1793,6 +1879,116 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    struct StartupFixture(PathBuf);
+    impl StartupFixture {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("supermanager-startup-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+        fn script(&self, name: &str, body: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            path
+        }
+    }
+    impl Drop for StartupFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_waits_for_control_channel_beyond_old_half_second_delay() {
+        let fixture = StartupFixture::new();
+        let ready = fixture.0.join("ready");
+        let swanctl = fixture.script(
+            "swanctl",
+            &format!("test -f '{}' && exit 0\nexit 2", ready.display()),
+        );
+        let mut child = Command::new("/bin/sleep")
+            .arg("20")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let signal = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(850)).await;
+            std::fs::write(ready, "ready").unwrap();
+        });
+        wait_for_charon(&mut child, &swanctl, std::time::Duration::from_secs(3))
+            .await
+            .unwrap();
+        assert!(start.elapsed() >= std::time::Duration::from_millis(850));
+        signal.await.unwrap();
+        child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_reports_daemon_exit_and_captures_its_reason() {
+        let fixture = StartupFixture::new();
+        let charon = fixture.script(
+            "charon",
+            "echo 'required VPN plugin is missing' >&2\nexit 3",
+        );
+        let swanctl = fixture.script("swanctl", "exit 2");
+        let mut engine = Strongswan {
+            charon: Some(charon),
+            swanctl: Some(swanctl),
+            etc: Some(fixture.0.clone()),
+            charon_child: None,
+        };
+        let error = engine.ensure_charon().await.unwrap_err().to_string();
+        assert!(error.contains("stopped during startup"), "{error}");
+        assert!(error.contains("required VPN plugin is missing"), "{error}");
+        assert!(engine.charon_child.is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_times_out_and_kills_a_hung_control_probe() {
+        let fixture = StartupFixture::new();
+        let pid_path = fixture.0.join("pid");
+        let swanctl = fixture.script(
+            "swanctl",
+            &format!("echo $$ > '{}'\nexec /bin/sleep 20", pid_path.display()),
+        );
+        let mut child = Command::new("/bin/sleep")
+            .arg("20")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let start = tokio::time::Instant::now();
+        let error = wait_for_charon(&mut child, &swanctl, std::time::Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("did not become ready"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        let pid: i32 = std::fs::read_to_string(pid_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            -1,
+            "timed-out probe was left running"
+        );
+        child.kill().await.unwrap();
+    }
+
+    #[test]
+    fn missing_local_control_socket_is_not_diagnosed_as_remote_gateway_failure() {
+        let message = diagnose_strongswan_failure(
+            "error: connecting to 'default' URI failed: Connection refused",
+        )
+        .unwrap();
+        assert!(message.contains("local VPN engine"));
+        assert!(message.contains("No connection to the VPN server was attempted"));
+    }
+
     fn args(host: &str, username: &str, password: &str, psk: &str) -> ConnectArgs {
         ConnectArgs {
             profile_id: "abcd1234-5678-9012-3456-7890abcdef00".to_owned(),
