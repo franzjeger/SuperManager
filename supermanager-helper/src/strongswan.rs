@@ -457,6 +457,22 @@ impl Strongswan {
             install_ipv6_leak_block();
         }
 
+        if ok && (args.full_tunnel || !args.dns_servers.is_empty()) {
+            // osx-attr adds gateway DNS to the physical service. Preserve
+            // its selected addresses, but publish an unscoped VPN resolver
+            // so macOS sends DNS using the tunnel route. Explicit profile
+            // servers override negotiated DNS; blank means automatic.
+            let servers = if args.dns_servers.is_empty() {
+                crate::dns_health_watchdog::read_active_resolvers()
+                    .into_iter()
+                    .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
+                    .collect()
+            } else {
+                args.dns_servers.clone()
+            };
+            crate::dns::set_vpn_dns(&servers);
+        }
+
         Ok(ConnectResult {
             ok,
             message: out.lines().last().unwrap_or("").to_owned(),

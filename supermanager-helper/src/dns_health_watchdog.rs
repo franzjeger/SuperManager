@@ -198,7 +198,7 @@ fn watchdog_loop() {
 
 /// Read every nameserver of `resolver #1` from `scutil --dns`, in
 /// the order macOS will try them.
-fn read_active_resolvers() -> Vec<String> {
+pub(crate) fn read_active_resolvers() -> Vec<String> {
     let Ok(out) = Command::new("/usr/sbin/scutil").arg("--dns").output() else {
         return vec![];
     };

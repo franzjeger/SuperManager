@@ -14,26 +14,11 @@
 //! (fallback disconnect path, crash, SIGKILL), those servers stay set
 //! permanently and survive VPN disconnection and reboots.
 //!
-//! ## Best practice
-//!
-//! `clear_vpn_dns()` uses a belt-and-braces approach:
-//!   1. `networksetup -setdnsservers <service> Empty` — handles any DNS
-//!      set via the Setup store (wg-quick, openvpn --up scripts, etc.)
-//!   2. `scutil remove State:/Network/Service/<uuid>/DNS` — handles any
-//!      DNS set via the State store (our own future scutil writes,
-//!      tailscaled, configd overrides)
-//!   3. Flush mDNSResponder so apps pick up the reverted config instantly.
-//!
-//! The function is deliberately infallible — all errors are logged but
-//! never propagated, because DNS cleanup must always run to completion
-//! even if individual steps fail. Callers treat it as fire-and-forget.
-//!
-//! ## Boot-time survival
-//!
-//! The companion LaunchDaemon (`no.sybr.supermanager.vpn-dns-cleanup`)
-//! runs `clear_vpn_dns` equivalent shell commands at boot, so a
-//! machine that was hard-powered-off mid-VPN session comes up with
-//! clean DNS rather than pointing at a VPN gateway that no longer exists.
+//! VPN resolvers live under our own ephemeral service key, as a
+//! supplemental resolver for all domains. macOS chooses the route to the
+//! nameserver instead of binding DNS queries to the physical interface.
+//! Disconnect removes only our key and flushes the resolver cache. Neither
+//! the user's saved DNS nor configd's derived Global/DNS is overwritten.
 
 use std::io::Write as _;
 use std::process::Command;
@@ -46,7 +31,7 @@ use std::process::Command;
 /// every teardown.
 const SUPERMGR_DNS_KEY: &str = "State:/Network/Service/com.sybr.supermanager.vpn/DNS";
 
-/// Remove any VPN-pushed DNS from both the Setup and State stores.
+/// Remove our ephemeral VPN resolver without changing saved DNS.
 ///
 /// Safe to call on every disconnect regardless of backend or whether
 /// DNS was actually set — all operations are idempotent and best-effort.
@@ -88,10 +73,9 @@ pub fn clear_vpn_dns() {
     //
     // A VPN that writes State DNS writes it under its OWN service key,
     // never the physical interface's, so scoping the removal to ours
-    // loses nothing. `SUPERMGR_DNS_KEY` is also what the updown script
-    // writes to when a gateway pushes INTERNAL_IP4_DNS.
-    let script =
-        format!("open\nremove {SUPERMGR_DNS_KEY}\nremove State:/Network/Global/DNS\nquit\n");
+    // loses nothing. configd owns Global/DNS; do not remove its derived
+    // state or another network service's resolver during teardown.
+    let script = format!("open\nremove {SUPERMGR_DNS_KEY}\nquit\n");
     match std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -185,18 +169,7 @@ pub fn set_vpn_dns(servers: &[String]) {
     }
     tracing::info!("set_vpn_dns: setting State DNS to {:?}", servers);
 
-    let mut script = String::new();
-    script.push_str("open\n");
-    script.push_str("d.init\n");
-    script.push_str("d.add ServerAddresses *");
-    for s in servers {
-        script.push(' ');
-        script.push_str(s);
-    }
-    script.push_str("\n");
-    script.push_str(&format!("set {SUPERMGR_DNS_KEY}\n"));
-    script.push_str("set State:/Network/Global/DNS\n");
-    script.push_str("quit\n");
+    let script = vpn_dns_script(servers);
 
     match std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
@@ -220,4 +193,44 @@ pub fn set_vpn_dns(servers: &[String]) {
     let _ = Command::new("/usr/bin/killall")
         .args(["-HUP", "mDNSResponder"])
         .output();
+}
+
+/// A supplemental default resolver is not bound to the physical service.
+/// Merely changing Global/DNS leaves mDNSResponder using en0, even when
+/// the IP route to the resolver belongs to an IPsec utun. configd owns
+/// Global/DNS, so install and remove only our own service dictionary.
+fn vpn_dns_script(servers: &[String]) -> String {
+    let addresses = servers
+        .iter()
+        .filter_map(|s| s.parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "open\nd.init\nd.add ServerAddresses * {addresses}\n\
+         d.add SupplementalMatchDomains * \"\"\n\
+         d.add SupplementalMatchOrders * # 100\n\
+         set {SUPERMGR_DNS_KEY}\nquit\n"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vpn_resolver_matches_all_domains_without_binding_to_wifi() {
+        let script = vpn_dns_script(&["1.1.1.1".into(), "8.8.8.8".into()]);
+        assert!(script.contains("ServerAddresses * 1.1.1.1 8.8.8.8\n"));
+        assert!(script.contains("SupplementalMatchDomains * \"\"\n"));
+        assert!(script.contains("SupplementalMatchOrders * # 100\n"));
+        assert!(!script.contains("Global/DNS"));
+        assert!(!script.contains("InterfaceName"));
+    }
+
+    #[test]
+    fn dns_addresses_cannot_inject_scutil_commands() {
+        let script = vpn_dns_script(&["1.1.1.1\nremove Setup:/Network/Global/DNS".into()]);
+        assert!(!script.contains("remove"));
+    }
 }
