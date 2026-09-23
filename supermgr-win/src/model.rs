@@ -405,6 +405,7 @@ pub fn describe_test(json: &str, port: u16) -> String {
         "auth_failed" => "Reachable, but the stored credentials were rejected.".to_owned(),
         "connection_refused" => format!("The host refused the connection on port {port}."),
         "timeout" => "No answer from the host. Check the address, and that this PC can reach it — over the VPN, if it is behind one.".to_owned(),
+        "host_key_changed" => "The host presented a different SSH key from the one on file, so SuperManager did not connect.".to_owned(),
         "" => "The service gave no result.".to_owned(),
         other => other.strip_prefix("error: ").unwrap_or(other).to_owned(),
     };
@@ -418,6 +419,57 @@ pub fn describe_test(json: &str, port: u16) -> String {
         out.push_str(&format!(" As for the API: {api}."));
     }
     out
+}
+
+/// A host presenting a different SSH key from the one on file, as
+/// `test_host_connection` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyChange {
+    /// The key on file, `SHA256:…`.
+    pub stored: String,
+    /// When the key on file was first recorded.
+    pub stored_since: Option<DateTime<Utc>>,
+    /// The key presented this time, `SHA256:…`.
+    pub presented: String,
+    /// Its type, e.g. `ssh-ed25519`: trusting it records both.
+    pub presented_algorithm: String,
+}
+
+/// Read a changed key out of a `test_host_connection` result; `None` for
+/// every other outcome.
+pub fn parse_key_change(json: &str) -> Option<KeyChange> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    if v.get("ssh").and_then(Value::as_str) != Some("host_key_changed") {
+        return None;
+    }
+    let text = |key: &str| v.get(key).and_then(Value::as_str).unwrap_or_default();
+    Some(KeyChange {
+        stored: fingerprint(text("stored")),
+        stored_since: DateTime::parse_from_rfc3339(text("stored_since"))
+            .ok()
+            .map(|t| t.with_timezone(&Utc)),
+        presented: fingerprint(text("presented")),
+        presented_algorithm: text("presented_algorithm").to_owned(),
+    })
+}
+
+/// The key on file for `hostname:port`, from `ssh_list_known_hosts`.
+pub fn known_key(json: &str, hostname: &str, port: u16) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    v.get(format!("{hostname}:{port}"))
+        .and_then(Value::as_str)
+        .filter(|fp| !fp.is_empty())
+        .map(fingerprint)
+}
+
+/// A host-key fingerprint the way OpenSSH prints it (`ssh-keygen -lf`), so
+/// it can be compared with the host's own at a glance.
+pub fn fingerprint(raw: &str) -> String {
+    if raw.is_empty() || raw.starts_with("SHA256:") {
+        raw.to_owned()
+    } else {
+        format!("SHA256:{raw}")
+    }
 }
 
 /// The output of `ssh_execute_command`.
@@ -682,6 +734,43 @@ mod tests {
             describe_test(r#"{"ssh":"error: no route to host"}"#, 22),
             "no route to host"
         );
+    }
+
+    #[test]
+    fn a_changed_key_is_read_with_both_fingerprints() {
+        let json = r#"{"ssh":"host_key_changed","stored":"b2xk","stored_algorithm":"ssh-ed25519","stored_since":"2026-09-01T10:00:00.5+00:00","presented":"bmV3","presented_algorithm":"ssh-rsa"}"#;
+        let change = parse_key_change(json).unwrap();
+        assert_eq!(change.stored, "SHA256:b2xk");
+        assert_eq!(change.presented, "SHA256:bmV3");
+        assert_eq!(change.presented_algorithm, "ssh-rsa");
+        assert_eq!(
+            change.stored_since,
+            Some(
+                Utc.with_ymd_and_hms(2026, 9, 1, 10, 0, 0).unwrap()
+                    + chrono::Duration::milliseconds(500)
+            )
+        );
+        assert!(describe_test(json, 22).contains("different SSH key"));
+
+        assert_eq!(parse_key_change(r#"{"ssh":"ok"}"#), None);
+        assert_eq!(parse_key_change("not json"), None);
+    }
+
+    #[test]
+    fn the_key_on_file_is_found_by_address_and_port() {
+        let json = r#"{"10.0.0.1:22":"YQ","10.0.0.1:2222":"Yg"}"#;
+        assert_eq!(
+            known_key(json, "10.0.0.1", 22).as_deref(),
+            Some("SHA256:YQ")
+        );
+        assert_eq!(
+            known_key(json, "10.0.0.1", 2222).as_deref(),
+            Some("SHA256:Yg")
+        );
+        assert_eq!(known_key(json, "10.0.0.2", 22), None);
+        assert_eq!(known_key("[]", "10.0.0.1", 22), None);
+        assert_eq!(fingerprint("SHA256:YQ"), "SHA256:YQ");
+        assert_eq!(fingerprint(""), "");
     }
 
     #[test]

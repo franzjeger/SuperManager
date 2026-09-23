@@ -237,6 +237,10 @@ export component AppWindow inherits Window {
                         Hosts.delete(App.confirm-target);
                     } else if App.confirm-action == ConfirmAction.delete-key {
                         Keys.delete(App.confirm-target);
+                    } else if App.confirm-action == ConfirmAction.trust-host-key {
+                        Hosts.trust-key(App.confirm-target);
+                    } else if App.confirm-action == ConfirmAction.forget-host-key {
+                        Hosts.forget-key(App.confirm-target);
                     }
                     App.close-overlay();
                 }

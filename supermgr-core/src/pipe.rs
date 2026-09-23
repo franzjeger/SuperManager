@@ -501,6 +501,56 @@ impl PipeClient {
         .await
     }
 
+    /// The SSH host keys the daemon has on file, as a JSON object mapping
+    /// `"host:port"` to the key's SHA-256 fingerprint.
+    pub async fn ssh_list_known_hosts(&self) -> Result<String, PipeError> {
+        self.invoke_json_string("ssh_list_known_hosts", serde_json::json!({}))
+            .await
+    }
+
+    /// Drop the host key on file for `hostname:port`, so the next
+    /// connection records the key the host presents then. Returns whether a
+    /// key was on file.
+    ///
+    /// Only for a change the operator has checked: whatever answers on that
+    /// address next is trusted.
+    pub async fn ssh_forget_host_key(&self, hostname: &str, port: u16) -> Result<bool, PipeError> {
+        let v = self
+            .invoke(
+                "ssh_forget_host_key",
+                serde_json::json!({ "hostname": hostname, "port": port }),
+            )
+            .await?;
+        v.as_bool().ok_or_else(|| {
+            PipeError::Protocol(format!(
+                "ssh_forget_host_key answered {v}, not true or false"
+            ))
+        })
+    }
+
+    /// Trust exactly this key for `hostname:port` from now on, in place of
+    /// the one on file — the key a changed host presented, once the
+    /// operator has compared it with the host's own. `fingerprint` is as
+    /// `test_host_connection` reported it.
+    pub async fn ssh_trust_host_key(
+        &self,
+        hostname: &str,
+        port: u16,
+        algorithm: &str,
+        fingerprint: &str,
+    ) -> Result<(), PipeError> {
+        self.invoke_unit(
+            "ssh_trust_host_key",
+            serde_json::json!({
+                "hostname": hostname,
+                "port": port,
+                "algorithm": algorithm,
+                "fingerprint": fingerprint,
+            }),
+        )
+        .await
+    }
+
     /// Toggle the favourite/pin flag for a host. Returns the new state.
     pub async fn toggle_host_pin(&self, host_id: &str) -> Result<String, PipeError> {
         self.invoke_json_string("toggle_host_pin", serde_json::json!({ "host_id": host_id }))

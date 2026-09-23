@@ -46,26 +46,124 @@ pub(super) fn bind(window: &AppWindow, ctx: &Ctx) {
     hosts.on_test({
         let ctx = ctx.clone();
         move |id| {
-            let ctx2 = ctx.clone();
-            let id = id.to_string();
-            let port = ctx.weak.upgrade().map_or(22, |w| {
-                u16::try_from(w.global::<Hosts>().get_detail().port).unwrap_or(22)
-            });
-            ctx.ui(|w| {
-                let h = w.global::<Hosts>();
-                h.set_testing(true);
-                h.set_test_result(SharedString::default());
-            });
+            let Some(w) = ctx.weak.upgrade() else {
+                return;
+            };
+            let h = w.global::<Hosts>();
+            let detail = h.get_detail();
+            let port = u16::try_from(detail.port).unwrap_or(22);
+            let hostname = detail.hostname.to_string();
+            h.set_testing(true);
+            h.set_test_result(SharedString::default());
+            let (ctx2, id) = (ctx.clone(), id.to_string());
             ctx.spawn(async move {
-                let result = ctx2
-                    .call(|c| async move { c.test_host_connection(&id).await })
+                let id2 = id.clone();
+                let (text, change) = match ctx2
+                    .call(|c| async move { c.test_host_connection(&id2).await })
                     .await
-                    .map_or_else(|e| e, |json| model::describe_test(&json, port));
+                {
+                    Ok(json) => (
+                        model::describe_test(&json, port),
+                        model::parse_key_change(&json),
+                    ),
+                    Err(e) => (e, None),
+                };
+                let shown = id.clone();
                 ctx2.ui(move |w| {
                     let h = w.global::<Hosts>();
                     h.set_testing(false);
-                    h.set_test_result(result.into());
+                    // The operator may have moved on to another host.
+                    if h.get_detail().id != shown.as_str() {
+                        return;
+                    }
+                    show_key_change(&h, change.as_ref());
+                    // A changed key has its own panel; the sentence would
+                    // only repeat its title.
+                    h.set_test_result(if change.is_some() {
+                        SharedString::default()
+                    } else {
+                        text.into()
+                    });
                 });
+                // A first connection records the host's key.
+                show_known_key(&ctx2, id, hostname, port);
+            });
+        }
+    });
+
+    hosts.on_trust_key({
+        let ctx = ctx.clone();
+        move |id| {
+            let Some(w) = ctx.weak.upgrade() else {
+                return;
+            };
+            let h = w.global::<Hosts>();
+            let detail = h.get_detail();
+            // Only the key the operator was shown, for the host it was
+            // shown on.
+            if detail.id != id || !h.get_key_changed() {
+                return;
+            }
+            let hostname = detail.hostname.to_string();
+            let port = u16::try_from(detail.port).unwrap_or(22);
+            let label = detail.label.to_string();
+            let algorithm = h.get_key_algorithm().to_string();
+            let fingerprint = h.get_key_presented().to_string();
+            let (ctx2, id) = (ctx.clone(), id.to_string());
+            ctx.spawn(async move {
+                let result = ctx2
+                    .call(|c| async move {
+                        c.ssh_trust_host_key(&hostname, port, &algorithm, &fingerprint)
+                            .await
+                    })
+                    .await;
+                match result {
+                    Ok(()) => {
+                        ctx2.toast_ok(format!("{label}'s new key is trusted."));
+                        // Sign in once with it, so the page shows it working.
+                        ctx2.ui(move |w| {
+                            let h = w.global::<Hosts>();
+                            h.set_key_changed(false);
+                            h.invoke_test(id.into());
+                        });
+                    }
+                    Err(e) => ctx2.toast_err(format!("Couldn't trust the new key: {e}")),
+                }
+            });
+        }
+    });
+
+    hosts.on_forget_key({
+        let ctx = ctx.clone();
+        move |id| {
+            let Some(w) = ctx.weak.upgrade() else {
+                return;
+            };
+            let detail = w.global::<Hosts>().get_detail();
+            if detail.id != id {
+                return;
+            }
+            let hostname = detail.hostname.to_string();
+            let port = u16::try_from(detail.port).unwrap_or(22);
+            let label = detail.label.to_string();
+            let (ctx2, id) = (ctx.clone(), id.to_string());
+            ctx.spawn(async move {
+                let host = hostname.clone();
+                match ctx2
+                    .call(|c| async move { c.ssh_forget_host_key(&host, port).await })
+                    .await
+                {
+                    Ok(removed) => {
+                        ctx2.toast_ok(if removed {
+                            format!("Forgot {label}'s key. The next connection records the key it presents.")
+                        } else {
+                            format!("No key was on file for {label}.")
+                        });
+                        ctx2.ui(|w| w.global::<Hosts>().set_key_changed(false));
+                    }
+                    Err(e) => ctx2.toast_err(format!("Couldn't forget the key: {e}")),
+                }
+                show_known_key(&ctx2, id, hostname, port);
             });
         }
     });
@@ -223,26 +321,69 @@ fn open(ctx: &Ctx, id: String) {
                     ctx2.toast_err("The service sent a host this app can't read.");
                     return;
                 };
+                let (id2_for_key, hostname, port) =
+                    (id.clone(), d.host.hostname.clone(), d.host.port);
                 ctx2.ui(move |w| {
                     let h = w.global::<Hosts>();
                     let same = h.get_has_detail() && h.get_detail().id == id.as_str();
                     h.set_detail(to_info(&d));
                     h.set_has_detail(true);
                     h.set_selected_id(id.into());
-                    // A different host: the last one's output and test
-                    // result say nothing about this one.
+                    // A different host: the last one's output, test result
+                    // and keys say nothing about this one.
                     if !same {
                         h.set_test_result(SharedString::default());
+                        h.set_key_changed(false);
+                        h.set_known_key(SharedString::default());
                         h.set_has_output(false);
                         h.set_command(SharedString::default());
                         h.set_new_password(SharedString::default());
                         h.set_new_token(SharedString::default());
                     }
                 });
+                show_known_key(&ctx2, id2_for_key, hostname, port);
             }
             Err(e) => ctx2.toast_err(format!("Couldn't open the host: {e}")),
         }
     });
+}
+
+/// Show the key on file for host `id`, if that host is still the one shown.
+fn show_known_key(ctx: &Ctx, id: String, hostname: String, port: u16) {
+    let ctx2 = ctx.clone();
+    ctx.spawn(async move {
+        let key = ctx2
+            .read(|c| async move { c.ssh_list_known_hosts().await })
+            .await
+            .ok()
+            .and_then(|json| model::known_key(&json, &hostname, port))
+            .unwrap_or_default();
+        ctx2.ui(move |w| {
+            let h = w.global::<Hosts>();
+            if h.get_detail().id == id.as_str() {
+                h.set_known_key(key.into());
+            }
+        });
+    });
+}
+
+/// Show, or clear, the panel for a host presenting a different key.
+fn show_key_change(h: &Hosts<'_>, change: Option<&model::KeyChange>) {
+    let Some(change) = change else {
+        h.set_key_changed(false);
+        return;
+    };
+    h.set_key_stored(change.stored.clone().into());
+    h.set_key_stored_since(
+        change
+            .stored_since
+            .map(|t| model::describe_time(local(t), chrono::Local::now()))
+            .unwrap_or_default()
+            .into(),
+    );
+    h.set_key_presented(change.presented.clone().into());
+    h.set_key_algorithm(change.presented_algorithm.clone().into());
+    h.set_key_changed(true);
 }
 
 fn to_item(h: &model::Host) -> HostItem {

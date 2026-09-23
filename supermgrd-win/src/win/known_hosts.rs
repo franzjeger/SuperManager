@@ -13,6 +13,11 @@
 //! - Subsequent connection with the **same** fingerprint → accepted.
 //! - Subsequent connection with a **different** fingerprint →
 //!   refused with a typed error so the GUI can surface a clear warning.
+//! - [`KnownHostsStore::trust`] records the key the operator has checked
+//!   and accepted in place of the one on file: that key, and no other.
+//! - [`KnownHostsStore::forget`] drops an entry, so the next connection
+//!   records whichever key the host presents then (the Linux daemon's
+//!   remedy, kept for parity).
 //!
 //! Compare to OpenSSH's `~/.ssh/known_hosts`: same idea, JSON format
 //! rather than the OpenSSH-specific text format so other tooling can
@@ -41,7 +46,8 @@ use tracing::info;
 pub struct Known {
     /// Server public-key algorithm name (e.g. `ssh-ed25519`).
     pub algorithm: String,
-    /// SHA-256 fingerprint in the OpenSSH `SHA256:<base64>` format.
+    /// SHA-256 of the key, base64 without padding: what OpenSSH prints
+    /// after `SHA256:` (`ssh-keygen -lf`), so the two can be compared.
     pub fingerprint: String,
     /// First-seen timestamp, RFC 3339.
     pub first_seen: String,
@@ -149,19 +155,109 @@ impl KnownHostsStore {
             }
             let mut snapshot = map.clone();
             snapshot.insert(key, presented.clone());
-            let bytes = serde_json::to_vec_pretty(&snapshot)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            let directory = inner.path.parent().expect("known-hosts path has a parent");
-            let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-            temporary.write_all(&bytes)?;
-            temporary.as_file().sync_all()?;
-            temporary.persist(&inner.path).map_err(|e| e.error)?;
+            write_atomically(&inner.path, &snapshot)?;
             *map = snapshot;
             Ok(HostKeyVerdict::FirstSeen(presented))
         })
         .await
         .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
     }
+
+    /// Every key on file, keyed `host:port`.
+    pub async fn entries(&self) -> Vec<(String, Known)> {
+        let map = self.inner.map.read().await;
+        let mut entries: Vec<(String, Known)> = map
+            .iter()
+            .map(|(address, known)| (address.clone(), known.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    /// Drop the recorded key for `host:port`, so the next connection is
+    /// first sight again and records whatever key the host presents then.
+    ///
+    /// The remedy for a changed key the operator has checked and found
+    /// benign — a reinstalled server, a rotated key, a replaced appliance.
+    /// Without it a legitimate rotation locks the host out for good, which
+    /// is how people learn to switch host-key checking off. Same contract as
+    /// the Linux daemon's `ssh_forget_host_key`.
+    ///
+    /// Returns whether there was anything to drop. Like `check`, the file
+    /// is rewritten before the in-memory map changes, so a failed write
+    /// forgets nothing.
+    pub async fn forget(&self, host: &str, port: u16) -> std::io::Result<bool> {
+        let key = format!("{host}:{port}");
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<bool> {
+            let mut map = inner.map.blocking_write();
+            if !map.contains_key(&key) {
+                return Ok(false);
+            }
+            let mut snapshot = map.clone();
+            snapshot.remove(&key);
+            write_atomically(&inner.path, &snapshot)?;
+            *map = snapshot;
+            Ok(true)
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
+    }
+
+    /// Record `algorithm`/`fingerprint` as the key `host:port` presents,
+    /// replacing whatever is on file.
+    ///
+    /// For a changed key the operator has compared with the host's own and
+    /// accepted. Unlike [`forget`](Self::forget), which trusts whichever
+    /// key answers next, only the key they checked gets in: if something
+    /// else answers, it is refused like any other change. The file is
+    /// rewritten before the map changes, as everywhere here.
+    pub async fn trust(
+        &self,
+        host: &str,
+        port: u16,
+        algorithm: &str,
+        fingerprint: &str,
+    ) -> std::io::Result<()> {
+        let key = format!("{host}:{port}");
+        let known = Known {
+            algorithm: algorithm.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+            first_seen: chrono::Utc::now().to_rfc3339(),
+        };
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut map = inner.map.blocking_write();
+            let mut snapshot = map.clone();
+            snapshot.insert(key, known);
+            write_atomically(&inner.path, &snapshot)?;
+            *map = snapshot;
+            Ok(())
+        })
+        .await
+        .map_err(|e| std::io::Error::other(format!("spawn_blocking: {e}")))?
+    }
+}
+
+/// Whether `s` is a fingerprint as this store keeps them: a SHA-256 digest
+/// in base64 without padding — 43 characters.
+pub fn is_sha256_fingerprint(s: &str) -> bool {
+    s.len() == 43
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+}
+
+/// Replace the file at `path` with `map`, all at once: a temporary file in
+/// the same directory, flushed to disk, then renamed over the old one.
+fn write_atomically(path: &Path, map: &HashMap<String, Known>) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec_pretty(map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let directory = path.parent().expect("known-hosts path has a parent");
+    let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+    temporary.write_all(&bytes)?;
+    temporary.as_file().sync_all()?;
+    temporary.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -228,6 +324,123 @@ mod tests {
         }
         let reloaded = KnownHostsStore::load_from(directory.path()).unwrap();
         assert_eq!(reloaded.inner.map.read().await.len(), 32);
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_key_is_learned_again_on_next_sight() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        store.check("host", 22, "ssh-ed25519", "old").await.unwrap();
+        assert!(matches!(
+            store.check("host", 22, "ssh-ed25519", "new").await.unwrap(),
+            HostKeyVerdict::Changed { .. }
+        ));
+
+        assert!(store.forget("host", 22).await.unwrap());
+        assert!(
+            !store.forget("host", 22).await.unwrap(),
+            "nothing left to forget"
+        );
+        assert!(matches!(
+            store.check("host", 22, "ssh-ed25519", "new").await.unwrap(),
+            HostKeyVerdict::FirstSeen(_)
+        ));
+
+        // For good: a restart must not bring the old key back.
+        let reloaded = KnownHostsStore::load_from(directory.path()).unwrap();
+        assert!(matches!(
+            reloaded
+                .check("host", 22, "ssh-ed25519", "new")
+                .await
+                .unwrap(),
+            HostKeyVerdict::Match(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_trusted_key_is_the_only_one_let_in() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        store.check("host", 22, "ssh-ed25519", "old").await.unwrap();
+
+        store
+            .trust("host", 22, "ssh-ed25519", "checked")
+            .await
+            .unwrap();
+        assert!(matches!(
+            store
+                .check("host", 22, "ssh-ed25519", "checked")
+                .await
+                .unwrap(),
+            HostKeyVerdict::Match(_)
+        ));
+        for other in ["old", "something-else"] {
+            assert!(matches!(
+                store.check("host", 22, "ssh-ed25519", other).await.unwrap(),
+                HostKeyVerdict::Changed { .. }
+            ));
+        }
+
+        // Kept across a restart, like every other record.
+        let reloaded = KnownHostsStore::load_from(directory.path()).unwrap();
+        assert!(matches!(
+            reloaded
+                .check("host", 22, "ssh-ed25519", "checked")
+                .await
+                .unwrap(),
+            HostKeyVerdict::Match(_)
+        ));
+    }
+
+    #[test]
+    fn only_sha256_fingerprints_are_fingerprints() {
+        assert!(is_sha256_fingerprint(
+            "uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s"
+        ));
+        assert!(!is_sha256_fingerprint(
+            "SHA256:uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s"
+        ));
+        assert!(!is_sha256_fingerprint(
+            "uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2s="
+        ));
+        assert!(!is_sha256_fingerprint("short"));
+        assert!(!is_sha256_fingerprint(
+            "uNiVztksCsDhcc0u9e8BujQXVUpKZIDTMczCvj3tD2\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn forgetting_one_port_keeps_the_others() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        store.check("host", 22, "ssh-ed25519", "ssh").await.unwrap();
+        store
+            .check("host", 2222, "ssh-ed25519", "alt")
+            .await
+            .unwrap();
+        assert!(store.forget("host", 22).await.unwrap());
+        assert!(matches!(
+            store
+                .check("host", 2222, "ssh-ed25519", "other")
+                .await
+                .unwrap(),
+            HostKeyVerdict::Changed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_forget_that_cannot_be_saved_forgets_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = KnownHostsStore::load_from(directory.path()).unwrap();
+        store.check("host", 22, "ssh-ed25519", "old").await.unwrap();
+        let path = directory.path().join("known_hosts.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(store.forget("host", 22).await.is_err());
+        assert!(matches!(
+            store.check("host", 22, "ssh-ed25519", "new").await.unwrap(),
+            HostKeyVerdict::Changed { .. }
+        ));
     }
 
     #[tokio::test]
