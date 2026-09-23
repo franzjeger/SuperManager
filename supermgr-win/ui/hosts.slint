@@ -7,11 +7,11 @@ import { Theme, Icons } from "theme.slint";
 import { App, ConfirmAction, HostItem, Hosts, Overlay } from "state.slint";
 import { Badge, Card, Console, DetailRow, DialogButtons, EmptyState, Field, PageHeader, SectionTitle, Sheet, SubtleButton } from "widgets.slint";
 
+// What the add form's combo boxes show. The values sent for each position
+// are `DEVICE_TYPES` and `AUTH_METHODS` in src/win/hosts.rs — same order.
 export global HostChoices {
     out property <[string]> device-labels: ["Linux / generic SSH", "FortiGate", "UniFi", "OPNsense", "Sophos", "OpenWrt", "pfSense"];
-    out property <[string]> device-values: ["linux", "fortigate", "unifi", "opnsense", "sophos", "openwrt", "pfsense"];
     out property <[string]> auth-labels: ["Password", "SSH key", "API token", "None"];
-    out property <[string]> auth-values: ["password", "key", "api-token", "none"];
 }
 
 component HostRow inherits Rectangle {
@@ -418,7 +418,8 @@ export component AddHostSheet inherits Sheet {
         Field {
             label: "SSH port";
             width: 96px;
-            LineEdit { text <=> Hosts.add-port; input-type: number; }
+            // The fluent LineEdit's own minimum is wider than a port needs.
+            LineEdit { text <=> Hosts.add-port; input-type: number; min-width: 64px; }
         }
     }
     HorizontalLayout {

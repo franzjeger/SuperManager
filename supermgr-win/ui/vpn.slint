@@ -705,7 +705,7 @@ export component AddProfileSheet inherits Sheet {
             if Vpn.add-kind == ProfileKind.sslvpn: Field {
                 label: "Port";
                 width: 96px;
-                LineEdit { text <=> Vpn.add-port; input-type: number; enabled: !Vpn.add-busy; }
+                LineEdit { text <=> Vpn.add-port; input-type: number; enabled: !Vpn.add-busy; min-width: 64px; }
             }
         }
         if Vpn.add-kind == ProfileKind.fortigate || Vpn.add-kind == ProfileKind.sslvpn: HorizontalLayout {
