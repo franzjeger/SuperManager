@@ -68,6 +68,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_SystemServices",
     "Win32_NetworkManagement_IpHelper",
+    # NET_LUID_LH: without it, IpHelper leaves out the functions that take one.
+    "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
 ] }
 eventlog = "0.3"

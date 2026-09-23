@@ -41,6 +41,9 @@ use base64::Engine as _;
 use ipnet::IpNet;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+use windows_sys::Win32::Foundation::NO_ERROR;
+use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceAliasToLuid;
+use windows_sys::Win32::NetworkManagement::Ndis::NET_LUID_LH;
 
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::vpn::profile::{Profile, ProfileConfig, WireGuardConfig};
@@ -263,18 +266,28 @@ impl WireGuardBackend {
         // Tear down any leftover same-named adapter from a previous crash.
         // `open` and `create` borrow the library in 0.5 instead of taking an
         // owned `Arc`, so `wg` is no longer consumed and needs no clone.
-        if let Ok(existing) = wireguard_nt::Adapter::open(&wg, &adapter_name) {
-            warn!(
-                adapter_name,
-                "tearing down stale WireGuard adapter from prior run"
-            );
-            // Not fatal: `create` below is the real gate, and it will fail with
-            // a clearer message if the stale adapter is genuinely stuck. Logged
-            // rather than discarded because it is the first hint of that.
-            if let Err(e) = existing.down() {
-                warn!(adapter_name, "stale adapter would not go down: {e}");
+        //
+        // Only when Windows has an adapter by that name, which it normally
+        // does not. `WireGuardOpenAdapter` reports a name it cannot find as an
+        // error of its own ("Failed to find matching adapter name"), and
+        // `wireguard-nt` logs it at error level, which puts it in the Event
+        // Log: opening unconditionally logged an error on every connect, with
+        // nothing wrong.
+        if interface_alias_exists(&adapter_name) {
+            if let Ok(existing) = wireguard_nt::Adapter::open(&wg, &adapter_name) {
+                warn!(
+                    adapter_name,
+                    "tearing down stale WireGuard adapter from prior run"
+                );
+                // Not fatal: `create` below is the real gate, and it will fail
+                // with a clearer message if the stale adapter is genuinely
+                // stuck. Logged rather than discarded because it is the first
+                // hint of that.
+                if let Err(e) = existing.down() {
+                    warn!(adapter_name, "stale adapter would not go down: {e}");
+                }
+                drop(existing);
             }
-            drop(existing);
         }
 
         // 0.4's `create` handed the `Arc` back inside its error tuple so the
@@ -455,6 +468,22 @@ fn route_prefixes(allowed_ips: &[IpNet]) -> Vec<IpNet> {
     allowed_ips.iter().map(IpNet::trunc).collect()
 }
 
+/// Whether Windows has a network interface with this alias: the name
+/// `Get-NetAdapter` shows, which for a tunnel adapter is the name it was
+/// created with. If the lookup itself fails, the answer is no as well.
+fn interface_alias_exists(alias: &str) -> bool {
+    // No alias contains a NUL, and the lookup would stop reading at one.
+    if alias.contains('\0') {
+        return false;
+    }
+    let wide: Vec<u16> = alias.encode_utf16().chain(Some(0)).collect();
+    let mut luid = NET_LUID_LH { Value: 0 };
+    // SAFETY: `wide` is NUL-terminated and `luid` is ours to write; both
+    // outlive the call, which keeps neither pointer.
+    let rc = unsafe { ConvertInterfaceAliasToLuid(wide.as_ptr(), &raw mut luid) };
+    rc == NO_ERROR
+}
+
 /// Shell out to PowerShell to set DNS server addresses on the tunnel
 /// interface. Uses `-InterfaceAlias` so we don't have to look up the
 /// ifindex separately — Windows resolves the alias to the right adapter.
@@ -522,8 +551,13 @@ async fn run_powershell(cmd: &str) -> Result<(), VpnError> {
 
 #[cfg(test)]
 mod tests {
-    use super::route_prefixes;
+    use super::{interface_alias_exists, route_prefixes};
     use ipnet::IpNet;
+    use windows_sys::Win32::Foundation::NO_ERROR;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::{IF_MAX_STRING_SIZE, NET_LUID_LH};
 
     #[test]
     fn allowed_ips_with_host_bits_become_the_network_they_name() {
@@ -539,5 +573,43 @@ mod tests {
             routed,
             ["10.8.0.0/24", "0.0.0.0/0", "fd00::/64", "192.0.2.7/32"]
         );
+    }
+
+    /// The alias of interface 1, the loopback on every Windows. Asked for
+    /// rather than spelled out, because it follows the display language.
+    fn loopback_alias() -> String {
+        let mut luid = NET_LUID_LH { Value: 0 };
+        // SAFETY: `luid` is ours to write and outlives the call.
+        let rc = unsafe { ConvertInterfaceIndexToLuid(1, &raw mut luid) };
+        assert_eq!(rc, NO_ERROR, "no interface 1");
+        let mut alias = [0u16; IF_MAX_STRING_SIZE as usize + 1];
+        // SAFETY: `luid` is initialised, and `alias` is writable for the
+        // length passed; both outlive the call.
+        let rc = unsafe {
+            ConvertInterfaceLuidToAlias(&raw const luid, alias.as_mut_ptr(), alias.len())
+        };
+        assert_eq!(rc, NO_ERROR, "no alias for interface 1");
+        let len = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
+        String::from_utf16(&alias[..len]).unwrap()
+    }
+
+    #[test]
+    fn an_interface_windows_has_is_found_by_its_alias() {
+        let alias = loopback_alias();
+        assert!(interface_alias_exists(&alias), "{alias:?} not found");
+    }
+
+    // A normal connect: no such adapter, so `bring_up` skips `open` and the
+    // error it would log.
+    #[test]
+    fn a_name_no_interface_has_is_not_found() {
+        assert!(!interface_alias_exists("supermgr-test-no-such-adapter"));
+    }
+
+    #[test]
+    fn a_name_with_a_nul_matches_no_alias() {
+        // Read only up to the NUL, this would be the loopback's alias.
+        let name = format!("{}\0x", loopback_alias());
+        assert!(!interface_alias_exists(&name));
     }
 }
