@@ -4,16 +4,6 @@
         <title>SuperManager</title>
         <description>Update feed for SuperManager.app</description>
         <language>en</language>
-        <item>
-            <title>Version 1.8.4</title>
-            <pubDate>Wed, 23 Sep 2026 08:12:10 +0000</pubDate>
-            <sparkle:version>1.8.4</sparkle:version>
-            <sparkle:shortVersionString>1.8.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure
-                url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.4/SuperManager-1.8.4.zip"
-                type="application/octet-stream"
-                sparkle:edSignature="eHxvEzawtFD53arbh9Sd/Swc3OGwIHl8vuJNFBk5IRRB2HMuTq1lgLxwU9RdKb2slWzBex1DkLNepHgKFELjDQ==" length="33388142" />
-        </item>
+        <!-- Updates paused while the macOS startup crash is corrected. -->
     </channel>
 </rss>
