@@ -231,3 +231,146 @@ mod tests {
         assert!(parse_version("2.0.0") > parse_version("1.99.99"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// The Settings page's Updates card
+// ---------------------------------------------------------------------------
+
+/// Answer the Updates card's buttons. `Updates.busy` doubles as the guard
+/// against a second check or download starting while one runs.
+pub(super) fn bind(window: &super::AppWindow, ctx: &super::Ctx) {
+    use slint::ComponentHandle as _;
+
+    use super::Updates;
+
+    fn status(ctx: &super::Ctx, msg: String) {
+        ctx.ui(move |w| w.global::<Updates>().set_status(msg.into()));
+    }
+
+    let updates = window.global::<Updates>();
+
+    updates.on_check({
+        let ctx = ctx.clone();
+        move || {
+            let Some(w) = ctx.weak.upgrade() else {
+                return;
+            };
+            let u = w.global::<Updates>();
+            if u.get_busy() {
+                return;
+            }
+            u.set_busy(true);
+            u.set_status("Checking GitHub releases\u{2026}".into());
+            let ctx2 = ctx.clone();
+            ctx.spawn(async move {
+                let result = check().await;
+                ctx2.ui(move |w| {
+                    let u = w.global::<Updates>();
+                    u.set_busy(false);
+                    match result {
+                        Ok(Some(info)) => {
+                            u.set_available(true);
+                            u.set_status(
+                                format!(
+                                    "Version {} is available. You have {CURRENT_VERSION}.",
+                                    info.version
+                                )
+                                .into(),
+                            );
+                        }
+                        Ok(None) => {
+                            u.set_available(false);
+                            u.set_status(
+                                format!("You have the latest version ({CURRENT_VERSION}).").into(),
+                            );
+                        }
+                        Err(e) => u.set_status(format!("Couldn't check for updates: {e:#}").into()),
+                    }
+                });
+            });
+        }
+    });
+
+    // Re-check (the offered version can be minutes old), download to
+    // %TEMP%, verify against the published SHA-256, start the installer,
+    // and quit — the MSI's MajorUpgrade replaces this install and restarts
+    // the service in its own transaction.
+    updates.on_install({
+        let ctx = ctx.clone();
+        move || {
+            let Some(w) = ctx.weak.upgrade() else {
+                return;
+            };
+            let u = w.global::<Updates>();
+            if u.get_busy() {
+                return;
+            }
+            u.set_busy(true);
+            let ctx2 = ctx.clone();
+            ctx.spawn(async move {
+                let done = |ctx: &super::Ctx| ctx.ui(|w| w.global::<Updates>().set_busy(false));
+                let info = match check().await {
+                    Ok(Some(i)) => i,
+                    Ok(None) => {
+                        ctx2.ui(|w| w.global::<Updates>().set_available(false));
+                        status(
+                            &ctx2,
+                            format!("You already have the latest version ({CURRENT_VERSION})."),
+                        );
+                        done(&ctx2);
+                        return;
+                    }
+                    Err(e) => {
+                        status(&ctx2, format!("Couldn't check for updates: {e:#}"));
+                        done(&ctx2);
+                        return;
+                    }
+                };
+
+                // Progress at ~5 MB steps; every chunk would flood the
+                // event loop for nothing visible.
+                let name = info.name.clone();
+                let mut last_step = u64::MAX;
+                let progress_ctx = ctx2.clone();
+                let downloaded = download(&info, |got, total| {
+                    let step = got / (5 * 1024 * 1024);
+                    if step != last_step {
+                        last_step = step;
+                        let msg = if total > 0 {
+                            format!(
+                                "Downloading {name}\u{2026} {} of {} MB",
+                                got / (1024 * 1024),
+                                total / (1024 * 1024)
+                            )
+                        } else {
+                            format!("Downloading {name}\u{2026} {} MB", got / (1024 * 1024))
+                        };
+                        status(&progress_ctx, msg);
+                    }
+                })
+                .await;
+
+                match downloaded.and_then(|path| launch(&path).map(|()| path)) {
+                    Ok(path) => {
+                        tracing::info!("update installer started: {}", path.display());
+                        status(
+                            &ctx2,
+                            "Installer verified and started \u{2014} SuperManager closes now."
+                                .into(),
+                        );
+                        // A moment for the message, then out of the
+                        // installer's way: it replaces this binary.
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                        let _ = slint::invoke_from_event_loop(|| {
+                            slint::quit_event_loop().ok();
+                        });
+                    }
+                    Err(e) => {
+                        status(&ctx2, format!("The update failed: {e:#}"));
+                        done(&ctx2);
+                    }
+                }
+            });
+        }
+    });
+}

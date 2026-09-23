@@ -1,0 +1,283 @@
+// What the window shows, and the calls it makes. The Rust side fills these
+// globals and handles their callbacks; pages read and call them directly
+// instead of having every value threaded through the component tree.
+
+// ── Shared ──────────────────────────────────────────────────────────────
+
+export enum Page { vpn, hosts, keys, settings }
+
+export enum Overlay { none, add-profile, rename-profile, add-host, generate-key, confirm }
+
+export enum ToastKind { success, error }
+
+export enum ConfirmAction { none, delete-profile, delete-host, delete-key }
+
+export global App {
+    in-out property <Page> page: Page.vpn;
+    in-out property <Overlay> overlay: Overlay.none;
+
+    // The service behind the named pipe. Everything but Settings needs it.
+    in property <bool> daemon-online: true;
+    in property <string> version: "";
+    in property <string> data-root: "C:\\ProgramData\\SuperManager";
+
+    // 0 = follow Windows, 1 = light, 2 = dark.
+    in-out property <int> appearance: 0;
+    callback appearance-changed(int);
+
+    // One message at a time, bottom of the window. Successes clear
+    // themselves; errors stay until dismissed.
+    in property <bool> toast-visible: false;
+    in property <string> toast-text: "";
+    in property <ToastKind> toast-kind: ToastKind.success;
+    callback dismiss-toast();
+
+    callback open-url(string);
+    callback copy-text(string);
+
+    // The confirmation dialog: what it is about, and what "yes" does.
+    in-out property <ConfirmAction> confirm-action: ConfirmAction.none;
+    in-out property <string> confirm-target: "";
+    in-out property <string> confirm-title: "";
+    in-out property <string> confirm-body: "";
+    in-out property <string> confirm-button: "";
+
+    public function confirm(action: ConfirmAction, target: string, title: string, body: string, button: string) {
+        self.confirm-action = action;
+        self.confirm-target = target;
+        self.confirm-title = title;
+        self.confirm-body = body;
+        self.confirm-button = button;
+        self.overlay = Overlay.confirm;
+    }
+
+    public function close-overlay() {
+        self.overlay = Overlay.none;
+    }
+}
+
+// ── VPN ─────────────────────────────────────────────────────────────────
+
+export enum ConnState { disconnected, connecting, connected, disconnecting, failed }
+
+export enum ProfileKind { wireguard, openvpn, azure, fortigate, sslvpn, other }
+
+export struct ProfileItem {
+    id: string,
+    name: string,
+    kind: ProfileKind,
+    kind-label: string,
+    host: string,
+    username: string,
+    full-tunnel: bool,
+    push-dns: bool,
+    last-connected: string,
+}
+
+export global Vpn {
+    in property <[ProfileItem]> profiles: [];
+
+    // The profile shown on the right. Set through `select` so the option
+    // switches below pick up that profile's values.
+    in-out property <ProfileItem> selected;
+    in-out property <bool> has-selection: false;
+    in-out property <bool> selected-push-dns: false;
+    in-out property <bool> selected-full-tunnel: false;
+
+    public function select(p: ProfileItem) {
+        self.selected = p;
+        self.selected-push-dns = p.push-dns;
+        self.selected-full-tunnel = p.full-tunnel;
+        self.has-selection = true;
+    }
+
+    // The tunnel, as the service reports it.
+    in property <ConnState> state: ConnState.disconnected;
+    in property <string> state-profile-id: "";
+    in property <string> state-profile-name: "";
+    in property <string> state-backend: "";
+    in property <string> phase: "";
+    in property <string> interface: "";
+    in property <string> since: "";
+    in property <string> error-message: "";
+    // Set while an Azure connect waits for the operator to sign in.
+    in property <string> auth-url: "";
+
+    callback connect(string);
+    callback disconnect();
+    callback retry();
+    callback dismiss-error();
+    callback set-push-dns(string, bool);
+    callback set-full-tunnel(string, bool);
+
+    // Which profile types this PC can run, and why not.
+    in property <bool> wireguard-available: true;
+    in property <string> wireguard-reason: "";
+    in property <bool> openvpn-available: true;
+    in property <string> openvpn-reason: "";
+    in property <bool> sslvpn-available: false;
+    in property <string> sslvpn-reason: "";
+
+    // ── Add profile ──
+    in-out property <int> add-step: 0;
+    in-out property <ProfileKind> add-kind: ProfileKind.wireguard;
+    in-out property <string> add-name: "";
+    in-out property <string> add-text: "";
+    in-out property <string> add-file: "";
+    in-out property <string> add-text-2: "";
+    in-out property <string> add-host: "";
+    in-out property <string> add-port: "443";
+    in-out property <string> add-username: "";
+    in-out property <string> add-password: "";
+    in property <bool> add-busy: false;
+    in-out property <string> add-error: "";
+    callback choose-file(ProfileKind);
+    callback submit-add();
+
+    public function open-add() {
+        self.add-step = 0;
+        self.add-name = "";
+        self.add-text = "";
+        self.add-file = "";
+        self.add-text-2 = "";
+        self.add-host = "";
+        self.add-port = "443";
+        self.add-username = "";
+        self.add-password = "";
+        self.add-error = "";
+        App.overlay = Overlay.add-profile;
+    }
+
+    // ── Rename / delete ──
+    in-out property <string> rename-text: "";
+    callback submit-rename(string, string);
+    callback delete(string);
+
+    public function open-rename() {
+        self.rename-text = self.selected.name;
+        App.overlay = Overlay.rename-profile;
+    }
+}
+
+// ── Hosts ───────────────────────────────────────────────────────────────
+
+export struct HostItem {
+    id: string,
+    label: string,
+    address: string,
+    device-type: string,
+    customer: string,
+    pinned: bool,
+}
+
+export struct HostInfo {
+    id: string,
+    label: string,
+    hostname: string,
+    port: int,
+    username: string,
+    group: string,
+    customer: string,
+    device-type: string,
+    auth-method: string,
+    pinned: bool,
+    created-at: string,
+}
+
+export global Hosts {
+    in property <[HostItem]> items: [];
+    in property <int> total: 0;
+    in-out property <string> search: "";
+    callback search-changed(string);
+
+    in-out property <string> selected-id: "";
+    in property <bool> has-detail: false;
+    in property <HostInfo> detail;
+    callback select(string);
+
+    callback test(string);
+    in property <bool> testing: false;
+    in property <string> test-result: "";
+
+    in-out property <string> command: "";
+    callback run(string, string);
+    in property <bool> running: false;
+    in property <bool> has-output: false;
+    in property <string> stdout: "";
+    in property <string> stderr: "";
+    in property <int> exit-code: 0;
+
+    in-out property <string> new-password: "";
+    callback save-password(string, string);
+    in-out property <string> new-token: "";
+    in-out property <string> new-token-port: "443";
+    callback save-token(string, string, string);
+
+    callback toggle-pin(string);
+    callback delete(string);
+
+    // ── Add host ──
+    in-out property <string> add-label: "";
+    in-out property <string> add-hostname: "";
+    in-out property <string> add-port: "22";
+    in-out property <string> add-username: "root";
+    in-out property <string> add-group: "";
+    in-out property <int> add-device-index: 0;
+    in-out property <int> add-auth-index: 0;
+    in property <bool> add-busy: false;
+    in-out property <string> add-error: "";
+    callback submit-add();
+
+    public function open-add() {
+        self.add-label = "";
+        self.add-hostname = "";
+        self.add-port = "22";
+        self.add-username = "root";
+        self.add-group = "";
+        self.add-device-index = 0;
+        self.add-auth-index = 0;
+        self.add-error = "";
+        App.overlay = Overlay.add-host;
+    }
+}
+
+// ── SSH keys ────────────────────────────────────────────────────────────
+
+export struct KeyItem {
+    id: string,
+    name: string,
+    key-type: string,
+    fingerprint: string,
+    created-at: string,
+}
+
+export global Keys {
+    in property <[KeyItem]> items: [];
+    callback copy-public(string);
+    callback delete(string);
+
+    in-out property <string> add-name: "";
+    in-out property <string> add-description: "";
+    in-out property <int> add-type-index: 0;
+    in property <bool> add-busy: false;
+    in-out property <string> add-error: "";
+    callback submit-add();
+
+    public function open-add() {
+        self.add-name = "";
+        self.add-description = "";
+        self.add-type-index = 0;
+        self.add-error = "";
+        App.overlay = Overlay.generate-key;
+    }
+}
+
+// ── Updates ─────────────────────────────────────────────────────────────
+
+export global Updates {
+    in property <string> status: "";
+    in property <bool> available: false;
+    in property <bool> busy: false;
+    callback check();
+    callback install();
+}

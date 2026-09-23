@@ -1,0 +1,125 @@
+// Settings: the service this window talks to, how it looks, updates.
+
+import { Button, ComboBox, ScrollView } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { App, Updates } from "state.slint";
+import { Card, DetailRow, OptionRow, PageHeader, SectionTitle, StatusDot } from "widgets.slint";
+
+export component SettingsPage inherits VerticalLayout {
+    padding-left: 32px;
+    padding-right: 32px;
+    padding-top: 24px;
+    padding-bottom: 24px;
+    spacing: 16px;
+
+    PageHeader { title: "Settings"; }
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 16px;
+            alignment: start;
+
+            Card {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    SectionTitle { text: "SuperManager service"; }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        StatusDot {
+                            tint: App.daemon-online ? Theme.success : Theme.critical;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        Text {
+                            text: App.daemon-online ? "Running" : "Not running";
+                            font-size: Theme.body;
+                            font-weight: 600;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    if !App.daemon-online: Text {
+                        text: "VPN, hosts and keys all go through the service. Start \"SuperManager\" in Services (services.msc), or reinstall to repair it. This window reconnects on its own.";
+                        font-size: Theme.body;
+                        color: Theme.text-secondary;
+                        wrap: word-wrap;
+                    }
+                    DetailRow { label: "Named pipe"; value: "\\\\.\\pipe\\supermgrd"; mono: true; }
+                    DetailRow { label: "Data folder"; value: App.data-root; mono: true; }
+                }
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    SectionTitle { text: "Appearance"; }
+                    OptionRow {
+                        title: "Theme";
+                        description: "Follow Windows, or always use light or dark.";
+                        ComboBox {
+                            model: ["Use Windows setting", "Light", "Dark"];
+                            current-index <=> App.appearance;
+                            width: 200px;
+                            selected => { App.appearance-changed(self.current-index); }
+                        }
+                    }
+                }
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    SectionTitle { text: "Updates"; }
+                    OptionRow {
+                        title: "Version " + App.version;
+                        description: Updates.status != "" ? Updates.status : "Updates come from the project's GitHub releases and are checked against their published SHA-256 before they install.";
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: end;
+                            if Updates.available: Button {
+                                text: "Install update";
+                                icon: Icons.download;
+                                colorize-icon: true;
+                                primary: true;
+                                enabled: !Updates.busy;
+                                y: (parent.height - self.height) / 2;
+                                clicked => { Updates.install(); }
+                            }
+                            Button {
+                                text: Updates.busy ? "Checking…" : "Check for updates";
+                                icon: Icons.refresh;
+                                colorize-icon: true;
+                                enabled: !Updates.busy;
+                                y: (parent.height - self.height) / 2;
+                                clicked => { Updates.check(); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Card {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    SectionTitle { text: "About"; }
+                    DetailRow { label: "License"; value: "GPL-3.0-or-later"; }
+                    DetailRow { label: "Icons"; value: "Fluent UI System Icons, MIT, © Microsoft"; }
+                    HorizontalLayout {
+                        alignment: start;
+                        Button {
+                            text: "Source code on GitHub";
+                            icon: Icons.open;
+                            colorize-icon: true;
+                            clicked => { App.open-url("https://github.com/franzjeger/SuperManager"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

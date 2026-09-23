@@ -38,6 +38,16 @@ fn main() {
         slint_build::compile("ui/main.slint").expect("slint UI compile failed");
 
         let mut res = winres::WindowsResource::new();
+        // The app icon, so the taskbar, Start menu and Explorer show it
+        // rather than Windows' generic program icon. Built from the same
+        // artwork as the Linux and macOS icons (contrib/icons/hicolor).
+        let icon = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+            .join("assets")
+            .join("supermanager.ico");
+        println!("cargo:rerun-if-changed=assets/supermanager.ico");
+        if let Some(icon) = icon.to_str() {
+            res.set_icon(icon);
+        }
         res.set("ProductName", "SuperManager");
         res.set("FileDescription", "SuperManager GUI");
         res.set("CompanyName", "Sybr");

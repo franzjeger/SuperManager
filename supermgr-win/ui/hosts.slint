@@ -1,0 +1,462 @@
+// The Hosts page: managed machines and appliances on the left, the chosen
+// one on the right with what can be done to it — test, run a command,
+// store its credentials.
+
+import { Button, ComboBox, LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { App, ConfirmAction, HostItem, Hosts, Overlay } from "state.slint";
+import { Badge, Card, Console, DetailRow, DialogButtons, EmptyState, Field, PageHeader, SectionTitle, Sheet, SubtleButton } from "widgets.slint";
+
+export global HostChoices {
+    out property <[string]> device-labels: ["Linux / generic SSH", "FortiGate", "UniFi", "OPNsense", "Sophos", "OpenWrt", "pfSense"];
+    out property <[string]> device-values: ["linux", "fortigate", "unifi", "opnsense", "sophos", "openwrt", "pfsense"];
+    out property <[string]> auth-labels: ["Password", "SSH key", "API token", "None"];
+    out property <[string]> auth-values: ["password", "key", "api-token", "none"];
+}
+
+component HostRow inherits Rectangle {
+    in property <HostItem> host;
+    in property <bool> selected;
+    callback clicked;
+
+    height: 60px;
+    accessible-role: list-item;
+    accessible-label: root.host.label + ", " + root.host.address;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    Rectangle {
+        x: 4px;
+        y: 2px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        border-radius: Theme.control-radius;
+        background: touch.pressed ? Theme.subtle-pressed
+            : root.selected ? Theme.subtle-selected
+            : touch.has-hover ? Theme.subtle-hover : transparent;
+        animate background { duration: 100ms; }
+
+        touch := TouchArea {
+            clicked => { root.clicked(); }
+        }
+        Rectangle {
+            x: 0;
+            width: 3px;
+            height: root.selected ? 16px : 0px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 1.5px;
+            background: Theme.accent;
+            animate height { duration: 150ms; easing: ease-out; }
+        }
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 10px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    if root.host.pinned: Image {
+                        source: Icons.pin;
+                        colorize: Theme.accent;
+                        width: 14px;
+                        height: 14px;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Text {
+                        text: root.host.label;
+                        font-size: Theme.body;
+                        font-weight: root.selected ? 600 : 400;
+                        color: Theme.text;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                    }
+                }
+                Text {
+                    text: root.host.address;
+                    font-size: Theme.caption;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+            }
+            if root.host.device-type != "" && root.host.device-type != "linux": Badge {
+                text: root.host.device-type;
+                y: (parent.height - self.height) / 2;
+            }
+        }
+    }
+}
+
+component HostDetail inherits Card {
+    property <string> id: Hosts.detail.id;
+
+    ScrollView {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 24px;
+            alignment: start;
+
+            HorizontalLayout {
+                spacing: 16px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 8px;
+                    Text {
+                        text: Hosts.detail.label;
+                        font-size: Theme.subtitle;
+                        font-weight: 600;
+                        color: Theme.text;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Badge { text: Hosts.detail.device-type != "" ? Hosts.detail.device-type : "linux"; }
+                        if Hosts.detail.customer != "": Badge { text: Hosts.detail.customer; }
+                        if Hosts.detail.pinned: Badge {
+                            text: "Pinned";
+                            fill: Theme.info-bg;
+                            ink: Theme.accent-text;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    Button {
+                        text: Hosts.testing ? "Testing…" : "Test connection";
+                        icon: Icons.test;
+                        colorize-icon: true;
+                        primary: true;
+                        enabled: !Hosts.testing && App.daemon-online;
+                        clicked => { Hosts.test(root.id); }
+                    }
+                }
+            }
+
+            if Hosts.test-result != "": Rectangle {
+                border-radius: Theme.control-radius;
+                background: Theme.info-bg;
+                border-width: 1px;
+                border-color: Theme.card-stroke;
+                HorizontalLayout {
+                    padding: 12px;
+                    spacing: 10px;
+                    Image {
+                        source: Icons.info;
+                        colorize: Theme.accent;
+                        width: 18px;
+                        height: 18px;
+                    }
+                    Text {
+                        text: Hosts.test-result;
+                        font-size: Theme.body;
+                        color: Theme.text;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Connection"; }
+                DetailRow {
+                    label: "SSH";
+                    value: Hosts.detail.username + "@" + Hosts.detail.hostname + ":" + Hosts.detail.port;
+                    mono: true;
+                }
+                DetailRow { label: "Signs in with"; value: Hosts.detail.auth-method; }
+                if Hosts.detail.group != "": DetailRow { label: "Group"; value: Hosts.detail.group; }
+                if Hosts.detail.created-at != "": DetailRow { label: "Added"; value: Hosts.detail.created-at; }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Run a command"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> Hosts.command;
+                        placeholder-text: "uptime";
+                        enabled: !Hosts.running;
+                        horizontal-stretch: 1;
+                        accepted => {
+                            if Hosts.command != "" && !Hosts.running { Hosts.run(root.id, Hosts.command); }
+                        }
+                    }
+                    Button {
+                        text: Hosts.running ? "Running…" : "Run";
+                        icon: Icons.run;
+                        colorize-icon: true;
+                        enabled: Hosts.command != "" && !Hosts.running && App.daemon-online;
+                        clicked => { Hosts.run(root.id, Hosts.command); }
+                    }
+                }
+                if Hosts.has-output: VerticalLayout {
+                    spacing: 8px;
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Badge {
+                            text: "Exit code " + Hosts.exit-code;
+                            fill: Hosts.exit-code == 0 ? Theme.success-bg : Theme.critical-bg;
+                            ink: Hosts.exit-code == 0 ? Theme.success : Theme.critical;
+                        }
+                        SubtleButton {
+                            icon: Icons.copy;
+                            text: "Copy output";
+                            clicked => { App.copy-text(Hosts.stdout + (Hosts.stderr != "" ? "\n" + Hosts.stderr : "")); }
+                        }
+                    }
+                    if Hosts.stdout != "": Console {
+                        text: Hosts.stdout;
+                        height: 180px;
+                    }
+                    if Hosts.stderr != "": Console {
+                        text: Hosts.stderr;
+                        ink: Theme.critical;
+                        height: 100px;
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Credentials"; }
+                Text {
+                    text: "Stored in Windows Credential Manager. Saving replaces what is there.";
+                    font-size: Theme.caption;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> Hosts.new-password;
+                        input-type: password;
+                        placeholder-text: "SSH password";
+                        horizontal-stretch: 1;
+                    }
+                    Button {
+                        text: "Save password";
+                        enabled: Hosts.new-password != "" && App.daemon-online;
+                        clicked => { Hosts.save-password(root.id, Hosts.new-password); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit {
+                        text <=> Hosts.new-token;
+                        input-type: password;
+                        placeholder-text: "API token";
+                        horizontal-stretch: 1;
+                    }
+                    LineEdit {
+                        text <=> Hosts.new-token-port;
+                        input-type: number;
+                        placeholder-text: "Port";
+                        width: 88px;
+                    }
+                    Button {
+                        text: "Save token";
+                        enabled: Hosts.new-token != "" && App.daemon-online;
+                        clicked => { Hosts.save-token(root.id, Hosts.new-token, Hosts.new-token-port); }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Manage"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: Hosts.detail.pinned ? "Unpin" : "Pin to top";
+                        icon: Hosts.detail.pinned ? Icons.pin-off : Icons.pin;
+                        colorize-icon: true;
+                        enabled: App.daemon-online;
+                        clicked => { Hosts.toggle-pin(root.id); }
+                    }
+                    Button {
+                        text: "Delete";
+                        icon: Icons.delete;
+                        colorize-icon: true;
+                        enabled: App.daemon-online;
+                        clicked => {
+                            App.confirm(ConfirmAction.delete-host, root.id,
+                                "Delete " + Hosts.detail.label + "?",
+                                "The host and the password or token saved for it are removed. The machine itself is not touched.",
+                                "Delete");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component HostsPage inherits VerticalLayout {
+    padding-left: 32px;
+    padding-right: 32px;
+    padding-top: 24px;
+    padding-bottom: 24px;
+    spacing: 16px;
+
+    PageHeader {
+        title: "Hosts";
+        Button {
+            text: "Add host";
+            icon: Icons.add;
+            colorize-icon: true;
+            enabled: App.daemon-online;
+            clicked => { Hosts.open-add(); }
+        }
+    }
+
+    if Hosts.total == 0: Card {
+        vertical-stretch: 1;
+        EmptyState {
+            icon: Icons.hosts-large;
+            title: "No hosts yet";
+            body: "Add the servers, firewalls and access points you manage, then test them and run commands from here.";
+            Button {
+                text: "Add host";
+                icon: Icons.add;
+                colorize-icon: true;
+                primary: true;
+                enabled: App.daemon-online;
+                clicked => { Hosts.open-add(); }
+            }
+        }
+    }
+
+    if Hosts.total > 0: HorizontalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        Card {
+            width: 320px;
+            VerticalLayout {
+                padding: 8px;
+                spacing: 4px;
+                LineEdit {
+                    text <=> Hosts.search;
+                    placeholder-text: "Search hosts";
+                    edited(text) => { Hosts.search-changed(text); }
+                }
+                if Hosts.items.length == 0: Text {
+                    text: "No host matches \"" + Hosts.search + "\".";
+                    font-size: Theme.body;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    vertical-stretch: 1;
+                }
+                if Hosts.items.length > 0: ListView {
+                    accessible-role: list;
+                    accessible-label: "Hosts";
+                    for host in Hosts.items: HostRow {
+                        host: host;
+                        selected: Hosts.selected-id == host.id;
+                        clicked => {
+                            Hosts.selected-id = host.id;
+                            Hosts.select(host.id);
+                        }
+                    }
+                }
+            }
+        }
+
+        if Hosts.has-detail: HostDetail {
+            horizontal-stretch: 1;
+        }
+        if !Hosts.has-detail: Card {
+            horizontal-stretch: 1;
+            EmptyState {
+                icon: Icons.hosts-large;
+                title: "Select a host";
+                body: "Test it, run a command on it, or save its credentials.";
+            }
+        }
+    }
+}
+
+export component AddHostSheet inherits Sheet {
+    property <bool> ready: Hosts.add-label != "" && Hosts.add-hostname != "";
+    title: "Add a host";
+    sheet-width: 560px;
+    close => { if !Hosts.add-busy { App.close-overlay(); } }
+
+    HorizontalLayout {
+        spacing: 12px;
+        Field {
+            label: "Name";
+            horizontal-stretch: 1;
+            LineEdit {
+                text <=> Hosts.add-label;
+                placeholder-text: "web-01";
+                init => { self.focus(); }
+            }
+        }
+        Field {
+            label: "Group (optional)";
+            horizontal-stretch: 1;
+            LineEdit { text <=> Hosts.add-group; placeholder-text: "production"; }
+        }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        Field {
+            label: "Address";
+            horizontal-stretch: 1;
+            LineEdit { text <=> Hosts.add-hostname; placeholder-text: "10.0.1.42 or web-01.example.com"; }
+        }
+        Field {
+            label: "SSH port";
+            width: 96px;
+            LineEdit { text <=> Hosts.add-port; input-type: number; }
+        }
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        Field {
+            label: "Username";
+            horizontal-stretch: 1;
+            LineEdit { text <=> Hosts.add-username; }
+        }
+        Field {
+            label: "Signs in with";
+            horizontal-stretch: 1;
+            ComboBox {
+                model: HostChoices.auth-labels;
+                current-index <=> Hosts.add-auth-index;
+            }
+        }
+    }
+    Field {
+        label: "Device type";
+        hint: "Appliances get their own actions: config backups, API calls, SSH key push.";
+        ComboBox {
+            model: HostChoices.device-labels;
+            current-index <=> Hosts.add-device-index;
+        }
+    }
+    DialogButtons {
+        error: Hosts.add-error;
+        Button {
+            text: "Cancel";
+            enabled: !Hosts.add-busy;
+            clicked => { App.close-overlay(); }
+        }
+        Button {
+            text: Hosts.add-busy ? "Adding…" : "Add host";
+            primary: true;
+            enabled: root.ready && !Hosts.add-busy;
+            clicked => { Hosts.submit-add(); }
+        }
+    }
+}

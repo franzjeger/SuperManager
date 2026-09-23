@@ -1,0 +1,172 @@
+// The SSH keys page: every key the service holds, and the two things done
+// with one — copy its public half somewhere, or delete it.
+
+import { Button, ComboBox, LineEdit, ListView } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { App, ConfirmAction, KeyItem, Keys } from "state.slint";
+import { Badge, Card, DialogButtons, EmptyState, Field, PageHeader, Sheet, SubtleButton } from "widgets.slint";
+
+component KeyRow inherits Rectangle {
+    in property <KeyItem> key;
+
+    height: 68px;
+    accessible-role: list-item;
+    accessible-label: root.key.name + ", " + root.key.key-type;
+
+    Rectangle {
+        x: 4px;
+        y: 2px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        border-radius: Theme.control-radius;
+        background: hover.has-hover ? Theme.subtle-hover : transparent;
+        hover := TouchArea { }
+
+        HorizontalLayout {
+            padding-left: 16px;
+            padding-right: 8px;
+            spacing: 14px;
+            Image {
+                source: Icons.keys;
+                colorize: Theme.text-secondary;
+                width: 20px;
+                height: 20px;
+                y: (parent.height - self.height) / 2;
+            }
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: root.key.name;
+                        font-size: Theme.body;
+                        font-weight: 600;
+                        color: Theme.text;
+                        overflow: elide;
+                        vertical-alignment: center;
+                    }
+                    Badge { text: root.key.key-type; }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                Text {
+                    text: root.key.fingerprint + (root.key.created-at != "" ? "   ·   " + root.key.created-at : "");
+                    font-family: Theme.mono;
+                    font-size: Theme.caption;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+            }
+            SubtleButton {
+                icon: Icons.copy;
+                text: "Copy public key";
+                y: (parent.height - self.height) / 2;
+                enabled: App.daemon-online;
+                clicked => { Keys.copy-public(root.key.id); }
+            }
+            SubtleButton {
+                icon: Icons.delete;
+                accessible-label: "Delete " + root.key.name;
+                y: (parent.height - self.height) / 2;
+                enabled: App.daemon-online;
+                clicked => {
+                    App.confirm(ConfirmAction.delete-key, root.key.id,
+                        "Delete " + root.key.name + "?",
+                        "The private key is erased from this PC. Servers that trust its public key keep trusting it until you remove it there, but nothing can sign in with it any more.",
+                        "Delete");
+                }
+            }
+        }
+    }
+}
+
+export component KeysPage inherits VerticalLayout {
+    padding-left: 32px;
+    padding-right: 32px;
+    padding-top: 24px;
+    padding-bottom: 24px;
+    spacing: 16px;
+
+    PageHeader {
+        title: "SSH keys";
+        Button {
+            text: "Generate key";
+            icon: Icons.add;
+            colorize-icon: true;
+            enabled: App.daemon-online;
+            clicked => { Keys.open-add(); }
+        }
+    }
+
+    if Keys.items.length == 0: Card {
+        vertical-stretch: 1;
+        EmptyState {
+            icon: Icons.keys-large;
+            title: "No SSH keys yet";
+            body: "Generate a key here. The private half stays in Windows Credential Manager; copy the public half to the servers that should accept it.";
+            Button {
+                text: "Generate key";
+                icon: Icons.add;
+                colorize-icon: true;
+                primary: true;
+                enabled: App.daemon-online;
+                clicked => { Keys.open-add(); }
+            }
+        }
+    }
+
+    if Keys.items.length > 0: Card {
+        vertical-stretch: 1;
+        VerticalLayout {
+            padding-top: 4px;
+            padding-bottom: 4px;
+            ListView {
+                accessible-role: list;
+                accessible-label: "SSH keys";
+                for key in Keys.items: KeyRow { key: key; }
+            }
+        }
+    }
+}
+
+export component GenerateKeySheet inherits Sheet {
+    title: "Generate an SSH key";
+    sheet-width: 520px;
+    close => { if !Keys.add-busy { App.close-overlay(); } }
+
+    Field {
+        label: "Name";
+        LineEdit {
+            text <=> Keys.add-name;
+            placeholder-text: "frank@workstation";
+            init => { self.focus(); }
+        }
+    }
+    Field {
+        label: "Description (optional)";
+        LineEdit { text <=> Keys.add-description; placeholder-text: "Deploy key for the web servers"; }
+    }
+    Field {
+        label: "Type";
+        hint: "Ed25519 is short, fast and accepted everywhere current. Choose RSA only for systems that need it.";
+        ComboBox {
+            model: ["Ed25519 (recommended)", "RSA 4096", "RSA 2048"];
+            current-index <=> Keys.add-type-index;
+        }
+    }
+    DialogButtons {
+        error: Keys.add-error;
+        Button {
+            text: "Cancel";
+            enabled: !Keys.add-busy;
+            clicked => { App.close-overlay(); }
+        }
+        Button {
+            text: Keys.add-busy ? "Generating…" : "Generate";
+            primary: true;
+            enabled: Keys.add-name != "" && !Keys.add-busy;
+            clicked => { Keys.submit-add(); }
+        }
+    }
+}

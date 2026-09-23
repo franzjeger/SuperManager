@@ -1,0 +1,110 @@
+// Design tokens for the Windows GUI.
+//
+// The std widgets (Button, LineEdit, Switch, …) come from Slint's fluent
+// style, which follows the Windows light/dark setting and accent colour on
+// its own. Everything drawn here — the navigation pane, cards, status
+// colours — takes its colours from `Theme`, which reads the same switch, so
+// custom surfaces and std widgets never disagree about the mode.
+//
+// Values are the Windows 11 (WinUI 3) system colours: Mica base for the
+// window, a slightly lighter layer for the content area, white or near-black
+// cards, and the WinUI status palette for success, caution and critical.
+
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    // ── Surfaces ────────────────────────────────────────────────────────
+    out property <color> window: dark ? #202020 : #f3f3f3;
+    out property <color> layer: dark ? #272727 : #f9f9f9;
+    out property <color> layer-stroke: dark ? #1d1d1d : #e5e5e5;
+    out property <color> card: dark ? #2b2b2b : #ffffff;
+    out property <color> card-stroke: dark ? #1d1d1d : #e5e5e5;
+    out property <color> card-secondary: dark ? #262626 : #f7f7f7;
+    out property <color> subtle-hover: dark ? #ffffff0f : #0000000a;
+    out property <color> subtle-pressed: dark ? #ffffff0a : #00000006;
+    out property <color> subtle-selected: dark ? #ffffff14 : #0000000f;
+    out property <color> divider: dark ? #ffffff14 : #0000000f;
+    out property <color> scrim: dark ? #00000099 : #0000004d;
+    out property <color> console: dark ? #1b1b1b : #f5f5f5;
+    out property <color> console-stroke: dark ? #333333 : #e0e0e0;
+
+    // ── Text ────────────────────────────────────────────────────────────
+    out property <color> text: dark ? #ffffff : #1b1b1b;
+    out property <color> text-secondary: dark ? #d0d0d0 : #5d5d5d;
+    out property <color> text-tertiary: dark ? #9a9a9a : #8b8b8b;
+    out property <color> text-disabled: dark ? #6b6b6b : #a8a8a8;
+
+    // ── Accent — the system accent, as the fluent style resolves it ─────
+    out property <brush> accent: Palette.accent-background;
+    out property <brush> on-accent: Palette.accent-foreground;
+    out property <color> accent-text: dark ? #99ebff : #003e92;
+
+    // ── Status (WinUI system fill colours) ──────────────────────────────
+    out property <color> success: dark ? #6ccb5f : #0f7b0f;
+    out property <color> caution: dark ? #fce100 : #9d5d00;
+    out property <color> critical: dark ? #ff99a4 : #c42b1c;
+    out property <color> neutral: dark ? #9d9d9d : #8a8a8a;
+    out property <color> success-bg: dark ? #393d1b : #dff6dd;
+    out property <color> caution-bg: dark ? #433519 : #fff4ce;
+    out property <color> critical-bg: dark ? #442726 : #fde7e9;
+    out property <color> info-bg: dark ? #2e2e2e : #f6f6f6;
+
+    // Destructive buttons: the WinUI critical red, readable on both modes.
+    out property <color> danger: #c42b1c;
+    out property <color> danger-hover: #b3271a;
+    out property <color> danger-pressed: #9f2317;
+
+    // ── Type ramp (WinUI) ───────────────────────────────────────────────
+    out property <length> caption: 12px;
+    out property <length> body: 14px;
+    out property <length> body-large: 18px;
+    out property <length> subtitle: 20px;
+    out property <length> title: 28px;
+    // On every Windows since Vista; Cascadia only ships with Windows 11.
+    out property <string> mono: "Consolas";
+
+    // ── Shape ───────────────────────────────────────────────────────────
+    out property <length> control-radius: 4px;
+    out property <length> card-radius: 8px;
+    out property <length> overlay-radius: 8px;
+}
+
+// Fluent System Icons (MIT, © Microsoft — see icons/LICENSE-fluentui-system-icons).
+// Monochrome; every use sets `colorize` so they follow the theme.
+export global Icons {
+    out property <image> vpn: @image-url("icons/vpn.svg");
+    out property <image> vpn-large: @image-url("icons/vpn-large.svg");
+    out property <image> hosts: @image-url("icons/hosts.svg");
+    out property <image> hosts-large: @image-url("icons/hosts-large.svg");
+    out property <image> keys: @image-url("icons/keys.svg");
+    out property <image> keys-large: @image-url("icons/keys-large.svg");
+    out property <image> settings: @image-url("icons/settings.svg");
+    out property <image> add: @image-url("icons/add.svg");
+    out property <image> delete: @image-url("icons/delete.svg");
+    out property <image> edit: @image-url("icons/edit.svg");
+    out property <image> copy: @image-url("icons/copy.svg");
+    out property <image> refresh: @image-url("icons/refresh.svg");
+    out property <image> retry: @image-url("icons/retry.svg");
+    out property <image> search: @image-url("icons/search.svg");
+    out property <image> connect: @image-url("icons/connect.svg");
+    out property <image> disconnect: @image-url("icons/disconnect.svg");
+    out property <image> dismiss: @image-url("icons/dismiss.svg");
+    out property <image> success: @image-url("icons/success.svg");
+    out property <image> error: @image-url("icons/error.svg");
+    out property <image> warning: @image-url("icons/warning.svg");
+    out property <image> info: @image-url("icons/info.svg");
+    out property <image> document: @image-url("icons/document.svg");
+    out property <image> folder: @image-url("icons/folder.svg");
+    out property <image> globe: @image-url("icons/globe.svg");
+    out property <image> pin: @image-url("icons/pin.svg");
+    out property <image> pin-off: @image-url("icons/pin-off.svg");
+    out property <image> run: @image-url("icons/run.svg");
+    out property <image> back: @image-url("icons/back.svg");
+    out property <image> open: @image-url("icons/open.svg");
+    out property <image> download: @image-url("icons/download.svg");
+    out property <image> lock: @image-url("icons/lock.svg");
+    out property <image> test: @image-url("icons/test.svg");
+    out property <image> app: @image-url("../../contrib/icons/hicolor/64.png");
+}
