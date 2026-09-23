@@ -38,7 +38,7 @@
 
     <util:RegistrySearch Id="VcRuntimeSearch" Variable="VcRuntimeVersion"
                          Root="HKLM" Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
-                         Value="Version" Result="value" Bitness="always64" />
+                         Value="Version" Result="value" Bitness="always32" />
     <Chain>
       <ExePackage Id="VcRuntime" SourceFile="vendor\vc_redist.x64.exe"
                   PerMachine="yes" Permanent="yes" Vital="yes"
