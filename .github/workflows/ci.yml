@@ -44,6 +44,9 @@ jobs:
           printf '  %s\n' "${files[@]}"
           shellcheck -S style -f gcc "${files[@]}"
 
+      - name: Test macOS distribution provisioning policy
+        run: python3 -m unittest discover -s scripts/tests -p 'test_*provisioning.py' -v
+
       # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
       - name: Parse every tracked shell script
         run: |

@@ -1,46 +1,10 @@
 import Foundation
 import Security
 
-/// Stores VPN credentials in the macOS **Data Protection Keychain**.
-///
-/// ## Why DPK
-///
-/// macOS exposes two keychains. The **legacy file-based keychain** pins
-/// every item to the calling app's *cdhash*; every ad-hoc rebuild gives
-/// you a fresh cdhash, the OS treats it as a different process, and the
-/// user gets the "Type your login password to allow access" prompt on
-/// every read. Unworkable for development.
-///
-/// The **Data Protection Keychain** (the one iOS has always used,
-/// ported to macOS in 10.15) replaces cdhash pinning with **access
-/// groups** keyed on the bundle id, which is stable across rebuilds.
-/// Items are file-system-encrypted on disk and only readable while the
-/// user's session is unlocked.
-///
-/// To opt into DPK we need two things:
-///
-/// 1. `kSecUseDataProtectionKeychain: true` on every SecItem call.
-/// 2. A `keychain-access-groups` entitlement on the signed bundle.
-///    Without it, every SecItem call returns
-///    `errSecMissingEntitlement` (-34018).
-///
-/// The entitlement is gated on the binary being signed with an explicit
-/// **App ID**. Per Apple DTS Quinn: *"To use the data protection
-/// keychain your app must be signed with an App ID."* Two ways to get
-/// one:
-///
-/// - **Paid Apple Developer Program** — issues full Developer ID + App
-///   IDs at will. We have one pending KYC verification (pass + Sybr AS
-///   firmaattest still under Apple's review).
-/// - **Free Apple ID via Xcode "Personal Team"** — Xcode synthesises
-///   an App ID for the project, but only when the project carries a
-///   capability that triggers it. Quinn explicitly cites Maps:
-///   adding it to Signing & Capabilities forces App ID creation.
-///   That entitles `keychain-access-groups`, which is what we need.
-///
-/// We're using the second path while the paid enrollment processes.
-/// Once Developer ID lands, the entitlement is the same — just signed
-/// with a stronger identity. No code changes.
+/// VPN secrets stay in the Data Protection Keychain across updates.
+/// Both development and Developer ID builds must carry an App ID, the same
+/// access group, and a provisioning profile authorizing their signing certificate.
+/// A Developer ID signature alone does not grant access (-34018).
 enum VPNKeychain {
     /// Keychain `service` string. Combined with `account` it forms the
     /// unique key for each item.
@@ -52,6 +16,9 @@ enum VPNKeychain {
 
         var errorDescription: String? {
             switch self {
+            case .osStatus(let s, _) where s == errSecMissingEntitlement:
+                return "This SuperManager build is missing valid Keychain permissions (-34018). " +
+                    "Install a corrected signed update. Creating another VPN profile will not fix this."
             case .osStatus(let s, let op):
                 return "Keychain \(op) failed (\(s))"
             case .missingReference:
@@ -68,15 +35,7 @@ enum VPNKeychain {
             kSecClass as String:                kSecClassGenericPassword,
             kSecAttrService as String:          service,
             kSecAttrAccount as String:          account,
-            // The fix: items live in the modern data-protection keychain.
-            // Without this flag SecItem* drops into the legacy file-based
-            // keychain (cdhash-pinned ACLs, prompt on every rebuild).
             kSecUseDataProtectionKeychain as String: true,
-            // Items are readable while the user is logged in. We don't
-            // need them to migrate to a different Mac via backup-restore,
-            // so plain `WhenUnlocked` is the right knob (not the
-            // ThisDeviceOnly variant — for VPN passwords roaming via
-            // iCloud Keychain is actually a feature, not a hazard).
             kSecAttrAccessible as String:       kSecAttrAccessibleWhenUnlocked,
         ]
     }
@@ -123,6 +82,29 @@ enum VPNKeychain {
             throw KeychainError.osStatus(errSecDecode, "decode utf8")
         }
         return s
+    }
+
+    /// Release gate: uses only a unique disposable account, never user secrets.
+    /// Runs in the signed app process, because a separate test tool has different entitlements.
+    static func selfTest() throws {
+        let account = "release-self-test/\(UUID().uuidString)"
+        defer { delete(account: account) }
+        for value in [Data("initial".utf8), Data("updated".utf8)] {
+            try set(value, account: account)
+            guard try getData(account: account) == value else {
+                throw KeychainError.osStatus(errSecDecode, "self-test readback")
+            }
+        }
+        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        guard status == errSecSuccess else {
+            throw KeychainError.osStatus(status, "self-test delete")
+        }
+        do {
+            _ = try getData(account: account)
+        } catch KeychainError.osStatus(let status, _) where status == errSecItemNotFound {
+            return
+        }
+        throw KeychainError.osStatus(errSecInternalComponent, "self-test deletion verification")
     }
 
     /// Delete an item. Missing items are ignored.

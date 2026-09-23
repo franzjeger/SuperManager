@@ -119,6 +119,46 @@ build is best done after the Developer ID path is committed.
 5. **Update `project.yml`'s `DEVELOPMENT_TEAM`** if your paid Team ID
    differs from the Personal Team ID currently baked in.
 
+### Required Keychain authorization
+
+VPN and master-password storage use the Data Protection Keychain. A Developer ID
+certificate alone does **not** authorize it. Stripping restricted entitlements
+lets the app launch but causes `errSecMissingEntitlement` (-34018), even when
+adding a new VPN. Never work around this by deleting users' profiles or passwords.
+
+Git-triggered releases fetch provisioning directly from Apple's App Store Connect
+API using the existing `AC_API_KEY_BASE64`, `AC_API_KEY_ID`, and `AC_API_ISSUER_ID`
+GitHub secrets. The key must be a **team API key** with Certificates, Identifiers
+& Profiles access, not a notarization-only credential.
+
+No `MACOS_PROVISION_PROFILE` secret or manual profile upload is needed. Each run:
+
+1. Matches the imported Developer ID signing certificate by its exact bytes.
+2. Retrieves an active `MAC_APP_DIRECT` profile for `com.sybr.supermanager` that
+   authorizes that certificate and the stable `LY6LJ395B8.com.sybr.supermanager`
+   Keychain group.
+3. Reuses it while valid, or creates a new one if missing, invalid, within 30 days
+   of expiry, or if the signing certificate changed. Old profiles are retained
+   because previously installed apps may still depend on them.
+4. Validates the downloaded profile before building/signing the app.
+
+The existing signing certificate/private key and Apple API credentials remain
+GitHub secrets; they are never committed to Git. Revoked API keys or expired
+signing certificates still need credential maintenance, but profiles are handled
+automatically. Local releases use the same process; `DEVELOPER_ID_PROFILE` is an
+optional explicit override, not a requirement.
+
+The release script embeds this profile, signs with validated entitlements, checks
+that the final signing certificate is authorized, and runs
+`--keychain-self-test` inside the final app. This tests create/read/update/delete
+with a unique disposable record before notarization or publishing. A missing,
+expired, development, wrong-team, or mismatched profile blocks the release.
+The test requires an unlocked user Keychain session; a runner unable to access
+DPK must be fixed, not allowed to skip the gate.
+
+Existing passwords remain in the same group. A password never successfully saved
+by a broken build must be entered again after installing the corrected update.
+
 ### Per-release flow
 
 ```sh

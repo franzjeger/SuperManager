@@ -31,6 +31,8 @@
 #   AC_API_ISSUER_ID        — your Issuer ID (UUID)
 #
 # Optional environment variables:
+#   DEVELOPER_ID_PROFILE    — Explicit profile override for offline/local signing.
+#                             Normally fetched/renewed automatically using AC_API_*.
 #   DEVELOPER_ID_INSTALLER  — e.g. "Developer ID Installer: Your Name (LY6LJ395B8)"
 #                             When set the .pkg is signed and notarised.
 #                             When absent the .pkg is built unsigned (suitable
@@ -103,6 +105,19 @@ case "$identities" in
         ;;
 esac
 
+# Fetch/create the profile on the runner using the existing Apple API credentials.
+# No profile uploads or profile secrets are needed for Git-triggered releases.
+if [ -z "${DEVELOPER_ID_PROFILE:-}" ]; then
+    DEVELOPER_ID_PROFILE="$RELEASE_DIR/SuperManager.provisionprofile"
+    python3 "$SCRIPT_DIR/fetch_mac_provisioning.py" "$DEVELOPER_ID_PROFILE"
+fi
+
+# Validate authorization before building or changing version numbers.
+TEAM_ID="$(echo "$DEVELOPER_ID_APP" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
+APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-distribution.entitlements"
+python3 "$SCRIPT_DIR/validate_mac_provisioning.py" \
+    "$DEVELOPER_ID_PROFILE" "$TEAM_ID" "$APP_ENTITLEMENTS"
+
 # Sparkle's sign_update tool.
 SIGN_UPDATE=""
 for candidate in \
@@ -130,6 +145,11 @@ sed -i '' "s|CFBundleVersion: .*|CFBundleVersion: \"$VERSION\"|" \
 
 # ---- 3. Build Release -------------------------------------------------------
 
+# Build directly from this checkout even when a developer's Xcode build phase
+# skips cargo locally. Fresh GitHub runners have no prebuilt target/release files.
+echo "→ Building Rust release binaries from Git sources"
+(cd "$REPO_ROOT" && cargo build --release -p supermgrd-mac -p supermanager-helper)
+
 echo "→ Building Release configuration"
 cd "$REPO_ROOT/SuperManagerMac"
 xcodebuild \
@@ -141,7 +161,10 @@ xcodebuild \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGN_IDENTITY="" \
     clean build \
-    2>&1 | grep -E '(error:|warning:|BUILD)' || true
+    > "$RELEASE_DIR/build.log" 2>&1 || {
+        tail -80 "$RELEASE_DIR/build.log"
+        exit 1
+    }
 
 BUILD_DIR="$(xcodebuild -project SuperManager.xcodeproj -scheme SuperManagerMac \
     -configuration Release -showBuildSettings 2>/dev/null \
@@ -174,60 +197,9 @@ codesign --force --options runtime --timestamp \
     --entitlements "$REPO_ROOT/SuperManagerMac/Signing/supermanager-helper.entitlements" \
     "$APP/Contents/MacOS/com.sybr.supermanager.helper"
 
-# The app's OWN entitlements. Omitting these shipped v1.6.0 with no
-# keychain-access-groups at all: the data-protection keychain scopes
-# items by access group, so the release build could not read a single
-# VPN password it had written as a development build — every profile
-# failed to connect with errSecItemNotFound (-25300). `codesign
-# --verify` passes happily on an entitlement-less app; it validates the
-# signature, not what is in it.
-#
-# `$(AppIdentifierPrefix)` is an XCODE build-setting placeholder.
-# codesign does NOT expand it, so a resolved copy is generated here
-# with the real team prefix substituted.
-TEAM_ID="$(echo "$DEVELOPER_ID_APP" | sed -n 's/.*(\([A-Z0-9]*\))$/\1/p')"
-if [ -z "$TEAM_ID" ]; then
-    echo "error: could not parse team id out of \$DEVELOPER_ID_APP" >&2
-    exit 1
-fi
-# `keychain-access-groups` is a RESTRICTED entitlement: it must be
-# authorised by a provisioning profile matching the signing identity.
-# Xcode's development profile matches its Apple Development signature,
-# so dev builds are fine — but a Developer ID re-sign has no matching
-# profile, and AMFI then refuses to launch the app at all ("Launchd job
-# spawn failed", no crash report). Bisected on the 1.6.1 artifact:
-#
-#   no entitlements            -> launches
-#   keychain-access-groups     -> does not launch
-#   keychain-access-groups + embedded profile -> does not launch
-#
-# So distribution builds ship WITHOUT it. VPNKeychain never sets
-# kSecAttrAccessGroup explicitly, so items land in the app's default
-# data-protection group, derived from the signature — which works for a
-# stable Developer ID identity. The cost is one-time: credentials stored
-# by a locally-signed dev build are not visible to a released build, and
-# must be re-entered once.
-#
-# Doing this properly instead would mean a Developer ID provisioning
-# profile with keychain sharing from the Apple Developer portal, then
-# embedding it here. That is the upgrade path if credential continuity
-# across identities ever matters.
-APP_ENTITLEMENTS="$RELEASE_DIR/SuperManagerMac-distribution.entitlements"
-cat > "$APP_ENTITLEMENTS" <<'ENTITLEMENTS'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.security.app-sandbox</key>
-	<false/>
-</dict>
-</plist>
-ENTITLEMENTS
-echo "→ Distribution entitlements written (team ${TEAM_ID}, no restricted keys)"
-
-# A development provisioning profile does not belong in a Developer
-# ID-distributed app; Xcode embeds one and it is meaningless here.
-rm -f "$APP/Contents/embedded.provisionprofile"
+# DPK requires BOTH signed app identifiers/access groups and a matching
+# Developer ID provisioning profile. A certificate alone grants no DPK group.
+cp "$DEVELOPER_ID_PROFILE" "$APP/Contents/embedded.provisionprofile"
 
 # The bundled Tailscale CLI. The build phase signs these with whatever
 # identity Xcode used — Apple Development — and without a timestamp,
@@ -270,19 +242,10 @@ codesign --force --options runtime --timestamp \
 codesign --verify --verbose=2 "$APP"
 spctl --assess --type execute --verbose=2 "$APP" || true
 
-# Entitlements gate. The signature being valid says nothing about the
-# app being able to reach its own keychain items — v1.6.0 passed
-# --verify and shipped broken. Assert the group is actually present.
-echo "→ Verifying signed app kept its keychain access group"
-app_entitlements="$(codesign -d --entitlements - "$APP" 2>&1 || true)"
-case "$app_entitlements" in
-    *keychain-access-groups*)
-        echo "error: signed app carries keychain-access-groups." >&2
-        echo "       That entitlement needs a matching provisioning profile;" >&2
-        echo "       without one AMFI refuses to launch the app at all." >&2
-        exit 1
-        ;;
-esac
+# Validate the actual artifact, including certificate membership in the profile.
+python3 "$SCRIPT_DIR/validate_mac_provisioning.py" \
+    "$APP/Contents/embedded.provisionprofile" "$TEAM_ID" "$APP_ENTITLEMENTS" --app "$APP"
+
 # The nested entitlement plists are deliberately EMPTY — the helper's
 # own comment explains it needs no keychain access, since secrets reach
 # it as RPC arguments. So there is nothing to assert about their
@@ -297,11 +260,19 @@ for nested in "$APP/Contents/MacOS/supermgrd-mac" \
 done
 echo "  entitlements sane (app), nested binaries validly signed"
 
-# THE gate that was missing all along: does the signed app actually
-# LAUNCH? Every other check verified a property of the artifact —
-# signature valid, notarization accepted, ticket stapled, entitlements
-# present — and 1.6.1 passed all of them and could not start. AMFI
-# rejects at exec time, so nothing short of running it finds that.
+# Exercise CRUD from the FINAL signed executable, with its own entitlements.
+# Launching a window alone never detected the -34018 regression.
+echo "→ Testing Keychain access in the signed app"
+python3 - "$APP/Contents/MacOS/SuperManagerMac" <<'PYPROBE'
+import subprocess
+import sys
+try:
+    subprocess.run([sys.argv[1], "--keychain-self-test"], check=True, timeout=30)
+except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+    sys.exit(f"error: signed app Keychain self-test failed: {error}")
+PYPROBE
+
+# Also retain the normal application startup check.
 echo "→ Launch test on the signed app"
 launch_probe="$RELEASE_DIR/launch-probe"
 rm -rf "$launch_probe" && mkdir -p "$launch_probe"

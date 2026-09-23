@@ -23,7 +23,7 @@ extension Notification.Name {
 
 @main
 struct SuperManagerApp: App {
-    @State private var appState = AppState()
+    @State private var appState: AppState
     /// Bound to the MenuBarExtra's `isInserted` below. Uses the same
     /// UserDefaults key `AppSettings.showMenuBarItem` writes, so the Settings
     /// toggle and this stay in step without a second source of truth —
@@ -36,6 +36,17 @@ struct SuperManagerApp: App {
     @State private var autoLockTask: Task<Void, Never>? = nil
 
     init() {
+        if CommandLine.arguments.contains("--keychain-self-test") {
+            do {
+                try VPNKeychain.selfTest()
+                print("Keychain self-test passed (create, read, update, delete)")
+                exit(EXIT_SUCCESS)
+            } catch {
+                fputs("Keychain self-test failed: \(error.localizedDescription)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+        }
+        _appState = State(initialValue: AppState())
         // Install crash reporter handlers FIRST, before any
         // app code runs. Catches Mach exceptions + signals from
         // startup-time crashes (malformed preference dict, etc).

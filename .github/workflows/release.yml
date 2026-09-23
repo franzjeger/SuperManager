@@ -26,6 +26,8 @@ name: Release
 #                                    "Developer ID Installer: Your Name (TEAM_ID)"
 #                                    Required when MACOS_INSTALLER_CERT is set.
 #   AC_API_KEY_BASE64              — `base64 -i AuthKey_XXXXXX.p8 -o key.b64`
+#                                    Team key with Certificates, Identifiers & Profiles access.
+#                                    Also retrieves/renews the Developer ID profile automatically.
 #   AC_API_KEY_ID                  — 10-char key id from App Store Connect
 #   AC_API_ISSUER_ID               — UUID from App Store Connect → Integrations
 #   SPARKLE_PRIVATE_KEY            — Sparkle EdDSA private key (base64).
@@ -43,6 +45,11 @@ on:
   push:
     tags:
       - 'v*.*.*'
+
+# Serialize provisioning and appcast publication across release tags.
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
 
 # Tighten workflow default to read-only — only the release job
 # opts in to `contents: write` for the GitHub Release upload.
