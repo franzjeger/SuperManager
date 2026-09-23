@@ -149,12 +149,12 @@ enum HelperInstaller {
         printf '%s' \(q(plistB64)) | /usr/bin/base64 -d > \(q(systemPlistPath))
         chown root:wheel \(q(systemPlistPath))
         chmod 644 \(q(systemPlistPath))
-        cp \(q(bundledHelper.path)) \(q(systemBinaryPath))
-        chown root:wheel \(q(systemBinaryPath))
-        chmod 755 \(q(systemBinaryPath))
-        # Replace any existing daemon registration; bootout is a no-op the
-        # first time. Then bootstrap from the freshly-written plist.
+        # Verify before stopping the existing service. Never overwrite a
+        # signed executable in place: macOS may retain its old code pages.
+        /usr/bin/codesign --verify --strict \(q(bundledHelper.path))
         launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
+        \(atomicReplacementScript(source: bundledHelper.path, destination: systemBinaryPath))
+        chown root:wheel \(q(systemBinaryPath))
         for attempt in {1..5}; do
             if launchctl bootstrap system \(q(systemPlistPath)); then break; fi
             sleep 0.3
@@ -198,6 +198,23 @@ enum HelperInstaller {
         throw InstallError.manualInstallFailed(
             "helper installed but a matching build did not become ready; check /var/log/supermanager-helper.log"
         )
+    }
+
+    /// Stage on the destination filesystem, validate, then rename to a new
+    /// inode. In-place copies of a previously executed signed Mach-O can be
+    /// killed by macOS even when codesign says the on-disk bytes are valid.
+    /// Exposed internally so tests execute the exact installer operation.
+    static func atomicReplacementScript(source: String, destination: String) -> String {
+        let stagedTemplate = destination + ".XXXXXX"
+        return """
+        helper_staged=$(/usr/bin/mktemp \(shellQuote(stagedTemplate)))
+        trap '/bin/rm -f "$helper_staged"' EXIT
+        /bin/cp \(shellQuote(source)) "$helper_staged"
+        /bin/chmod 755 "$helper_staged"
+        /usr/bin/codesign --verify --strict "$helper_staged"
+        /bin/mv -f "$helper_staged" \(shellQuote(destination))
+        trap - EXIT
+        """
     }
 
     /// Removes the daemon. Best-effort: errors don't propagate because
