@@ -43,6 +43,7 @@
       <ExePackage Id="VcRuntime" SourceFile="vendor\vc_redist.x64.exe"
                   PerMachine="yes" Permanent="yes" Vital="yes"
                   DetectCondition="VcRuntimeVersion &gt;= v14.44.35211.0"
+                  RepairCondition="VcRuntimeVersion = v14.44.35211.0"
                   InstallArguments="/install /quiet /norestart"
                   RepairArguments="/repair /quiet /norestart" />
       <!-- WireGuard for Windows. Downloaded by the build script to

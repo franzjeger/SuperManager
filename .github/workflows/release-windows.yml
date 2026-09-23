@@ -61,7 +61,7 @@ jobs:
             -p supermgr-mcp
 
       - name: Test Windows daemon
-        run: cargo test --locked -p supermgrd-win
+        run: cargo test --release --locked -p supermgrd-win
 
       - name: Install WiX v5
         run: |
