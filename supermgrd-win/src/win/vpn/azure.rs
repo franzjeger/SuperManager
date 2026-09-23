@@ -235,8 +235,8 @@ impl Ikev2Backend {
         info!(upn, "Azure: authenticated");
 
         // ── Step 2 — Tempfiles ──────────────────────────────────────────────
-        let tmp_dir =
-            crate::win::paths::create_private_runtime_dir(&profile.id).map_err(VpnError::Io)?;
+        let tmp_dir = crate::win::paths::create_private_runtime_dir("azure", &profile.id)
+            .map_err(VpnError::Io)?;
 
         let key_path = tmp_dir.path().join("tls-auth.key");
         let auth_path = tmp_dir.path().join("auth.txt");

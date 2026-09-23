@@ -12,12 +12,16 @@
 //!    needs auth-user-pass). It is given to OpenVPN over the management
 //!    interface when OpenVPN asks for it, never written to disk.
 //! 2. Pick a free localhost port and spawn `openvpn.exe --config <path>
-//!    --management 127.0.0.1 <port> stdin --management-query-passwords
-//!    --management-hold`, with a one-off management password on stdin.
-//! 3. Connect to the management port, log in with that password, switch
-//!    on state events and send `hold release`, then read `>STATE:`
-//!    messages until we see `CONNECTED,SUCCESS` (tunnel up) or `>FATAL` /
-//!    process exit (tunnel failed).
+//!    --management 127.0.0.1 <port> <password file>
+//!    --management-query-passwords --management-hold`. The one-off
+//!    management password is in a file only SYSTEM and Administrators can
+//!    read, removed once OpenVPN has used it.
+//! 3. Connect to the management port and log in: wait for OpenVPN's
+//!    `ENTER PASSWORD:`, answer with the password, wait for it to be
+//!    accepted. Switch on state events, release the hold when OpenVPN
+//!    announces it (`>HOLD:`), then read `>STATE:` messages until we see
+//!    `CONNECTED,SUCCESS` (tunnel up) or `>FATAL` / process exit (tunnel
+//!    failed).
 //! 4. Spawn a background watcher that keeps reading the management
 //!    stream so OpenVPN never blocks writing further state messages.
 //! 5. On disconnect: send `signal SIGTERM` over the management socket
@@ -50,6 +54,15 @@ use super::{output, VpnBackend, VpnError};
 /// Soft cap on bring-up time. OpenVPN handshakes complete in under a
 /// second for healthy gateways and trip TLS retries past 30 s.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How long OpenVPN has to greet the management client and accept its
+/// password. It is already listening by then, so this is only ever reached
+/// when something is wrong.
+const MGMT_LOGIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How many management-interface lines to keep for the log when a connect
+/// fails.
+const HEARD_LINES: usize = 40;
 
 /// Active OpenVPN tunnel state. Holds onto the child process and the
 /// management-socket reader so disconnect can issue a graceful SIGTERM
@@ -194,6 +207,18 @@ impl OpenVpnBackend {
         let openvpn_exe = locate_openvpn()?;
         let mgmt_port = pick_free_port().await?;
 
+        // The management interface's password, random per connect, in a
+        // file only SYSTEM and Administrators can read, for as long as it
+        // takes OpenVPN to read it. `--management … stdin` is meant for a
+        // person at a console: OpenVPN on Linux refuses a pipe outright,
+        // and on Windows a client was seen starting with no management
+        // password at all, taking the password line for a command.
+        let mgmt_password = uuid::Uuid::new_v4().to_string();
+        let runtime = crate::win::paths::create_private_runtime_dir("openvpn", &profile.id)
+            .map_err(VpnError::Io)?;
+        let mgmt_password_file = runtime.path().join("management.pw");
+        std::fs::write(&mgmt_password_file, format!("{mgmt_password}\n")).map_err(VpnError::Io)?;
+
         // Credentials are supplied over the management interface's password
         // query (answered in `wait_for_connected`), never written to disk.
         // The previous implementation wrote them to
@@ -235,7 +260,7 @@ impl OpenVpnBackend {
             .arg("--management")
             .arg("127.0.0.1")
             .arg(mgmt_port.to_string())
-            .arg("stdin")
+            .arg(&mgmt_password_file)
             .arg("--management-hold")
             .arg("--management-query-passwords");
         if auth_creds.is_some() {
@@ -252,7 +277,7 @@ impl OpenVpnBackend {
             .arg("--suppress-timestamps")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
 
         let mut child = command.spawn().map_err(|e| {
@@ -267,19 +292,6 @@ impl OpenVpnBackend {
         // The management interface reports progress; the log is for the
         // explanation when there is no progress to report.
         let (tail, _) = output::capture(&mut child);
-
-        // Send the management password on stdin. With `--management ...
-        // stdin` openvpn reads the first line from stdin as the password.
-        // Random token so the management protocol is authenticated even
-        // though nobody outside localhost can reach it.
-        let mgmt_password = uuid::Uuid::new_v4().to_string();
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(format!("{mgmt_password}\n").as_bytes())
-                .await
-                .map_err(VpnError::Io)?;
-            drop(stdin);
-        }
 
         let mgmt_addr: SocketAddr = format!("127.0.0.1:{mgmt_port}").parse().unwrap();
         let stream = match timeout(Duration::from_secs(5), connect_mgmt(mgmt_addr)).await {
@@ -310,17 +322,36 @@ impl OpenVpnBackend {
 
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
+        let mut heard = Heard::default();
 
-        // Log in, enable state events, release the hold, then wait for
-        // `>STATE:.*,CONNECTED`. OpenVPN greets the client with `ENTER
-        // PASSWORD:` and compares the whole next line with the password, so
-        // the line is the bare password. (`password "…"` is how credential
-        // queries are answered; sent here it was a wrong password, and with
-        // `state on` and `hold release` after it, three of them: OpenVPN
-        // refused the client, and no OpenVPN connect got past this point.)
-        write_mgmt(&mut writer, &format!("{mgmt_password}\n")).await?;
+        // Log in before anything else is said: until the password is
+        // accepted, OpenVPN takes every line it is sent as a password
+        // attempt, and after three wrong ones it refuses the client.
+        let login = timeout(
+            MGMT_LOGIN_TIMEOUT,
+            mgmt_login(&mut reader, &mut writer, &mgmt_password, &mut heard),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(VpnError::Subprocess {
+                code: -1,
+                stderr: format!(
+                    "OpenVPN did not accept the management login within {} s",
+                    MGMT_LOGIN_TIMEOUT.as_secs()
+                ),
+            })
+        });
+        if let Err(e) = login {
+            let _ = child.kill().await;
+            heard.log();
+            return Err(explain(e, &tail));
+        }
+        // OpenVPN read the password file before it started listening.
+        drop(runtime);
+
+        // State events, then the hold: `wait_for_connected` releases it
+        // when OpenVPN announces it.
         write_mgmt(&mut writer, "state on\n").await?;
-        write_mgmt(&mut writer, "hold release\n").await?;
 
         let mut last_state = String::new();
         let success = timeout(
@@ -330,6 +361,7 @@ impl OpenVpnBackend {
                 &mut writer,
                 auth_creds.as_ref(),
                 &mut last_state,
+                &mut heard,
             ),
         )
         .await;
@@ -337,10 +369,12 @@ impl OpenVpnBackend {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let _ = child.kill().await;
+                heard.log();
                 return Err(explain(e, &tail));
             }
             Err(_) => {
                 let _ = child.kill().await;
+                heard.log();
                 tail.log_failure("OpenVPN");
                 let said = tail
                     .reason()
@@ -451,6 +485,91 @@ fn mgmt_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Log in to the management interface.
+///
+/// OpenVPN greets the client with `ENTER PASSWORD:` — no line end — and
+/// compares the whole next line with the password: the bare password, not
+/// a `password "…"` command, which is how credential queries are answered.
+/// Nothing else is sent until OpenVPN says the password is correct.
+async fn mgmt_login<R>(
+    reader: &mut R,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    password: &str,
+    heard: &mut Heard,
+) -> Result<(), VpnError>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    let closed = || VpnError::Subprocess {
+        code: -1,
+        stderr: "OpenVPN closed the management connection during the login".into(),
+    };
+    // The greeting, read up to its colon since no line end follows it.
+    let mut chunk = Vec::new();
+    loop {
+        chunk.clear();
+        if reader
+            .read_until(b':', &mut chunk)
+            .await
+            .map_err(VpnError::Io)?
+            == 0
+        {
+            return Err(closed());
+        }
+        let text = String::from_utf8_lossy(&chunk);
+        heard.push(text.trim());
+        if text.trim_end().ends_with("ENTER PASSWORD:") {
+            break;
+        }
+    }
+    write_mgmt(writer, &format!("{password}\n")).await?;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).await.map_err(VpnError::Io)? == 0 {
+            return Err(closed());
+        }
+        let text = line.trim();
+        heard.push(text);
+        if text.starts_with("SUCCESS: password is correct") {
+            return Ok(());
+        }
+        if text.starts_with("ERROR: bad password") {
+            return Err(VpnError::Subprocess {
+                code: -1,
+                stderr: "OpenVPN refused the management password it was started with".into(),
+            });
+        }
+    }
+}
+
+/// The last lines the management interface sent, for the log when a
+/// connect fails: state changes, holds, the replies to our commands.
+#[derive(Default)]
+struct Heard(std::collections::VecDeque<String>);
+
+impl Heard {
+    fn push(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
+        if self.0.len() == HEARD_LINES {
+            self.0.pop_front();
+        }
+        self.0.push_back(line.to_owned());
+    }
+
+    fn log(&self) {
+        if !self.0.is_empty() {
+            let lines: Vec<&str> = self.0.iter().map(String::as_str).collect();
+            warn!(
+                "OpenVPN management interface, before the failure:\n{}",
+                lines.join("\n")
+            );
+        }
+    }
+}
+
 async fn write_mgmt(w: &mut tokio::net::tcp::OwnedWriteHalf, line: &str) -> Result<(), VpnError> {
     w.write_all(line.as_bytes()).await.map_err(VpnError::Io)
 }
@@ -463,6 +582,7 @@ async fn wait_for_connected(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     auth_creds: Option<&(String, String)>,
     last_state: &mut String,
+    heard: &mut Heard,
 ) -> Result<(), VpnError> {
     let mut line = String::new();
     loop {
@@ -475,7 +595,16 @@ async fn wait_for_connected(
             });
         }
         let trimmed = line.trim_end();
-        if let Some(rest) = trimmed.strip_prefix(">STATE:") {
+        heard.push(trimmed);
+        if trimmed.starts_with(">HOLD:") {
+            // OpenVPN waits here at start and, while the hold flag
+            // `--management-hold` set is on, after every restart. A release
+            // sent before this announcement is not remembered, so this is
+            // when to send it. `hold off` first: a reconnect later — a
+            // ping-restart, a network change — must not wait for a release
+            // nobody is there to send.
+            write_mgmt(writer, "hold off\nhold release\n").await?;
+        } else if let Some(rest) = trimmed.strip_prefix(">STATE:") {
             // Format: timestamp,state,detail,...
             let parts: Vec<&str> = rest.splitn(4, ',').collect();
             let state = parts.get(1).copied().unwrap_or("");
@@ -587,7 +716,104 @@ async fn tear_down(mut active: OvpnActive) {
 
 #[cfg(test)]
 mod tests {
-    use super::{mgmt_escape, step};
+    use super::{mgmt_escape, mgmt_login, step, wait_for_connected, write_mgmt, Heard, VpnError};
+    use tokio::{
+        io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+        net::{TcpListener, TcpStream},
+    };
+
+    /// Connect to a stand-in for OpenVPN's end of the management interface.
+    async fn talk_to(
+        listener: &TcpListener,
+    ) -> (
+        BufReader<tokio::net::tcp::OwnedReadHalf>,
+        tokio::net::tcp::OwnedWriteHalf,
+    ) {
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (reader, writer) = stream.into_split();
+        (BufReader::new(reader), writer)
+    }
+
+    #[tokio::test]
+    async fn the_management_conversation_follows_openvpns_order() {
+        // What OpenVPN 2.6 does, as seen from a real client: a greeting with
+        // no line end, then every line is a password attempt until one is
+        // right; the hold is announced after the login, and a release sent
+        // before the announcement is lost.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (mut reader, mut writer) = talk_to(&listener).await;
+        let openvpn = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (from_client, mut to_client) = socket.into_split();
+            let mut from_client = BufReader::new(from_client);
+            let mut line = String::new();
+            to_client.write_all(b"ENTER PASSWORD:").await.unwrap();
+            from_client.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "secret\n", "the first line is the bare password");
+            to_client
+                .write_all(
+                    b"SUCCESS: password is correct\r\n\
+                      >INFO:OpenVPN Management Interface Version 5\r\n\
+                      >HOLD:Waiting for hold release:0\r\n",
+                )
+                .await
+                .unwrap();
+            let mut said = Vec::new();
+            for _ in 0..3 {
+                line.clear();
+                from_client.read_line(&mut line).await.unwrap();
+                said.push(line.trim_end().to_owned());
+            }
+            assert_eq!(said, ["state on", "hold off", "hold release"]);
+            to_client
+                .write_all(b">STATE:1,CONNECTED,SUCCESS,10.8.0.2,192.0.2.1,1194,,\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut heard = Heard::default();
+        mgmt_login(&mut reader, &mut writer, "secret", &mut heard)
+            .await
+            .unwrap();
+        write_mgmt(&mut writer, "state on\n").await.unwrap();
+        let mut last_state = String::new();
+        wait_for_connected(&mut reader, &mut writer, None, &mut last_state, &mut heard)
+            .await
+            .unwrap();
+        assert_eq!(last_state, "CONNECTED");
+        openvpn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_management_password_is_an_error_not_a_wait() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (mut reader, mut writer) = talk_to(&listener).await;
+        let openvpn = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (from_client, mut to_client) = socket.into_split();
+            let mut line = String::new();
+            to_client.write_all(b"ENTER PASSWORD:").await.unwrap();
+            BufReader::new(from_client)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            to_client
+                .write_all(b"ERROR: bad password\r\n")
+                .await
+                .unwrap();
+        });
+
+        let err = mgmt_login(&mut reader, &mut writer, "secret", &mut Heard::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, VpnError::Subprocess { stderr, .. } if stderr.contains("refused the management password")),
+            "{err:?}"
+        );
+        openvpn.await.unwrap();
+    }
 
     #[test]
     fn a_stalled_handshake_names_the_step_it_stalled_on() {

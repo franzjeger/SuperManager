@@ -133,9 +133,10 @@ pub fn exit_reason(client: &str, status: std::process::ExitStatus, tail: &Tail) 
 /// versions, every retry. The explanation is the last line that reads like
 /// one, so search from the end. OpenVPN ends every fatal error with the
 /// same "Exiting due to fatal error", which explains nothing: it is only
-/// the answer when no line before it does. Nothing matching means the
-/// client's output has no explanation to offer, and the caller says what
-/// it knows instead.
+/// the answer when no line before it does. Its "Note:" lines are never the
+/// answer — every 2.6 client starts with one about cipher negotiation that
+/// has "failed" in it. Nothing matching means the client's output has no
+/// explanation to offer, and the caller says what it knows instead.
 pub fn failure_line(lines: &[String]) -> Option<String> {
     const MARKERS: &[&str] = &[
         "AUTH_FAILED",
@@ -159,8 +160,9 @@ pub fn failure_line(lines: &[String]) -> Option<String> {
         lines
             .iter()
             .rev()
-            .find(|line| markers.iter().any(|m| line.contains(m)))
             .map(|line| clean(line))
+            .filter(|line| !line.starts_with("Note:"))
+            .find(|line| markers.iter().any(|m| line.contains(m)))
     };
     last_with(MARKERS).or_else(|| last_with(LAST_RESORT))
 }
@@ -249,6 +251,17 @@ mod tests {
     #[test]
     fn output_with_no_explanation_offers_none() {
         let out = lines("OpenVPN 2.6.12\nTCP/UDP: Preserving recently used remote address");
+        assert_eq!(failure_line(&out), None);
+    }
+
+    #[test]
+    fn openvpns_notes_are_not_complaints() {
+        let out = lines(
+            "Note: --cipher is not set. OpenVPN versions before 2.5 defaulted to BF-CBC as \
+             fallback when cipher negotiation failed in this case.\n\
+             OpenVPN 2.6.22 [git:v2.6.22/c9b790f5b9e8ebca] Windows [SSL (OpenSSL)] [DCO]\n\
+             MANAGEMENT: CMD 'hold release'",
+        );
         assert_eq!(failure_line(&out), None);
     }
 

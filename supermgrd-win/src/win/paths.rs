@@ -124,13 +124,20 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
 /// A new session never reuses stale files, explicit old ACLs, symlinks or file
 /// handles left by an earlier client. The secret DACL is supplied to creation,
 /// so there is no create-before-lock window. Retain the guard until teardown.
-pub fn create_private_runtime_dir(profile_id: &uuid::Uuid) -> io::Result<PrivateRuntimeDir> {
+///
+/// `purpose` names the directory (`azure-…`, `openvpn-…`) so a leftover one
+/// says what left it.
+pub fn create_private_runtime_dir(
+    purpose: &str,
+    profile_id: &uuid::Uuid,
+) -> io::Result<PrivateRuntimeDir> {
     let root = root_path_at(&program_data_dir())?;
-    create_private_runtime_dir_at(&root, profile_id)
+    create_private_runtime_dir_at(&root, purpose, profile_id)
 }
 
 fn create_private_runtime_dir_at(
     root: &Path,
+    purpose: &str,
     profile_id: &uuid::Uuid,
 ) -> io::Result<PrivateRuntimeDir> {
     // The full state-tree migration runs once, before daemon startup. Pin and
@@ -140,7 +147,7 @@ fn create_private_runtime_dir_at(
     let runtime = root.join("runtime");
     let _runtime_handle = secure_directory(&runtime, SECRET_SDDL, true)?;
     let path = runtime.join(format!(
-        "azure-{}-{}",
+        "{purpose}-{}-{}",
         profile_id.simple(),
         uuid::Uuid::new_v4().simple()
     ));
@@ -495,8 +502,8 @@ mod tests {
             "imported OpenVPN configs must be private"
         );
         let profile = uuid::Uuid::new_v4();
-        let first = create_private_runtime_dir_at(&root, &profile).unwrap();
-        let second = create_private_runtime_dir_at(&root, &profile).unwrap();
+        let first = create_private_runtime_dir_at(&root, "azure", &profile).unwrap();
+        let second = create_private_runtime_dir_at(&root, "azure", &profile).unwrap();
         assert_ne!(first.path(), second.path());
         let token = first.path().join("auth.txt");
         std::fs::write(&token, "test-token").unwrap();
@@ -519,7 +526,7 @@ mod tests {
         let config = root.join("profiles").join("open.json");
         let writer = std::fs::File::create(&config).unwrap();
         assert!(ensure_root_at(&base).is_err());
-        let unrelated_session = create_private_runtime_dir_at(&root, &profile)
+        let unrelated_session = create_private_runtime_dir_at(&root, "azure", &profile)
             .expect("live profile writer must not block a new private VPN session");
         let unrelated_token = unrelated_session.path().join("auth.txt");
         std::fs::write(&unrelated_token, "test-token").unwrap();
@@ -566,7 +573,7 @@ mod tests {
             "rejected linked file must retain its private ACL"
         );
 
-        let active = create_private_runtime_dir_at(&root, &profile).unwrap();
+        let active = create_private_runtime_dir_at(&root, "azure", &profile).unwrap();
         let active_token = active.path().join("auth.txt");
         std::fs::write(&active_token, "fixture-secret").unwrap();
         ensure_root_at(&base).unwrap();
