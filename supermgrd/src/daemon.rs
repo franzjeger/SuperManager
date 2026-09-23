@@ -29,8 +29,8 @@ use supermgr_core::{
     dbus::core_error_to_fdo,
     vpn::backend::{BackendStatus, VpnBackend},
     vpn::profile::{
-        import_wireguard_conf, AzureVpnConfig, FortiGateConfig, OpenVpnConfig, Profile,
-        ProfileConfig, ProfileSummary, SecretRef,
+        import_wireguard_conf, FortiGateConfig, OpenVpnConfig, Profile, ProfileConfig,
+        ProfileSummary, SecretRef,
     },
     vpn::state::{state_to_json, stats_to_json, VpnState},
 };
@@ -1693,7 +1693,7 @@ impl DaemonService {
         // Validate the config text before touching the filesystem.
         // This gives an immediate, descriptive error when the user accidentally
         // uploads a WireGuard conf, an SSH key, or an OpenVPN server config.
-        validate_ovpn_config(conf_text).map_err(|e| {
+        supermgr_core::vpn::import::validate_ovpn_config(conf_text).map_err(|e| {
             error!("import_openvpn: validation failed for '{}': {}", name, e);
             fdo::Error::InvalidArgs(format!("OpenVPN config validation failed: {e}"))
         })?;
@@ -2446,10 +2446,11 @@ impl DaemonService {
 
         info!("import_azure_vpn: parsing config for profile '{name}'");
 
-        let cfg = parse_azure_xml(azure_xml, vpn_settings_xml).map_err(|e| {
-            error!("import_azure_vpn: XML parse error: {e}");
-            fdo::Error::InvalidArgs(format!("Azure XML parse error: {e}"))
-        })?;
+        let cfg = supermgr_core::vpn::import::parse_azure_xml(azure_xml, vpn_settings_xml)
+            .map_err(|e| {
+                error!("import_azure_vpn: XML parse error: {e}");
+                fdo::Error::InvalidArgs(format!("Azure XML parse error: {e}"))
+            })?;
 
         let profile_id = uuid::Uuid::new_v4();
 
@@ -7796,219 +7797,6 @@ async fn try_autoconnect(state: &Arc<Mutex<DaemonState>>, conn: &zbus::Connectio
     if let Err(e) = connect_profile(profile, Arc::clone(state), ctx).await {
         error!("auto-connect: connect_profile failed: {e}");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Config-format validators
-// ---------------------------------------------------------------------------
-
-/// Validate that `text` looks like an OpenVPN client configuration.
-///
-/// Checks for the minimum set of directives required by openvpn3:
-/// - `client` or `tls-client` (identifies this as a client-mode config)
-/// - at least one `remote` line (server address)
-/// - a `dev` line (`tun` or `tap`)
-/// - a CA certificate (either a `<ca>` inline block or a `ca <file>` directive)
-///
-/// Returns `Ok(())` when all checks pass, or `Err(human-readable message)`.
-///
-/// This catches the most common mistakes — importing a WireGuard `.conf`,
-/// an SSH key, a plain-text file, or an OpenVPN _server_ config — before
-/// any file is written to disk.
-fn validate_ovpn_config(text: &str) -> Result<(), String> {
-    // Strip comment lines (starting with `#` or `;`) for all checks.
-    let active_lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#') && !l.starts_with(';') && !l.is_empty())
-        .collect();
-
-    let has_directive = |name: &str| -> bool {
-        active_lines.iter().any(|l| {
-            let lc = l.to_ascii_lowercase();
-            lc == name
-                || lc.starts_with(&format!("{name} "))
-                || lc.starts_with(&format!("{name}\t"))
-        })
-    };
-
-    // Must be a client config, not a server config.
-    if !has_directive("client") && !has_directive("tls-client") {
-        if active_lines.contains(&"[Interface]") {
-            return Err(
-                "this looks like a WireGuard config — use 'Import WireGuard' instead".into(),
-            );
-        }
-        return Err(
-            "not a valid OpenVPN client config: missing 'client' or 'tls-client' directive".into(),
-        );
-    }
-
-    if !has_directive("remote") {
-        return Err(
-            "not a valid OpenVPN client config: missing 'remote' directive (no server address)"
-                .into(),
-        );
-    }
-
-    if !has_directive("dev") {
-        return Err(
-            "not a valid OpenVPN client config: missing 'dev' directive (tun or tap)".into(),
-        );
-    }
-
-    // A CA certificate must be present either inline or as a file reference.
-    let has_ca_directive = has_directive("ca");
-    let has_ca_inline = text.contains("<ca>") && text.contains("</ca>");
-    if !has_ca_directive && !has_ca_inline {
-        return Err("not a valid OpenVPN client config: missing CA certificate \
-             ('ca <file>' directive or '<ca>...</ca>' inline block)"
-            .into());
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Azure XML parser
-// ---------------------------------------------------------------------------
-
-/// Extract the first text content of the given XML `tag` from `xml`.
-///
-/// Returns `None` if the tag is absent or has no content.  This is a
-/// minimal, dependency-free parser sufficient for the well-known Azure VPN
-/// XML format — it does not handle CDATA, attributes, or namespaces.
-fn xml_tag<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let start = xml.find(&open).map(|i| i + open.len())?;
-    let end = xml[start..].find(&close).map(|i| i + start)?;
-    let value = xml[start..end].trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-/// Extract all occurrences of `<tag>content</tag>` from `xml`.
-fn xml_tags_all<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
-    let open = format!("<{tag}>");
-    let close = format!("</{tag}>");
-    let mut results = Vec::new();
-    let mut rest = xml;
-    while let Some(s) = rest.find(&open) {
-        let after = &rest[s + open.len()..];
-        if let Some(e) = after.find(&close) {
-            let value = after[..e].trim();
-            if !value.is_empty() {
-                results.push(value);
-            }
-            rest = &after[e + close.len()..];
-        } else {
-            break;
-        }
-    }
-    results
-}
-
-/// Wrap a raw base64 string (no headers) as a PEM certificate block,
-/// folding at 64 characters per line.
-fn base64_to_pem_cert(b64: &str) -> String {
-    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-        pem.push('\n');
-    }
-    pem.push_str("-----END CERTIFICATE-----\n");
-    pem
-}
-
-/// Parse `azurevpnconfig.xml` and `VpnSettings.xml` into an [`AzureVpnConfig`].
-fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureVpnConfig, String> {
-    use std::net::IpAddr;
-    use std::str::FromStr;
-
-    // -- Fields from azurevpnconfig.xml --
-    let client_id = xml_tag(azure_xml, "audience")
-        .ok_or("missing <audience> in azurevpnconfig.xml")?
-        .to_owned();
-
-    let tenant_url = xml_tag(azure_xml, "tenant")
-        .or_else(|| xml_tag(azure_xml, "issuer"))
-        .ok_or("missing <tenant>/<issuer> in azurevpnconfig.xml")?;
-    let tenant_id = tenant_url
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .ok_or("cannot extract tenant ID from tenant URL")?
-        .to_owned();
-
-    let gateway_fqdn = xml_tag(azure_xml, "fqdn")
-        .or_else(|| xml_tag(vpn_settings_xml, "VpnServer"))
-        .ok_or("missing <fqdn> / <VpnServer>")?
-        .to_owned();
-
-    let server_secret_hex = xml_tag(azure_xml, "serversecret")
-        .ok_or("missing <serversecret> in azurevpnconfig.xml")?
-        .to_owned();
-
-    // DNS servers: prefer VpnSettings comma list, fall back to individual tags.
-    let dns_servers: Vec<IpAddr> = {
-        let mut servers = Vec::new();
-        if let Some(csv) = xml_tag(vpn_settings_xml, "CustomDnsServers") {
-            for part in csv.split(',') {
-                if let Ok(ip) = part.trim().parse::<IpAddr>() {
-                    servers.push(ip);
-                }
-            }
-        }
-        if servers.is_empty() {
-            for tag in xml_tags_all(azure_xml, "dnsserver") {
-                if let Ok(ip) = tag.parse::<IpAddr>() {
-                    servers.push(ip);
-                }
-            }
-        }
-        servers
-    };
-
-    // -- CA certificate from VpnSettings.xml --
-    let ca_cert_pem = xml_tags_all(vpn_settings_xml, "string")
-        .into_iter()
-        .find(|s| s.len() > 100) // all actual certs are long base64 blobs
-        .map(base64_to_pem_cert)
-        .unwrap_or_default();
-
-    // -- Split-tunnel routes from VpnSettings.xml --
-    let routes: Vec<ipnet::IpNet> = xml_tag(vpn_settings_xml, "Routes")
-        .map(|csv| {
-            csv.split(',')
-                .filter_map(|r| ipnet::IpNet::from_str(r.trim()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if server_secret_hex.len() != 512 {
-        return Err(format!(
-            "<serversecret> must be 512 hex chars (got {})",
-            server_secret_hex.len()
-        ));
-    }
-    if !server_secret_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("<serversecret> contains non-hex characters".into());
-    }
-
-    Ok(AzureVpnConfig {
-        gateway_fqdn,
-        tenant_id,
-        client_id,
-        server_secret_hex,
-        ca_cert_pem,
-        routes,
-        dns_servers,
-    })
 }
 
 // ---------------------------------------------------------------------------
