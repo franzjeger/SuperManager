@@ -24,13 +24,13 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tracing::warn;
+use tracing::{info, warn};
 
 use supermgr_core::protocol::{PipeRequest, PipeResponse, RpcError, PROTOCOL_VERSION};
 use supermgr_core::secret_lifecycle::SecretOwner;
 
 use super::daemon::DaemonState;
-use super::{appliance, ssh_exec};
+use super::{appliance, known_hosts, ssh_exec};
 use crate::rpc_args::arg_id;
 
 /// Clear every credential an entity owned, after its record is gone.
@@ -86,6 +86,9 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
         "ssh_execute_command" => handle_ssh_execute_command(state, &req.args).await,
         "test_host_connection" => handle_test_host_connection(state, &req.args).await,
         "toggle_host_pin" => handle_toggle_host_pin(state, &req.args).await,
+        "ssh_list_known_hosts" => handle_ssh_list_known_hosts(state).await,
+        "ssh_forget_host_key" => handle_ssh_forget_host_key(state, &req.args).await,
+        "ssh_trust_host_key" => handle_ssh_trust_host_key(state, &req.args).await,
         "ssh_set_password" => handle_ssh_set_password(state, &req.args).await,
         "ssh_set_api_token" => handle_ssh_set_api_token(state, &req.args).await,
 
@@ -1017,6 +1020,85 @@ async fn handle_test_host_connection(
     )
     .await;
     Ok(Value::String(result.to_string()))
+}
+
+/// The SSH host keys on file, as `{"host:port": "SHA256:…"}` — the Linux
+/// daemon's shape.
+async fn handle_ssh_list_known_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    let entries: serde_json::Map<String, Value> = state
+        .known_hosts
+        .entries()
+        .await
+        .into_iter()
+        .map(|(address, known)| (address, Value::String(known.fingerprint)))
+        .collect();
+    Ok(Value::String(Value::Object(entries).to_string()))
+}
+
+/// Drop the key on file for `hostname:port`, so the next connection records
+/// the key the host presents then. Returns whether there was one.
+///
+/// The way back from a changed key the operator has checked — a
+/// reinstalled server, a replaced appliance, a deliberate rotation — and
+/// the Linux daemon's method of the same name.
+async fn handle_ssh_forget_host_key(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
+    let hostname = arg_str(args, "hostname")?;
+    let port = u16::try_from(arg_u64(args, "port")?)
+        .map_err(|_| RpcError::Protocol("port must be from 0 to 65535".into()))?;
+    let removed = state
+        .known_hosts
+        .forget(hostname, port)
+        .await
+        .map_err(|e| RpcError::Backend(format!("could not update the known-hosts file: {e}")))?;
+    if removed {
+        info!("forgot the SSH host key of {hostname}:{port} on request");
+    }
+    Ok(Value::Bool(removed))
+}
+
+/// Trust exactly the key given for `hostname:port` from now on, in place of
+/// the one on file.
+///
+/// What the GUI's "Trust the new key" sends once the operator has compared
+/// the key a changed host presented with the host's own. Where
+/// `ssh_forget_host_key` trusts whichever key answers next, this trusts
+/// the key they checked and nothing else. The fingerprint is the one
+/// `test_host_connection` reported, with or without OpenSSH's `SHA256:`.
+async fn handle_ssh_trust_host_key(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
+    let hostname = arg_str(args, "hostname")?;
+    let port = u16::try_from(arg_u64(args, "port")?)
+        .map_err(|_| RpcError::Protocol("port must be from 0 to 65535".into()))?;
+    let algorithm = arg_str(args, "algorithm")?;
+    let fingerprint = arg_str(args, "fingerprint")?;
+    let fingerprint = fingerprint.strip_prefix("SHA256:").unwrap_or(fingerprint);
+    if !known_hosts::is_sha256_fingerprint(fingerprint) {
+        return Err(RpcError::Protocol(format!(
+            "{fingerprint:?} is not a SHA-256 host-key fingerprint"
+        )));
+    }
+    let algorithm_ok = !algorithm.is_empty()
+        && algorithm.len() <= 64
+        && algorithm
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-@.".contains(&b));
+    if !algorithm_ok {
+        return Err(RpcError::Protocol(format!(
+            "{algorithm:?} is not an SSH key algorithm"
+        )));
+    }
+    state
+        .known_hosts
+        .trust(hostname, port, algorithm, fingerprint)
+        .await
+        .map_err(|e| RpcError::Backend(format!("could not update the known-hosts file: {e}")))?;
+    info!("trusted SSH host key SHA256:{fingerprint} for {hostname}:{port} on request");
+    Ok(Value::Null)
 }
 
 async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {

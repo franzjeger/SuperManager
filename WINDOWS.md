@@ -242,6 +242,17 @@ profile: the gateway pushes routes for the networks behind it, and a P2S
 gateway not built for forced tunnelling would drop internet traffic. Both
 apply from the next connect.
 
+**Host keys.** The first connection to a host records the SSH key it
+presents; the host's page shows it under *Host key*, in the form
+`ssh-keygen -lf` prints. After that, a host presenting any other key is
+refused before anything is sent to it. **Test connection** then shows
+both keys side by side: a reinstalled server or a replaced appliance
+explains the change, and **Trust the new key…** accepts exactly the key
+shown — compare it with the one the host reports first. If nothing
+explains the change, someone may be intercepting the connection; don't
+trust it. **Forget** next to the key drops it instead, so the next
+connection records whatever key answers.
+
 **Tray.** Left-click opens the window. The tooltip says where the tunnel
 stands; the menu has Open, Disconnect VPN, Check for updates and Quit.
 
@@ -261,9 +272,9 @@ Common ones:
 - *Cannot listen on http://localhost:2023* (Azure): another program — the
   Azure VPN Client, typically — holds the port the sign-in returns to.
 
-The service logs to the Application event log (source *SuperManager*); run
-it with `--console` (below) to watch it live, with the VPN clients' own
-output at `RUST_LOG=vpn_client=debug`.
+The service logs to the Application event log (source *SuperManager*,
+information and above); run it with `--console` (below) to watch it live,
+with the VPN clients' own output at `RUST_LOG=vpn_client=debug`.
 
 ## Developer / console mode
 
@@ -299,7 +310,7 @@ Application event log.
 - **UniFi Controller REST API**: `unifi_api` (cookie-based session via `POST /api/auth/login`), `unifi_set_inform` (SSH `set-inform <url>` against UniFi-adopted devices).
 - **OPNsense REST API**: `opnsense_api`, `opnsense_backup_config`. HTTP Basic auth using the key/secret pair from Credential Manager; backups saved as `<host>_<timestamp>.opnsense.xml` so they don't collide with FortiGate `.conf` filenames.
 - **Sophos XG XML Configuration API**: `sophos_xml_api`. Wraps the caller's `<Get>/<Set>/<Remove>` body in the WebAdmin `<Request><Login>...</Login>` envelope; credentials come from Credential Manager.
-- **Persistent known_hosts**: SSH host keys recorded in `%PROGRAMDATA%\SuperManager\known_hosts.json` on first sight; subsequent connections require an exact match. A changed fingerprint surfaces as `RpcError::PermissionDenied` rather than silently going through TOFU again.
+- **Persistent known_hosts**: SSH host keys recorded in `%PROGRAMDATA%\SuperManager\known_hosts.json` on first sight; subsequent connections require an exact match. A changed key stops the handshake before any credential is sent: `test_host_connection` reports `{"ssh":"host_key_changed","stored":…,"presented":…}`, and commands fail with `RpcError::PermissionDenied` naming both fingerprints. `ssh_list_known_hosts` lists what is on file, `ssh_trust_host_key` replaces a key with the one the operator checked, and `ssh_forget_host_key` (the Linux daemon's method) drops it.
 - **Named-pipe ACL hardening**: explicit SDDL grants `SYSTEM` + `Administrators` Generic All and `Authenticated Users` Read + Write (no DACL-modify). Built via `ConvertStringSecurityDescriptorToSecurityDescriptorW` and applied with `ServerOptions::create_with_security_attributes_raw`.
 - **Tray icon**: the app icon, a tooltip with the tunnel's state, and Open / Disconnect VPN / Check for updates / Quit.
 - **Windows Service** start/stop/restart via the SCM.
@@ -321,6 +332,33 @@ cargo run -p supermgrd-win -- --console
 
 The first terminal logs every dispatched method; the second prints the
 JSON-RPC responses end-to-end.
+
+### VPN end to end, in CI
+
+Every push runs `scripts/windows/test-vpn.ps1` on the Windows runner,
+against the service the bundle just installed. It stands up real servers
+on the runner — a WireGuard tunnel through WireGuard for Windows, and an
+OpenVPN server with a throwaway PKI — and drives the service over its
+pipe the way the app does:
+
+- **WireGuard**: import (a DNS line and AllowedIPs with host bits set),
+  connect, then check the adapter, its address, the AllowedIPs route, the
+  DNS server, the server's handshake, and bytes arriving at the server
+  through the tunnel; deleting the connected profile is refused;
+  switching profiles removes the first adapter; disconnecting removes the
+  second; stopping the service takes a connected tunnel down.
+- **OpenVPN**: a connect to a server that never answers can be cancelled
+  and leaves no `openvpn.exe` behind; left alone, it gives up after 45 s
+  with a reason; against the local server it connects, is listed by the
+  server, gets an address, and disconnects cleanly.
+
+Both ends share one IP stack, so no reply can come back through a tunnel;
+traffic is proven one way, by the bytes the server decrypts. The test is
+destructive (adapters, a tunnel service, firewall rules) and refuses to
+run outside GitHub Actions. On failure its logs — the service's own
+Application-log entries, adapters, routes, DNS, `wg show`, the OpenVPN
+server log — are in the `windows-installer-test-logs` artifact, under
+`vpn\`.
 
 ## What is stubbed (intentionally)
 

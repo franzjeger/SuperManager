@@ -10,7 +10,7 @@ export enum Overlay { none, add-profile, rename-profile, add-host, generate-key,
 
 export enum ToastKind { success, error }
 
-export enum ConfirmAction { none, delete-profile, delete-host, delete-key }
+export enum ConfirmAction { none, delete-profile, delete-host, delete-key, trust-host-key, forget-host-key }
 
 export global App {
     in-out property <Page> page: Page.vpn;
@@ -198,6 +198,20 @@ export global Hosts {
     callback test(string);
     in property <bool> testing: false;
     in property <string> test-result: "";
+
+    // The SSH key on file for the host shown, "SHA256:…"; "" until the
+    // first connection records one.
+    in property <string> known-key: "";
+    // Set when a test found the host presenting a different key: the two
+    // keys, and when the one on file was recorded.
+    in property <bool> key-changed: false;
+    in property <string> key-stored: "";
+    in property <string> key-stored-since: "";
+    in property <string> key-presented: "";
+    in property <string> key-algorithm: "";
+    // Trust the presented key for a host, or drop the key on file.
+    callback trust-key(string);
+    callback forget-key(string);
 
     in-out property <string> command: "";
     callback run(string, string);

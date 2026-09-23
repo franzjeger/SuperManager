@@ -89,6 +89,110 @@ component HostRow inherits Rectangle {
     }
 }
 
+// One of the two keys in a changed-key warning.
+component KeyLine inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> note;
+    spacing: 12px;
+    Text {
+        text: root.label;
+        width: 110px;
+        font-size: Theme.body;
+        color: Theme.text-secondary;
+    }
+    VerticalLayout {
+        horizontal-stretch: 1;
+        spacing: 2px;
+        Text {
+            text: root.value;
+            font-size: Theme.body;
+            font-family: Theme.mono;
+            color: Theme.text;
+            // A fingerprint has no spaces to break at.
+            wrap: char-wrap;
+        }
+        if root.note != "": Text {
+            text: root.note;
+            font-size: Theme.caption;
+            color: Theme.text-secondary;
+        }
+    }
+}
+
+// A host presenting a different SSH key from the one on file: both keys,
+// what that can mean, and the way to accept the new one once checked.
+component KeyChangedBar inherits Rectangle {
+    in property <string> host-id;
+
+    border-radius: Theme.control-radius;
+    border-width: 1px;
+    border-color: Theme.card-stroke;
+    background: Theme.critical-bg;
+
+    HorizontalLayout {
+        padding: 16px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: start;
+            Image {
+                source: Icons.error;
+                colorize: Theme.critical;
+                width: 20px;
+                height: 20px;
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 10px;
+            Text {
+                text: "This host's SSH key has changed";
+                font-size: Theme.body;
+                font-weight: 600;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "SuperManager did not connect and sent nothing to it. Reinstalling a server or replacing an appliance changes its key. If neither explains this, someone may be intercepting the connection: don't trust the new key.";
+                font-size: Theme.body;
+                color: Theme.text;
+                wrap: word-wrap;
+            }
+            KeyLine {
+                label: "On file";
+                value: Hosts.key-stored;
+                note: Hosts.key-stored-since != "" ? "Recorded " + Hosts.key-stored-since : "";
+            }
+            KeyLine {
+                label: "Presented now";
+                value: Hosts.key-presented;
+            }
+            HorizontalLayout {
+                alignment: start;
+                spacing: 8px;
+                Button {
+                    text: "Trust the new key…";
+                    enabled: App.daemon-online;
+                    clicked => {
+                        App.confirm(ConfirmAction.trust-host-key, root.host-id,
+                            "Trust the new key?",
+                            "From now on SuperManager connects to " + Hosts.detail.hostname + ":" + Hosts.detail.port
+                                + " only while it presents this key:\n\n" + Hosts.key-presented
+                                + "\n\nCompare it with the key the host reports itself first — on Linux, ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub. If they differ, cancel.",
+                            "Trust this key");
+                    }
+                }
+                Button {
+                    text: "Copy new key";
+                    icon: Icons.copy;
+                    colorize-icon: true;
+                    clicked => { App.copy-text(Hosts.key-presented); }
+                }
+            }
+        }
+    }
+}
+
 component HostDetail inherits Card {
     property <string> id: Hosts.detail.id;
 
@@ -135,6 +239,10 @@ component HostDetail inherits Card {
                 }
             }
 
+            if Hosts.key-changed: KeyChangedBar {
+                host-id: root.id;
+            }
+
             if Hosts.test-result != "": Rectangle {
                 border-radius: Theme.control-radius;
                 background: Theme.info-bg;
@@ -168,6 +276,38 @@ component HostDetail inherits Card {
                     mono: true;
                 }
                 DetailRow { label: "Signs in with"; value: Hosts.detail.auth-method; }
+                HorizontalLayout {
+                    spacing: 16px;
+                    Text {
+                        text: "Host key";
+                        width: 150px;
+                        font-size: Theme.body;
+                        color: Theme.text-secondary;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: Hosts.known-key != "" ? Hosts.known-key : "Recorded on first connection";
+                        font-size: Theme.body;
+                        font-family: Hosts.known-key != "" ? Theme.mono : "";
+                        color: Hosts.known-key != "" ? Theme.text : Theme.text-secondary;
+                        // A fingerprint has no spaces to break at.
+                        wrap: Hosts.known-key != "" ? TextWrap.char-wrap : TextWrap.word-wrap;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    if Hosts.known-key != "": SubtleButton {
+                        icon: Icons.delete;
+                        text: "Forget";
+                        enabled: App.daemon-online;
+                        clicked => {
+                            App.confirm(ConfirmAction.forget-host-key, root.id,
+                                "Forget this host key?",
+                                "SuperManager will accept and record whatever key " + Hosts.detail.hostname + ":" + Hosts.detail.port
+                                    + " presents on the next connection. Only do this if you know why the key changed — a rebuilt server, a replaced appliance, a deliberate rotation. If you don't, the change may be someone intercepting the connection.",
+                                "Forget");
+                        }
+                    }
+                }
                 if Hosts.detail.group != "": DetailRow { label: "Group"; value: Hosts.detail.group; }
                 if Hosts.detail.created-at != "": DetailRow { label: "Added"; value: Hosts.detail.created-at; }
             }

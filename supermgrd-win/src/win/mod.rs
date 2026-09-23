@@ -78,7 +78,9 @@ fn run_async() -> anyhow::Result<()> {
 /// SCM-invoked entry point. Wires the Windows Service control handler to a
 /// `watch` channel that the async daemon listens to for shutdown.
 fn service_main(_args: Vec<OsString>) {
-    // Tracing → Application event log when running under the SCM. The
+    // Tracing → Application event log when running under the SCM. No
+    // tracing subscriber is installed here, so tracing's `log` feature
+    // turns each event into a `log` record, which `eventlog` writes. The
     // `eventlog` crate registers the source on first init; we ignore the
     // result so an already-registered source doesn't crash startup.
     let _ = eventlog::register("SuperManager");

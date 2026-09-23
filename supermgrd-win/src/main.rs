@@ -16,10 +16,17 @@ mod win;
 #[cfg(any(target_os = "windows", test))]
 mod rpc_args;
 
-// Exercise the Windows trust-store implementation on every CI host too.
+// Exercise the Windows trust-store implementation on every CI host too,
+// and the SSH client that consults it: russh and tokio, no Win32. Named as
+// they are under `win` so the client finds the store where it looks.
 #[cfg(all(test, not(target_os = "windows")))]
 #[path = "win/known_hosts.rs"]
-mod windows_known_hosts;
+mod known_hosts;
+
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "win/ssh_exec.rs"]
+#[allow(dead_code)]
+mod ssh_exec;
 
 // Likewise the VPN clients' output reader: plain tokio, no Win32. Only its
 // tests run off Windows, so the reader itself is unused there.

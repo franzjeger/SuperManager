@@ -410,10 +410,9 @@ jobs:
             -p supermgrd-win `
             -p supermgr-win
 
-      # supermgrd-win / supermgr-win carry no tests of their own yet, but
-      # naming them still compiles their `#[cfg(test)]` code — which a
-      # plain `cargo build` never does, and which is where test-only
-      # compile errors hide.
+      # Runs the Windows crates' own tests — the daemon's host-key checks
+      # against an in-process SSH server among them — and compiles their
+      # `#[cfg(test)]` code, which a plain `cargo build` never does.
       - name: Tests (Windows + cross-platform crates)
         run: |
           cargo test --release `
