@@ -9,14 +9,15 @@
 //! # Flow
 //!
 //! 1. Resolve the password from Credential Manager (if the profile
-//!    needs auth-user-pass) and write a temporary credentials file with
-//!    restrictive permissions.
+//!    needs auth-user-pass). It is given to OpenVPN over the management
+//!    interface when OpenVPN asks for it, never written to disk.
 //! 2. Pick a free localhost port and spawn `openvpn.exe --config <path>
 //!    --management 127.0.0.1 <port> stdin --management-query-passwords
-//!    --management-hold`.
-//! 3. Connect to the management port, send `hold off` to release the
-//!    hold, then read `>STATE:` messages until we see `CONNECTED,SUCCESS`
-//!    (tunnel up) or `>FATAL` / process exit (tunnel failed).
+//!    --management-hold`, with a one-off management password on stdin.
+//! 3. Connect to the management port, log in with that password, switch
+//!    on state events and send `hold release`, then read `>STATE:`
+//!    messages until we see `CONNECTED,SUCCESS` (tunnel up) or `>FATAL` /
+//!    process exit (tunnel failed).
 //! 4. Spawn a background watcher that keeps reading the management
 //!    stream so OpenVPN never blocks writing further state messages.
 //! 5. On disconnect: send `signal SIGTERM` over the management socket
@@ -310,9 +311,14 @@ impl OpenVpnBackend {
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
 
-        // Authenticate to the management interface, enable state events,
-        // release the hold, then wait for `>STATE:.*,CONNECTED`.
-        write_mgmt(&mut writer, &format!("password \"{mgmt_password}\"\n")).await?;
+        // Log in, enable state events, release the hold, then wait for
+        // `>STATE:.*,CONNECTED`. OpenVPN greets the client with `ENTER
+        // PASSWORD:` and compares the whole next line with the password, so
+        // the line is the bare password. (`password "…"` is how credential
+        // queries are answered; sent here it was a wrong password, and with
+        // `state on` and `hold release` after it, three of them: OpenVPN
+        // refused the client, and no OpenVPN connect got past this point.)
+        write_mgmt(&mut writer, &format!("{mgmt_password}\n")).await?;
         write_mgmt(&mut writer, "state on\n").await?;
         write_mgmt(&mut writer, "hold release\n").await?;
 
@@ -335,6 +341,7 @@ impl OpenVpnBackend {
             }
             Err(_) => {
                 let _ = child.kill().await;
+                tail.log_failure("OpenVPN");
                 let said = tail
                     .reason()
                     .map(|r| format!(" The client's last complaint: {r}"))
@@ -534,6 +541,7 @@ async fn wait_for_connected(
 /// it said something. An authentication rejection is already the reason
 /// and stays as it is.
 fn explain(e: VpnError, tail: &output::Tail) -> VpnError {
+    tail.log_failure("OpenVPN");
     match e {
         VpnError::PermissionDenied(_) | VpnError::MissingDependency(_) => e,
         other => match tail.reason() {

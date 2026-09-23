@@ -439,9 +439,11 @@ PersistentKeepalive = 1
     $unreachable = Invoke-Rpc 'import_openvpn' @{ conf_text = (Get-OpenVpnClientConfig $pki 1195); name = 'E2E OpenVPN unreachable' }
     $profiles.Add($unreachable)
     Invoke-Rpc 'connect' @{ profile_id = $unreachable } | Out-Null
-    $status = Wait-VpnState @('connecting') 10
     Wait-Until { @(Get-OpenVpnClients).Count -gt 0 } 'the OpenVPN client to start' 10
     Start-Sleep -Seconds 3
+    # Only a connect still in progress makes this a test of cancelling one.
+    $status = Get-VpnStatus
+    if ($status.state -ne 'connecting') { throw "The connect had already ended before the cancel: $(Format-Status $status)" }
     Disconnect-Vpn
     Wait-Until { @(Get-OpenVpnClients).Count -eq 0 } 'the cancelled OpenVPN client to exit' 15
 

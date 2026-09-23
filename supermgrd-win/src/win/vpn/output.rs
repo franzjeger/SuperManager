@@ -26,7 +26,7 @@ use tokio::{
     process::Child,
     sync::mpsc,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// How many lines of output to keep for an error message.
 const TAIL_LINES: usize = 60;
@@ -57,6 +57,18 @@ impl Tail {
     /// The line that best explains a failure, if the client printed one.
     pub fn reason(&self) -> Option<String> {
         failure_line(&self.lines())
+    }
+
+    /// Put everything kept in the service's log, for a connect that failed.
+    ///
+    /// The operator is shown one line; what led up to it is often the
+    /// explanation, and without it a failure that happens only on someone
+    /// else's machine cannot be told apart from any other.
+    pub fn log_failure(&self, client: &str) {
+        let lines = self.lines();
+        if !lines.is_empty() {
+            warn!(target: "vpn_client", "{client} said, before it failed:\n{}", lines.join("\n"));
+        }
     }
 }
 
@@ -119,8 +131,11 @@ pub fn exit_reason(client: &str, status: std::process::ExitStatus, tail: &Tail) 
 ///
 /// Clients print a lot on the way to failing — OpenVPN's banner, library
 /// versions, every retry. The explanation is the last line that reads like
-/// one, so search from the end. Nothing matching means the client's output
-/// has no explanation to offer, and the caller says what it knows instead.
+/// one, so search from the end. OpenVPN ends every fatal error with the
+/// same "Exiting due to fatal error", which explains nothing: it is only
+/// the answer when no line before it does. Nothing matching means the
+/// client's output has no explanation to offer, and the caller says what
+/// it knows instead.
 pub fn failure_line(lines: &[String]) -> Option<String> {
     const MARKERS: &[&str] = &[
         "AUTH_FAILED",
@@ -138,13 +153,16 @@ pub fn failure_line(lines: &[String]) -> Option<String> {
         "Failed",
         "refused",
         "No such file",
-        "Exiting due to",
     ];
-    lines
-        .iter()
-        .rev()
-        .find(|line| MARKERS.iter().any(|m| line.contains(m)))
-        .map(|line| clean(line))
+    const LAST_RESORT: &[&str] = &["Exiting due to"];
+    let last_with = |markers: &[&str]| {
+        lines
+            .iter()
+            .rev()
+            .find(|line| markers.iter().any(|m| line.contains(m)))
+            .map(|line| clean(line))
+    };
+    last_with(MARKERS).or_else(|| last_with(LAST_RESORT))
 }
 
 /// Drop the decoration clients put in front of a message.
@@ -200,6 +218,31 @@ mod tests {
         assert_eq!(
             failure_line(&out).as_deref(),
             Some("Could not authenticate to gateway.")
+        );
+    }
+
+    #[test]
+    fn a_fatal_errors_own_line_wins_over_its_generic_trailer() {
+        let out = lines(
+            "OpenVPN 2.6.22\n\
+             Cannot load inline certificate file\n\
+             Exiting due to fatal error",
+        );
+        assert_eq!(
+            failure_line(&out).as_deref(),
+            Some("Cannot load inline certificate file")
+        );
+
+        // With nothing more specific said, the trailer is still better
+        // than no reason at all.
+        let out = lines(
+            "OpenVPN 2.6.22 [git:v2.6.22] Windows [SSL (OpenSSL)] [DCO]\n\
+             There are no TAP-Windows, Wintun or ovpn-dco adapters on this system.\n\
+             Exiting due to fatal error",
+        );
+        assert_eq!(
+            failure_line(&out).as_deref(),
+            Some("Exiting due to fatal error")
         );
     }
 
