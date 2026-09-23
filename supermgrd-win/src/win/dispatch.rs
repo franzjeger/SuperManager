@@ -1002,14 +1002,21 @@ async fn handle_ssh_execute_command(
     Ok(Value::String(result.to_string()))
 }
 
+/// Connect to the host and sign in, without running anything. Same result
+/// shape as the Linux daemon: `{"ssh": "ok" | "auth_failed" | …}`.
 async fn handle_test_host_connection(
-    _state: &Arc<DaemonState>,
+    state: &Arc<DaemonState>,
     args: &Value,
 ) -> Result<Value, RpcError> {
-    let _ = arg_id(args, "host_id")?;
-    Ok(Value::String(
-        json!({ "reachable": false, "reason": "not implemented yet on Windows" }).to_string(),
-    ))
+    let host_id = arg_id(args, "host_id")?;
+    let result = ssh_exec::test(
+        &state.root,
+        state.secret_store.clone(),
+        state.known_hosts.clone(),
+        host_id,
+    )
+    .await;
+    Ok(Value::String(result.to_string()))
 }
 
 async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
