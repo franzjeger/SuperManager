@@ -34,6 +34,7 @@ $tapctl = Join-Path $ovpnBin 'tapctl.exe'
 $wgServerTunnel = 'smtestsrv'
 $wgServerPort = 51820
 $ovpnServerAdapter = 'SMTestOvpnSrv'
+$ovpnSpareAdapter = 'SMTestOvpnCli'
 $ovpnServerPort = 1194
 $firewallRule = 'SuperManager VPN end-to-end test'
 
@@ -281,7 +282,7 @@ function Save-Diagnostics {
 $profiles = [Collections.Generic.List[string]]::new()
 $ovpnServer = $null
 $wgServerInstalled = $false
-$ovpnAdapterCreated = $false
+$ovpnAdapters = [Collections.Generic.List[string]]::new()
 $failed = $true
 Start-Transcript -Path (Join-Path $LogDir 'test-vpn.transcript.txt') -Force | Out-Null
 try {
@@ -414,6 +415,16 @@ PersistentKeepalive = 1
 
     # -- OpenVPN --------------------------------------------------------------
 
+    Write-Host '==> OpenVPN adapters'
+    # One for the server, and a spare for the service's client: it uses the
+    # DCO driver where it can open it, and falls back to TAP-Windows6 —
+    # which needs a free adapter — where it cannot.
+    foreach ($name in @($ovpnServerAdapter, $ovpnSpareAdapter)) {
+        & $tapctl create --name $name --hwid 'root\tap0901' | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "tapctl could not create TAP-Windows6 adapter $name ($LASTEXITCODE)." }
+        $ovpnAdapters.Add($name)
+    }
+
     Write-Host '==> OpenVPN: a connect that cannot reach its server can be cancelled'
     $pki = New-TestPki
     $unreachable = Invoke-Rpc 'import_openvpn' @{ conf_text = (Get-OpenVpnClientConfig $pki 1195); name = 'E2E OpenVPN unreachable' }
@@ -435,9 +446,6 @@ PersistentKeepalive = 1
     Disconnect-Vpn
 
     Write-Host '==> OpenVPN server'
-    & $tapctl create --name $ovpnServerAdapter --hwid 'root\tap0901' | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "tapctl could not create a TAP-Windows6 adapter for the server ($LASTEXITCODE)." }
-    $ovpnAdapterCreated = $true
     $serverLog = Join-Path $LogDir 'openvpn-server.log'
     $serverStatus = Join-Path $work 'openvpn-server-status.txt'
     $serverOvpn = Join-Path $work 'server.ovpn'
@@ -506,7 +514,7 @@ $($pki.Server.Key)
     }
     Close-Service
     if ($ovpnServer -and -not $ovpnServer.HasExited) { Stop-Process -Id $ovpnServer.Id -Force; $ovpnServer.WaitForExit(10000) | Out-Null }
-    if ($ovpnAdapterCreated) { & $tapctl delete $ovpnServerAdapter | Out-Host }
+    foreach ($name in $ovpnAdapters) { & $tapctl delete $name | Out-Host }
     if ($wgServerInstalled) {
         try { Invoke-WireGuard /uninstalltunnelservice $wgServerTunnel | Out-Null } catch { Write-Host "cleanup: $_" }
     }
