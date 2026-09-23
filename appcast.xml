@@ -5,15 +5,15 @@
         <description>Update feed for SuperManager.app</description>
         <language>en</language>
         <item>
-            <title>Version 1.8.9</title>
-            <pubDate>Wed, 23 Sep 2026 10:39:44 +0000</pubDate>
-            <sparkle:version>1.8.9</sparkle:version>
-            <sparkle:shortVersionString>1.8.9</sparkle:shortVersionString>
+            <title>Version 1.8.10</title>
+            <pubDate>Wed, 23 Sep 2026 12:00:22 +0000</pubDate>
+            <sparkle:version>1.8.10</sparkle:version>
+            <sparkle:shortVersionString>1.8.10</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.9/SuperManager-1.8.9.zip"
+                url="https://github.com/franzjeger/SuperManager/releases/download/v1.8.10/SuperManager-1.8.10.zip"
                 type="application/octet-stream"
-                sparkle:edSignature="+Xsxv+0uBNbc7HoJdqbymUOy3FYDWHB8kjZYg9kc85l2aX4OzFhOkxXiDE751JcYd+0+nKb6tKA+YQdvwIckCg==" length="33405349" />
+                sparkle:edSignature="tJm0+H2YnmhYk8/vgMXlQvmSa7nN1OrHEn3ETReP99yz8c8jkOSDj0BGs4qcRqF5yCXoEPB84t9U0z9Hm+eqCQ==" length="33406926" />
         </item>
     </channel>
 </rss>
