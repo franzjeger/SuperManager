@@ -262,14 +262,15 @@ echo "  entitlements sane (app), nested binaries validly signed"
 
 # Exercise CRUD from the FINAL signed executable, with its own entitlements.
 # Launching a window alone never detected the -34018 regression.
-echo "→ Testing Keychain access in the signed app"
+echo "→ Testing Keychain and concurrent Tailscale discovery in the signed app"
 python3 - "$APP/Contents/MacOS/SuperManagerMac" <<'PYPROBE'
 import subprocess
 import sys
 try:
-    subprocess.run([sys.argv[1], "--keychain-self-test"], check=True, timeout=30)
+    for check in ("--keychain-self-test", "--tailscale-self-test"):
+        subprocess.run([sys.argv[1], check], check=True, timeout=30)
 except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-    sys.exit(f"error: signed app Keychain self-test failed: {error}")
+    sys.exit(f"error: signed app self-test failed: {error}")
 PYPROBE
 
 # Also retain the normal application startup check.

@@ -46,7 +46,16 @@ struct SuperManagerApp: App {
                 exit(EXIT_FAILURE)
             }
         }
-        _appState = State(initialValue: AppState())
+        if CommandLine.arguments.contains("--tailscale-self-test") {
+            do {
+                try TailscaleClient.selfTest()
+                print("Tailscale concurrent discovery self-test passed")
+                exit(EXIT_SUCCESS)
+            } catch {
+                fputs("Tailscale self-test failed: \(error.localizedDescription)\n", stderr)
+                exit(EXIT_FAILURE)
+            }
+        }
         // Install crash reporter handlers FIRST, before any
         // app code runs. Catches Mach exceptions + signals from
         // startup-time crashes (malformed preference dict, etc).
@@ -54,6 +63,7 @@ struct SuperManagerApp: App {
         // `~/Library/Application Support/SuperManager/crashes/`
         // where the Support Bundle picks it up.
         CrashReporting.start()
+        _appState = State(initialValue: AppState())
     }
 
     /// `isInserted` binding for the menu bar item.

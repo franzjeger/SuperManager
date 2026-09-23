@@ -60,41 +60,42 @@ enum TailscaleClient {
     ///   3. Homebrew on Intel + the legacy App Store shim path.
     ///   4. App Store / DMG install location.
     ///
-    /// Result is cached on the actor for the process lifetime — the
+    /// Result is cached under a lock for the process lifetime — the
     /// validate step does fork+exec which costs ~30 ms per call, and
     /// the binary doesn't move while we're running.
     private static func locateBinary() -> URL? {
-        if let cached = _cachedBinary { return cached }
-        var candidates: [String] = []
-        // 1. Our own bundled copy. Build phase
-        // `bundle_tailscale.sh` writes here.
-        if let bundled = Bundle.main.url(
-            forResource: "tailscale",
-            withExtension: nil,
-            subdirectory: "tailscale-bin"
-        ) {
-            candidates.append(bundled.path)
-        }
-        // 2-4. Common system locations as fallback. Order matters:
-        // /opt/homebrew first on arm64 because it's most likely the
-        // *real* binary; /usr/local/bin last because it's where the
-        // App Store leaves a dead shim.
-        candidates.append(contentsOf: [
-            "/opt/homebrew/bin/tailscale",
-            "/opt/homebrew/opt/tailscale/bin/tailscale",
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-            "/usr/local/bin/tailscale",
-        ])
-
-        for path in candidates {
-            guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-            let url = URL(fileURLWithPath: path)
-            if validateBinary(at: url) {
-                _cachedBinary = url
-                return url
+        binaryCache.resolve { cached in
+            if let cached { return cached }
+            var candidates: [String] = []
+            // 1. Our own bundled copy. Build phase
+            // `bundle_tailscale.sh` writes here.
+            if let bundled = Bundle.main.url(
+                forResource: "tailscale",
+                withExtension: nil,
+                subdirectory: "tailscale-bin"
+            ) {
+                candidates.append(bundled.path)
             }
+            // 2-4. Common system locations as fallback. Order matters:
+            // /opt/homebrew first on arm64 because it's most likely the
+            // *real* binary; /usr/local/bin last because it's where the
+            // App Store leaves a dead shim.
+            candidates.append(contentsOf: [
+                "/opt/homebrew/bin/tailscale",
+                "/opt/homebrew/opt/tailscale/bin/tailscale",
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                "/usr/local/bin/tailscale",
+            ])
+
+            for path in candidates {
+                guard FileManager.default.isExecutableFile(atPath: path) else { continue }
+                let url = URL(fileURLWithPath: path)
+                if validateBinary(at: url) {
+                    return url
+                }
+            }
+            return nil
         }
-        return nil
     }
 
     /// Probe whether a candidate `tailscale` binary actually
@@ -107,21 +108,58 @@ enum TailscaleClient {
         process.executableURL = url
         process.arguments = ["version"]
         // Discard output; we only care about exit code.
-        process.standardOutput = Pipe()
-        process.standardError = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
-            process.waitUntilExit()
+            // waitUntilExit pumps the caller's run loop and can reenter
+            // discovery from SwiftUI while the cache lock is held.
+            guard exited.wait(timeout: .now() + 2) == .success else {
+                process.terminate()
+                return false
+            }
             return process.terminationStatus == 0
         } catch {
             return false
         }
     }
 
-    /// Per-process cache for the located binary. Reset across app
-    /// launches; a SIGINT/restart picks up newly-installed binaries
-    /// without manual intervention.
-    private static var _cachedBinary: URL?
+    /// Status, preferences and profile refreshes overlap. Protect the complete
+    /// read/resolve/write operation so no task retains a URL freed by another.
+    final class BinaryCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cached: URL?
+
+        func resolve(_ lookup: (URL?) -> URL?) -> URL? {
+            lock.lock()
+            defer { lock.unlock() }
+            let resolved = lookup(cached)
+            cached = resolved
+            return resolved
+        }
+    }
+
+    private static let binaryCache = BinaryCache()
+
+    /// Exercise cold discovery with the same concurrent readers used on launch.
+    /// Only calls `tailscale version`; does not change VPN or Tailscale settings.
+    static func selfTest() throws {
+        let resultLock = NSLock()
+        var results = [URL?](repeating: nil, count: 32)
+        DispatchQueue.concurrentPerform(iterations: results.count) { index in
+            var resolved: URL?
+            for _ in 0..<100 { resolved = locateBinary() }
+            resultLock.lock()
+            results[index] = resolved
+            resultLock.unlock()
+        }
+        guard let first = results.first ?? nil else { throw ClientError.notInstalled }
+        guard results.allSatisfy({ $0 == first }) else {
+            throw ClientError.decodeFailed("Concurrent Tailscale discovery returned inconsistent paths")
+        }
+    }
 
     /// Path to the bundled `tailscaled` daemon (next to `tailscale`
     /// in the same Resources subdirectory). Used by the privileged
