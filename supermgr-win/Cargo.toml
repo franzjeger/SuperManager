@@ -56,7 +56,14 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Slint code generation runs in build.rs; the slint-build crate produces Rust
 # from the `.slint` UI files at compile time. `winres` embeds the
 # VS_FIXEDFILEINFO version resource for File Explorer Properties + the MSI.
-[target.'cfg(target_os = "windows")'.build-dependencies]
+#
+# Unconditional, not behind a target cfg. A build script runs on the *host*,
+# so gating these on `cfg(target_os = "windows")` meant a Linux or macOS
+# machine could not type-check this crate for Windows at all: the UI was
+# never generated and `slint::include_modules!()` had nothing to include.
+# build.rs now decides from `CARGO_CFG_TARGET_OS`, which is the target, and
+# nothing but an explicit `-p supermgr-win` ever builds this crate.
+[build-dependencies]
 slint-build = "1.8"
 winres      = "0.1"
 
