@@ -88,7 +88,7 @@ polkit, since there is no terminal to ask for `sudo` in).
 
 ### Windows
 
-Download **`SuperManager-Setup-<version>.exe`** from the
+Download **[the Windows installer with dependencies](https://github.com/franzjeger/SuperManager/releases/latest/download/SuperManager-Setup.exe)**. Versioned downloads are also available from the
 [releases page](https://github.com/franzjeger/SuperManager/releases). It
 is a single bootstrapper that chain-installs WireGuard, OpenVPN, and
 SuperManager itself — one UAC prompt, no separate installs. If you

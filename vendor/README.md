@@ -1,11 +1,13 @@
 # Third-party binaries (`vendor/`)
 
-Drop the following files into this directory before building the MSI to
-get a fully bundled SuperManager installer.
+Run `scripts/windows/Get-VendorFiles.ps1` before building. CI downloads and
+verifies the exact versions in `manifest.toml`; no manual file transfer is needed.
 
 | Filename                  | Source | Purpose |
 |---------------------------|--------|---------|
-| `openfortivpn.exe`        | <https://github.com/openfortivpn-windows/openfortivpn-windows/releases> | FortiGate SSL VPN client |
+| `openfortivpn.exe`        | No maintained upstream Windows build | FortiGate SSL VPN client |
+| `wireguard.dll` | Official WireGuardNT SDK, signature checked by CI | Native library and driver used by SuperManager |
+| `vc_redist.x64.exe` | Microsoft, signature checked by CI | MSVC x64 runtime |
 | `wireguard-installer.msi` | <https://download.wireguard.com/windows-client/> | WireGuardNT driver + DLL |
 | `openvpn-installer.msi`   | <https://openvpn.net/community-downloads/> | OpenVPN Community Edition + TAP-Windows6 |
 

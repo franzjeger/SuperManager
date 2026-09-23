@@ -88,6 +88,13 @@
                   KeyPath="yes" />
           </Component>
 
+          <Component Id="WireGuardNativeDll" Bitness="always64">
+            <File Id="wireguard.dll" Source="vendor\wireguard.dll" KeyPath="yes" />
+          </Component>
+          <Component Id="WireGuardNativeLicense" Bitness="always64">
+            <File Id="wireguard_nt_license" Source="vendor\wireguard-nt-LICENSE.txt" KeyPath="yes" />
+          </Component>
+
           <Component Id="McpExe" Bitness="always64">
             <File Id="supermgr_mcp.exe"
                   Source="$(var.TargetDir)\supermgr-mcp.exe"
@@ -165,6 +172,8 @@
       <ComponentRef Id="DaemonExe" />
       <ComponentRef Id="GuiExe" />
       <ComponentRef Id="McpExe" />
+      <ComponentRef Id="WireGuardNativeDll" />
+      <ComponentRef Id="WireGuardNativeLicense" />
       <?if $(var.IncludeOpenfortivpn) = "yes" ?>
       <ComponentRef Id="OpenfortivpnExe" />
       <?endif?>

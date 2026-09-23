@@ -97,7 +97,7 @@ try {
 
     # 4. Optional Burn bundle.
     if ($Bundle) {
-        foreach ($f in @("wireguard-installer.msi", "openvpn-installer.msi")) {
+        foreach ($f in @("wireguard-installer.msi", "openvpn-installer.msi", "vc_redist.x64.exe")) {
             $p = Join-Path $vendorDir $f
             if (-not (Test-Path $p)) {
                 throw "Bundle build requires $p. See vendor\README.md for the download URL."
@@ -116,6 +116,7 @@ try {
         & $wix build `
             -arch x64 `
             -ext WixToolset.BootstrapperApplications.wixext `
+            -ext WixToolset.Util.wixext `
             -out $outputExe `
             $wxsBundle
         if ($LASTEXITCODE -ne 0) { throw "wix build (bundle) failed" }

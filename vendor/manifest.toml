@@ -89,3 +89,19 @@ output = "openvpn-installer.msi"
 # (or the SuperManager project ships one built in CI in a later
 # release). The other four VPN backends (WireGuard, OpenVPN, Azure,
 # FortiGate IKEv2) all install bundled and work out of the box.
+
+[wireguard_nt]
+# Official WireGuardNT SDK, downloaded from the publisher on 2026-09-23.
+# CI also verifies the embedded DLL's Authenticode signature before packaging.
+version = "1.1"
+url = "https://download.wireguard.com/wireguard-nt/wireguard-nt-1.1.zip"
+sha256 = "DCEB30A9BC4BE48CCE0F74160FC88A585A2C2627366E8F846FC6658F9038DACE"
+output = "wireguard-nt.zip"
+
+[vc_runtime]
+# Immutable Microsoft download URL resolved from the official VS 2022 redist
+# link on 2026-09-23. CI verifies Microsoft's Authenticode signature too.
+version = "14.44.35211.0"
+url = "https://download.visualstudio.microsoft.com/download/pr/bd1c8d9d-ba95-4eee-bc6e-df1fcc876373/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe"
+sha256 = "CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B"
+output = "vc_redist.x64.exe"

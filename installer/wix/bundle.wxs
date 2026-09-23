@@ -22,7 +22,8 @@
   and installer\wix\license.rtf exists.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+     xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Bundle Name="SuperManager"
           Version="!(bind.packageVersion.SuperManagerMsi)"
           Manufacturer="Sybr"
@@ -35,7 +36,15 @@
           SuppressOptionsUI="yes" />
     </BootstrapperApplication>
 
+    <util:RegistrySearch Id="VcRuntimeSearch" Variable="VcRuntimeVersion"
+                         Root="HKLM" Key="SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
+                         Value="Version" Result="value" Bitness="always64" />
     <Chain>
+      <ExePackage Id="VcRuntime" SourceFile="vendor\vc_redist.x64.exe"
+                  PerMachine="yes" Permanent="yes" Vital="yes"
+                  DetectCondition="VcRuntimeVersion &gt;= v14.44.35211.0"
+                  InstallArguments="/install /quiet /norestart"
+                  RepairArguments="/repair /quiet /norestart" />
       <!-- WireGuard for Windows. Downloaded by the build script to
            vendor/wireguard-installer.msi; we reference the relative
            path so the embedded MSI is part of the EXE's payload. -->

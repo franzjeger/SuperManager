@@ -44,15 +44,27 @@ any host.
 
 ## Installing
 
-The recommended install is the **`SuperManager-Setup-<version>.exe`**
-Burn bootstrapper from the latest GitHub Release. It is a single
+Download **[SuperManager-Setup.exe](https://github.com/franzjeger/SuperManager/releases/latest/download/SuperManager-Setup.exe)** and open it. Approve the Windows administrator prompt, then choose Install. It is a single
 executable that chain-installs everything SuperManager needs:
 
-1. WireGuard for Windows (driver + DLL)
-2. OpenVPN Community Edition (openvpn.exe + TAP-Windows6 driver)
-3. SuperManager itself (daemon + GUI + MCP server + Windows Service registration)
+1. Microsoft Visual C++ x64 runtime (when missing or older)
+2. WireGuard for Windows and the WireGuardNT DLL beside SuperManager
+3. OpenVPN Community Edition (openvpn.exe and VPN drivers)
+4. SuperManager (app, background service, MCP server and Start menu shortcut)
 
-You get one UAC prompt, one progress UI, no separate installs.
+You get one administrator prompt and one progress window. The dependencies
+are embedded; no separate downloads or terminal commands are needed. Open
+**SuperManager** from the Start menu afterward.
+
+**Scope:** this package includes the dependencies for WireGuard, OpenVPN,
+Azure OpenVPN and native Windows networking. FortiClient SSL VPN remains
+unavailable without a compatible Windows client; the current backend expects
+openfortivpn, which upstream does not distribute for Windows. Installing the
+bundle does not make this unsupported backend functional.
+
+Every release must pass a Windows installation test covering the service,
+app startup, RPC, OpenVPN executable, WireGuard driver creation, repair,
+uninstall and preservation of user state.
 
 If you already manage WireGuard and OpenVPN out-of-band (e.g. via
 Group Policy / Intune), grab the bare **`SuperManager-<version>.msi`**

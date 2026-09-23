@@ -60,6 +60,9 @@ jobs:
             -p supermgr-win `
             -p supermgr-mcp
 
+      - name: Test Windows daemon
+        run: cargo test --locked -p supermgrd-win
+
       - name: Install WiX v5
         run: |
           dotnet tool install --global wix --version 5.0.2
@@ -78,6 +81,18 @@ jobs:
 
       - name: Build MSI + Burn bundle
         run: .\installer\wix\build-msi.ps1 -SkipBuild -Bundle
+
+      - name: Test complete Windows installation
+        run: .\scripts\windows\test-installer.ps1
+
+      - name: Upload installer test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-installer-test-logs
+          path: ${{ runner.temp }}/supermanager-installer-test/
+          if-no-files-found: ignore
+
 
       # ----- Optional signing block (commented out until a cert exists) ----
       # - name: Sign artifacts
@@ -115,6 +130,9 @@ jobs:
                   Out-File -FilePath "$p.sha256" -Encoding ascii
               Write-Host "SHA-256 $(Split-Path -Leaf $p): $hash"
           }
+          Copy-Item $exe "installer\wix\SuperManager-Setup.exe"
+          $stableHash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "$stableHash  SuperManager-Setup.exe" | Out-File "installer\wix\SuperManager-Setup.exe.sha256" -Encoding ascii
           "MSI_PATH=$msi"              | Out-File -FilePath $env:GITHUB_ENV -Append
           "EXE_PATH=$exe"              | Out-File -FilePath $env:GITHUB_ENV -Append
           "MSI_SHA256_PATH=$msi.sha256" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -124,6 +142,8 @@ jobs:
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: |
+            installer/wix/SuperManager-Setup.exe
+            installer/wix/SuperManager-Setup.exe.sha256
             ${{ env.EXE_PATH }}
             ${{ env.EXE_SHA256_PATH }}
             ${{ env.MSI_PATH }}

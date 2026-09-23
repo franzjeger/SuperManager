@@ -56,8 +56,7 @@ foreach ($name in $manifest.Keys | Sort-Object) {
     $required = @('url', 'sha256', 'output')
     $missing = $required | Where-Object { -not $entry.ContainsKey($_) }
     if ($missing) {
-        Write-Warning "[$name] missing keys: $($missing -join ', ') - skipping"
-        continue
+        throw "[$name] missing keys: $($missing -join ', ')"
     }
     $expectedHash = $entry['sha256'].ToUpperInvariant()
     $dest = Join-Path $VendorDir $entry['output']
@@ -101,3 +100,19 @@ if ($failed) {
 
 Write-Host ""
 Write-Host "All vendor files verified." -ForegroundColor Green
+
+# Stage the native library the daemon actually loads, not just the WG GUI.
+$ntDir = Join-Path $VendorDir "wireguard-nt-sdk"
+Expand-Archive -LiteralPath (Join-Path $VendorDir "wireguard-nt.zip") -DestinationPath $ntDir -Force
+$dll = Join-Path $ntDir "wireguard-nt/bin/amd64/wireguard.dll"
+foreach ($item in @(
+    @{ Path = $dll; Publisher = "WireGuard" },
+    @{ Path = (Join-Path $VendorDir "vc_redist.x64.exe"); Publisher = "Microsoft Corporation" }
+)) {
+    $signature = Get-AuthenticodeSignature -FilePath $item.Path
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notlike "*$($item.Publisher)*") {
+        throw "Invalid publisher signature for $($item.Path): $($signature.Status)"
+    }
+}
+Copy-Item $dll (Join-Path $VendorDir "wireguard.dll") -Force
+Copy-Item (Join-Path $ntDir "wireguard-nt/LICENSE.txt") (Join-Path $VendorDir "wireguard-nt-LICENSE.txt") -Force

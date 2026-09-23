@@ -208,7 +208,12 @@ async fn handle_connect(state: &Arc<DaemonState>, args: &Value) -> Result<Value,
                         tracing::warn!("failed to persist TOFU certificate: {}", e);
                     }
                     let p_json = serde_json::to_string(&p).unwrap_or(profile_json);
-                    state.vpn.forticlient.connect(&p_json).await.map_err(map_vpn_err)?
+                    state
+                        .vpn
+                        .forticlient
+                        .connect(&p_json)
+                        .await
+                        .map_err(map_vpn_err)?
                 }
                 Err(e) => return Err(map_vpn_err(e)),
             }
@@ -338,6 +343,9 @@ fn map_vpn_err(e: super::vpn::VpnError) -> RpcError {
     match e {
         VpnError::NotImplemented(what) => {
             RpcError::Backend(format!("not implemented on Windows: {what}"))
+        }
+        VpnError::TofuCertificateRequired(fingerprint) => {
+            RpcError::Backend(format!("VPN certificate approval required: {fingerprint}"))
         }
         VpnError::MissingDependency(msg) => RpcError::Backend(format!("missing dependency: {msg}")),
         VpnError::Win32(msg) => RpcError::Backend(format!("win32: {msg}")),
@@ -1065,4 +1073,18 @@ async fn handle_sophos_xml_api(state: &Arc<DaemonState>, args: &Value) -> Result
         appliance::sophos_xml_api(&state.root, state.secret_store.clone(), host_id, inner_xml)
             .await?;
     Ok(Value::String(resp))
+}
+
+#[cfg(test)]
+mod vpn_error_tests {
+    use super::*;
+    #[test]
+    fn certificate_error_preserves_fingerprint_without_becoming_success() {
+        let result = map_vpn_err(super::super::vpn::VpnError::TofuCertificateRequired(
+            "sha256:example".into(),
+        ));
+        assert!(
+            matches!(result, RpcError::Backend(message) if message.contains("sha256:example") && message.contains("approval required"))
+        );
+    }
 }
