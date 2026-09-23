@@ -11,8 +11,8 @@
 //!    fall back to the PKCE browser flow if the refresh fails or no
 //!    cached token exists.
 //! 2. **PKCE** — generate a code_verifier + code_challenge, bind a local
-//!    TcpListener on `127.0.0.1:2023`, open the auth URL in the user's
-//!    default browser, await the redirect, exchange the code for an
+//!    TcpListener on `127.0.0.1:2023`, publish the auth URL for the GUI to
+//!    open (see below), await the redirect, exchange the code for an
 //!    access + refresh token.
 //! 3. **Tempfiles** — write `tls-auth.key`, `auth.txt`, `client.ovpn` to
 //!    a fresh directory under `%PROGRAMDATA%\SuperManager\runtime\`.
@@ -28,6 +28,17 @@
 //!
 //! Kill the openvpn child, wait for exit, scrub the temp directory,
 //! revert DNS.
+//!
+//! # Who opens the browser
+//!
+//! Not the daemon. It runs as `LocalSystem` in session 0, which has no
+//! desktop, so a browser it starts — `cmd /c start` included — opens where
+//! nobody can see it, and the connect used to wait out its full timeout
+//! for a sign-in that could never happen. The URL goes into the shared
+//! [`AuthPrompt`] instead; `get_status` carries it while the connect is
+//! waiting, and the GUI, running in the operator's own session, opens it.
+//! The redirect still reaches the listener here: 127.0.0.1 is the same
+//! machine whichever session the browser runs in.
 //!
 //! # Naming
 //!
@@ -53,15 +64,22 @@ use tracing::{info, warn};
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::vpn::profile::{AzureVpnConfig, Profile, ProfileConfig};
 
-use super::{VpnBackend, VpnError};
+use super::session::AuthPrompt;
+use super::{output, VpnBackend, VpnError};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Max time we wait for the user to complete browser auth. Device code
-/// usually expires after 15 min; we give 20 to be safe.
-const AUTH_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// How long a connect waits for the operator to finish signing in. Ten
+/// minutes is long enough for MFA on a phone left in another room; past
+/// that, whoever started it has walked away. The GUI can cancel sooner.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How long one connection to the callback listener may take to send its
+/// request line. Browsers open speculative connections they may never use;
+/// one of those must not hold up the one carrying the code.
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Max time we wait for openvpn to finish negotiating the tunnel.
 const OPENVPN_CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -89,6 +107,8 @@ struct AzActive {
     tmp_dir: crate::win::paths::PrivateRuntimeDir,
     /// Whether we pushed DNS that needs reverting.
     dns_overridden: bool,
+    /// What openvpn has been printing, for when it stops by itself.
+    tail: output::Tail,
 }
 
 // ---------------------------------------------------------------------------
@@ -99,14 +119,19 @@ struct AzActive {
 /// see module docs).
 pub struct Ikev2Backend {
     secret_store: Option<Arc<dyn SecretStore>>,
+    /// Where a sign-in URL goes for the GUI to open. `None` only for the
+    /// `Default` backend, which then just logs the URL.
+    auth_prompt: Option<AuthPrompt>,
     active: Mutex<Option<AzActive>>,
 }
 
 impl Ikev2Backend {
-    /// Construct with a secret store (required to cache the refresh token).
-    pub fn with_store(secret_store: Arc<dyn SecretStore>) -> Self {
+    /// Construct with a secret store (required to cache the refresh token)
+    /// and the prompt slot the session reports sign-in URLs from.
+    pub fn with_store(secret_store: Arc<dyn SecretStore>, auth_prompt: AuthPrompt) -> Self {
         Self {
             secret_store: Some(secret_store),
+            auth_prompt: Some(auth_prompt),
             active: Mutex::new(None),
         }
     }
@@ -115,12 +140,24 @@ impl Ikev2Backend {
     pub async fn is_active(&self) -> bool {
         self.active.lock().await.is_some()
     }
+
+    /// Why the tunnel's openvpn exited, if it has. `None` while it runs,
+    /// and when there is no tunnel.
+    pub async fn exited(&self) -> Option<String> {
+        let mut guard = self.active.lock().await;
+        let active = guard.as_mut()?;
+        match active.child.try_wait() {
+            Ok(Some(status)) => Some(output::exit_reason("Azure VPN", status, &active.tail)),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Ikev2Backend {
     fn default() -> Self {
         Self {
             secret_store: None,
+            auth_prompt: None,
             active: Mutex::new(None),
         }
     }
@@ -153,6 +190,7 @@ impl VpnBackend for Ikev2Backend {
                 "state": "Connected",
                 "backend": "azure",
                 "profile_id": a.profile_id.to_string(),
+                "adapter": a.adapter_name,
             })
             .to_string())
         } else {
@@ -185,8 +223,14 @@ impl Ikev2Backend {
         info!(profile_id = %profile.id, "Azure: starting connect");
 
         // ── Step 1 — OAuth ──────────────────────────────────────────────────
-        let access_token =
-            authenticate(&profile.id, &cfg.tenant_id, &cfg.client_id, store.as_ref()).await?;
+        let access_token = authenticate(
+            &profile.id,
+            &cfg.tenant_id,
+            &cfg.client_id,
+            store.as_ref(),
+            self.auth_prompt.as_ref(),
+        )
+        .await?;
         let upn = jwt_upn(&access_token);
         info!(upn, "Azure: authenticated");
 
@@ -219,25 +263,17 @@ impl Ikev2Backend {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(VpnError::Io)?;
+        let mut child = command.spawn().map_err(|e| {
+            VpnError::MissingDependency(format!("could not start {}: {e}", openvpn_exe.display()))
+        })?;
         info!(?openvpn_exe, config = %ovpn_path.display(), "spawned openvpn for Azure tunnel");
 
         // ── Step 4 — Wait for "Initialization Sequence Completed" ──────────
         // We don't enable the management socket here — Azure's flow is
-        // fully scripted, mid-flight controls aren't needed. Stdout
-        // parsing is enough to detect success.
-        let stdout = child.stdout.take().ok_or_else(|| VpnError::Subprocess {
-            code: -1,
-            stderr: "no stdout pipe from openvpn".into(),
-        })?;
-
-        let (sender, mut watcher) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let stdout_task = tokio::spawn(async move {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                let _ = sender.send(line);
-            }
-        });
+        // fully scripted, mid-flight controls aren't needed. The log is
+        // enough to detect success, and it goes on being read after this
+        // stops listening: an unread pipe fills and stalls the tunnel.
+        let (tail, mut watcher) = output::capture(&mut child);
 
         let mut adapter_name: Option<String> = None;
         let mut connected = false;
@@ -255,22 +291,26 @@ impl Ikev2Backend {
             }
             if line.contains("AUTH_FAILED") {
                 let _ = child.kill().await;
-                stdout_task.abort();
-                return Err(VpnError::PermissionDenied("Azure auth rejected by gateway"));
+                return Err(VpnError::PermissionDenied(
+                    "The VPN gateway rejected the Entra ID sign-in",
+                ));
             }
             if let Some(name) = extract_tap_adapter(&line) {
                 adapter_name = Some(name);
             }
         }
-        stdout_task.abort();
+        drop(watcher);
 
         if !connected {
             let _ = child.kill().await;
             return Err(VpnError::Subprocess {
                 code: -1,
-                stderr: format!(
-                    "openvpn did not reach \"Initialization Sequence Completed\" within {OPENVPN_CONNECT_TIMEOUT:?}"
-                ),
+                stderr: tail.reason().unwrap_or_else(|| {
+                    format!(
+                        "The Azure gateway did not complete the connection within {} s",
+                        OPENVPN_CONNECT_TIMEOUT.as_secs()
+                    )
+                }),
             });
         }
 
@@ -295,6 +335,7 @@ impl Ikev2Backend {
             adapter_name,
             tmp_dir,
             dns_overridden,
+            tail,
         });
         Ok(())
     }
@@ -336,6 +377,7 @@ async fn authenticate(
     tenant_id: &str,
     audience: &str,
     secret_store: &dyn SecretStore,
+    prompt: Option<&AuthPrompt>,
 ) -> Result<String, VpnError> {
     let label = refresh_token_label(profile_id);
 
@@ -359,7 +401,7 @@ async fn authenticate(
         }
     }
 
-    let (access, refresh_opt) = pkce_browser_flow(tenant_id, audience).await?;
+    let (access, refresh_opt) = pkce_browser_flow(tenant_id, audience, prompt).await?;
     if let Some(rt) = refresh_opt {
         if let Err(e) = secret_store.store(&label, rt.as_bytes()).await {
             warn!("Azure: failed to cache refresh token: {e}");
@@ -409,9 +451,33 @@ async fn refresh_access_token(
     }
 }
 
+/// Holds a published sign-in URL, and withdraws it however the wait ends —
+/// signed in, timed out, or cancelled by the future being dropped. A stale
+/// URL left behind would have the GUI open a sign-in nobody is listening
+/// for.
+struct Published<'a>(&'a AuthPrompt);
+
+impl<'a> Published<'a> {
+    fn new(prompt: &'a AuthPrompt, url: &str) -> Self {
+        if let Ok(mut slot) = prompt.lock() {
+            *slot = Some(url.to_owned());
+        }
+        Self(prompt)
+    }
+}
+
+impl Drop for Published<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
+
 async fn pkce_browser_flow(
     tenant_id: &str,
     audience: &str,
+    prompt: Option<&AuthPrompt>,
 ) -> Result<(String, Option<String>), VpnError> {
     let u1 = uuid::Uuid::new_v4();
     let u2 = uuid::Uuid::new_v4();
@@ -436,27 +502,35 @@ async fn pkce_browser_flow(
         scope_enc = encode_query_value(&scope),
     );
 
-    // Bind BEFORE opening the browser so we never miss the redirect.
+    // Bind BEFORE publishing the URL so we never miss the redirect.
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", REDIRECT_PORT))
         .await
         .map_err(|e| {
             VpnError::MissingDependency(format!(
-                "cannot listen on {REDIRECT_URI} for OAuth callback: {e}"
+                "Cannot listen on {REDIRECT_URI} for the sign-in redirect ({e}). \
+                 Another program is using port {REDIRECT_PORT} — the Azure VPN \
+                 Client, if it is installed, is the usual one."
             ))
         })?;
 
-    info!("Azure: opening browser at {auth_url}");
-    open_url_in_browser(&auth_url)?;
+    // The URL carries the PKCE challenge, not the verifier: nothing in it
+    // lets anyone else redeem the code. Logged so a `--console` run with no
+    // GUI attached can still be signed in by hand.
+    info!("Azure: waiting for sign-in at {auth_url}");
+    let _published = prompt.map(|p| Published::new(p, &auth_url));
 
     let code = timeout(AUTH_TIMEOUT, accept_auth_code(listener, &state))
         .await
         .map_err(|_| VpnError::Subprocess {
             code: -1,
-            stderr: format!("Entra ID browser authentication timed out after {AUTH_TIMEOUT:?}"),
+            stderr: format!(
+                "Nobody finished signing in to Microsoft Entra ID within {} minutes",
+                AUTH_TIMEOUT.as_secs() / 60
+            ),
         })?
         .map_err(|e| VpnError::Subprocess {
             code: -1,
-            stderr: format!("auth redirect: {e}"),
+            stderr: format!("Entra ID sign-in failed: {e}"),
         })?;
 
     info!("Azure: authorization code received, exchanging for tokens");
@@ -499,41 +573,91 @@ async fn pkce_browser_flow(
     }
 }
 
-/// Accept exactly one HTTP connection on `listener`, parse the OAuth2
-/// `code` + `state` query parameters, respond with a friendly HTML, and
-/// return the code.
+/// What one connection to the callback listener turned out to be.
+#[derive(Debug, PartialEq, Eq)]
+enum Callback {
+    /// The redirect, carrying the authorization code.
+    Code(String),
+    /// The redirect, carrying Entra ID's refusal.
+    Refused(String),
+    /// Anything else: a speculative connection, a favicon request, a
+    /// stale tab. Not an answer; keep listening.
+    Other,
+}
+
+/// Wait for the redirect that carries the authorization code.
+///
+/// Accepts connections until one is the redirect. The first connection is
+/// not necessarily it: browsers open sockets speculatively and ask for
+/// `/favicon.ico`, and taking whichever came first failed the sign-in on
+/// an empty request.
 async fn accept_auth_code(
     listener: tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
-    let (stream, _) = listener
-        .accept()
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept: {e}"))?;
+        match timeout(
+            CALLBACK_READ_TIMEOUT,
+            answer_callback(stream, expected_state),
+        )
         .await
-        .map_err(|e| format!("accept: {e}"))?;
+        {
+            Ok(Callback::Code(code)) => return Ok(code),
+            Ok(Callback::Refused(reason)) => return Err(reason),
+            Ok(Callback::Other) | Err(_) => continue,
+        }
+    }
+}
+
+/// Read one request from the listener, answer it, and say what it was.
+async fn answer_callback(stream: tokio::net::TcpStream, expected_state: &str) -> Callback {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
-    let request_line = lines
-        .next_line()
-        .await
-        .map_err(|e| format!("read: {e}"))?
-        .ok_or_else(|| "empty HTTP request".to_string())?;
-
-    let html = concat!(
-        "HTTP/1.1 200 OK\r\n",
-        "Content-Type: text/html; charset=utf-8\r\n",
-        "Connection: close\r\n\r\n",
-        "<html><head><title>SuperManager</title></head><body>",
-        "<h2>Authentication complete</h2>",
-        "<p>You may close this tab and return to SuperManager.</p>",
-        "</body></html>\r\n",
+    let request_line = match lines.next_line().await {
+        Ok(Some(line)) => line,
+        _ => return Callback::Other,
+    };
+    let callback = parse_callback(&request_line, expected_state);
+    let (status, heading, body) = match &callback {
+        Callback::Code(_) => (
+            "200 OK",
+            "Signed in",
+            "You can close this tab. SuperManager is connecting.",
+        ),
+        Callback::Refused(_) => (
+            "200 OK",
+            "Sign-in failed",
+            "Microsoft Entra ID did not sign you in. SuperManager shows the reason.",
+        ),
+        Callback::Other => ("404 Not Found", "Not found", ""),
+    };
+    let page = format!(
+        "HTTP/1.1 {status}\r\n\
+         Content-Type: text/html; charset=utf-8\r\n\
+         Connection: close\r\n\r\n\
+         <html><head><title>SuperManager</title></head><body>\
+         <h2>{heading}</h2><p>{body}</p></body></html>\r\n"
     );
-    let _ = writer.write_all(html.as_bytes()).await;
+    let _ = writer.write_all(page.as_bytes()).await;
+    callback
+}
 
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "malformed HTTP request line".to_string())?;
-    let query = path.splitn(2, '?').nth(1).unwrap_or("");
+/// Classify a callback request line.
+///
+/// The `state` must come back and must match: a redirect without it is
+/// not one this connect asked for, whatever else it carries.
+fn parse_callback(request_line: &str, expected_state: &str) -> Callback {
+    let Some(target) = request_line.split_whitespace().nth(1) else {
+        return Callback::Other;
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path != "/" {
+        return Callback::Other;
+    }
 
     let mut code: Option<String> = None;
     let mut returned_state: Option<String> = None;
@@ -551,41 +675,17 @@ async fn accept_auth_code(
         }
     }
 
-    if let Some(e) = error_desc {
-        return Err(e);
+    if code.is_none() && error_desc.is_none() {
+        return Callback::Other;
     }
-    if let Some(s) = &returned_state {
-        if s != expected_state {
-            return Err("OAuth2 state mismatch — possible CSRF".to_string());
-        }
+    if returned_state.as_deref() != Some(expected_state) {
+        return Callback::Refused("the sign-in reply did not match this request".into());
     }
-    code.ok_or_else(|| "no authorization code in redirect".into())
-}
-
-/// Open `url` in the user's default browser via `cmd /c start`. The
-/// daemon runs as `LocalSystem`, which has no desktop session —
-/// `ShellExecuteW` from Session 0 silently fails. Shelling out to
-/// `cmd /c start "" "<url>"` posts the request through the shell
-/// association machinery to the active interactive session.
-///
-/// In console-mode (interactive) runs this works the same way as a
-/// regular foreground app.
-fn open_url_in_browser(url: &str) -> Result<(), VpnError> {
-    use std::process::Stdio;
-    let status = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .status()
-        .map_err(VpnError::Io)?;
-    if !status.success() {
-        return Err(VpnError::Subprocess {
-            code: status.code().unwrap_or(-1),
-            stderr: format!("could not open browser for {url}"),
-        });
+    match (code, error_desc) {
+        (_, Some(reason)) => Callback::Refused(reason),
+        (Some(code), None) => Callback::Code(code),
+        (None, None) => Callback::Other,
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +785,7 @@ fn build_ovpn_config(
          data-ciphers AES-256-GCM\n\
          disable-dco\n\
          verb 3\n\
+         suppress-timestamps\n\
          <ca>\n",
         fqdn = cfg.gateway_fqdn,
     );
@@ -697,7 +798,12 @@ fn build_ovpn_config(
     s.push_str(&format!("auth-user-pass {auth_path}\n"));
     s.push_str(&format!("tls-auth {key_path} 1\n"));
 
-    if full_tunnel || cfg.routes.is_empty() {
+    // Split tunnel means what the gateway pushes — the networks behind it,
+    // as the Azure VPN Client gets them — plus any routes the profile adds.
+    // This used to force `redirect-gateway` whenever the profile listed no
+    // routes, the usual case, and a P2S gateway not built for forced
+    // tunnelling drops internet traffic: connected, and nothing loads.
+    if full_tunnel {
         s.push_str("redirect-gateway def1\n");
     } else {
         for route in &cfg.routes {
@@ -817,5 +923,80 @@ async fn run_powershell(cmd: &str) -> Result<(), VpnError> {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_ovpn_config, parse_callback, Callback};
+    use supermgr_core::vpn::profile::AzureVpnConfig;
+
+    fn config(routes: &[&str]) -> AzureVpnConfig {
+        AzureVpnConfig {
+            gateway_fqdn: "azuregateway-x.vpn.azure.com".into(),
+            tenant_id: "tenant".into(),
+            client_id: "41b23e61-6c1e-4545-b367-cd054e0ed4b4".into(),
+            server_secret_hex: "00".repeat(256),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n".into(),
+            dns_servers: Vec::new(),
+            routes: routes.iter().map(|r| r.parse().unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_split_tunnel_with_no_listed_routes_takes_the_gateways() {
+        let ovpn = build_ovpn_config(&config(&[]), "k", "a", false);
+        assert!(!ovpn.contains("redirect-gateway"), "{ovpn}");
+    }
+
+    #[test]
+    fn listed_routes_are_added_and_full_tunnel_redirects_everything() {
+        let split = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", false);
+        assert!(split.contains("route 10.1.0.0 255.255.0.0"), "{split}");
+        let full = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", true);
+        assert!(full.contains("redirect-gateway def1"), "{full}");
+    }
+
+    const STATE: &str = "5b1c1f9e-state";
+
+    #[test]
+    fn the_redirect_with_a_code_and_our_state_is_the_answer() {
+        let line = format!("GET /?code=abc%2Fdef&state={STATE}&session_state=x HTTP/1.1");
+        assert_eq!(
+            parse_callback(&line, STATE),
+            Callback::Code("abc/def".into())
+        );
+    }
+
+    #[test]
+    fn a_speculative_connection_or_favicon_is_not_an_answer() {
+        // Taking the first connection as the redirect is what failed
+        // sign-ins on browsers that preconnect.
+        assert_eq!(
+            parse_callback("GET /favicon.ico HTTP/1.1", STATE),
+            Callback::Other
+        );
+        assert_eq!(parse_callback("GET / HTTP/1.1", STATE), Callback::Other);
+        assert_eq!(parse_callback("", STATE), Callback::Other);
+    }
+
+    #[test]
+    fn a_code_without_our_state_is_refused() {
+        // The old check only compared a state that was present, so a reply
+        // with none at all went through.
+        let refused = |line: &str| matches!(parse_callback(line, STATE), Callback::Refused(_));
+        assert!(refused("GET /?code=abc HTTP/1.1"));
+        assert!(refused("GET /?code=abc&state=someone-else HTTP/1.1"));
+    }
+
+    #[test]
+    fn entra_ids_refusal_is_passed_on_in_its_own_words() {
+        let line = format!(
+            "GET /?error=access_denied&error_description=User+cancelled+the+flow&state={STATE} HTTP/1.1"
+        );
+        assert_eq!(
+            parse_callback(&line, STATE),
+            Callback::Refused("User cancelled the flow".into())
+        );
     }
 }

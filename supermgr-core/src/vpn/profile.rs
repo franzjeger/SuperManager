@@ -491,6 +491,11 @@ pub struct ProfileSummary {
     /// Kill-switch flag.
     #[serde(default)]
     pub kill_switch: bool,
+    /// Whether connecting also points the system at the VPN's DNS servers.
+    /// Carried so a settings toggle can show its state without fetching
+    /// the whole profile.
+    #[serde(default)]
+    pub push_dns: bool,
     /// Customer / tenant tag for grouping. Empty = ungrouped.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub customer: String,
@@ -547,6 +552,7 @@ impl From<&Profile> for ProfileSummary {
                 _ => Vec::new(),
             },
             kill_switch: p.kill_switch,
+            push_dns: p.push_dns,
             customer: p.customer.clone(),
             local_id: match &p.config {
                 ProfileConfig::FortiGate(fg) => fg.local_id.clone(),

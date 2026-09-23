@@ -15,6 +15,8 @@
 //! | `logs\`           | Rolling daemon logs (Event Log is for service lifecycle only) |
 //! | `backups\`        | FortiGate/OPNsense config backups                 |
 //! | `templates\`      | Custom Tera templates the user has dropped in     |
+//! | `ovpn\`           | Imported OpenVPN configs — **private**: they carry keys inline |
+//! | `runtime\`        | Per-connect VPN scratch files — **private**        |
 
 use std::ffi::c_void;
 use std::io;
@@ -45,6 +47,23 @@ use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 /// to change the DACL. Creation is restricted to the elevated service/admins.
 const ROOT_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;AU)";
 const SECRET_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
+
+/// Top-level directories that get [`SECRET_SDDL`] instead of the tree's
+/// read-for-everyone [`ROOT_SDDL`]. Startup re-applies the ACL of every
+/// top-level entry, so a private directory missing from this list would be
+/// made readable again on the next service start.
+const PRIVATE_DIRS: &[&str] = &["runtime", "ovpn"];
+
+fn sddl_for(top_level_name: &str) -> &'static str {
+    if PRIVATE_DIRS
+        .iter()
+        .any(|d| top_level_name.eq_ignore_ascii_case(d))
+    {
+        SECRET_SDDL
+    } else {
+        ROOT_SDDL
+    }
+}
 
 pub const PROGRAM_DATA_SUBPATH: &str = "SuperManager";
 
@@ -81,12 +100,9 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
         "backups",
         "templates",
         "runtime",
+        "ovpn",
     ] {
-        let sddl = if sub == "runtime" {
-            SECRET_SDDL
-        } else {
-            ROOT_SDDL
-        };
+        let sddl = sddl_for(sub);
         let dir = root.join(sub);
         let _handle = secure_directory(&dir, sddl, true)?;
     }
@@ -95,15 +111,7 @@ fn ensure_root_at(base: &Path) -> io::Result<PathBuf> {
     // configuration tree's read permission for authenticated users.
     for entry in std::fs::read_dir(&root)? {
         let entry = entry?;
-        let sddl = if entry
-            .file_name()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("runtime")
-        {
-            SECRET_SDDL
-        } else {
-            ROOT_SDDL
-        };
+        let sddl = sddl_for(&entry.file_name().to_string_lossy());
         let (handle, is_dir) = open_trusted_path(&entry.path())?;
         set_dacl(&handle, sddl)?;
         if is_dir {
@@ -138,6 +146,19 @@ fn create_private_runtime_dir_at(
     ));
     drop(secure_directory(&path, SECRET_SDDL, false)?);
     Ok(PrivateRuntimeDir { path })
+}
+
+/// The directory imported OpenVPN configs live in, created if need be.
+///
+/// Readable by SYSTEM and Administrators only. A client config usually
+/// carries its private key inline (`<key>`), and everything else under the
+/// state root is readable by every signed-in user.
+pub fn private_config_dir() -> io::Result<PathBuf> {
+    let root = root_path_at(&program_data_dir())?;
+    let _root_handle = secure_directory(&root, ROOT_SDDL, true)?;
+    let dir = root.join("ovpn");
+    drop(secure_directory(&dir, SECRET_SDDL, true)?);
+    Ok(dir)
 }
 
 #[derive(Debug)]
@@ -464,6 +485,15 @@ mod tests {
         let base = std::env::temp_dir().join(format!("supermanager-acl-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&base).unwrap();
         let root = ensure_root_at(&base).expect("create secure temporary state tree");
+        // Imported OpenVPN configs carry private keys: the directory they go
+        // in must not inherit the tree's read-for-everyone ACL.
+        let ovpn = root.join("ovpn").join("imported.ovpn");
+        std::fs::write(&ovpn, "<key>fixture</key>").unwrap();
+        assert_eq!(
+            effective_rights(&file_descriptor(&ovpn), WinAuthenticatedUserSid),
+            0,
+            "imported OpenVPN configs must be private"
+        );
         let profile = uuid::Uuid::new_v4();
         let first = create_private_runtime_dir_at(&root, &profile).unwrap();
         let second = create_private_runtime_dir_at(&root, &profile).unwrap();
@@ -546,6 +576,11 @@ mod tests {
             "startup migration must preserve private runtime ACLs"
         );
         drop(active);
+        assert_eq!(
+            effective_rights(&file_descriptor(&ovpn), WinAuthenticatedUserSid),
+            0,
+            "startup migration must keep imported OpenVPN configs private"
+        );
         std::fs::remove_dir_all(base).unwrap();
     }
 

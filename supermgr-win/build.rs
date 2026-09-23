@@ -31,11 +31,23 @@ fn main() {
     println!("cargo:rustc-env=SUPERMGR_VERSION={version}");
     println!("cargo:rerun-if-env-changed=SUPERMGR_RELEASE_VERSION");
 
-    #[cfg(target_os = "windows")]
-    {
+    // The target, not the host. `#[cfg(target_os)]` in a build script
+    // describes the machine running the build, so it skipped the UI entirely
+    // whenever this crate was checked for Windows from anywhere else.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         slint_build::compile("ui/main.slint").expect("slint UI compile failed");
 
         let mut res = winres::WindowsResource::new();
+        // The app icon, so the taskbar, Start menu and Explorer show it
+        // rather than Windows' generic program icon. Built from the same
+        // artwork as the Linux and macOS icons (contrib/icons/hicolor).
+        let icon = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default())
+            .join("assets")
+            .join("supermanager.ico");
+        println!("cargo:rerun-if-changed=assets/supermanager.ico");
+        if let Some(icon) = icon.to_str() {
+            res.set_icon(icon);
+        }
         res.set("ProductName", "SuperManager");
         res.set("FileDescription", "SuperManager GUI");
         res.set("CompanyName", "Sybr");
@@ -59,7 +71,6 @@ fn main() {
 /// `"1.7.0"` → the four 16-bit fields of a VS_FIXEDFILEINFO version,
 /// packed major.minor.patch.0. `None` when the string is not dotted
 /// numbers, in which case winres keeps its CARGO_PKG_VERSION default.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn pack_version(v: &str) -> Option<u64> {
     let mut parts = v.split('.');
     let field = |p: Option<&str>| -> Option<u64> {

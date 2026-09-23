@@ -229,18 +229,25 @@ impl PipeClient {
             .await
     }
 
-    /// Connect to the named profile.
+    /// Start connecting the named profile.
+    ///
+    /// Returns once the daemon has started the bring-up, not when the
+    /// tunnel is up — the same as on Linux. Poll [`Self::get_status`] for
+    /// progress, the outcome, and the reason if it failed.
     pub async fn connect(&self, profile_id: &str) -> Result<(), PipeError> {
         self.invoke_unit("connect", serde_json::json!({ "profile_id": profile_id }))
             .await
     }
 
-    /// Disconnect the active profile.
+    /// Disconnect the active profile, or cancel a connect in progress.
     pub async fn disconnect(&self) -> Result<(), PipeError> {
         self.invoke_unit("disconnect", serde_json::json!({})).await
     }
 
-    /// Current VPN status JSON.
+    /// Current VPN status JSON: a serialised
+    /// [`VpnState`](crate::vpn::state::VpnState) (`state`, `profile_id`,
+    /// `phase`, `interface`, `message`, …) plus `backend`, and `auth_url`
+    /// while an Azure connect waits for a sign-in.
     pub async fn get_status(&self) -> Result<String, PipeError> {
         self.invoke_json_string("get_status", serde_json::json!({}))
             .await
@@ -251,6 +258,85 @@ impl PipeClient {
         self.invoke_unit(
             "delete_profile",
             serde_json::json!({ "profile_id": profile_id }),
+        )
+        .await
+    }
+
+    /// Rename a profile.
+    pub async fn rename_profile(&self, profile_id: &str, new_name: &str) -> Result<(), PipeError> {
+        self.invoke_unit(
+            "rename_profile",
+            serde_json::json!({ "profile_id": profile_id, "new_name": new_name }),
+        )
+        .await
+    }
+
+    /// Whether connecting the profile also switches Windows to the VPN's
+    /// DNS servers.
+    pub async fn set_push_dns(&self, profile_id: &str, enabled: bool) -> Result<(), PipeError> {
+        self.invoke_unit(
+            "set_push_dns",
+            serde_json::json!({ "profile_id": profile_id, "enabled": enabled }),
+        )
+        .await
+    }
+
+    /// Whether connecting the profile sends all traffic through the tunnel.
+    pub async fn set_full_tunnel(&self, profile_id: &str, enabled: bool) -> Result<(), PipeError> {
+        self.invoke_unit(
+            "set_full_tunnel",
+            serde_json::json!({ "profile_id": profile_id, "enabled": enabled }),
+        )
+        .await
+    }
+
+    /// Which VPN backends can run on this machine, as a JSON object keyed
+    /// by backend (`wireguard`, `openvpn`, `azure`, `fortigate`,
+    /// `forticlient`), each `{ "available": bool, "reason"?: string }`.
+    pub async fn vpn_capabilities(&self) -> Result<String, PipeError> {
+        self.invoke_json_string("vpn_capabilities", serde_json::json!({}))
+            .await
+    }
+
+    /// Import an OpenVPN client config. Returns the new profile id.
+    ///
+    /// `username` and `password` are stored only when both are given; pass
+    /// empty strings for a config that authenticates by certificate alone.
+    pub async fn import_openvpn(
+        &self,
+        conf_text: &str,
+        name: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<String, PipeError> {
+        self.invoke_json_string(
+            "import_openvpn",
+            serde_json::json!({
+                "conf_text": conf_text,
+                "name": name,
+                "username": username,
+                "password": password,
+            }),
+        )
+        .await
+    }
+
+    /// Import an Azure VPN (Entra ID) profile from `azurevpnconfig.xml`,
+    /// plus `VpnSettings.xml` when the profile package has one (else "").
+    /// Returns the new profile id.
+    pub async fn import_azure_vpn(
+        &self,
+        azure_xml: &str,
+        vpn_settings_xml: &str,
+        name: &str,
+    ) -> Result<String, PipeError> {
+        self.invoke_json_string(
+            "import_azure_vpn",
+            serde_json::json!({
+                "azure_xml": azure_xml,
+                "vpn_settings_xml": vpn_settings_xml,
+                "name": name,
+            }),
         )
         .await
     }
@@ -267,7 +353,8 @@ impl PipeClient {
     /// Import a FortiGate IKEv2 IPsec profile (Windows RAS / strongSwan).
     /// Returns the new profile id. Password + PSK are sent in cleartext
     /// over the local pipe; the daemon stores them in the platform
-    /// secret store before responding.
+    /// secret store before responding. The PSK may be empty: Windows'
+    /// IKEv2 client authenticates with EAP and never uses it.
     pub async fn import_fortigate(
         &self,
         name: &str,

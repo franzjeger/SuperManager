@@ -1,148 +1,103 @@
-//! Windows system tray integration.
+//! The notification-area icon.
 //!
-//! Uses the cross-platform [`tray_icon`] crate, which on Windows wraps
-//! `Shell_NotifyIconW`. Two menu items in addition to Show/Hide/Quit:
-//! "Quick disconnect" triggers a daemon `disconnect()` without opening
-//! the window, and "Dashboard" opens the window directly on the
-//! Dashboard tab.
+//! [`tray_icon`] wraps `Shell_NotifyIconW`. The icon is the app's own (the
+//! same artwork as the Linux tray and the macOS menu bar); its tooltip says
+//! where the tunnel stands, and its menu opens the window, disconnects, or
+//! quits. A left click opens the window.
 //!
-//! The MenuEvent receiver is a crossbeam channel that's polled by a
-//! dedicated thread; events are bridged into the Slint event loop via
-//! `slint::Weak::upgrade_in_event_loop`. The quick-disconnect path
-//! reaches the daemon through the shared `ConnectionSlot`.
+//! Menu and click events arrive on channels polled by one thread each and
+//! are handed to the Slint event loop. The icon itself is not `Send`, so it
+//! lives in a thread-local on the UI thread, where the tooltip is updated.
 
-use std::sync::Arc;
+use std::cell::RefCell;
 
-use slint::{ComponentHandle as _, Weak};
-use tokio::sync::Mutex;
+use slint::ComponentHandle as _;
 use tracing::warn;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
-    Icon, TrayIcon, TrayIconBuilder,
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
 };
 
-use super::AppWindow;
-use supermgr_core::client;
+use super::{App, Ctx, Page, Updates};
 
-type ConnectionSlot = Arc<Mutex<Option<Arc<client::DaemonClient>>>>;
+thread_local! {
+    static TRAY: RefCell<Option<TrayIcon>> = const { RefCell::new(None) };
+}
 
-pub fn spawn(
-    weak: Weak<AppWindow>,
-    conn: ConnectionSlot,
-    rt: tokio::runtime::Handle,
-) -> Option<TrayIcon> {
+/// The app icon at 64×64, ARGB32 in network byte order — the format the
+/// Linux tray takes, shared so both trays show the same pixels.
+const ICON_ARGB: &[u8] = include_bytes!("../../../contrib/icons/tray-icon-64.argb32");
+const ICON_SIZE: u32 = 64;
+
+/// Create the icon. Call on the UI thread; a failure costs the tray, not
+/// the app.
+pub(super) fn install(ctx: &Ctx) {
     let menu = Menu::new();
-    let dashboard = MenuItem::new("Dashboard", true, None);
-    let show = MenuItem::new("Show window", true, None);
-    let hide = MenuItem::new("Hide window", true, None);
-    let disconnect = MenuItem::new("Quick disconnect VPN", true, None);
+    let open = MenuItem::new("Open SuperManager", true, None);
+    let disconnect = MenuItem::new("Disconnect VPN", true, None);
     let updates = MenuItem::new("Check for updates\u{2026}", true, None);
-    let quit = MenuItem::new("Quit", true, None);
-
-    let dashboard_id = dashboard.id().clone();
-    let show_id = show.id().clone();
-    let hide_id = hide.id().clone();
-    let disconnect_id = disconnect.id().clone();
-    let updates_id = updates.id().clone();
-    let quit_id = quit.id().clone();
+    let quit = MenuItem::new("Quit SuperManager", true, None);
 
     if let Err(e) = menu.append_items(&[
-        &dashboard,
-        &show,
+        &open,
         &PredefinedMenuItem::separator(),
         &disconnect,
         &PredefinedMenuItem::separator(),
         &updates,
-        &hide,
-        &PredefinedMenuItem::separator(),
         &quit,
     ]) {
-        warn!("tray menu append: {e}");
-        return None;
+        warn!("tray menu: {e}");
+        return;
     }
 
-    let icon = match Icon::from_rgba(default_icon_rgba(), 32, 32) {
+    let icon = match Icon::from_rgba(rgba(ICON_ARGB), ICON_SIZE, ICON_SIZE) {
         Ok(i) => i,
         Err(e) => {
-            warn!("tray icon decode: {e}");
-            return None;
+            warn!("tray icon: {e}");
+            return;
         }
     };
 
     let tray = match TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("SuperManager")
         .with_icon(icon)
         .build()
     {
         Ok(t) => t,
         Err(e) => {
-            warn!("tray build: {e}");
-            return None;
+            warn!("tray: {e}");
+            return;
         }
     };
+    TRAY.with(|slot| *slot.borrow_mut() = Some(tray));
 
-    // Dedicated thread polling the MenuEvent channel. `recv()` blocks
-    // until a menu item is clicked or the sender drops (process
-    // teardown).
+    let (open_id, disconnect_id, updates_id, quit_id) = (
+        open.id().clone(),
+        disconnect.id().clone(),
+        updates.id().clone(),
+        quit.id().clone(),
+    );
+    let menu_ctx = ctx.clone();
     std::thread::spawn(move || {
-        let rx = MenuEvent::receiver();
-        while let Ok(event) = rx.recv() {
-            let id = event.id;
-            let weak = weak.clone();
-            if id == dashboard_id {
-                let _ = weak.upgrade_in_event_loop(|w| {
-                    let _ = w.show();
-                    w.window().set_minimized(false);
-                    w.set_current_view(0);
-                });
-            } else if id == show_id {
-                let _ = weak.upgrade_in_event_loop(|w| {
-                    let _ = w.show();
-                    w.window().set_minimized(false);
-                });
-            } else if id == hide_id {
-                let _ = weak.upgrade_in_event_loop(|w| {
-                    let _ = w.hide();
-                });
-            } else if id == disconnect_id {
-                let conn = conn.clone();
-                rt.spawn(async move {
-                    let client = {
-                        let guard = conn.lock().await;
-                        guard.clone()
-                    };
-                    if let Some(c) = client {
-                        match c.disconnect().await {
-                            Ok(()) => {
-                                let _ = weak.upgrade_in_event_loop(|w| {
-                                    w.set_last_status_message("VPN disconnected.".into());
-                                });
-                            }
-                            Err(e) => {
-                                warn!("tray disconnect: {e}");
-                                let _ = weak.upgrade_in_event_loop(move |w| {
-                                    w.set_last_error(slint::SharedString::from(format!(
-                                        "Disconnect: {e}"
-                                    )));
-                                });
-                            }
-                        }
+        while let Ok(event) = MenuEvent::receiver().recv() {
+            let ctx = &menu_ctx;
+            if event.id == open_id {
+                show(ctx, Some(Page::Vpn));
+            } else if event.id == disconnect_id {
+                let ctx2 = ctx.clone();
+                ctx.spawn(async move {
+                    match ctx2.call(|c| async move { c.disconnect().await }).await {
+                        Ok(()) => ctx2.refresh_status(),
+                        Err(e) => ctx2.toast_err(format!("Couldn't disconnect: {e}")),
                     }
                 });
-            } else if id == updates_id {
-                // Land on the Settings page (view 4), where the update
-                // status and the Install button live, and start the check
-                // through the same callback the page's own button uses.
-                let _ = weak.upgrade_in_event_loop(|w| {
-                    let _ = w.show();
-                    w.window().set_minimized(false);
-                    w.set_current_view(4);
-                    w.invoke_check_updates();
-                });
-            } else if id == quit_id {
-                let _ = weak.upgrade_in_event_loop(|w| {
-                    let _ = w.hide();
+            } else if event.id == updates_id {
+                show(ctx, Some(Page::Settings));
+                ctx.ui(|w| w.global::<Updates>().invoke_check());
+            } else if event.id == quit_id {
+                let _ = slint::invoke_from_event_loop(|| {
                     slint::quit_event_loop().ok();
                 });
                 return;
@@ -150,26 +105,46 @@ pub fn spawn(
         }
     });
 
-    Some(tray)
-}
-
-/// Synthetic placeholder icon — 32×32 SuperManager-blue disc. The MSI
-/// can later overwrite this with a real product icon by placing a
-/// `tray.ico` next to the binary; not load-bearing for the MVP.
-fn default_icon_rgba() -> Vec<u8> {
-    let size = 32usize;
-    let mut buf = Vec::with_capacity(size * size * 4);
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as i32 - 16).abs();
-            let dy = (y as i32 - 16).abs();
-            let in_circle = dx * dx + dy * dy < 14 * 14;
-            if in_circle {
-                buf.extend_from_slice(&[0x6e, 0xc1, 0xff, 0xff]);
-            } else {
-                buf.extend_from_slice(&[0, 0, 0, 0]);
+    let click_ctx = ctx.clone();
+    std::thread::spawn(move || {
+        while let Ok(event) = TrayIconEvent::receiver().recv() {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show(&click_ctx, None);
             }
         }
-    }
-    buf
+    });
+}
+
+/// Bring the window up, on `page` if given.
+fn show(ctx: &Ctx, page: Option<Page>) {
+    ctx.ui(move |w| {
+        let _ = w.show();
+        w.window().set_minimized(false);
+        if let Some(page) = page {
+            w.global::<App>().set_page(page);
+        }
+    });
+}
+
+/// Say where the tunnel stands. Call on the UI thread.
+pub(super) fn set_tooltip(text: &str) {
+    TRAY.with(|slot| {
+        if let Some(tray) = slot.borrow().as_ref() {
+            if let Err(e) = tray.set_tooltip(Some(text)) {
+                warn!("tray tooltip: {e}");
+            }
+        }
+    });
+}
+
+/// ARGB32 (network order) to the RGBA `tray_icon` takes.
+fn rgba(argb: &[u8]) -> Vec<u8> {
+    argb.chunks_exact(4)
+        .flat_map(|px| [px[1], px[2], px[3], px[0]])
+        .collect()
 }

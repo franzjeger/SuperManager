@@ -22,7 +22,9 @@
 //! # Lifecycle
 //!
 //! Connect:
-//! 1. Resolve PSK + EAP password from Credential Manager.
+//! 1. Resolve the EAP password from Credential Manager. (A profile may
+//!    carry a PSK for the Linux daemon's strongSwan path; Windows' IKEv2
+//!    client authenticates with EAP alone and never asks for it.)
 //! 2. `Add-VpnConnection` to register the connection (or replace any
 //!    existing one with the same name).
 //! 3. `rasdial <name> <user> <password>` to dial up.
@@ -33,6 +35,10 @@
 //! 1. `rasdial <name> /disconnect`.
 //! 2. `Remove-VpnConnection -Name <name> -Force` so a future connect
 //!    can re-register cleanly.
+//!
+//! A dial is the one bring-up that outlives the task running it: RAS owns
+//! the connection, not this process. A connect cancelled mid-dial is
+//! cleaned up by [`abandon`], which the session calls by profile id.
 
 use std::{sync::Arc, time::Duration};
 
@@ -80,6 +86,23 @@ impl FortiGateBackend {
     pub async fn is_active(&self) -> bool {
         self.active.lock().await.is_some()
     }
+
+    /// Why the dialled connection is down, if Windows says it is.
+    ///
+    /// Only a definite "Disconnected" counts. A status query that fails —
+    /// PowerShell slow to start on a loaded machine — says nothing about
+    /// the tunnel, and tearing down a working one on that basis would be
+    /// worse than reporting a dead one late.
+    pub async fn dropped(&self) -> Option<String> {
+        let name = self.active.lock().await.as_ref()?.connection_name.clone();
+        match get_connection_status(&name).await {
+            Ok(status) if status == "Disconnected" => Some(
+                "The IKEv2 connection was dropped — the gateway ended it or the network went away"
+                    .into(),
+            ),
+            _ => None,
+        }
+    }
 }
 
 impl Default for FortiGateBackend {
@@ -96,7 +119,7 @@ impl FortiGateBackend {
     /// Windows VPN connection names are case-insensitive; the
     /// simple-form UUID keeps the name within the allowed charset.
     fn connection_name(profile_id: &uuid::Uuid) -> String {
-        format!("SuperMgr-FG-{}", profile_id.simple())
+        connection_name(profile_id)
     }
 
     async fn bring_up(&self, profile: &Profile) -> Result<(), VpnError> {
@@ -199,6 +222,24 @@ impl VpnBackend for FortiGateBackend {
             Ok(r#"{"state":"Disconnected","backend":"fortigate"}"#.to_owned())
         }
     }
+}
+
+/// PowerShell-safe connection name built from the profile id.
+fn connection_name(profile_id: &uuid::Uuid) -> String {
+    format!("SuperMgr-FG-{}", profile_id.simple())
+}
+
+/// Hang up and unregister a dial that was cancelled before it finished.
+///
+/// The cancelled task never recorded the connection as active, so
+/// `disconnect` does not know it exists; RAS may be mid-negotiation with
+/// it all the same. Best effort, like every teardown: either step failing
+/// usually means there was nothing left to undo.
+pub async fn abandon(profile_id: &uuid::Uuid) {
+    let name = connection_name(profile_id);
+    info!(conn = %name, "abandoning a cancelled IKEv2 dial");
+    let _ = rasdial_disconnect(&name).await;
+    let _ = remove_connection(&name).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,16 +359,70 @@ async fn rasdial_connect(conn_name: &str, username: &str, password: &str) -> Res
         .arg(conn_name)
         .arg(username)
         .arg(password)
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(VpnError::Io)?;
     if output.status.success() {
-        Ok(())
-    } else {
-        Err(VpnError::Subprocess {
-            code: output.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        return Ok(());
+    }
+    // rasdial reports on stdout, not stderr, and exits with the RAS error
+    // number. Reading only stderr is why a failed dial used to say nothing.
+    let code = output.status.code().unwrap_or(-1);
+    let printed = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Err(ras_error(code, &printed))
+}
+
+/// Turn a RAS error into what an operator can act on.
+///
+/// The common IKEv2 failures each have one usual cause, and Windows' own
+/// text for them ("The network connection between your computer and the
+/// VPN server could not be established because the remote server is not
+/// responding") rarely names it.
+fn ras_error(code: i32, printed: &str) -> VpnError {
+    let known = match code {
+        691 => return VpnError::PermissionDenied("The gateway rejected the username or password"),
+        809 => Some(
+            "The gateway did not answer. IKEv2 needs UDP ports 500 and 4500 open \
+             between this PC and the gateway."
+                .to_owned(),
+        ),
+        812 => Some(
+            "The gateway's policy refused this connection. Check that EAP-MSCHAPv2 \
+             is allowed for this user."
+                .to_owned(),
+        ),
+        868 => Some("The gateway's name could not be looked up.".to_owned()),
+        13801 => Some(
+            "Windows does not trust the gateway's certificate. Import the CA that \
+             issued it into the computer's Trusted Root Certification Authorities."
+                .to_owned(),
+        ),
+        13806 => Some("Windows found no machine certificate to authenticate with.".to_owned()),
+        13868 => Some(
+            "Windows and the gateway share no IKE proposal. Add one Windows offers to \
+             the gateway's phase 1, such as AES256-SHA256 with DH group 14."
+                .to_owned(),
+        ),
+        _ => None,
+    };
+    let message = known
+        .map(|hint| format!("{hint} (RAS error {code})"))
+        .or_else(|| {
+            printed
+                .lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("Remote Access error"))
+                .map(str::to_owned)
         })
+        .unwrap_or_else(|| format!("rasdial failed with RAS error {code}"));
+    VpnError::Subprocess {
+        code,
+        stderr: message,
     }
 }
 
@@ -335,6 +430,7 @@ async fn rasdial_disconnect(conn_name: &str) -> Result<(), VpnError> {
     let output = Command::new("rasdial.exe")
         .arg(conn_name)
         .arg("/disconnect")
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(VpnError::Io)?;
@@ -402,5 +498,47 @@ async fn tear_down(active: FgActive) {
     }
     if let Err(e) = remove_connection(&active.connection_name).await {
         warn!("Remove-VpnConnection failed: {e:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ras_error, VpnError};
+
+    fn message(e: VpnError) -> String {
+        match e {
+            VpnError::Subprocess { stderr, .. } => stderr,
+            other => other.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_known_ras_error_names_its_usual_cause() {
+        let m = message(ras_error(
+            809,
+            "Remote Access error 809 - The network connection ...",
+        ));
+        assert!(m.contains("UDP ports 500 and 4500"), "{m}");
+        assert!(m.contains("809"), "{m}");
+    }
+
+    #[test]
+    fn a_rejected_password_is_an_authentication_failure() {
+        assert!(matches!(ras_error(691, ""), VpnError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn an_unknown_ras_error_keeps_windows_own_words() {
+        // rasdial prints on stdout; this is the line that used to be lost.
+        let printed = "Connecting to SuperMgr-FG-x...\n\
+                       Remote Access error 720 - A connection to the remote computer could not be completed.\n\
+                       For more help on this error:";
+        let m = message(ras_error(720, printed));
+        assert!(m.starts_with("Remote Access error 720"), "{m}");
+    }
+
+    #[test]
+    fn silence_still_yields_the_error_number() {
+        assert!(message(ras_error(4242, "")).contains("4242"));
     }
 }

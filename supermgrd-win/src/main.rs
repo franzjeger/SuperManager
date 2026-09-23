@@ -21,6 +21,13 @@ mod rpc_args;
 #[path = "win/known_hosts.rs"]
 mod windows_known_hosts;
 
+// Likewise the VPN clients' output reader: plain tokio, no Win32. Only its
+// tests run off Windows, so the reader itself is unused there.
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "win/vpn/output.rs"]
+#[allow(dead_code)]
+mod windows_vpn_output;
+
 fn main() {
     #[cfg(target_os = "windows")]
     {

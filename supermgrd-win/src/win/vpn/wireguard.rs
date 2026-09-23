@@ -209,7 +209,7 @@ impl WireGuardBackend {
                 None
             };
             let endpoint_sockaddr = if let Some(ep) = &peer.endpoint {
-                resolve_endpoint(ep)?
+                resolve_endpoint(ep).await?
             } else {
                 return Err(VpnError::MissingDependency(format!(
                     "peer {} has no Endpoint set — WireGuardNT requires one",
@@ -221,7 +221,7 @@ impl WireGuardBackend {
                 preshared_key,
                 keep_alive: peer.persistent_keepalive,
                 endpoint: endpoint_sockaddr,
-                allowed_ips: peer.allowed_ips.clone(),
+                allowed_ips: route_prefixes(&peer.allowed_ips),
             });
         }
 
@@ -279,8 +279,20 @@ impl WireGuardBackend {
 
         // 0.4's `create` handed the `Arc` back inside its error tuple so the
         // caller could retry; 0.5 borrows, so the error is just an error.
-        let adapter = wireguard_nt::Adapter::create(&wg, "SuperManager", &adapter_name, None)
-            .map_err(|e| VpnError::Win32(format!("create WireGuard adapter: {e}")))?;
+        //
+        // The GUID is the profile's own id. Windows keys its network
+        // profiles (Public/Private, and the firewall rules that follow) on
+        // the adapter GUID; a random one made every connect a network it
+        // had never seen — "Network 7", filed as Public. The official
+        // WireGuard client derives its GUID from the tunnel for the same
+        // reason.
+        let adapter = wireguard_nt::Adapter::create(
+            &wg,
+            "SuperManager",
+            &adapter_name,
+            Some(profile.id.as_u128()),
+        )
+        .map_err(|e| VpnError::Win32(format!("create WireGuard adapter: {e}")))?;
 
         adapter
             .set_config(&interface)
@@ -342,6 +354,18 @@ impl WireGuardBackend {
     }
 }
 
+/// Whether WireGuardNT can be loaded, and what to tell the operator when it
+/// cannot. Loading it is what a connect would do first anyway, and the
+/// library stays loaded for that connect.
+pub fn availability() -> Result<(), String> {
+    WireGuardBackend::ensure_lib()
+        .map(|_| ())
+        .map_err(|e| match e {
+            VpnError::MissingDependency(message) => message,
+            other => other.to_string(),
+        })
+}
+
 /// Synchronous-ish teardown: drop the Adapter (kernel removes the
 /// interface and its routes), then revert DNS if we set it. The
 /// PowerShell cmdlet to revert DNS is fire-and-forget; failures are
@@ -401,15 +425,34 @@ impl VpnBackend for WireGuardBackend {
 /// Resolve a `host:port` endpoint string to a single `SocketAddr`. We
 /// pick the first result the OS returns; the kernel handles
 /// re-resolution if the gateway moves.
-fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr, VpnError> {
-    use std::net::ToSocketAddrs;
-    endpoint
-        .to_socket_addrs()
-        .map_err(|e| VpnError::MissingDependency(format!("resolve endpoint {endpoint}: {e}")))?
+///
+/// Asynchronous: the blocking resolver this used to call held a runtime
+/// worker for as long as DNS took to answer — or to time out, on the
+/// captive-portal networks where a VPN is most often started.
+async fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr, VpnError> {
+    tokio::net::lookup_host(endpoint)
+        .await
+        .map_err(|e| {
+            VpnError::MissingDependency(format!(
+                "Could not look up the WireGuard server {endpoint}: {e}"
+            ))
+        })?
         .next()
         .ok_or_else(|| {
-            VpnError::MissingDependency(format!("endpoint {endpoint} resolved to no addresses"))
+            VpnError::MissingDependency(format!("The WireGuard server {endpoint} has no addresses"))
         })
+}
+
+/// AllowedIPs as the route table will accept them.
+///
+/// `10.8.0.1/24` is a valid AllowedIPs entry — WireGuard masks it — and a
+/// common one in hand-written configs. The route for it is another
+/// matter: `CreateIpForwardEntry2` refuses a destination with host bits
+/// set, and the whole connect failed on "set default route" with no hint
+/// that one line of the config was the reason. The network is what was
+/// meant; the driver and the route both get that.
+fn route_prefixes(allowed_ips: &[IpNet]) -> Vec<IpNet> {
+    allowed_ips.iter().map(IpNet::trunc).collect()
 }
 
 /// Shell out to PowerShell to set DNS server addresses on the tunnel
@@ -474,5 +517,27 @@ async fn run_powershell(cmd: &str) -> Result<(), VpnError> {
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::route_prefixes;
+    use ipnet::IpNet;
+
+    #[test]
+    fn allowed_ips_with_host_bits_become_the_network_they_name() {
+        let given: Vec<IpNet> = ["10.8.0.1/24", "0.0.0.0/0", "fd00::5/64", "192.0.2.7/32"]
+            .iter()
+            .map(|s| s.parse().unwrap())
+            .collect();
+        let routed: Vec<String> = route_prefixes(&given)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            routed,
+            ["10.8.0.0/24", "0.0.0.0/0", "fd00::/64", "192.0.2.7/32"]
+        );
     }
 }

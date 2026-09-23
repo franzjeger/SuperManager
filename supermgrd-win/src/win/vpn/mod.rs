@@ -11,8 +11,12 @@
 //! | [`fortigate`]   | `FortiGateBackend`   | `ProfileConfig::FortiGate` | Windows RAS via `Add-VpnConnection` + `rasdial` |
 //! | [`forticlient`] | `ForticlientBackend` | `ProfileConfig::ForticlientSslvpn` | `openfortivpn.exe` subprocess + PPP-line monitor |
 //!
-//! All five backends are wired through `handle_connect`/`handle_disconnect`;
-//! the dispatcher routes by `ProfileConfig` discriminator.
+//! The backends do not decide when they run. [`session`] owns the one
+//! tunnel the daemon is responsible for: it starts a bring-up in the
+//! background, routes it to the backend matching the profile's
+//! `ProfileConfig`, records what happened, and cancels it on request.
+//! [`output`] is how the backends that run a client process read what it
+//! prints.
 
 use async_trait::async_trait;
 
@@ -24,6 +28,8 @@ pub mod fortigate;
 /// real implementation under `azure` is the Azure P2S OpenVPN flow.
 pub use azure as ikev2;
 pub mod openvpn;
+pub mod output;
+pub mod session;
 pub mod wireguard;
 
 /// Outcome of a VPN operation on Windows. Carries enough detail for the

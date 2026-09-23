@@ -22,6 +22,12 @@
 //! 5. On disconnect: send `signal SIGTERM` over the management socket
 //!    and wait for the process to exit; fall back to `Child::kill` if
 //!    it doesn't terminate within 5 s.
+//!
+//! The client's stdout and stderr are read for its whole life by
+//! [`super::output`] — unread, they fill and stall it — and what it last
+//! complained about becomes the error when a connect fails. The child is
+//! `kill_on_drop`, so a connect cancelled mid-handshake takes the process
+//! with it instead of leaving an orphan holding the adapter.
 
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
@@ -38,7 +44,7 @@ use tracing::{info, warn};
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::vpn::profile::{Profile, ProfileConfig};
 
-use super::{VpnBackend, VpnError};
+use super::{output, VpnBackend, VpnError};
 
 /// Soft cap on bring-up time. OpenVPN handshakes complete in under a
 /// second for healthy gateways and trip TLS retries past 30 s.
@@ -53,6 +59,8 @@ struct OvpnActive {
     /// Writer half of the management TCP connection. Disconnect uses
     /// it to send `signal SIGTERM`.
     mgmt_writer: tokio::net::tcp::OwnedWriteHalf,
+    /// What the client has been printing, for when it stops by itself.
+    tail: output::Tail,
 }
 
 /// Windows OpenVPN backend.
@@ -75,6 +83,17 @@ impl OpenVpnBackend {
     /// Whether a tunnel is currently up.
     pub async fn is_active(&self) -> bool {
         self.active.lock().await.is_some()
+    }
+
+    /// Why the tunnel's client exited, if it has. `None` while it runs, and
+    /// when there is no tunnel.
+    pub async fn exited(&self) -> Option<String> {
+        let mut guard = self.active.lock().await;
+        let active = guard.as_mut()?;
+        match active.child.try_wait() {
+            Ok(Some(status)) => Some(output::exit_reason("OpenVPN", status, &active.tail)),
+            _ => None,
+        }
     }
 }
 
@@ -131,6 +150,15 @@ fn locate_openvpn() -> Result<PathBuf, VpnError> {
          Re-run the SuperManager installer to restore it."
             .into(),
     ))
+}
+
+/// Whether `openvpn.exe` can be found, and what to tell the operator when
+/// it cannot.
+pub fn availability() -> Result<(), String> {
+    locate_openvpn().map(|_| ()).map_err(|e| match e {
+        VpnError::MissingDependency(message) => message,
+        other => other.to_string(),
+    })
 }
 
 /// Find a free TCP port on localhost.
@@ -218,17 +246,26 @@ impl OpenVpnBackend {
             command.arg("--auth-user-pass");
         }
         command
+            // The log lines are only ever read here, so the date on each is
+            // noise in front of the error message an operator is shown.
+            .arg("--suppress-timestamps")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .stdin(std::process::Stdio::piped());
+            .stdin(std::process::Stdio::piped())
+            .kill_on_drop(true);
 
-        let mut child = command.spawn().map_err(VpnError::Io)?;
+        let mut child = command.spawn().map_err(|e| {
+            VpnError::MissingDependency(format!("could not start {}: {e}", openvpn_exe.display()))
+        })?;
         info!(
             ?openvpn_exe,
             config = %cfg.config_file,
             mgmt_port,
             "spawned openvpn.exe"
         );
+        // The management interface reports progress; the log is for the
+        // explanation when there is no progress to report.
+        let (tail, _) = output::capture(&mut child);
 
         // Send the management password on stdin. With `--management ...
         // stdin` openvpn reads the first line from stdin as the password.
@@ -248,17 +285,25 @@ impl OpenVpnBackend {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
                 let _ = child.kill().await;
-                return Err(VpnError::Subprocess {
-                    code: -1,
-                    stderr: format!("connect to management socket: {e}"),
-                });
+                // Almost always the client refusing the config and exiting
+                // before it opened the socket. Its own words say why.
+                return Err(explain(
+                    VpnError::Subprocess {
+                        code: -1,
+                        stderr: format!("connect to management socket: {e}"),
+                    },
+                    &tail,
+                ));
             }
             Err(_) => {
                 let _ = child.kill().await;
-                return Err(VpnError::Subprocess {
-                    code: -1,
-                    stderr: "openvpn did not open management socket within 5 s".into(),
-                });
+                return Err(explain(
+                    VpnError::Subprocess {
+                        code: -1,
+                        stderr: "openvpn did not open management socket within 5 s".into(),
+                    },
+                    &tail,
+                ));
             }
         };
 
@@ -271,22 +316,36 @@ impl OpenVpnBackend {
         write_mgmt(&mut writer, "state on\n").await?;
         write_mgmt(&mut writer, "hold release\n").await?;
 
+        let mut last_state = String::new();
         let success = timeout(
             HANDSHAKE_TIMEOUT,
-            wait_for_connected(&mut reader, &mut writer, auth_creds.as_ref()),
+            wait_for_connected(
+                &mut reader,
+                &mut writer,
+                auth_creds.as_ref(),
+                &mut last_state,
+            ),
         )
         .await;
         match success {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 let _ = child.kill().await;
-                return Err(e);
+                return Err(explain(e, &tail));
             }
             Err(_) => {
                 let _ = child.kill().await;
+                let said = tail
+                    .reason()
+                    .map(|r| format!(" The client's last complaint: {r}"))
+                    .unwrap_or_default();
                 return Err(VpnError::Subprocess {
                     code: -1,
-                    stderr: format!("openvpn handshake exceeded {HANDSHAKE_TIMEOUT:?}"),
+                    stderr: format!(
+                        "OpenVPN did not connect within {} s — it was {}.{said}",
+                        HANDSHAKE_TIMEOUT.as_secs(),
+                        step(&last_state),
+                    ),
                 });
             }
         }
@@ -312,6 +371,7 @@ impl OpenVpnBackend {
             profile_id: profile.id,
             child,
             mgmt_writer: writer,
+            tail,
         });
         Ok(())
     }
@@ -395,6 +455,7 @@ async fn wait_for_connected(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     auth_creds: Option<&(String, String)>,
+    last_state: &mut String,
 ) -> Result<(), VpnError> {
     let mut line = String::new();
     loop {
@@ -412,6 +473,7 @@ async fn wait_for_connected(
             let parts: Vec<&str> = rest.splitn(4, ',').collect();
             let state = parts.get(1).copied().unwrap_or("");
             let detail = parts.get(2).copied().unwrap_or("");
+            state.clone_into(last_state);
             match state {
                 "CONNECTED" if detail == "SUCCESS" => return Ok(()),
                 "EXITING" => {
@@ -447,18 +509,57 @@ async fn wait_for_connected(
                     .await?;
                 }
                 None => {
-                    return Err(VpnError::Subprocess {
-                        code: -1,
-                        stderr: "server requires auth-user-pass but the profile has no stored credentials".into(),
-                    });
+                    return Err(VpnError::MissingDependency(
+                        "This server asks for a username and password, and the profile \
+                         has none. Import the config again with the credentials."
+                            .into(),
+                    ));
                 }
             }
+        } else if trimmed.starts_with(">PASSWORD:Need 'Private Key'") {
+            return Err(VpnError::MissingDependency(
+                "The private key in this config is protected by a passphrase, which \
+                 SuperManager cannot supply. Export the config without one."
+                    .into(),
+            ));
         } else if trimmed.starts_with(">PASSWORD:Verification Failed") {
-            return Err(VpnError::Subprocess {
-                code: -1,
-                stderr: "openvpn auth-user-pass verification failed".into(),
-            });
+            return Err(VpnError::PermissionDenied(
+                "The server rejected the username or password",
+            ));
         }
+    }
+}
+
+/// Replace a bare transport error with what the client itself said, when
+/// it said something. An authentication rejection is already the reason
+/// and stays as it is.
+fn explain(e: VpnError, tail: &output::Tail) -> VpnError {
+    match e {
+        VpnError::PermissionDenied(_) | VpnError::MissingDependency(_) => e,
+        other => match tail.reason() {
+            Some(reason) => VpnError::Subprocess {
+                code: -1,
+                stderr: reason,
+            },
+            None => other,
+        },
+    }
+}
+
+/// The step a `>STATE:` name stands for, as the end of "it was …".
+fn step(state: &str) -> String {
+    match state {
+        "" => "still starting up".into(),
+        "RESOLVE" => "looking up the server's address".into(),
+        "TCP_CONNECT" => "opening a TCP connection to the server".into(),
+        "CONNECTING" => "connecting to the server".into(),
+        "WAIT" => "waiting for the server to answer".into(),
+        "AUTH" => "authenticating".into(),
+        "GET_CONFIG" => "waiting for the server's settings".into(),
+        "ASSIGN_IP" => "assigning the tunnel address".into(),
+        "ADD_ROUTES" => "adding routes".into(),
+        "RECONNECTING" => "retrying after a failed attempt".into(),
+        other => format!("in state {other}"),
     }
 }
 
@@ -478,7 +579,17 @@ async fn tear_down(mut active: OvpnActive) {
 
 #[cfg(test)]
 mod tests {
-    use super::mgmt_escape;
+    use super::{mgmt_escape, step};
+
+    #[test]
+    fn a_stalled_handshake_names_the_step_it_stalled_on() {
+        // "exceeded 45s" told an operator nothing. Where it stopped does:
+        // WAIT is a server that never answered, AUTH one that did.
+        assert_eq!(step("WAIT"), "waiting for the server to answer");
+        assert_eq!(step("AUTH"), "authenticating");
+        assert_eq!(step(""), "still starting up");
+        assert_eq!(step("SOMETHING_NEW"), "in state SOMETHING_NEW");
+    }
 
     #[test]
     fn plain_credential_is_unchanged() {

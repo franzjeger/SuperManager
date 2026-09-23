@@ -30,7 +30,11 @@ uuid               = { workspace = true }
 # Slint 1.x — pure-Rust UI framework. We pin to the `winit` backend with the
 # `software` renderer disabled (GPU path is fine on Windows and faster) and
 # turn off live-reload so the release build doesn't include the file watcher.
-slint = { version = "1.8", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-skia"] }
+#
+# `accessibility` exposes the UI to screen readers through UI Automation.
+# `raw-window-handle-06` lets the file picker open as a dialog of this
+# window rather than a free-floating one.
+slint = { version = "1.8", default-features = false, features = ["compat-1-2", "std", "backend-winit", "renderer-skia", "accessibility", "raw-window-handle-06"] }
 
 # Cross-platform tray-icon abstraction. Backed by Win32 NotifyIcon on Windows.
 tray-icon = "0.19"
@@ -45,6 +49,22 @@ winit = "0.30"
 # our own code.
 arboard = { version = "3.4", default-features = false }
 
+# The native Open dialog, for choosing a VPN config file.
+rfd = { version = "0.17", default-features = false }
+
+# Azure publishes a VPN profile as a .zip; reading it directly spares the
+# operator unpacking it. Decompression only.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+# ShellExecuteW (open a sign-in page in the default browser) and the
+# registry value that says whether Windows is in dark mode.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 # In-app updater: GitHub Releases API + installer download (reqwest),
 # SHA-256 verification against the published .sha256 sidecar (sha2),
 # streaming the download to disk (futures-util). Windows-gated with the
@@ -56,7 +76,14 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Slint code generation runs in build.rs; the slint-build crate produces Rust
 # from the `.slint` UI files at compile time. `winres` embeds the
 # VS_FIXEDFILEINFO version resource for File Explorer Properties + the MSI.
-[target.'cfg(target_os = "windows")'.build-dependencies]
+#
+# Unconditional, not behind a target cfg. A build script runs on the *host*,
+# so gating these on `cfg(target_os = "windows")` meant a Linux or macOS
+# machine could not type-check this crate for Windows at all: the UI was
+# never generated and `slint::include_modules!()` had nothing to include.
+# build.rs now decides from `CARGO_CFG_TARGET_OS`, which is the target, and
+# nothing but an explicit `-p supermgr-win` ever builds this crate.
+[build-dependencies]
 slint-build = "1.8"
 winres      = "0.1"
 

@@ -65,6 +65,82 @@ pub async fn execute(
     host_id: &str,
     command: &str,
 ) -> Result<Value, RpcError> {
+    let session = open_session(root, secret_store, known_hosts, host_id).await?;
+
+    let mut channel = session
+        .channel_open_session()
+        .await
+        .map_err(|e| RpcError::Backend(format!("open ssh session channel: {e}")))?;
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|e| RpcError::Backend(format!("ssh exec: {e}")))?;
+
+    let (stdout, stderr, exit_code) = collect_output(&mut channel)
+        .await
+        .map_err(|e| RpcError::Backend(format!("ssh output: {e}")))?;
+
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "", "")
+        .await;
+
+    Ok(json!({
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+    }))
+}
+
+/// Whether the host answers and accepts its stored credentials, in the
+/// Linux daemon's shape: `{"ssh": "ok" | "auth_failed" |
+/// "connection_refused" | "timeout" | "error: …"}`.
+///
+/// Signs in and out without running anything, so it is safe on appliances
+/// whose shells have no `true` to run.
+pub async fn test(
+    root: &std::path::Path,
+    secret_store: Arc<dyn SecretStore>,
+    known_hosts: KnownHostsStore,
+    host_id: &str,
+) -> Value {
+    let outcome = match timeout(
+        CONNECT_TIMEOUT * 2,
+        open_session(root, secret_store, known_hosts, host_id),
+    )
+    .await
+    {
+        Err(_) => "timeout".to_owned(),
+        Ok(Ok(session)) => {
+            let _ = session
+                .disconnect(russh::Disconnect::ByApplication, "", "")
+                .await;
+            "ok".to_owned()
+        }
+        Ok(Err(RpcError::PermissionDenied(_))) => "auth_failed".to_owned(),
+        Ok(Err(e)) => classify_failure(&e.to_string()),
+    };
+    json!({ "ssh": outcome })
+}
+
+/// Name the common ways a connection fails, as the Linux daemon does.
+fn classify_failure(message: &str) -> String {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("refused") {
+        "connection_refused".to_owned()
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout".to_owned()
+    } else {
+        format!("error: {message}")
+    }
+}
+
+/// Connect to the host and sign in with the credentials stored for it.
+async fn open_session(
+    root: &std::path::Path,
+    secret_store: Arc<dyn SecretStore>,
+    known_hosts: KnownHostsStore,
+    host_id: &str,
+) -> Result<client::Handle<KnownHostsHandler>, RpcError> {
     let meta = read_host_meta(root, host_id)?;
     let hostname = meta
         .get("hostname")
@@ -115,7 +191,7 @@ pub async fn execute(
         }
         other => {
             return Err(RpcError::Other(format!(
-                "auth_method {other:?} not supported by ssh_execute_command (use password or key)"
+                "this host signs in with {other:?}, which SSH cannot use — set a password or an SSH key for it"
             )));
         }
     };
@@ -178,29 +254,7 @@ pub async fn execute(
             }
         }
     }
-
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| RpcError::Backend(format!("open ssh session channel: {e}")))?;
-    channel
-        .exec(true, command)
-        .await
-        .map_err(|e| RpcError::Backend(format!("ssh exec: {e}")))?;
-
-    let (stdout, stderr, exit_code) = collect_output(&mut channel)
-        .await
-        .map_err(|e| RpcError::Backend(format!("ssh output: {e}")))?;
-
-    let _ = session
-        .disconnect(russh::Disconnect::ByApplication, "", "")
-        .await;
-
-    Ok(json!({
-        "stdout": stdout,
-        "stderr": stderr,
-        "exit_code": exit_code,
-    }))
+    Ok(session)
 }
 
 enum AuthMethod {
@@ -285,5 +339,23 @@ impl client::Handler for KnownHostsHandler {
                 Err(russh::Error::Disconnect)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_failure;
+
+    #[test]
+    fn failures_are_named_as_the_linux_daemon_names_them() {
+        assert_eq!(
+            classify_failure("ssh connect to h:22: Connection refused (os error 10061)"),
+            "connection_refused"
+        );
+        assert_eq!(
+            classify_failure("connect timeout after 10s to h:22"),
+            "timeout"
+        );
+        assert_eq!(classify_failure("no route"), "error: no route");
     }
 }

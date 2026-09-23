@@ -1,0 +1,785 @@
+// The VPN page: the tunnel's state across the top, profiles on the left,
+// the selected profile on the right. One primary action at a time —
+// Connect, Disconnect, or Cancel — on the profile it applies to.
+
+import { Button, LineEdit, ListView, ProgressIndicator, ScrollView, Switch, TextEdit } from "std-widgets.slint";
+import { Theme, Icons } from "theme.slint";
+import { App, ConfirmAction, ConnState, Overlay, ProfileItem, ProfileKind, Vpn } from "state.slint";
+import { Badge, Card, DetailRow, DialogButtons, EmptyState, Field, OptionRow, PageHeader, SectionTitle, Sheet, StatusDot, SubtleButton } from "widgets.slint";
+
+// The colour a profile's state is shown in, everywhere.
+export global VpnLook {
+    public pure function state-of(id: string) -> ConnState {
+        return Vpn.state-profile-id == id ? Vpn.state : ConnState.disconnected;
+    }
+    public pure function color-of(state: ConnState) -> color {
+        if (state == ConnState.connected) {
+            return Theme.success;
+        }
+        if (state == ConnState.connecting || state == ConnState.disconnecting) {
+            return Theme.caution;
+        }
+        if (state == ConnState.failed) {
+            return Theme.critical;
+        }
+        return Theme.neutral;
+    }
+    out property <bool> busy: Vpn.state == ConnState.connecting || Vpn.state == ConnState.disconnecting;
+}
+
+// ── The tunnel's state ──────────────────────────────────────────────────
+
+component BannerActions inherits HorizontalLayout {
+    in property <bool> signing-in;
+    in property <bool> detail-has-it;
+    spacing: 8px;
+    alignment: end;
+    if root.signing-in: Button {
+        text: "Open sign-in page";
+        icon: Icons.open;
+        colorize-icon: true;
+        primary: true;
+        clicked => { App.open-url(Vpn.auth-url); }
+    }
+    if root.signing-in: Button {
+        text: "Copy link";
+        icon: Icons.copy;
+        colorize-icon: true;
+        clicked => { App.copy-text(Vpn.auth-url); }
+    }
+    if Vpn.state == ConnState.connecting && !root.detail-has-it: Button {
+        text: "Cancel";
+        clicked => { Vpn.disconnect(); }
+    }
+    if Vpn.state == ConnState.connected && !root.detail-has-it: Button {
+        text: "Disconnect";
+        icon: Icons.disconnect;
+        colorize-icon: true;
+        clicked => { Vpn.disconnect(); }
+    }
+    if Vpn.state == ConnState.failed && !root.detail-has-it: Button {
+        text: "Try again";
+        icon: Icons.retry;
+        colorize-icon: true;
+        enabled: App.daemon-online;
+        clicked => { Vpn.retry(); }
+    }
+    if Vpn.state == ConnState.failed: Button {
+        text: "Copy details";
+        icon: Icons.copy;
+        colorize-icon: true;
+        clicked => { App.copy-text(Vpn.error-message); }
+    }
+    if Vpn.state == ConnState.failed: SubtleButton {
+        icon: Icons.dismiss;
+        accessible-label: "Dismiss";
+        clicked => { Vpn.dismiss-error(); }
+    }
+}
+
+component ConnectionBanner inherits Card {
+    property <bool> signing-in: Vpn.state == ConnState.connecting && Vpn.auth-url != "";
+    // The detail pane already offers Disconnect / Cancel / Connect for the
+    // profile it shows; the banner only repeats them for another profile.
+    property <bool> detail-has-it: Vpn.has-selection && Vpn.selected.id == Vpn.state-profile-id;
+    property <string> name: Vpn.state-profile-name != "" ? Vpn.state-profile-name : "the VPN";
+    property <string> heading: Vpn.state == ConnState.connected ? "Connected to " + name
+        : root.signing-in ? "Sign in to connect to " + name
+        : Vpn.state == ConnState.connecting ? "Connecting to " + name + "…"
+        : Vpn.state == ConnState.disconnecting ? "Disconnecting from " + name + "…"
+        : Vpn.state == ConnState.failed ? "Couldn't connect to " + name
+        : "Not connected";
+    property <string> detail: Vpn.state == ConnState.connected
+        ? Vpn.state-backend + (Vpn.interface != "" ? "  ·  " + Vpn.interface : "") + (Vpn.since != "" ? "  ·  since " + Vpn.since : "")
+        : root.signing-in ? "Finish signing in to Microsoft Entra ID in your browser. The sign-in page opened automatically."
+        : Vpn.state == ConnState.connecting ? Vpn.phase
+        : Vpn.state == ConnState.failed ? Vpn.error-message
+        : Vpn.state == ConnState.disconnecting ? ""
+        : !App.daemon-online ? "The tunnel's state is unknown while the service is not running."
+        : Vpn.profiles.length == 0 ? "Add a profile to get started." : "Choose a profile and select Connect.";
+
+    // Below 820px the actions go under the text instead of squeezing it.
+    // Set on a change, not bound, for the same reason as the navigation
+    // pane's compact mode (main.slint).
+    property <bool> narrow: false;
+    init => { self.narrow = self.width > 0 && self.width < 820px; }
+    changed width => { self.narrow = self.width < 820px; }
+
+    min-height: 76px;
+    clip: true;
+    accessible-role: text;
+    accessible-label: root.heading + ". " + root.detail;
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding: 16px;
+            padding-left: 20px;
+            spacing: 16px;
+
+            Rectangle {
+                width: 40px;
+                height: 40px;
+                y: (parent.height - self.height) / 2;
+                border-radius: 20px;
+                background: Vpn.state == ConnState.connected ? Theme.success-bg
+                    : Vpn.state == ConnState.failed ? Theme.critical-bg
+                    : VpnLook.busy ? Theme.caution-bg : Theme.subtle-selected;
+                Image {
+                    source: Vpn.state == ConnState.failed ? Icons.error : root.signing-in ? Icons.globe : Icons.vpn;
+                    colorize: Vpn.state == ConnState.disconnected ? Theme.text-secondary : VpnLook.color-of(Vpn.state);
+                    width: 20px;
+                    height: 20px;
+                    x: 10px;
+                    y: 10px;
+                }
+            }
+
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.heading;
+                    font-size: Theme.body-large;
+                    font-weight: 600;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+                if root.detail != "": Text {
+                    text: root.detail;
+                    font-size: Theme.body;
+                    color: Vpn.state == ConnState.failed ? Theme.text : Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+            }
+
+            // Centred, not stretched to the banner's height.
+            if !root.narrow: VerticalLayout {
+                alignment: center;
+                BannerActions {
+                    signing-in: root.signing-in;
+                    detail-has-it: root.detail-has-it;
+                }
+            }
+        }
+        if root.narrow: HorizontalLayout {
+            padding-left: 76px;
+            padding-right: 16px;
+            padding-bottom: 16px;
+            BannerActions {
+                alignment: start;
+                signing-in: root.signing-in;
+                detail-has-it: root.detail-has-it;
+            }
+        }
+        if VpnLook.busy: ProgressIndicator {
+            indeterminate: true;
+            height: 3px;
+        }
+    }
+}
+
+// ── Profile list ────────────────────────────────────────────────────────
+
+component ProfileRow inherits Rectangle {
+    in property <ProfileItem> profile;
+    in property <bool> selected;
+    callback clicked;
+
+    property <ConnState> state: VpnLook.state-of(root.profile.id);
+
+    height: 60px;
+    accessible-role: list-item;
+    accessible-label: root.profile.name + ", " + root.profile.kind-label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => { root.clicked(); }
+
+    inner := Rectangle {
+        x: 4px;
+        y: 2px;
+        width: parent.width - 8px;
+        height: parent.height - 4px;
+        border-radius: Theme.control-radius;
+        background: touch.pressed ? Theme.subtle-pressed
+            : root.selected ? Theme.subtle-selected
+            : touch.has-hover ? Theme.subtle-hover : transparent;
+        animate background { duration: 100ms; }
+
+        touch := TouchArea {
+            clicked => { root.clicked(); }
+        }
+
+        Rectangle {
+            x: 0;
+            width: 3px;
+            height: root.selected ? 16px : 0px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 1.5px;
+            background: Theme.accent;
+            animate height { duration: 150ms; easing: ease-out; }
+        }
+
+        HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 14px;
+            spacing: 12px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.profile.name;
+                    font-size: Theme.body;
+                    font-weight: root.selected ? 600 : 400;
+                    color: Theme.text;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.profile.kind-label + (root.profile.host != "" ? "  ·  " + root.profile.host : "");
+                    font-size: Theme.caption;
+                    color: Theme.text-secondary;
+                    overflow: elide;
+                }
+            }
+            if root.state != ConnState.disconnected: StatusDot {
+                tint: VpnLook.color-of(root.state);
+                y: (parent.height - self.height) / 2;
+            }
+        }
+    }
+}
+
+// ── Selected profile ────────────────────────────────────────────────────
+
+component ProfileDetail inherits Card {
+    property <ProfileItem> p: Vpn.selected;
+    property <ConnState> state: VpnLook.state-of(root.p.id);
+    property <bool> takes-dns: root.p.kind == ProfileKind.wireguard || root.p.kind == ProfileKind.azure || root.p.kind == ProfileKind.sslvpn;
+    property <bool> takes-routing: root.p.kind == ProfileKind.azure || root.p.kind == ProfileKind.sslvpn;
+    property <bool> other-active: Vpn.state-profile-id != root.p.id && (Vpn.state == ConnState.connected || VpnLook.busy);
+
+    ScrollView {
+        VerticalLayout {
+            padding: 24px;
+            spacing: 24px;
+            alignment: start;
+
+            HorizontalLayout {
+                spacing: 16px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    spacing: 8px;
+                    Text {
+                        text: root.p.name;
+                        font-size: Theme.subtitle;
+                        font-weight: 600;
+                        color: Theme.text;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Badge { text: root.p.kind-label; }
+                        if root.state == ConnState.connected: Badge {
+                            text: "Connected";
+                            fill: Theme.success-bg;
+                            ink: Theme.success;
+                        }
+                        if root.state == ConnState.connecting: Badge {
+                            text: "Connecting";
+                            fill: Theme.caution-bg;
+                            ink: Theme.caution;
+                        }
+                        if root.state == ConnState.failed: Badge {
+                            text: "Failed";
+                            fill: Theme.critical-bg;
+                            ink: Theme.critical;
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: start;
+                    spacing: 6px;
+                    if root.state == ConnState.connected: Button {
+                        text: "Disconnect";
+                        icon: Icons.disconnect;
+                        colorize-icon: true;
+                        primary: true;
+                        clicked => { Vpn.disconnect(); }
+                    }
+                    if root.state == ConnState.connecting: Button {
+                        text: "Cancel";
+                        clicked => { Vpn.disconnect(); }
+                    }
+                    if root.state == ConnState.disconnecting: Button {
+                        text: "Disconnecting…";
+                        enabled: false;
+                    }
+                    if root.state == ConnState.disconnected || root.state == ConnState.failed: Button {
+                        text: "Connect";
+                        icon: Icons.connect;
+                        colorize-icon: true;
+                        primary: true;
+                        enabled: App.daemon-online && !VpnLook.busy;
+                        clicked => { Vpn.connect(root.p.id); }
+                    }
+                }
+            }
+
+            if root.other-active && Vpn.state == ConnState.connected: Text {
+                text: "Connecting to this profile disconnects " + Vpn.state-profile-name + " first.";
+                font-size: Theme.caption;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Details"; }
+                DetailRow { label: "Type"; value: root.p.kind-label; }
+                if root.p.host != "": DetailRow { label: "Server"; value: root.p.host; }
+                if root.p.username != "": DetailRow { label: "Username"; value: root.p.username; }
+                if root.state == ConnState.connected && Vpn.interface != "": DetailRow { label: "Interface"; value: Vpn.interface; }
+                DetailRow {
+                    label: "Last connected";
+                    value: root.p.last-connected != "" ? root.p.last-connected : "Never";
+                }
+            }
+
+            if root.takes-dns: VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Options"; }
+                OptionRow {
+                    title: "Use the VPN's DNS servers";
+                    description: "Look up names through the tunnel. Needed to reach internal names when only some traffic goes through the VPN. Applies from the next connect.";
+                    Switch {
+                        checked <=> Vpn.selected-push-dns;
+                        accessible-label: "Use the VPN's DNS servers";
+                        toggled => { Vpn.set-push-dns(root.p.id, self.checked); }
+                    }
+                }
+                if root.takes-routing: OptionRow {
+                    title: "Send all traffic through the VPN";
+                    description: "When off, only the networks behind the gateway use the tunnel. Applies from the next connect.";
+                    Switch {
+                        checked <=> Vpn.selected-full-tunnel;
+                        accessible-label: "Send all traffic through the VPN";
+                        toggled => { Vpn.set-full-tunnel(root.p.id, self.checked); }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 12px;
+                SectionTitle { text: "Manage"; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Button {
+                        text: "Rename";
+                        icon: Icons.edit;
+                        colorize-icon: true;
+                        enabled: App.daemon-online;
+                        clicked => { Vpn.open-rename(); }
+                    }
+                    Button {
+                        text: "Delete";
+                        icon: Icons.delete;
+                        colorize-icon: true;
+                        enabled: App.daemon-online && (root.state == ConnState.disconnected || root.state == ConnState.failed);
+                        clicked => {
+                            App.confirm(ConfirmAction.delete-profile, root.p.id,
+                                "Delete " + root.p.name + "?",
+                                "The profile and the credentials saved with it are removed from this PC. This can't be undone.",
+                                "Delete");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component VpnPage inherits VerticalLayout {
+    padding-left: 32px;
+    padding-right: 32px;
+    padding-top: 24px;
+    padding-bottom: 24px;
+    spacing: 16px;
+
+    PageHeader {
+        title: "VPN";
+        Button {
+            text: "Add profile";
+            icon: Icons.add;
+            colorize-icon: true;
+            enabled: App.daemon-online;
+            clicked => { Vpn.open-add(); }
+        }
+    }
+
+    ConnectionBanner { }
+
+    if Vpn.profiles.length == 0: Card {
+        vertical-stretch: 1;
+        EmptyState {
+            icon: Icons.vpn-large;
+            title: "No VPN profiles yet";
+            body: "Import a WireGuard or OpenVPN file, an Azure VPN profile, or set up a FortiGate connection.";
+            Button {
+                text: "Add profile";
+                icon: Icons.add;
+                colorize-icon: true;
+                primary: true;
+                enabled: App.daemon-online;
+                clicked => { Vpn.open-add(); }
+            }
+        }
+    }
+
+    if Vpn.profiles.length > 0: HorizontalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        Card {
+            width: 300px;
+            VerticalLayout {
+                padding-top: 4px;
+                padding-bottom: 4px;
+                ListView {
+                    accessible-role: list;
+                    accessible-label: "VPN profiles";
+                    for profile in Vpn.profiles: ProfileRow {
+                        profile: profile;
+                        selected: Vpn.has-selection && Vpn.selected.id == profile.id;
+                        clicked => { Vpn.select(profile); }
+                    }
+                }
+            }
+        }
+
+        if Vpn.has-selection: ProfileDetail {
+            horizontal-stretch: 1;
+        }
+        if !Vpn.has-selection: Card {
+            horizontal-stretch: 1;
+            EmptyState {
+                icon: Icons.vpn-large;
+                title: "Select a profile";
+                body: "Its details and the Connect button appear here.";
+            }
+        }
+    }
+}
+
+// ── Add a profile ───────────────────────────────────────────────────────
+
+component KindChoice inherits Rectangle {
+    in property <image> icon;
+    in property <string> title;
+    in property <string> description;
+    in property <bool> available: true;
+    in property <string> reason;
+    callback chosen;
+
+    height: layout.preferred-height;
+    border-radius: Theme.control-radius;
+    border-width: 1px;
+    border-color: Theme.card-stroke;
+    background: !root.available ? transparent
+        : touch.pressed ? Theme.subtle-pressed
+        : touch.has-hover ? Theme.subtle-hover : Theme.card-secondary;
+    opacity: root.available ? 1 : 0.6;
+    animate background { duration: 100ms; }
+
+    accessible-role: button;
+    accessible-label: root.title;
+    accessible-description: root.available ? root.description : root.reason;
+    accessible-enabled: root.available;
+    accessible-action-default => { if root.available { root.chosen(); } }
+
+    touch := TouchArea {
+        enabled: root.available;
+        clicked => { root.chosen(); }
+    }
+    layout := HorizontalLayout {
+        padding: 14px;
+        spacing: 14px;
+        Image {
+            source: root.icon;
+            colorize: root.available ? Theme.accent : Theme.text-disabled;
+            width: 24px;
+            height: 24px;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            alignment: center;
+            Text {
+                text: root.title;
+                font-size: Theme.body;
+                font-weight: 600;
+                color: root.available ? Theme.text : Theme.text-secondary;
+            }
+            Text {
+                text: root.available ? root.description : root.reason;
+                font-size: Theme.caption;
+                color: Theme.text-secondary;
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+// Choose a file or paste its contents.
+component ConfigSource inherits VerticalLayout {
+    in property <string> label;
+    in property <string> hint;
+    in property <string> placeholder;
+    in property <ProfileKind> kind;
+    in property <bool> allow-paste: true;
+    spacing: 6px;
+
+    Text {
+        text: root.label;
+        font-size: Theme.body;
+        color: Theme.text;
+    }
+    HorizontalLayout {
+        spacing: 12px;
+        Button {
+            text: "Choose file…";
+            icon: Icons.folder;
+            colorize-icon: true;
+            enabled: !Vpn.add-busy;
+            clicked => { Vpn.choose-file(root.kind); }
+        }
+        Text {
+            text: Vpn.add-file != "" ? Vpn.add-file : (root.allow-paste ? "or paste it below" : "No file chosen");
+            font-size: Theme.body;
+            color: Vpn.add-file != "" ? Theme.text : Theme.text-secondary;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+    if root.allow-paste: TextEdit {
+        text <=> Vpn.add-text;
+        placeholder-text: root.placeholder;
+        font-family: Theme.mono;
+        font-size: 13px;
+        min-height: 140px;
+        vertical-stretch: 1;
+        enabled: !Vpn.add-busy;
+        wrap: no-wrap;
+    }
+    if root.hint != "": Text {
+        text: root.hint;
+        font-size: Theme.caption;
+        color: Theme.text-secondary;
+        wrap: word-wrap;
+    }
+}
+
+export component AddProfileSheet inherits Sheet {
+    property <string> kind-title: Vpn.add-kind == ProfileKind.wireguard ? "WireGuard"
+        : Vpn.add-kind == ProfileKind.openvpn ? "OpenVPN"
+        : Vpn.add-kind == ProfileKind.azure ? "Azure VPN"
+        : Vpn.add-kind == ProfileKind.fortigate ? "FortiGate IPsec (IKEv2)"
+        : Vpn.add-kind == ProfileKind.sslvpn ? "FortiGate SSL VPN" : "VPN";
+    property <bool> ready: Vpn.add-name != "" && (
+        Vpn.add-kind == ProfileKind.wireguard ? Vpn.add-text != ""
+        : Vpn.add-kind == ProfileKind.openvpn ? Vpn.add-text != ""
+        : Vpn.add-kind == ProfileKind.azure ? Vpn.add-text != "" && Vpn.add-text-2 != ""
+        : Vpn.add-host != "" && Vpn.add-username != "" && Vpn.add-password != "");
+
+    title: Vpn.add-step == 0 ? "Add a VPN profile" : "Add " + root.kind-title + " profile";
+    subtitle: Vpn.add-step == 0 ? "What kind of connection is it?" : "";
+    sheet-width: 600px;
+    close => { if !Vpn.add-busy { App.close-overlay(); } }
+
+    if Vpn.add-step == 0: VerticalLayout {
+        spacing: 8px;
+        KindChoice {
+            icon: Icons.document;
+            title: "WireGuard";
+            description: "A .conf file from your WireGuard server or provider.";
+            available: Vpn.wireguard-available;
+            reason: Vpn.wireguard-reason;
+            chosen => { Vpn.add-kind = ProfileKind.wireguard; Vpn.add-step = 1; }
+        }
+        KindChoice {
+            icon: Icons.document;
+            title: "OpenVPN";
+            description: "A .ovpn client configuration, with a username and password if the server wants them.";
+            available: Vpn.openvpn-available;
+            reason: Vpn.openvpn-reason;
+            chosen => { Vpn.add-kind = ProfileKind.openvpn; Vpn.add-step = 1; }
+        }
+        KindChoice {
+            icon: Icons.globe;
+            title: "Azure VPN (Microsoft Entra ID)";
+            description: "The VPN client profile package from the Azure portal. You sign in with your Microsoft account.";
+            available: Vpn.openvpn-available;
+            reason: Vpn.openvpn-reason;
+            chosen => { Vpn.add-kind = ProfileKind.azure; Vpn.add-step = 1; }
+        }
+        KindChoice {
+            icon: Icons.lock;
+            title: "FortiGate IPsec (IKEv2)";
+            description: "Windows' built-in IKEv2 client, with a username and password.";
+            chosen => { Vpn.add-kind = ProfileKind.fortigate; Vpn.add-step = 1; }
+        }
+        KindChoice {
+            icon: Icons.lock;
+            title: "FortiGate SSL VPN";
+            description: "An SSL VPN gateway, with a username and password.";
+            available: Vpn.sslvpn-available;
+            reason: Vpn.sslvpn-reason;
+            chosen => { Vpn.add-kind = ProfileKind.sslvpn; Vpn.add-step = 1; }
+        }
+        DialogButtons {
+            Button {
+                text: "Cancel";
+                clicked => { App.close-overlay(); }
+            }
+        }
+    }
+
+    if Vpn.add-step == 1: VerticalLayout {
+        spacing: 16px;
+        vertical-stretch: 1;
+
+        Field {
+            label: "Name";
+            name-edit := LineEdit {
+                text <=> Vpn.add-name;
+                placeholder-text: "Office";
+                enabled: !Vpn.add-busy;
+                init => { self.focus(); }
+            }
+        }
+
+        if Vpn.add-kind == ProfileKind.wireguard: ConfigSource {
+            label: "Configuration";
+            kind: ProfileKind.wireguard;
+            placeholder: "[Interface]\nPrivateKey = …\nAddress = …\n\n[Peer]\nPublicKey = …\nEndpoint = …\nAllowedIPs = …";
+            hint: "The private key goes to Windows Credential Manager, not into the profile file.";
+        }
+
+        if Vpn.add-kind == ProfileKind.openvpn: ConfigSource {
+            label: "Configuration";
+            kind: ProfileKind.openvpn;
+            placeholder: "client\ndev tun\nremote vpn.example.com 1194\n…";
+            hint: "Certificates and keys must be inside the file (<ca>, <cert>, <key>).";
+        }
+        if Vpn.add-kind == ProfileKind.openvpn: HorizontalLayout {
+            spacing: 12px;
+            Field {
+                label: "Username (optional)";
+                horizontal-stretch: 1;
+                LineEdit { text <=> Vpn.add-username; enabled: !Vpn.add-busy; }
+            }
+            Field {
+                label: "Password (optional)";
+                horizontal-stretch: 1;
+                LineEdit { text <=> Vpn.add-password; input-type: password; enabled: !Vpn.add-busy; }
+            }
+        }
+
+        if Vpn.add-kind == ProfileKind.azure: ConfigSource {
+            label: "Profile package";
+            kind: ProfileKind.azure;
+            allow-paste: false;
+            hint: "Download it from the Azure portal: your VPN gateway → Point-to-site configuration → Download VPN client. Choose the .zip, or azurevpnconfig.xml from the unpacked folder.";
+        }
+
+        if Vpn.add-kind == ProfileKind.fortigate || Vpn.add-kind == ProfileKind.sslvpn: HorizontalLayout {
+            spacing: 12px;
+            Field {
+                label: "Gateway";
+                horizontal-stretch: 1;
+                LineEdit { text <=> Vpn.add-host; placeholder-text: "vpn.example.com"; enabled: !Vpn.add-busy; }
+            }
+            if Vpn.add-kind == ProfileKind.sslvpn: Field {
+                label: "Port";
+                width: 96px;
+                LineEdit { text <=> Vpn.add-port; input-type: number; enabled: !Vpn.add-busy; min-width: 64px; }
+            }
+        }
+        if Vpn.add-kind == ProfileKind.fortigate || Vpn.add-kind == ProfileKind.sslvpn: HorizontalLayout {
+            spacing: 12px;
+            Field {
+                label: "Username";
+                horizontal-stretch: 1;
+                LineEdit { text <=> Vpn.add-username; enabled: !Vpn.add-busy; }
+            }
+            Field {
+                label: "Password";
+                horizontal-stretch: 1;
+                LineEdit {
+                    text <=> Vpn.add-password;
+                    input-type: password;
+                    enabled: !Vpn.add-busy;
+                    accepted => { if root.ready && !Vpn.add-busy { Vpn.submit-add(); } }
+                }
+            }
+        }
+        if Vpn.add-kind == ProfileKind.fortigate: Text {
+            text: "Connects with Windows' built-in IKEv2 client using EAP-MSCHAPv2. The gateway's certificate must be trusted by Windows.";
+            font-size: Theme.caption;
+            color: Theme.text-secondary;
+            wrap: word-wrap;
+        }
+
+        DialogButtons {
+            error: Vpn.add-error;
+            Button {
+                text: "Back";
+                enabled: !Vpn.add-busy;
+                clicked => { Vpn.add-error = ""; Vpn.add-step = 0; }
+            }
+            Button {
+                text: "Cancel";
+                enabled: !Vpn.add-busy;
+                clicked => { App.close-overlay(); }
+            }
+            Button {
+                text: Vpn.add-busy ? "Adding…" : "Add profile";
+                primary: true;
+                enabled: root.ready && !Vpn.add-busy;
+                clicked => { Vpn.submit-add(); }
+            }
+        }
+    }
+}
+
+export component RenameProfileSheet inherits Sheet {
+    title: "Rename profile";
+    sheet-width: 440px;
+    close => { App.close-overlay(); }
+
+    Field {
+        label: "Name";
+        LineEdit {
+            text <=> Vpn.rename-text;
+            init => { self.focus(); self.select-all(); }
+            accepted => {
+                if Vpn.rename-text != "" { Vpn.submit-rename(Vpn.selected.id, Vpn.rename-text); }
+            }
+        }
+    }
+    DialogButtons {
+        Button {
+            text: "Cancel";
+            clicked => { App.close-overlay(); }
+        }
+        Button {
+            text: "Save";
+            primary: true;
+            enabled: Vpn.rename-text != "" && Vpn.rename-text != Vpn.selected.name;
+            clicked => { Vpn.submit-rename(Vpn.selected.id, Vpn.rename-text); }
+        }
+    }
+}

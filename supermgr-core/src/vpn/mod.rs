@@ -6,8 +6,10 @@
 //! - [`profile`] — VPN profile definitions and `WireGuard` config import.
 //! - [`state`]   — Connection state machine and tunnel statistics.
 //! - [`backend`] — The [`VpnBackend`] trait and reconciliation logic.
+//! - [`import`]  — Parsing and validation for imported configurations.
 
 pub mod backend;
+pub mod import;
 pub mod profile;
 pub mod state;
 

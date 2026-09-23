@@ -47,6 +47,12 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of SuperManager is already installed." />
 
+    <!-- The app icon in Settings > Apps and Programs and Features. The
+         Start Menu shortcut takes the same icon from supermgr-win.exe,
+         which embeds it (supermgr-win/build.rs). -->
+    <Icon Id="SuperManagerIcon" SourceFile="supermgr-win\assets\supermanager.ico" />
+    <Property Id="ARPPRODUCTICON" Value="SuperManagerIcon" />
+
     <!-- Require Windows 10 1809 or later (the WireGuardNT driver and
          tokio::net::windows::named_pipe both rely on Win10 features). -->
     <Launch Condition="Installed OR (VersionNT &gt;= 603)"

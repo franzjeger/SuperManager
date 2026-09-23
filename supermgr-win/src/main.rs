@@ -14,6 +14,12 @@
 #[cfg(target_os = "windows")]
 mod win;
 
+// What the window makes of the service's answers. Plain Rust, so its tests
+// run on every host; only the window that uses it is Windows-only.
+#[cfg(any(target_os = "windows", test))]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod model;
+
 fn main() -> std::process::ExitCode {
     #[cfg(target_os = "windows")]
     {
