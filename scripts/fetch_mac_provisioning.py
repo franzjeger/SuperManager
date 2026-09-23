@@ -92,8 +92,14 @@ class AppleAPI:
                     time.sleep(2 ** attempt)
                     continue
                 reason = ""
+                try:
+                    errors = json.loads(error.read(65536)).get("errors", [])
+                    details = [" / ".join(str(item.get(key, "")) for key in ("code", "title", "detail")) for item in errors]
+                    reason = "; " + " | ".join(details)[:2000] if details else ""
+                except (ValueError, TypeError):
+                    pass
                 if error.code in (401, 403):
-                    reason = "; AC_API_* must be a team API key with Certificates, Identifiers & Profiles access"
+                    reason += "; check the team API key's Certificates, Identifiers & Profiles permissions"
                 raise RuntimeError(f"Apple API {method} {parsed.path}: HTTP {error.code}{reason}") from None
         raise RuntimeError("Apple API retry limit reached")
 

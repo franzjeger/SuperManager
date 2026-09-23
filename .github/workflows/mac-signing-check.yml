@@ -1,0 +1,41 @@
+name: Check Mac signing access
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: macos-release
+  cancel-in-progress: false
+jobs:
+  provisioning:
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify automatic Apple provisioning without publishing
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          DEVELOPER_ID_APP: ${{ secrets.MACOS_DEV_ID_APP }}
+          AC_API_KEY_BASE64: ${{ secrets.AC_API_KEY_BASE64 }}
+          AC_API_KEY_ID: ${{ secrets.AC_API_KEY_ID }}
+          AC_API_ISSUER_ID: ${{ secrets.AC_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          KCHAIN_PW=$(openssl rand -hex 16)
+          echo "::add-mask::$KCHAIN_PW"
+          security create-keychain -p "$KCHAIN_PW" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KCHAIN_PW" build.keychain
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k build.keychain \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          export AC_API_KEY_PATH="$RUNNER_TEMP/apple-key.p8"
+          printf '%s' "$AC_API_KEY_BASE64" | base64 --decode > "$AC_API_KEY_PATH"
+          chmod 600 "$AC_API_KEY_PATH"
+          python3 scripts/fetch_mac_provisioning.py "$RUNNER_TEMP/SuperManager.provisionprofile"
+      - name: Clean up signing material
+        if: always()
+        run: |
+          security delete-keychain build.keychain || true
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/apple-key.p8" "$RUNNER_TEMP/SuperManager.provisionprofile"
