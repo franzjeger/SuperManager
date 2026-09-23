@@ -28,19 +28,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Installed OpenVPN cannot start.' }
 # Prove that the bundled DLL can create its signed driver/adapter. No VPN
 # endpoint, address, routes or credentials are configured during this test.
 $dll = Join-Path $bin 'wireguard.dll'
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class WireGuardInstallProbe {
-    [DllImport(@"$dll", CallingConvention=CallingConvention.Winapi, CharSet=CharSet.Unicode, SetLastError=true)]
-    public static extern IntPtr WireGuardCreateAdapter(string name, string type, IntPtr guid);
-    [DllImport(@"$dll", CallingConvention=CallingConvention.Winapi)]
-    public static extern void WireGuardCloseAdapter(IntPtr adapter);
-}
-"@
-$adapter = [WireGuardInstallProbe]::WireGuardCreateAdapter('SuperManagerInstallTest', 'SuperManager', [IntPtr]::Zero)
-if ($adapter -eq [IntPtr]::Zero) { throw "WireGuard driver failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
-[WireGuardInstallProbe]::WireGuardCloseAdapter($adapter)
+& "$PSHOME\pwsh.exe" -NoProfile -File "$PSScriptRoot\test-wireguard-driver.ps1" -DllPath $dll
+if ($LASTEXITCODE -ne 0) { throw 'WireGuard driver probe failed.' }
 
 $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'supermgrd', [IO.Pipes.PipeDirection]::InOut)
 try {
