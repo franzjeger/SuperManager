@@ -830,8 +830,7 @@ fn short_hash(s: &str) -> String {
     let bytes = h.finalize();
     // 16 hex chars (64 bits) — enough to distinguish duplicate
     // creds without enabling cross-engagement correlation.
-    let hex: String = bytes.iter().take(8).map(|b| format!("{b:02x}")).collect();
-    hex
+    hex::encode(&bytes[..8])
 }
 
 /// Extract an SNMP community string from a tcpdump-printed

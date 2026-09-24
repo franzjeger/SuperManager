@@ -21,6 +21,7 @@ russh-keys      = { workspace = true }
 russh-sftp      = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
+hex             = { workspace = true }
 sha2            = { workspace = true }
 ssh-key         = { workspace = true }
 thiserror       = { workspace = true }

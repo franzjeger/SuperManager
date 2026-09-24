@@ -30,6 +30,7 @@ ipnet              = { workspace = true }
 libc               = "0.2"
 # WireGuard module hashes profile UUIDs into a 12-char interface name
 # (kernel's IFNAMSIZ-1 limit). Workspace already pins SHA-256.
+hex                = { workspace = true }
 sha2               = { workspace = true }
 
 [lints]

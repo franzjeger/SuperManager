@@ -20,6 +20,7 @@ toml           = { workspace = true }
 # Private atomic replacements for SSH trust records
 tempfile       = "3"
 # SHA-256 fingerprints for the SSH known-hosts store
+hex            = { workspace = true }
 sha2           = { workspace = true }
 ssh-key        = { workspace = true }
 thiserror      = { workspace = true }

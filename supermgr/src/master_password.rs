@@ -176,14 +176,10 @@ fn verify_legacy_sha256(password: &str, salt_hex: &str, expected_hex: &str) -> b
     let mut hasher = Sha256::new();
     hasher.update(salt_hex.as_bytes());
     hasher.update(password.as_bytes());
-    // Byte-by-byte hex: sha2 0.11's finalize output dropped the `LowerHex`
-    // impl. Identical lowercase-hex string as `{:x}` gave — this verifies a
-    // stored legacy hash, so the encoding must match exactly.
-    let computed: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    // Lowercase hex, as `{:x}` gave before sha2 0.11's output dropped
+    // `LowerHex`: this verifies a stored legacy hash, so the encoding must
+    // match exactly.
+    let computed = hex::encode(hasher.finalize());
     computed.len() == expected_hex.len()
         && computed
             .bytes()
@@ -261,7 +257,7 @@ mod tests {
             let mut h = Sha256::new();
             h.update(salt.as_bytes());
             h.update(pw.as_bytes());
-            let hash: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+            let hash = hex::encode(h.finalize());
             let legacy = format!("{salt}:{hash}");
 
             // Simulate a freshly migrated legacy hash.

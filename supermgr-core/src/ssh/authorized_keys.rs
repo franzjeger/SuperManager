@@ -251,7 +251,7 @@ async fn revoke_via_sftp(shell: &dyn RemoteShell, pub_line: &str) -> Result<(), 
     let filtered: String = existing
         .lines()
         .filter(|line| !line.contains(pub_line))
-        .map(|line| format!("{line}\n"))
+        .flat_map(|line| [line, "\n"])
         .collect();
 
     let original_count = existing.lines().count();

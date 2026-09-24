@@ -183,11 +183,7 @@ pub async fn download(
     file.flush().await?;
     drop(file);
 
-    let actual: String = hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
+    let actual = hex::encode(hasher.finalize());
     if actual != expected {
         let _ = tokio::fs::remove_file(&path).await;
         anyhow::bail!(

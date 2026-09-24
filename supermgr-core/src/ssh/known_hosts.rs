@@ -124,16 +124,11 @@ impl KnownHostsStore {
     /// it's simpler and we don't need cross-tool compatibility.
     #[must_use]
     pub fn fingerprint(public_key_bytes: &[u8]) -> String {
-        // Hex-encode byte by byte. sha2 0.11's digest output is `Array`
-        // (hybrid-array), which no longer implements `LowerHex` the way 0.10's
-        // `GenericArray` did, so `format!("{digest:x}")` stopped compiling.
-        // This produces the identical lowercase-hex string — the format is a
-        // stored, compared fingerprint, so it must not shift or every recorded
-        // host key would read as changed.
-        Sha256::digest(public_key_bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        // Lowercase hex, the string `format!("{digest:x}")` gave before sha2
+        // 0.11's `Array` output stopped implementing `LowerHex`. It is a
+        // stored, compared fingerprint, so it must not shift or every
+        // recorded host key would read as changed.
+        hex::encode(Sha256::digest(public_key_bytes))
     }
 
     /// Check the current fingerprint of `host:port` against the recorded

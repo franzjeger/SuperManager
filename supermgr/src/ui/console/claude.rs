@@ -582,6 +582,7 @@ fn finalize_tool_block(
 }
 
 #[cfg(test)]
+    use std::fmt::Write as _;
 mod tests {
     use super::*;
 
@@ -632,10 +633,10 @@ mod tests {
             json!({"type":"message_delta","delta":{"stop_reason":"tool_use"}}),
             json!({"type":"message_stop"}),
         ];
-        let body = events
-            .iter()
-            .map(|e| format!("data: {e}\n\n"))
-            .collect::<String>();
+        let body = events.iter().fold(String::new(), |mut body, e| {
+            let _ = write!(body, "data: {e}\n\n");
+            body
+        });
         let (tx, _rx) = mpsc::channel();
         let (_, reason, calls) = parse_stream(super::super::tests::response(&body).await, &tx)
             .await

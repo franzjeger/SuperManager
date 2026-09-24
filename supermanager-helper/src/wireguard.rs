@@ -527,8 +527,7 @@ fn interface_name(profile_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(profile_id.as_bytes());
     let digest = hasher.finalize();
-    let hex: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
-    format!("smwg{hex}")
+    format!("smwg{}", hex::encode(&digest[..4]))
 }
 
 fn conf_path_for(name: &str) -> PathBuf {

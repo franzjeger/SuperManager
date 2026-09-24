@@ -64,6 +64,8 @@ zeroize     = { version = "1.8",  features = ["derive"] }
 async-trait = "0.1"
 # Base64 encoding (secrets file)
 base64      = "0.22"
+# Lowercase hex, for digests shown, stored and compared as text
+hex         = "0.4"
 # HTTP client — native-tls for FortiGate compat, rustls-tls for Claude API
 #
 # `form` and `query` are explicit because 0.13 made them opt-in features that
