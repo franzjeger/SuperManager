@@ -1041,6 +1041,10 @@ impl DaemonService {
 }
 
 #[interface(name = "org.supermgr.Daemon1")]
+#[expect(
+    clippy::unused_self,
+    reason = "zbus serves every method of an interface on &self"
+)]
 impl DaemonService {
     // =======================================================================
     // VPN Methods

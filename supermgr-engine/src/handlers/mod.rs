@@ -1,10 +1,18 @@
 //! Per-area JSON-RPC handler modules.
 //!
 //! Each submodule contains an `impl crate::server::EngineServer { ... }`
-//! block that holds the `async fn handle_*` methods routed from the big
+//! block that holds the `handle_*` methods routed from the big
 //! `dispatch()` match in `server.rs`. Splitting them by area keeps each
 //! file under a few hundred lines and makes the responsibility obvious
 //! from the path. The dispatch table itself stays in `server.rs`.
+//!
+//! Every handler is a method of the server, including those that read
+//! nothing from it: where a handler lives says what it is, not what it
+//! happens to touch today.
+#![expect(
+    clippy::unused_self,
+    reason = "every RPC handler is a method of the server; see above"
+)]
 
 pub mod backup;
 pub mod compliance;
