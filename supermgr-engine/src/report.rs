@@ -355,13 +355,13 @@ fn scope_methodology(out: &mut String, input: &ReportInput<'_>) {
         out.push_str("- _(none specified)_\n");
     } else {
         for t in &e.allowed_techniques {
-            out.push_str(&format!("- {}\n", technique_label(t)));
+            out.push_str(&format!("- {}\n", technique_label(*t)));
         }
     }
     out.push('\n');
 }
 
-fn technique_label(t: &crate::engagement::Technique) -> &'static str {
+fn technique_label(t: crate::engagement::Technique) -> &'static str {
     use crate::engagement::Technique::{
         CredTest, Discovery, DosTest, Recon, SmbEnum, SnmpRead, TlsAudit, VulnScan, WebExploit,
         Wireless,
@@ -394,7 +394,7 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
     let mut by_sev = std::collections::BTreeMap::<u8, Vec<&PersistedFinding>>::new();
     for f in &open {
         by_sev
-            .entry(sev_rank(&f.finding.severity))
+            .entry(sev_rank(f.finding.severity))
             .or_default()
             .push(f);
     }
@@ -500,7 +500,7 @@ fn resolved_section(out: &mut String, input: &ReportInput<'_>) {
     for f in resolved {
         out.push_str(&format!(
             "| {} | {} | `{}` | {} |\n",
-            sev_label(&f.finding.severity),
+            sev_label(f.finding.severity),
             f.finding.title,
             f.finding.host_ip,
             f.last_seen.format("%Y-%m-%d"),
@@ -521,7 +521,7 @@ fn audit_log(out: &mut String, input: &ReportInput<'_>) {
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} |\n",
             ev.at.format("%Y-%m-%d %H:%M"),
-            technique_label(&ev.technique),
+            technique_label(ev.technique),
             ev.action,
             ev.findings,
             ev.notes,
@@ -537,7 +537,7 @@ fn footer(out: &mut String) {
     ));
 }
 
-fn sev_rank(s: &Severity) -> u8 {
+fn sev_rank(s: Severity) -> u8 {
     match s {
         Severity::Critical => 0,
         Severity::High => 1,
@@ -547,7 +547,7 @@ fn sev_rank(s: &Severity) -> u8 {
     }
 }
 
-fn sev_label(s: &Severity) -> &'static str {
+fn sev_label(s: Severity) -> &'static str {
     match s {
         Severity::Critical => "Critical",
         Severity::High => "High",

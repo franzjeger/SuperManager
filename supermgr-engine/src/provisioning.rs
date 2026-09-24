@@ -272,7 +272,7 @@ pub fn render(req: &RenderRequest) -> Result<RenderResult> {
         .with_context(|| format!("parse template {}", req.template_id))?;
     register_filters(&mut tera);
 
-    let context = build_context(&customer, site, &req.extras)?;
+    let context = build_context(&customer, site, &req.extras);
     let output = tera
         .render(&req.template_id, &context)
         .with_context(|| format!("render template {}", req.template_id))?;
@@ -300,7 +300,7 @@ pub fn render_with_customer(
         .with_context(|| format!("parse template {template_id}"))?;
     register_filters(&mut tera);
 
-    let context = build_context(customer, site, extras)?;
+    let context = build_context(customer, site, extras);
     let output = tera
         .render(template_id, &context)
         .with_context(|| format!("render template {template_id}"))?;
@@ -320,7 +320,7 @@ fn build_context(
     customer: &Customer,
     site: &Site,
     extras: &serde_json::Map<String, serde_json::Value>,
-) -> Result<TeraContext> {
+) -> TeraContext {
     let mut ctx = TeraContext::new();
     ctx.insert("customer", customer);
     ctx.insert("site", site);
@@ -333,7 +333,7 @@ fn build_context(
             "framework": "SuperManager Provisioning v1",
         }),
     );
-    Ok(ctx)
+    ctx
 }
 
 // ---------------------------------------------------------------------------

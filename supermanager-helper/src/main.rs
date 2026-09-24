@@ -781,12 +781,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscaled_uninstall" => {
             match serde_json::from_value::<tailscale::UninstallArgs>(req.params) {
-                Ok(args) => match tailscale::uninstall(args) {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                    Err(e) => {
-                        Response::err(id, -32000, format!("tailscaled_uninstall failed: {e:#}"))
-                    }
-                },
+                Ok(args) => Response::ok(
+                    id,
+                    serde_json::to_value(tailscale::uninstall(args)).unwrap_or_default(),
+                ),
                 Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }
@@ -873,20 +871,16 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscale_remove_exit_routes" => {
             match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-                Ok(args) => match tailscale::remove_exit_routes(args) {
-                    Ok(s) => {
-                        // This RPC is the INTENTIONAL clear (user cleared the exit
-                        // node) — stop self-heal. The watchdog's blip recovery goes
-                        // through panic_reset (clear_pref=false), which does NOT
-                        // touch the desired-state, so a transient drop never wipes
-                        // intent.
-                        tailscale_state::clear_desired();
-                        Response::ok(id, serde_json::to_value(s).unwrap_or_default())
-                    }
-                    Err(e) => {
-                        Response::err(id, -32000, format!("remove_exit_routes failed: {e:#}"))
-                    }
-                },
+                Ok(args) => {
+                    let s = tailscale::remove_exit_routes(args);
+                    // This RPC is the INTENTIONAL clear (user cleared the exit
+                    // node) — stop self-heal. The watchdog's blip recovery goes
+                    // through panic_reset (clear_pref=false), which does NOT
+                    // touch the desired-state, so a transient drop never wipes
+                    // intent.
+                    tailscale_state::clear_desired();
+                    Response::ok(id, serde_json::to_value(s).unwrap_or_default())
+                }
                 Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }

@@ -227,6 +227,10 @@ pub struct TunnelStats {
     pub uptime_secs: u64,
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
 fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }

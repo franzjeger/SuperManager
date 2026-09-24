@@ -182,7 +182,7 @@ fn build_payload(
                 "\n• `{}` {}{} — {}",
                 f.finding.host_ip,
                 f.finding.port.map(|p| format!(":{p} ")).unwrap_or_default(),
-                severity_emoji(&f.finding.severity),
+                severity_emoji(f.finding.severity),
                 f.finding.title
             ));
         }
@@ -203,7 +203,7 @@ fn build_payload(
     serde_json::json!({ "text": text })
 }
 
-fn severity_emoji(s: &Severity) -> &'static str {
+fn severity_emoji(s: Severity) -> &'static str {
     match s {
         Severity::Critical => ":rotating_light:",
         Severity::High => ":warning:",

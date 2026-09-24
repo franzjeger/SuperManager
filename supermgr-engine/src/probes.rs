@@ -449,7 +449,7 @@ pub async fn http_probe(host: &str, port: u16, tls: bool) -> Result<HttpResult> 
         .map(str::to_owned);
     let body = resp.text().await.unwrap_or_default();
     let title = extract_title(&body);
-    let fingerprints = fingerprint_web(&headers, &body, &title);
+    let fingerprints = fingerprint_web(&headers, &body, title.as_deref());
 
     // WAF / CDN detection — collect a flat (name, value) list of
     // every response header + every Set-Cookie name, hand it to
@@ -559,7 +559,7 @@ fn waf_findings(
 fn fingerprint_web(
     headers: &reqwest::header::HeaderMap,
     body: &str,
-    title: &Option<String>,
+    title: Option<&str>,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let body_lc = body.to_lowercase();
@@ -651,7 +651,7 @@ fn fingerprint_web(
     if let Some(t) = title {
         let tl = t.to_lowercase();
         if tl.contains("powered by") {
-            out.push(t.clone());
+            out.push(t.to_owned());
         }
     }
 
@@ -733,7 +733,7 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = format!("{stdout}\n{stderr}");
-    let mut info = parse_tls_output(&combined, host)?;
+    let mut info = parse_tls_output(&combined);
 
     // Cipher matrix — probe each weak family. Each shell-out is
     // ~1-2s; we run them in parallel via tokio::join! to keep
@@ -961,10 +961,9 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
     Ok(combined.contains("verify return code") || combined.contains("cipher    : "))
 }
 
-/// `_host` is unused today; it stays in the signature because the
-/// certificate-name checks this parser will grow need it, and the
-/// callers already have it to hand.
-fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
+/// The protocol, cipher and certificate `openssl s_client` reported;
+/// "unknown" or `None` for what it did not.
+fn parse_tls_output(text: &str) -> TlsInfo {
     let mut version = "unknown".to_owned();
     let mut cipher = "unknown".to_owned();
     let mut subject: Option<String> = None;
@@ -1013,7 +1012,7 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
     let self_signed =
         subject.as_deref().is_some() && issuer.as_deref().is_some() && subject == issuer;
 
-    Ok(TlsInfo {
+    TlsInfo {
         version,
         cipher,
         cert_subject: subject,
@@ -1023,7 +1022,7 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
         self_signed,
         weak_ciphers_accepted: Vec::new(), // populated by tls_audit
         protocols_accepted: Vec::new(),    // populated by tls_audit
-    })
+    }
 }
 
 /// SNMP read of sysDescr.0 (1.3.6.1.2.1.1.1.0) using common

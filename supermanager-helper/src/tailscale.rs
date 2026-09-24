@@ -213,7 +213,7 @@ pub fn install(args: &InstallArgs) -> Result<InstallResult> {
 /// the launchd registration. Leaves the state directory intact —
 /// the user's node key + tailnet identity is in there, and a future
 /// reinstall (whether ours or Tailscale.app's) will pick it up.
-pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
+pub fn uninstall(_: UninstallArgs) -> InstallResult {
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .status();
@@ -223,10 +223,10 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     if Path::new(DAEMON_INSTALL_PATH).exists() {
         let _ = fs::remove_file(DAEMON_INSTALL_PATH);
     }
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: "tailscaled uninstalled. State directory preserved.".to_string(),
-    })
+    }
 }
 
 /// Find PID of the running tailscaled. Used by exit-node setup to
@@ -871,7 +871,7 @@ fn delete_split_default_if_unowned(
 /// Remove the split-default exit-node routes. Always succeeds —
 /// missing routes are a no-op. Called when the user clears the
 /// exit node, when auto-revert kicks in, and from `panic_reset`.
-pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
+pub fn remove_exit_routes(_: ExitRoutesArgs) -> InstallResult {
     // 1. Drop the /1 split routes — but ONLY the ones tailscale owns.
     //
     // This runs from panic_reset (fired by the connectivity watchdog on a
@@ -901,13 +901,13 @@ pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     }
     let _ = fs::remove_file(EXEMPTION_STATE_FILE);
 
-    Ok(InstallResult {
+    InstallResult {
         success: true,
         message: format!(
             "Removed split-default + {} underlay exemptions (best-effort)",
             exempt.len()
         ),
-    })
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]

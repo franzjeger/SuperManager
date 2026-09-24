@@ -3597,7 +3597,7 @@ impl DaemonService {
 
                 // Connect to host
                 let session_result =
-                    connect_to_ssh_host(host, &private_key_pem_opt, &state_arc).await;
+                    connect_to_ssh_host(host, private_key_pem_opt.as_deref(), &state_arc).await;
 
                 match session_result {
                     Err(e) => {
@@ -3606,7 +3606,7 @@ impl DaemonService {
                             &ctx_owned,
                             op_id_clone.clone(),
                             host.label.clone(),
-                            msg.clone(),
+                            msg,
                         )
                         .await;
                     }
@@ -3651,7 +3651,7 @@ impl DaemonService {
                                     &ctx_owned,
                                     op_id_clone.clone(),
                                     host.label.clone(),
-                                    msg.clone(),
+                                    msg,
                                 )
                                 .await;
                             }
@@ -3673,7 +3673,7 @@ impl DaemonService {
                                     &ctx_owned,
                                     op_id_clone.clone(),
                                     host.label.clone(),
-                                    msg.clone(),
+                                    msg,
                                 )
                                 .await;
                             }
@@ -3767,7 +3767,7 @@ impl DaemonService {
                 .await;
 
                 let session_result =
-                    connect_to_ssh_host(host, &private_key_pem_opt, &state_arc).await;
+                    connect_to_ssh_host(host, private_key_pem_opt.as_deref(), &state_arc).await;
 
                 match session_result {
                     Err(e) => {
@@ -3776,7 +3776,7 @@ impl DaemonService {
                             &ctx_owned,
                             op_id_clone.clone(),
                             host.label.clone(),
-                            msg.clone(),
+                            msg,
                         )
                         .await;
                     }
@@ -3819,7 +3819,7 @@ impl DaemonService {
                                     &ctx_owned,
                                     op_id_clone.clone(),
                                     host.label.clone(),
-                                    msg.clone(),
+                                    msg,
                                 )
                                 .await;
                             }
@@ -3841,7 +3841,7 @@ impl DaemonService {
                                     &ctx_owned,
                                     op_id_clone.clone(),
                                     host.label.clone(),
-                                    msg.clone(),
+                                    msg,
                                 )
                                 .await;
                             }
@@ -4043,7 +4043,7 @@ impl DaemonService {
         };
 
         let state_arc = Arc::clone(&self.state);
-        let session = connect_to_ssh_host(&host, &None, &state_arc)
+        let session = connect_to_ssh_host(&host, None, &state_arc)
             .await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
@@ -4373,7 +4373,7 @@ impl DaemonService {
         );
 
         let state_arc = Arc::clone(&self.state);
-        let session = connect_to_ssh_host(&host, &None, &state_arc)
+        let session = connect_to_ssh_host(&host, None, &state_arc)
             .await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
@@ -4392,8 +4392,8 @@ impl DaemonService {
     }
 
     /// Return recent SSH audit log entries.
-    fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> {
-        Ok(crate::ssh::audit::read_audit(max_lines as usize))
+    fn ssh_get_audit_log(&self, max_lines: u32) -> Vec<String> {
+        crate::ssh::audit::read_audit(max_lines as usize)
     }
 
     /// Return the SSH command string for connecting to the given host.
@@ -5025,7 +5025,7 @@ impl DaemonService {
         );
 
         let state_arc = Arc::clone(&self.state);
-        let session = connect_to_ssh_host(&host, &None, &state_arc)
+        let session = connect_to_ssh_host(&host, None, &state_arc)
             .await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
@@ -5603,7 +5603,7 @@ impl DaemonService {
         let state_arc = Arc::clone(&self.state);
         let ssh_result = match tokio::time::timeout(
             Duration::from_secs(10),
-            connect_to_ssh_host(&host, &None, &state_arc),
+            connect_to_ssh_host(&host, None, &state_arc),
         )
         .await
         {
@@ -6037,7 +6037,7 @@ impl DaemonService {
             host.username, host.hostname, host.port
         );
 
-        let session = connect_to_ssh_host(&host, &None, &self.state)
+        let session = connect_to_ssh_host(&host, None, &self.state)
             .await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
@@ -6257,7 +6257,7 @@ impl DaemonService {
         );
 
         let state_arc = Arc::clone(&self.state);
-        let session = connect_to_ssh_host(&host, &None, &state_arc)
+        let session = connect_to_ssh_host(&host, None, &state_arc)
             .await
             .map_err(|e| fdo::Error::Failed(format!("SSH connection failed: {e}")))?;
 
@@ -6576,7 +6576,7 @@ impl DaemonService {
             );
 
             // Establish one SSH session for this forward's lifetime.
-            let session = match connect_to_ssh_host(&host, &None, &state_arc).await {
+            let session = match connect_to_ssh_host(&host, None, &state_arc).await {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     error!("port forward: SSH connect failed: {e}");
@@ -6694,7 +6694,7 @@ impl DaemonService {
 /// through the jump host (recursively, to support chaining).
 async fn connect_to_ssh_host(
     host: &Host,
-    push_key_pem: &Option<String>,
+    push_key_pem: Option<&str>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
     // If a jump host is configured, connect through it.
@@ -6708,15 +6708,15 @@ async fn connect_to_ssh_host(
 /// Connect directly to a host (no jump host).
 async fn connect_direct(
     host: &Host,
-    push_key_pem: &Option<String>,
+    push_key_pem: Option<&str>,
     state_arc: &Arc<Mutex<DaemonState>>,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
     let known_hosts = Arc::clone(&state_arc.lock().await.known_hosts);
     match host.auth_method {
         AuthMethod::Key | AuthMethod::Certificate => {
             // Resolve the private key PEM.
-            let pem = if let Some(ref p) = push_key_pem {
-                Some(p.clone())
+            let pem = if let Some(p) = push_key_pem {
+                Some(p.to_owned())
             } else if let Some(auth_key_id) = host.auth_key_id {
                 let state = state_arc.lock().await;
                 if let Some(auth_key) = state.ssh_keys.get(&auth_key_id) {
@@ -6835,7 +6835,7 @@ const MAX_PROXY_JUMP_DEPTH: u8 = 10;
 async fn connect_via_jump(
     target: &Host,
     jump_id: uuid::Uuid,
-    push_key_pem: &Option<String>,
+    push_key_pem: Option<&str>,
     state_arc: &Arc<Mutex<DaemonState>>,
     depth: u8,
 ) -> Result<crate::ssh::connection::SshSession, supermgr_core::error::SshError> {
@@ -6892,7 +6892,7 @@ async fn connect_via_jump(
 
     // Authenticate through the tunnel to the target host.
     if target.auth_method == AuthMethod::Key || target.auth_method == AuthMethod::Certificate {
-        if let Some(ref pem) = push_key_pem {
+        if let Some(pem) = push_key_pem {
             return crate::ssh::connection::SshSession::connect_key_stream(
                 tunnel_stream,
                 &target.hostname,

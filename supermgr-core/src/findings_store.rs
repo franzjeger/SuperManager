@@ -493,14 +493,14 @@ pub fn list_findings(customer_slug: &str) -> Result<Vec<PersistedFinding>> {
     let store = load_store(customer_slug)?;
     let mut findings: Vec<PersistedFinding> = store.findings.into_values().collect();
     findings.sort_by(|a, b| {
-        sev_rank(&a.finding.severity)
-            .cmp(&sev_rank(&b.finding.severity))
+        sev_rank(a.finding.severity)
+            .cmp(&sev_rank(b.finding.severity))
             .then_with(|| a.first_seen.cmp(&b.first_seen))
     });
     Ok(findings)
 }
 
-fn sev_rank(s: &crate::severity::Severity) -> u8 {
+fn sev_rank(s: crate::severity::Severity) -> u8 {
     use crate::severity::Severity;
     match s {
         Severity::Critical => 0,
