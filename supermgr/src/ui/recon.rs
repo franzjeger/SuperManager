@@ -159,7 +159,7 @@ impl ReconView {
         let window = self.window.clone();
         let tx = self.tx.clone();
         export.connect_clicked(move |_| {
-            design::export_json(Some(window.upcast_ref()), "recon-scan.json", &data, &tx)
+            design::export_json(Some(window.upcast_ref()), "recon-scan.json", &data, &tx);
         });
         summary.set_header_suffix(Some(&export));
         for warning in &result.warnings {
@@ -197,7 +197,7 @@ impl ReconView {
             let row = adw::ActionRow::builder()
                 .title(host.managed_label.as_deref().unwrap_or(&host.ip))
                 .subtitle(if let Some(customer) = &host.customer {
-                    format!("{} · {ports}", customer)
+                    format!("{customer} · {ports}")
                 } else {
                     ports
                 })
@@ -239,7 +239,7 @@ impl ReconView {
                 add.connect_clicked(move |_| {
                     let keys = app_state
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .ssh_keys
                         .clone();
                     super::ssh::dialogs::show_add_host_dialog_prefilled(

@@ -155,6 +155,46 @@ async fn read_response(
     bail!("The OpenAI stream ended before completion. Retry the request.")
 }
 
+/// Generate an editable draft without giving the model any operational tools.
+pub async fn generate(
+    settings: &AppSettings,
+    prompt: &str,
+    system: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !settings.openai_api_key.trim().is_empty(),
+        "Add an OpenAI API key in Settings → AI."
+    );
+    let response = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap_or_default().post("https://api.openai.com/v1/responses")
+        .bearer_auth(&settings.openai_api_key)
+        .json(&json!({"model":settings.openai_model,"instructions":system,"input":prompt,"store":false,"max_output_tokens":16384}))
+        .send().await?;
+    let status = response.status();
+    let body: Value = response.json().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "OpenAI API error {status}: {}",
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("request rejected")
+    );
+    anyhow::ensure!(
+        body["status"] == "completed",
+        "OpenAI draft was incomplete; no deployable configuration was produced."
+    );
+    let text = body["output"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "message")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::ensure!(!text.trim().is_empty(), "OpenAI returned no configuration.");
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,44 +247,4 @@ mod tests {
             output.as_array().unwrap().clone()
         );
     }
-}
-
-/// Generate an editable draft without giving the model any operational tools.
-pub async fn generate(
-    settings: &AppSettings,
-    prompt: &str,
-    system: &str,
-) -> anyhow::Result<String> {
-    anyhow::ensure!(
-        !settings.openai_api_key.trim().is_empty(),
-        "Add an OpenAI API key in Settings → AI."
-    );
-    let response = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().unwrap_or_default().post("https://api.openai.com/v1/responses")
-        .bearer_auth(&settings.openai_api_key)
-        .json(&json!({"model":settings.openai_model,"instructions":system,"input":prompt,"store":false,"max_output_tokens":16384}))
-        .send().await?;
-    let status = response.status();
-    let body: Value = response.json().await?;
-    anyhow::ensure!(
-        status.is_success(),
-        "OpenAI API error {status}: {}",
-        body["error"]["message"]
-            .as_str()
-            .unwrap_or("request rejected")
-    );
-    anyhow::ensure!(
-        body["status"] == "completed",
-        "OpenAI draft was incomplete; no deployable configuration was produced."
-    );
-    let text = body["output"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|item| item["type"] == "message")
-        .flat_map(|item| item["content"].as_array().into_iter().flatten())
-        .filter_map(|part| part["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    anyhow::ensure!(!text.trim().is_empty(), "OpenAI returned no configuration.");
-    Ok(text)
 }

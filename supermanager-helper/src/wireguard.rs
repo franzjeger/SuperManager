@@ -341,10 +341,7 @@ impl WireGuard {
         crate::dns::clear_vpn_dns();
 
         // Final verdict: success iff the interface is gone now.
-        let final_alive = utun_name_before
-            .as_deref()
-            .map(interface_exists)
-            .unwrap_or(false);
+        let final_alive = utun_name_before.as_deref().is_some_and(interface_exists);
         Ok(WgDisconnectResult {
             success: !final_alive,
             message: if final_alive {

@@ -28,7 +28,7 @@
 //!   failures (returns `None` for the missing fields rather than failing the
 //!   whole call).
 //!
-//! Endpoints used here were verified against OPNsense 26.1.6_2 (FreeBSD 14.3)
+//! Endpoints used here were verified against OPNsense `26.1.6_2` (FreeBSD 14.3)
 //! on 2026-04-28. The official docs are at <https://docs.opnsense.org/development/api.html>.
 
 use std::time::Duration;
@@ -234,7 +234,9 @@ pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSe
                     .pointer("/memory/total")
                     .and_then(|x| x.as_str())
                     .and_then(|s| s.parse().ok());
-                s.memory_used_bytes = v.pointer("/memory/used").and_then(|x| x.as_u64());
+                s.memory_used_bytes = v
+                    .pointer("/memory/used")
+                    .and_then(serde_json::Value::as_u64);
             }
         }
     }

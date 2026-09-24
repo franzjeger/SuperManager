@@ -123,7 +123,7 @@ pub fn populate_ssh_key_list(
         let deployment = format!("{} assigned", key.assigned_host_ids.len());
         let row = adw::ActionRow::builder()
             .title(&key.name)
-            .subtitle(&format!(
+            .subtitle(format!(
                 "{:?} · {deployment}\n{}",
                 key.key_type,
                 short_fingerprint(&key.fingerprint)
@@ -203,7 +203,7 @@ pub fn populate_ssh_key_list(
                 let action = gio::SimpleAction::new("delete", None);
                 action.connect_activate(move |_, _| {
                     let dialog = adw::AlertDialog::new(
-                        Some(&format!("Delete key \"{}\"?", key_name)),
+                        Some(&format!("Delete key \"{key_name}\"?")),
                         Some("The private key will be removed from the keyring. This cannot be undone."),
                     );
                     dialog.add_response("cancel", "Cancel");
@@ -255,7 +255,7 @@ pub fn populate_ssh_key_list(
                 action.connect_activate(move |_, _| {
                     let dialog = gtk4::FileDialog::builder()
                         .title("Export Public Key")
-                        .initial_name(format!("{}.pub", key_name))
+                        .initial_name(format!("{key_name}.pub"))
                         .build();
                     let key_id = key_id.clone();
                     let rt = rt.clone();
@@ -276,8 +276,7 @@ pub fn populate_ssh_key_list(
                                                     write_key_file(&path, &content, 0o644)
                                                 {
                                                     tx.send(AppMsg::OperationFailed(format!(
-                                                        "Failed to write public key: {}",
-                                                        e
+                                                        "Failed to write public key: {e}"
                                                     )))
                                                     .ok();
                                                 } else {
@@ -313,7 +312,7 @@ pub fn populate_ssh_key_list(
                 action.connect_activate(move |_, _| {
                     let dialog = gtk4::FileDialog::builder()
                         .title("Export Private Key")
-                        .initial_name(key_name.to_string())
+                        .initial_name(key_name.clone())
                         .build();
                     let key_id = key_id.clone();
                     let rt = rt.clone();
@@ -334,8 +333,7 @@ pub fn populate_ssh_key_list(
                                                     write_key_file(&path, &content, 0o600)
                                                 {
                                                     tx.send(AppMsg::OperationFailed(format!(
-                                                        "Failed to write private key: {}",
-                                                        e
+                                                        "Failed to write private key: {e}"
                                                     )))
                                                     .ok();
                                                 } else {
@@ -389,8 +387,7 @@ pub fn populate_ssh_key_list(
                         let dialog = adw::AlertDialog::new(
                             Some("Overwrite existing keys?"),
                             Some(&format!(
-                                "Files already exist in ~/.ssh/:\n{}\n{}\n\nOverwrite them?",
-                                priv_name, pub_name,
+                                "Files already exist in ~/.ssh/:\n{priv_name}\n{pub_name}\n\nOverwrite them?",
                             )),
                         );
                         dialog.add_response("cancel", "Cancel");
@@ -460,8 +457,8 @@ pub fn ssh_dir_filenames(key_type: SshKeyType, name: &str) -> (String, String) {
         SshKeyType::Ed25519 => "id_ed25519",
         SshKeyType::Rsa2048 | SshKeyType::Rsa4096 => "id_rsa",
     };
-    let priv_name = format!("{}_{}", prefix, name);
-    let pub_name = format!("{}_{}.pub", prefix, name);
+    let priv_name = format!("{prefix}_{name}");
+    let pub_name = format!("{prefix}_{name}.pub");
     (priv_name, pub_name)
 }
 
@@ -493,8 +490,7 @@ fn do_export_to_ssh_dir(
             Ok(c) => c,
             Err(e) => {
                 tx.send(AppMsg::OperationFailed(format!(
-                    "Failed to export private key: {}",
-                    e
+                    "Failed to export private key: {e}"
                 )))
                 .ok();
                 return;
@@ -502,8 +498,7 @@ fn do_export_to_ssh_dir(
         };
         if let Err(e) = write_key_file(&priv_path, &priv_content, 0o600) {
             tx.send(AppMsg::OperationFailed(format!(
-                "Failed to write private key: {}",
-                e
+                "Failed to write private key: {e}"
             )))
             .ok();
             return;
@@ -514,8 +509,7 @@ fn do_export_to_ssh_dir(
             Ok(c) => c,
             Err(e) => {
                 tx.send(AppMsg::OperationFailed(format!(
-                    "Failed to export public key: {}",
-                    e
+                    "Failed to export public key: {e}"
                 )))
                 .ok();
                 return;
@@ -523,18 +517,14 @@ fn do_export_to_ssh_dir(
         };
         if let Err(e) = write_key_file(&pub_path, &pub_content, 0o644) {
             tx.send(AppMsg::OperationFailed(format!(
-                "Failed to write public key: {}",
-                e
+                "Failed to write public key: {e}"
             )))
             .ok();
             return;
         }
 
-        tx.send(AppMsg::ShowToast(format!(
-            "Exported to ~/.ssh/{}",
-            priv_name
-        )))
-        .ok();
+        tx.send(AppMsg::ShowToast(format!("Exported to ~/.ssh/{priv_name}")))
+            .ok();
     });
 }
 

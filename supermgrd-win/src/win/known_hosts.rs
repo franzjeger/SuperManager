@@ -129,12 +129,11 @@ impl KnownHostsStore {
             if let Some(known) = map.get(&key) {
                 if known.fingerprint == fingerprint {
                     return Ok(HostKeyVerdict::Match(known.clone()));
-                } else {
-                    return Ok(HostKeyVerdict::Changed {
-                        stored: known.clone(),
-                        presented,
-                    });
                 }
+                return Ok(HostKeyVerdict::Changed {
+                    stored: known.clone(),
+                    presented,
+                });
             }
         }
         // Keep verification, durable replacement and cache publication in one

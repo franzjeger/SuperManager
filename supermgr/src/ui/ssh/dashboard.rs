@@ -23,7 +23,7 @@ use crate::settings::AppSettings;
 
 /// Build the multi-device SSH dashboard widget.
 ///
-/// Returns `(flow_box, widget)` — the flow_box is needed by the drain loop
+/// Returns `(flow_box, widget)` — the `flow_box` is needed by the drain loop
 /// to apply per-device status updates.
 pub fn build_ssh_dashboard(
     app_state: &Arc<Mutex<AppState>>,
@@ -327,7 +327,7 @@ fn collect_card_text(widget: &gtk4::Widget) -> String {
 // Populate
 // ---------------------------------------------------------------------------
 
-/// Rebuild the dashboard cards from current AppState, then kick off async
+/// Rebuild the dashboard cards from current `AppState`, then kick off async
 /// fetches for each device with API.  Also fetches from UI.com Site Manager
 /// cloud API if an API key is configured in settings.
 pub fn populate_dashboard(
@@ -345,7 +345,9 @@ pub fn populate_dashboard(
     }
 
     let dash_hosts: Vec<HostSummary> = {
-        let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         s.hosts
             .iter()
             .filter(|h| {
@@ -603,7 +605,7 @@ pub fn populate_dashboard(
                     .and_then(|v| v.as_array())
                     .and_then(|a| a.first())
                     .and_then(|v| v.get("current"))
-                    .and_then(|v| v.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                 {
                     data["session_count"] = Value::from(sessions);
                 }
@@ -655,7 +657,9 @@ pub fn populate_dashboard(
 
     // ── UI.com Site Manager cloud fetch ──────────────────────────────────────
     let api_key = AppSettings::load().unifi_cloud_api_key;
-    if !api_key.is_empty() {
+    if api_key.is_empty() {
+        info!("UI.com cloud: no API key configured");
+    } else {
         info!("UI.com cloud: API key configured, fetching devices...");
         let tx = tx.clone();
         rt.spawn(async move {
@@ -669,8 +673,6 @@ pub fn populate_dashboard(
                 }
             }
         });
-    } else {
-        info!("UI.com cloud: no API key configured");
     }
 }
 
@@ -796,15 +798,15 @@ async fn fetch_unifi_cloud_devices(
                     }
 
                     // Calculate uptime from startupTime.
-                    let uptime_secs = if !startup_time.is_empty() {
+                    let uptime_secs = if startup_time.is_empty() {
+                        None
+                    } else {
                         chrono::DateTime::parse_from_rfc3339(&startup_time)
                             .ok()
                             .map(|dt| {
                                 let now = chrono::Utc::now();
                                 (now - dt.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64
                             })
-                    } else {
-                        None
                     };
 
                     let mut data = serde_json::json!({
@@ -820,10 +822,10 @@ async fn fetch_unifi_cloud_devices(
                         data["uptime"] = Value::from(up);
                     }
                     // Use device IP, fallback to site's WAN IP.
-                    let display_ip = if !ip.is_empty() {
-                        ip.clone()
-                    } else {
+                    let display_ip = if ip.is_empty() {
                         site_wan_ip.clone()
+                    } else {
+                        ip.clone()
                     };
                     if !display_ip.is_empty() {
                         data["wan_ip"] = Value::from(display_ip.as_str());
@@ -1005,12 +1007,13 @@ fn build_device_card(host: &HostSummary, app_state: &Arc<Mutex<AppState>>) -> gt
     if !host.customer.is_empty() {
         let customer = app_state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .customers
             .iter()
             .find(|customer| customer.slug == host.customer)
-            .map(|customer| customer.display_name.as_str())
-            .unwrap_or(host.customer.as_str())
+            .map_or(host.customer.as_str(), |customer| {
+                customer.display_name.as_str()
+            })
             .to_owned();
         let customer_label = gtk4::Label::builder()
             .label(&customer)
@@ -1076,7 +1079,7 @@ fn build_device_card(host: &HostSummary, app_state: &Arc<Mutex<AppState>>) -> gt
 /// Update a dashboard card with fetched FortiGate status data.
 ///
 /// Called from the GTK drain loop when `AppMsg::DashboardDeviceStatus` arrives.
-/// Walks the flow_box children looking for widgets named with the host_id.
+/// Walks the `flow_box` children looking for widgets named with the `host_id`.
 pub fn apply_dashboard_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     let is_error = data.get("error").is_some();
     let is_unifi = data.get("_device_type").and_then(|v| v.as_str()) == Some("unifi");
@@ -1237,7 +1240,10 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
         .or_else(|| results.get("version"))
         .and_then(|v| v.as_str())
         .unwrap_or("--");
-    let build = data.get("build").and_then(|v| v.as_u64()).unwrap_or(0);
+    let build = data
+        .get("build")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
     let fw_update = data.get("firmware_update").and_then(|v| v.as_str());
     let fw = if let Some(update_ver) = fw_update {
         if build > 0 {
@@ -1258,7 +1264,10 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
     });
 
     // Sessions.
-    if let Some(sessions) = data.get("session_count").and_then(|v| v.as_u64()) {
+    if let Some(sessions) = data
+        .get("session_count")
+        .and_then(serde_json::Value::as_u64)
+    {
         update_label_by_name(flow_box, &format!("uptime-{host_id}"), |lbl| {
             lbl.set_label(&format!("Sessions: {sessions}"));
         });
@@ -1292,10 +1301,16 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
 
     // VPN tunnels + last backup.
     let mut bottom_parts = Vec::new();
-    if let Some(count) = data.get("vpn_tunnel_count").and_then(|v| v.as_u64()) {
+    if let Some(count) = data
+        .get("vpn_tunnel_count")
+        .and_then(serde_json::Value::as_u64)
+    {
         bottom_parts.push(format!("VPN: {count}"));
     }
-    if let Some(ago_secs) = data.get("last_backup_ago").and_then(|v| v.as_u64()) {
+    if let Some(ago_secs) = data
+        .get("last_backup_ago")
+        .and_then(serde_json::Value::as_u64)
+    {
         bottom_parts.push(format!("Backup: {}", format_ago(ago_secs)));
     }
     if !bottom_parts.is_empty() {
@@ -1431,7 +1446,7 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     }
 
     // Uptime.
-    if let Some(secs) = data.get("uptime").and_then(|v| v.as_u64()) {
+    if let Some(secs) = data.get("uptime").and_then(serde_json::Value::as_u64) {
         update_label_by_name(flow_box, &format!("uptime-{host_id}"), |lbl| {
             lbl.set_label(&format!("Up: {}", format_uptime(secs)));
         });
@@ -1467,7 +1482,7 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
     }
 
     // Connected clients.
-    if let Some(clients) = data.get("clients").and_then(|v| v.as_u64()) {
+    if let Some(clients) = data.get("clients").and_then(serde_json::Value::as_u64) {
         update_label_by_name(flow_box, &format!("bottom-stat-{host_id}"), |lbl| {
             lbl.set_label(&format!("Clients: {clients}"));
         });
@@ -1537,7 +1552,7 @@ pub fn add_cloud_device_cards(
     refresh_summary(&flow_box);
 }
 
-/// Build a card for a cloud-fetched device (no HostSummary needed).
+/// Build a card for a cloud-fetched device (no `HostSummary` needed).
 fn build_cloud_card(id: &str, label: &str, hostname: &str, site: &str) -> gtk4::FlowBoxChild {
     let card = gtk4::Box::builder()
         .orientation(gtk4::Orientation::Vertical)
@@ -1639,7 +1654,7 @@ fn format_uptime(secs: u64) -> String {
 // Widget-tree search helpers
 // ---------------------------------------------------------------------------
 
-/// Walk the flow_box children and find a Label with the given widget name.
+/// Walk the `flow_box` children and find a Label with the given widget name.
 fn update_label_by_name(flow_box: &gtk4::FlowBox, name: &str, f: impl FnOnce(&gtk4::Label)) {
     if let Some(widget) = find_widget_by_name(flow_box.upcast_ref(), name) {
         if let Some(lbl) = widget.downcast_ref::<gtk4::Label>() {
@@ -1648,7 +1663,7 @@ fn update_label_by_name(flow_box: &gtk4::FlowBox, name: &str, f: impl FnOnce(&gt
     }
 }
 
-/// Walk the flow_box children and find a ProgressBar with the given widget name.
+/// Walk the `flow_box` children and find a `ProgressBar` with the given widget name.
 fn update_progress_by_name(flow_box: &gtk4::FlowBox, name: &str, fraction: f64) {
     if let Some(widget) = find_widget_by_name(flow_box.upcast_ref(), name) {
         if let Some(bar) = widget.downcast_ref::<gtk4::ProgressBar>() {
@@ -1670,6 +1685,17 @@ fn find_widget_by_name(root: &gtk4::Widget, name: &str) -> Option<gtk4::Widget> 
         child = c.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+pub(crate) fn preview_cards(
+    flow: &gtk4::FlowBox,
+    hosts: &[HostSummary],
+    state: &Arc<Mutex<AppState>>,
+) {
+    for host in hosts {
+        flow.insert(&build_device_card(host, state), -1);
+    }
 }
 
 #[cfg(test)]
@@ -1717,16 +1743,5 @@ mod summary_tests {
         // The empty state says what to do; a "0 devices" line above it would
         // just be the same news twice.
         assert_eq!(summary_text(&[]), "");
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn preview_cards(
-    flow: &gtk4::FlowBox,
-    hosts: &[HostSummary],
-    state: &Arc<Mutex<AppState>>,
-) {
-    for host in hosts {
-        flow.insert(&build_device_card(host, state), -1);
     }
 }

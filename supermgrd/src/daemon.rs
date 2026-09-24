@@ -1350,8 +1350,7 @@ impl DaemonService {
                 Ok(BackendStatus::Active { stats, .. }) => {
                     let lhs = stats
                         .last_handshake
-                        .map(|dt| dt.timestamp().max(0) as u64)
-                        .unwrap_or(0);
+                        .map_or(0, |dt| dt.timestamp().max(0) as u64);
                     (stats.bytes_sent, stats.bytes_received, lhs)
                 }
                 _ => (0, 0, 0),
@@ -1714,7 +1713,7 @@ impl DaemonService {
             .await
             .map_err(|e| fdo::Error::Failed(format!("create ovpn directory: {e}")))?;
 
-        let config_path = ovpn_dir.join(format!("{}.ovpn", profile_id));
+        let config_path = ovpn_dir.join(format!("{profile_id}.ovpn"));
         let config_path_str = config_path.to_string_lossy().into_owned();
 
         tokio::fs::write(&config_path, conf_text)
@@ -2027,7 +2026,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the auto_connect flag on a profile and persist it.
+    /// Set the `auto_connect` flag on a profile and persist it.
     async fn set_auto_connect(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -2057,7 +2056,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the kill_switch flag on a profile and persist it.
+    /// Set the `kill_switch` flag on a profile and persist it.
     async fn set_kill_switch(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -2258,7 +2257,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the full_tunnel flag on a profile and persist it.
+    /// Set the `full_tunnel` flag on a profile and persist it.
     async fn set_full_tunnel(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -2288,7 +2287,7 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Set the split_routes list for a WireGuard profile and persist it.
+    /// Set the `split_routes` list for a WireGuard profile and persist it.
     async fn set_split_routes(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -2319,7 +2318,7 @@ impl DaemonService {
                         .into(),
                 ))
             }
-        };
+        }
         profile.updated_at = chrono::Utc::now();
 
         let profile_clone = profile.clone();
@@ -2856,7 +2855,7 @@ impl DaemonService {
         self.delete_ssh_key_inner(key_id).await
     }
 
-    /// Export the public key in OpenSSH authorized_keys format.
+    /// Export the public key in OpenSSH `authorized_keys` format.
     async fn ssh_export_public_key(&self, key_id: &str) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(key_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -3047,7 +3046,7 @@ impl DaemonService {
             .to_owned();
         let proposed_port = updates
             .get("port")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .and_then(|v| u16::try_from(v).ok())
             .unwrap_or(current.port);
         if let Some(existing) = state.hosts.values().find(|existing| {
@@ -3070,7 +3069,7 @@ impl DaemonService {
         if updates.get("hostname").is_some() {
             host.hostname = proposed_hostname;
         }
-        if let Some(v) = updates.get("port").and_then(|v| v.as_u64()) {
+        if let Some(v) = updates.get("port").and_then(serde_json::Value::as_u64) {
             host.port = v as u16;
         }
         if let Some(v) = updates.get("username").and_then(|v| v.as_str()) {
@@ -3116,7 +3115,7 @@ impl DaemonService {
         if let Some(v) = updates.get("proxy_jump") {
             host.proxy_jump = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         }
-        if let Some(v) = updates.get("api_port").and_then(|v| v.as_u64()) {
+        if let Some(v) = updates.get("api_port").and_then(serde_json::Value::as_u64) {
             host.api_port = Some(v as u16);
         }
         // RDP/VNC ports: 0 or null means "not configured".
@@ -3126,7 +3125,7 @@ impl DaemonService {
         if let Some(v) = updates.get("vnc_port") {
             host.vnc_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
         }
-        if let Some(v) = updates.get("pinned").and_then(|v| v.as_bool()) {
+        if let Some(v) = updates.get("pinned").and_then(serde_json::Value::as_bool) {
             host.pinned = v;
         }
         if let Some(v) = updates.get("port_forwards") {
@@ -4082,7 +4081,7 @@ impl DaemonService {
             "end".into(),
             format!("execute api-user generate-key {api_user_owned}"),
         ];
-        let mut lines: Vec<&str> = cmd_lines.iter().map(|s| s.as_str()).collect();
+        let mut lines: Vec<&str> = cmd_lines.iter().map(std::string::String::as_str).collect();
 
         // Add password if we have it (FortiGate will prompt for it).
         let pw_string;
@@ -4122,7 +4121,7 @@ impl DaemonService {
                 stdout
                     .lines()
                     .map(str::trim)
-                    .find(|l| l.len() > 20 && l.chars().all(|c| c.is_alphanumeric()))
+                    .find(|l| l.len() > 20 && l.chars().all(char::is_alphanumeric))
                     .map(String::from)
             })
             .ok_or_else(|| {
@@ -4737,8 +4736,7 @@ impl DaemonService {
                     .map(|d| std::path::PathBuf::from(d).join("supermgr/settings.json"))
                     .ok(),
                 Some(std::path::PathBuf::from(format!(
-                    "{}/.config/supermgr/settings.json",
-                    home
+                    "{home}/.config/supermgr/settings.json"
                 ))),
             ];
             let mut settings_json = serde_json::Value::Null;
@@ -6011,7 +6009,7 @@ impl DaemonService {
 
     /// Run CIS benchmark checks against a FortiGate device via SSH.
     ///
-    /// SSHes into the device and runs a series of `show` commands, checking the
+    /// `SSHes` into the device and runs a series of `show` commands, checking the
     /// output against CIS FortiGate hardening recommendations.
     ///
     /// Returns a JSON object with individual check results and a summary score.
@@ -6298,7 +6296,7 @@ impl DaemonService {
             .unwrap_or("443");
         checks.push(serde_json::json!({
             "name": "Admin HTTPS non-default port",
-            "status": if port_val.trim() != "443" { "pass" } else { "fail" },
+            "status": if port_val.trim() == "443" { "fail" } else { "pass" },
             "detail": format!("Port {}", port_val.trim()),
         }));
 
@@ -6375,7 +6373,7 @@ impl DaemonService {
         let wan_has_https = out.to_lowercase().contains("https");
         checks.push(serde_json::json!({
             "name": "WAN1 no HTTPS management",
-            "status": if !wan_has_https { "pass" } else { "fail" },
+            "status": if wan_has_https { "fail" } else { "pass" },
             "detail": if wan_has_https { "https found in WAN1 allowaccess" } else { "https not in WAN1 allowaccess" },
         }));
 
@@ -6383,7 +6381,7 @@ impl DaemonService {
         let wan_has_ssh = out.to_lowercase().contains("ssh");
         checks.push(serde_json::json!({
             "name": "WAN1 no SSH management",
-            "status": if !wan_has_ssh { "pass" } else { "fail" },
+            "status": if wan_has_ssh { "fail" } else { "pass" },
             "detail": if wan_has_ssh { "ssh found in WAN1 allowaccess" } else { "ssh not in WAN1 allowaccess" },
         }));
 
@@ -6819,7 +6817,7 @@ async fn connect_direct(
     }
 }
 
-/// Build a ProxyJump chain string for the `-J` flag of the `ssh` CLI.
+/// Build a `ProxyJump` chain string for the `-J` flag of the `ssh` CLI.
 ///
 /// Walks the chain of jump hosts and returns something like
 /// `"user1@host1:22,user2@host2:22"`, or `None` if no jump host is set.
@@ -7477,8 +7475,7 @@ async fn connect_profile_if_current(
                         .await
                         .ok()
                         .and_then(|mut it| it.next())
-                        .map(|sa| sa.ip().to_string())
-                        .unwrap_or_else(|| fg.host.clone());
+                        .map_or_else(|| fg.host.clone(), |sa| sa.ip().to_string());
                     let mode = if profile.kill_switch {
                         // Both branches used to call `current_system_dns_ips`,
                         // so a profile that named its own resolvers had them
@@ -7905,11 +7902,10 @@ pub fn spawn_health_check_task(state: Arc<Mutex<DaemonState>>, conn: zbus::Conne
 
                     // Webhook: host went DOWN (was reachable or first-time unreachable).
                     if !reachable && wh_on_host_down && !wh_url.is_empty() {
-                        let host_label = state_guard
-                            .hosts
-                            .get(id)
-                            .map(|h| format!("{} ({}:{})", h.label, h.hostname, h.port))
-                            .unwrap_or_else(|| id.to_string());
+                        let host_label = state_guard.hosts.get(id).map_or_else(
+                            || id.to_string(),
+                            |h| format!("{} ({}:{})", h.label, h.hostname, h.port),
+                        );
                         let msg = format!(
                             "\u{26a0}\u{fe0f} SuperManager: SSH host **{host_label}** is unreachable"
                         );
@@ -8028,8 +8024,7 @@ pub fn spawn_monitor_task(
                                 {
                                     s.profiles
                                         .get(profile_id)
-                                        .map(|p| p.name.clone())
-                                        .unwrap_or_else(|| profile_id.to_string())
+                                        .map_or_else(|| profile_id.to_string(), |p| p.name.clone())
                                 } else {
                                     "unknown".to_string()
                                 };
@@ -8267,7 +8262,12 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                     let s = state.lock().await;
                     s.webhook_url.clone()
                 };
-                if !webhook_url.is_empty() {
+                if webhook_url.is_empty() {
+                    debug!(
+                        "backup diff webhook: {} host(s) drifted but no webhook URL configured",
+                        report.diffed_hosts.len()
+                    );
+                } else {
                     for host in &report.diffed_hosts {
                         let msg = format!(
                             "SuperManager: backup diff detected for `{host}` — \
@@ -8277,11 +8277,6 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
                         let url = webhook_url.clone();
                         tokio::spawn(async move { send_webhook(&url, &msg).await });
                     }
-                } else {
-                    debug!(
-                        "backup diff webhook: {} host(s) drifted but no webhook URL configured",
-                        report.diffed_hosts.len()
-                    );
                 }
             }
         }

@@ -122,7 +122,7 @@ impl WireGuardBackend {
         // unprivileged process can seed.
         let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf));
 
         let loaded: wireguard_nt::Wireguard = (|| {
             // 1. Bundled in the SuperManager bin\ directory.
@@ -453,9 +453,9 @@ async fn resolve_endpoint(endpoint: &str) -> Result<std::net::SocketAddr, VpnErr
         })
 }
 
-/// AllowedIPs as the route table will accept them.
+/// `AllowedIPs` as the route table will accept them.
 ///
-/// `10.8.0.1/24` is a valid AllowedIPs entry — WireGuard masks it — and a
+/// `10.8.0.1/24` is a valid `AllowedIPs` entry — WireGuard masks it — and a
 /// common one in hand-written configs. The route for it is another
 /// matter: `CreateIpForwardEntry2` refuses a destination with host bits
 /// set, and the whole connect failed on "set default route" with no hint

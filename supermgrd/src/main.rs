@@ -77,12 +77,13 @@ async fn main() -> anyhow::Result<()> {
     let log_dir = if nix::unistd::getuid().is_root() {
         PathBuf::from("/var/log/supermgrd")
     } else {
-        let base = std::env::var("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_STATE_HOME").map_or_else(
+            |_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                 PathBuf::from(home).join(".local/state")
-            });
+            },
+            PathBuf::from,
+        );
         base.join("supermgrd")
     };
 
@@ -129,23 +130,25 @@ async fn main() -> anyhow::Result<()> {
     // `SUPERMGRD_PROFILE_DIR` always wins; otherwise the directory is chosen
     // based on effective UID so the daemon works for both production (root,
     // system path) and development (non-root, XDG user path).
-    let profile_dir = std::env::var("SUPERMGRD_PROFILE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
+    let profile_dir = std::env::var("SUPERMGRD_PROFILE_DIR").map_or_else(
+        |_| {
             if nix::unistd::getuid().is_root() {
                 PathBuf::from(SYSTEM_PROFILE_DIR)
             } else {
                 // Non-root development mode: use XDG data home so no
                 // privileged filesystem access is required.
-                let base = std::env::var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
+                let base = std::env::var("XDG_DATA_HOME").map_or_else(
+                    |_| {
                         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
                         PathBuf::from(home).join(".local/share")
-                    });
+                    },
+                    PathBuf::from,
+                );
                 base.join("supermgrd/profiles")
             }
-        });
+        },
+        PathBuf::from,
+    );
 
     info!("profile directory: {}", profile_dir.display());
 
@@ -625,7 +628,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RingLayer {
             line.push_str(&v.extras.join(" "));
         }
 
-        let mut buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
+        let mut buf = self
+            .buf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if buf.len() >= self.cap {
             buf.pop_front();
         }

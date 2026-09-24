@@ -331,13 +331,14 @@ async fn poll(ctx: Ctx) {
                 ctx.lists_stale.store(true, Ordering::SeqCst);
             }
         }
-        let status = status
-            .map(|json| model::parse_status(&json))
-            .unwrap_or_else(|_| model::Status::disconnected());
+        let status = status.map_or_else(
+            |_| model::Status::disconnected(),
+            |json| model::parse_status(&json),
+        );
         let busy = status.is_busy();
         vpn::show_status(&ctx, status);
 
-        let due = last_lists.map_or(true, |t| t.elapsed() >= LIST_REFRESH);
+        let due = last_lists.is_none_or(|t| t.elapsed() >= LIST_REFRESH);
         if is_online && (due || ctx.lists_stale.swap(false, Ordering::SeqCst)) {
             refresh_lists(&ctx).await;
             last_lists = Some(Instant::now());

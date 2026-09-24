@@ -21,7 +21,7 @@ static ATTEMPT: Mutex<Option<Attempt>> = Mutex::new(None);
 pub fn ensure_idle() -> Result<(), String> {
     if ATTEMPT
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .is_some_and(|a| a.view.state == "waiting")
     {
@@ -37,7 +37,7 @@ pub fn ensure_idle() -> Result<(), String> {
 pub fn status(id: &str, uid: u32) -> Result<TailscaleLoginAttempt, String> {
     ATTEMPT
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .filter(|a| a.belongs_to(id, uid))
         .map(|a| a.view.clone())
@@ -45,7 +45,9 @@ pub fn status(id: &str, uid: u32) -> Result<TailscaleLoginAttempt, String> {
 }
 
 pub fn cancel(id: &str, uid: u32) -> Result<(), String> {
-    let guard = ATTEMPT.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = ATTEMPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let attempt = guard
         .as_ref()
         .filter(|a| a.belongs_to(id, uid))
@@ -59,7 +61,7 @@ pub fn cancel(id: &str, uid: u32) -> Result<(), String> {
 fn update(id: &str, state: &str, message: &str, url: &str) {
     if let Some(attempt) = ATTEMPT
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_mut()
         .filter(|a| a.view.id == id)
     {
@@ -197,7 +199,9 @@ pub async fn start(expected: &str, uid: u32) -> Result<TailscaleLoginAttempt, St
         message: "Waiting for a browser sign-in link…".into(),
     };
     let cancel = Arc::new(tokio::sync::Notify::new());
-    *ATTEMPT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Attempt {
+    *ATTEMPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Attempt {
         owner: uid,
         view: view.clone(),
         cancel: Arc::clone(&cancel),
@@ -209,8 +213,8 @@ pub async fn start(expected: &str, uid: u32) -> Result<TailscaleLoginAttempt, St
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         let (mut state, mut message) = loop {
             tokio::select! {
-                _ = cancel.notified() => break ("cancelled", "Sign-in cancelled.".to_owned()),
-                _ = &mut deadline => break ("failed", "Sign-in timed out after three minutes.".to_owned()),
+                () = cancel.notified() => break ("cancelled", "Sign-in cancelled.".to_owned()),
+                () = &mut deadline => break ("failed", "Sign-in timed out after three minutes.".to_owned()),
                 result = child.wait() => match result {
                     Ok(exit) if exit.success() => break ("complete", "Tailscale account signed in.".to_owned()),
                     Ok(exit) => break ("failed", format!("Tailscale sign-in ended with {exit}. Try signing in again.")),
@@ -244,7 +248,10 @@ pub async fn start(expected: &str, uid: u32) -> Result<TailscaleLoginAttempt, St
                 }
             }
         }
-        let message = if state != "complete" {
+        let message = if state == "complete" {
+            let _ = std::fs::remove_file(JOURNAL);
+            message
+        } else {
             match restore_with(&Live, &previous).await {
                 Ok(result) => {
                     let _ = std::fs::remove_file(JOURNAL);
@@ -252,9 +259,6 @@ pub async fn start(expected: &str, uid: u32) -> Result<TailscaleLoginAttempt, St
                 }
                 Err(error) => format!("{message} Recovery failed: {error}"),
             }
-        } else {
-            let _ = std::fs::remove_file(JOURNAL);
-            message
         };
         update(&id, state, &message, "");
     });

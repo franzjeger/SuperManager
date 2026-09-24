@@ -47,7 +47,7 @@ const PID_DIR: &str = "/var/run";
 /// Where we keep per-profile log files. `/tmp` instead of
 /// `/var/log` so that the GUI process (running as the user, not
 /// root) can read what openvpn actually said. The log file is
-/// the only way to diagnose mid-handshake failures (AUTH_FAILED,
+/// the only way to diagnose mid-handshake failures (`AUTH_FAILED`,
 /// "Cannot resolve host", TLS errors) — without world-readable
 /// logs, "openvpn started but the tunnel never reached
 /// connected" is a complete black box for the user.
@@ -507,11 +507,10 @@ impl OpenVpn {
             let fatal_hit = FATAL.iter().find(|m| log_body.contains(*m));
 
             if !pid_alive || fatal_hit.is_some() {
-                let reason = fatal_hit
-                    .map(|m| format!("openvpn died after fork — {m}"))
-                    .unwrap_or_else(|| {
-                        "openvpn died after fork (no PID, no fatal marker — see log)".to_owned()
-                    });
+                let reason = fatal_hit.map_or_else(
+                    || "openvpn died after fork (no PID, no fatal marker — see log)".to_owned(),
+                    |m| format!("openvpn died after fork — {m}"),
+                );
                 let log_tail = {
                     let lines: Vec<&str> =
                         log_body.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -897,14 +896,13 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
         .lines()
         .find_map(|l| l.split("/sbin/ifconfig ").nth(1))
         .map(|s| s.split_whitespace().collect::<Vec<_>>())
-        .map(|toks| {
+        .map_or((None, None), |toks| {
             // `<iface> <vip> <vgw> netmask ...`
             (
-                toks.get(1).map(|s| s.to_string()),
-                toks.get(2).map(|s| s.to_string()),
+                toks.get(1).map(std::string::ToString::to_string),
+                toks.get(2).map(std::string::ToString::to_string),
             )
-        })
-        .unwrap_or((None, None));
+        });
     (iface, vip, vgw)
 }
 
@@ -957,10 +955,10 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
     if octets.len() != 4 {
         return None;
     }
-    let bits = ((octets[0] as u32) << 24)
-        | ((octets[1] as u32) << 16)
-        | ((octets[2] as u32) << 8)
-        | (octets[3] as u32);
+    let bits = (u32::from(octets[0]) << 24)
+        | (u32::from(octets[1]) << 16)
+        | (u32::from(octets[2]) << 8)
+        | u32::from(octets[3]);
     let leading = bits.leading_ones();
     let trailing = bits.trailing_zeros();
     if leading + trailing != 32 {
@@ -980,7 +978,7 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// protocol, but the gateway's TLS channel layer rejects 2.x
 /// clients in the AAD/Entra ID flow — TLS handshake completes,
 /// then the gateway RSTs immediately after our auth payload
-/// without sending AUTH_FAILED. The same configuration on a 3.x
+/// without sending `AUTH_FAILED`. The same configuration on a 3.x
 /// client connects cleanly. MSP-Toolkit-V2 (the production
 /// reference) and Microsoft's own Azure VPN Client both use
 /// OpenVPN 3 for this reason.
@@ -994,7 +992,7 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
 /// OpenVPN servers don't care about 2.x vs 3.x) but should not
 /// be relied on for Azure VPN.
 fn locate_openvpn(require_openvpn3: bool) -> anyhow::Result<PathBuf> {
-    select_openvpn(require_openvpn3, |path| path.is_file())
+    select_openvpn(require_openvpn3, std::path::Path::is_file)
 }
 
 fn select_openvpn(

@@ -134,7 +134,7 @@ pub struct AppSettings {
     pub webhook_on_vpn_disconnect: bool,
 
     // ---- UniFi Cloud (ui.com Site Manager) ----
-    /// API key for the UI.com Site Manager API (https://unifi.ui.com).
+    /// API key for the UI.com Site Manager API (<https://unifi.ui.com>).
     /// Create at Settings > API Keys in Site Manager.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub unifi_cloud_api_key: String,

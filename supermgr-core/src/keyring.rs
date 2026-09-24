@@ -486,7 +486,7 @@ impl SecretStore for CredentialManagerStore {
             // primary label so `retrieve` knows to reassemble.
             let chunks: Vec<Vec<u8>> = secret
                 .chunks(WIN_CRED_MAX_BLOB)
-                .map(|c| c.to_vec())
+                .map(<[u8]>::to_vec)
                 .collect();
             let n = chunks.len();
             let marker = format!("{CHUNK_PREFIX}{n}").into_bytes();

@@ -69,7 +69,9 @@ static SESSION_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None
 
 /// Reset the Claude CLI session (e.g. on "Clear conversation").
 pub fn reset_session() {
-    *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *SESSION_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
 }
 
 /// Send a message using Claude Code CLI (subscription-based, no API tokens).
@@ -108,7 +110,10 @@ pub async fn send_message_subscription(
 
     let system_with_context = format!("{SYSTEM_PROMPT}\n\n## Current State\n{context}");
 
-    let session_id = SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let session_id = SESSION_ID
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
 
     let mut cmd = subscription_command(model);
     cmd.args([
@@ -129,10 +134,10 @@ pub async fn send_message_subscription(
         cmd.args(["--resume", sid]);
     }
 
-    if !allow_changes {
-        cmd.env("SUPERMGR_MCP_READ_ONLY", "1");
-    } else {
+    if allow_changes {
         cmd.env_remove("SUPERMGR_MCP_READ_ONLY");
+    } else {
+        cmd.env("SUPERMGR_MCP_READ_ONLY", "1");
     }
     cmd.kill_on_drop(true);
     cmd.arg(user_text);
@@ -209,13 +214,11 @@ pub async fn send_message_subscription(
                         );
                     }
                     // Final result — extract text if we haven't streamed yet.
-                    if !sent_text {
-                        if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
-                            let _ = tx_stream
-                                .send(AppMsg::ConsoleResponse(format!("\nClaude: {result}\n")));
-                        }
-                    } else {
+                    if sent_text {
                         let _ = tx_stream.send(AppMsg::ConsoleResponse("\n".into()));
+                    } else if let Some(result) = parsed.get("result").and_then(|r| r.as_str()) {
+                        let _ = tx_stream
+                            .send(AppMsg::ConsoleResponse(format!("\nClaude: {result}\n")));
                     }
                     // Capture session_id from result.
                     if let Some(sid) = parsed.get("session_id").and_then(|s| s.as_str()) {
@@ -240,7 +243,9 @@ pub async fn send_message_subscription(
         "Claude CLI exited with {status}. Check 'claude auth status'."
     );
     if let Some(sid) = session.0 {
-        *SESSION_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(sid);
+        *SESSION_ID
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sid);
     }
 
     Ok(())
@@ -504,10 +509,7 @@ fn dispatch_sse_event(
                     .to_owned();
                 *tool_input_json = String::new();
                 *in_tool_block = true;
-                let _ = tx.send(AppMsg::ConsoleResponse(format!(
-                    "\n[tool: {}]\n",
-                    tool_name
-                )));
+                let _ = tx.send(AppMsg::ConsoleResponse(format!("\n[tool: {tool_name}]\n")));
             }
         }
         "content_block_delta" => {
@@ -551,7 +553,7 @@ fn dispatch_sse_event(
     Ok(())
 }
 
-/// Finalize a tool_use content block and record it for execution.
+/// Finalize a `tool_use` content block and record it for execution.
 fn finalize_tool_block(
     content_blocks: &mut Vec<Value>,
     tool_id: &mut String,

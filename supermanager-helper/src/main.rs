@@ -946,7 +946,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         "tailscale_set_dns_fallbacks" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
                 Ok(args) => match dns_health_watchdog::set_fallbacks(args.servers) {
-                    Ok(_) => Response::ok(
+                    Ok(()) => Response::ok(
                         id,
                         serde_json::json!({
                             "fallbacks": dns_health_watchdog::current_fallbacks()
@@ -975,7 +975,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             let secs = req
                 .params
                 .get("seconds")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(30);
             connectivity_watchdog::pause_for(secs);
             Response::ok(id, serde_json::json!({"paused_seconds": secs}))
@@ -1009,7 +1009,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
             match auto_reconnect::enable(profile_id.clone(), backend, args).await {
-                Ok(_) => Response::ok(id, serde_json::json!({"enabled": profile_id})),
+                Ok(()) => Response::ok(id, serde_json::json!({"enabled": profile_id})),
                 Err(e) => Response::err(id, -32000, format!("enable failed: {e:#}")),
             }
         }
@@ -1020,7 +1020,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 None => return Response::err(id, -32602, "missing profile_id"),
             };
             match auto_reconnect::disable(&profile_id).await {
-                Ok(_) => Response::ok(id, serde_json::json!({"disabled": profile_id})),
+                Ok(()) => Response::ok(id, serde_json::json!({"disabled": profile_id})),
                 Err(e) => Response::err(id, -32000, format!("disable failed: {e:#}")),
             }
         }

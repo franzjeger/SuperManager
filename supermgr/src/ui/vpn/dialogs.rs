@@ -36,7 +36,7 @@ pub fn import_wireguard(
 ) {
     if !app_state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .daemon_available
     {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
@@ -78,10 +78,10 @@ pub fn import_wireguard(
             return;
         };
 
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Imported Profile".to_owned());
+        let name = path.file_stem().map_or_else(
+            || "Imported Profile".to_owned(),
+            |s| s.to_string_lossy().into_owned(),
+        );
 
         let tx = tx.clone();
         rt.spawn(async move {
@@ -116,7 +116,7 @@ pub fn import_toml_config(
 ) {
     if !app_state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .daemon_available
     {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
@@ -217,7 +217,7 @@ pub fn import_openvpn(
 ) {
     if !app_state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .daemon_available
     {
         toast_overlay.add_toast(adw::Toast::new("Daemon not running \u{2014} cannot import"));
@@ -1119,7 +1119,7 @@ pub fn show_logs_dialog(
     log_window.set_opacity(
         app_settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .opacity,
     );
 
@@ -1287,7 +1287,7 @@ pub fn show_logs_dialog(
 
                 let filtered: Vec<&str> = lines
                     .iter()
-                    .map(|l| l.as_str())
+                    .map(std::string::String::as_str)
                     .filter(|line| {
                         let lower = line.to_lowercase();
                         // Category filter.

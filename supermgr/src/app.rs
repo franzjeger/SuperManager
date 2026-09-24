@@ -109,58 +109,6 @@ impl AppState {
 /// How many notifications the centre keeps. Older ones fall off the end.
 pub const NOTIFICATION_HISTORY_LIMIT: usize = 100;
 
-#[cfg(test)]
-mod notification_tests {
-    use super::*;
-
-    #[test]
-    fn newest_notification_comes_first() {
-        let mut s = AppState::default();
-        s.push_notification("a-symbolic", "first");
-        s.push_notification("b-symbolic", "second");
-        assert_eq!(s.notifications[0].message, "second");
-        assert_eq!(s.notifications[1].message, "first");
-    }
-
-    #[test]
-    fn history_is_capped_and_drops_the_oldest() {
-        // The cap has to bound what the popover renders, not just what
-        // the store holds — those were different numbers before the UI
-        // rendered from the store.
-        let mut s = AppState::default();
-        for i in 0..NOTIFICATION_HISTORY_LIMIT + 10 {
-            s.push_notification("x-symbolic", format!("event {i}"));
-        }
-        assert_eq!(s.notifications.len(), NOTIFICATION_HISTORY_LIMIT);
-        assert_eq!(s.notifications[0].message, "event 109");
-        assert_eq!(
-            s.notifications.last().unwrap().message,
-            "event 10",
-            "the oldest surviving entry should be the 11th pushed"
-        );
-    }
-
-    #[test]
-    fn clear_empties_the_store() {
-        let mut s = AppState::default();
-        s.push_notification("x-symbolic", "something happened");
-        s.clear_notifications();
-        assert!(s.notifications.is_empty());
-    }
-
-    #[test]
-    fn icon_and_timestamp_are_retained_for_display() {
-        // Both were captured and then never read; the popover now shows
-        // them, so a regression here is visible rather than invisible.
-        let before = chrono::Utc::now();
-        let mut s = AppState::default();
-        s.push_notification("network-vpn-symbolic", "VPN connected");
-        let n = &s.notifications[0];
-        assert_eq!(n.icon, "network-vpn-symbolic");
-        assert!(n.timestamp >= before);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Inter-thread messages
 // ---------------------------------------------------------------------------
@@ -387,7 +335,7 @@ pub enum AppMsg {
     },
     /// Cloud-fetched devices from UI.com Site Manager API.
     DashboardCloudDevices {
-        /// List of (device_id, device_name, hostname, data) tuples.
+        /// List of (`device_id`, `device_name`, hostname, data) tuples.
         devices: Vec<(String, String, String, Value)>,
     },
     /// FortiGate config backup completed.
@@ -415,4 +363,56 @@ pub enum AppMsg {
     ProvisioningConfigGenerated(String),
     /// Config push to device completed (success or failure already toasted).
     ProvisioningPushDone,
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+
+    #[test]
+    fn newest_notification_comes_first() {
+        let mut s = AppState::default();
+        s.push_notification("a-symbolic", "first");
+        s.push_notification("b-symbolic", "second");
+        assert_eq!(s.notifications[0].message, "second");
+        assert_eq!(s.notifications[1].message, "first");
+    }
+
+    #[test]
+    fn history_is_capped_and_drops_the_oldest() {
+        // The cap has to bound what the popover renders, not just what
+        // the store holds — those were different numbers before the UI
+        // rendered from the store.
+        let mut s = AppState::default();
+        for i in 0..NOTIFICATION_HISTORY_LIMIT + 10 {
+            s.push_notification("x-symbolic", format!("event {i}"));
+        }
+        assert_eq!(s.notifications.len(), NOTIFICATION_HISTORY_LIMIT);
+        assert_eq!(s.notifications[0].message, "event 109");
+        assert_eq!(
+            s.notifications.last().unwrap().message,
+            "event 10",
+            "the oldest surviving entry should be the 11th pushed"
+        );
+    }
+
+    #[test]
+    fn clear_empties_the_store() {
+        let mut s = AppState::default();
+        s.push_notification("x-symbolic", "something happened");
+        s.clear_notifications();
+        assert!(s.notifications.is_empty());
+    }
+
+    #[test]
+    fn icon_and_timestamp_are_retained_for_display() {
+        // Both were captured and then never read; the popover now shows
+        // them, so a regression here is visible rather than invisible.
+        let before = chrono::Utc::now();
+        let mut s = AppState::default();
+        s.push_notification("network-vpn-symbolic", "VPN connected");
+        let n = &s.notifications[0];
+        assert_eq!(n.icon, "network-vpn-symbolic");
+        assert!(n.timestamp >= before);
+    }
 }

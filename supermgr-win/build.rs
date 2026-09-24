@@ -16,9 +16,9 @@
 //!
 //! - `env!("SUPERMGR_VERSION")` in the app, which the in-app update check
 //!   compares against the newest GitHub release tag.
-//! - The `.exe`'s numeric VS_FIXEDFILEINFO version, which the MSI's
+//! - The `.exe`'s numeric `VS_FIXEDFILEINFO` version, which the MSI's
 //!   `!(bind.FileVersion.supermgrd_win.exe)` binding turns into the MSI
-//!   ProductVersion — the value Windows Installer's MajorUpgrade logic
+//!   `ProductVersion` — the value Windows Installer's `MajorUpgrade` logic
 //!   compares. Before this, every release MSI carried 1.0.0 and only the
 //!   *filename* knew the real version.
 
@@ -68,9 +68,9 @@ fn main() {
     }
 }
 
-/// `"1.7.0"` → the four 16-bit fields of a VS_FIXEDFILEINFO version,
+/// `"1.7.0"` → the four 16-bit fields of a `VS_FIXEDFILEINFO` version,
 /// packed major.minor.patch.0. `None` when the string is not dotted
-/// numbers, in which case winres keeps its CARGO_PKG_VERSION default.
+/// numbers, in which case winres keeps its `CARGO_PKG_VERSION` default.
 fn pack_version(v: &str) -> Option<u64> {
     let mut parts = v.split('.');
     let field = |p: Option<&str>| -> Option<u64> {

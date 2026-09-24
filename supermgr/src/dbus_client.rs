@@ -150,7 +150,9 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
         info!("state after stale disconnect: {:?}", vpn_state);
     }
 
-    let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = app_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     s.profiles = profiles;
     s.vpn_state = vpn_state;
     s.daemon_available = true;
@@ -170,7 +172,9 @@ pub async fn fetch_initial_ssh_state(app_state: &Arc<Mutex<AppState>>) -> anyhow
     let hosts_json = proxy.list_hosts().await.context("SshListHosts")?;
     let hosts: Vec<HostSummary> = serde_json::from_str(&hosts_json).context("parse SSH hosts")?;
 
-    let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut s = app_state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     s.ssh_keys = keys;
     s.hosts = hosts;
     Ok(())
@@ -459,7 +463,7 @@ pub async fn dbus_set_auto_connect(profile_id: String, auto_connect: bool) -> an
 /// of IPv4/IPv6 addresses; pass an empty string to clear any override and
 /// fall back to the FortiGate's mode-config-pushed DNS.
 ///
-/// `local_id` is the IKE identity (IDi). Empty clears it — which is the only
+/// `local_id` is the IKE identity (`IDi`). Empty clears it — which is the only
 /// way back to the default once one has been set, so this is deliberately not
 /// a "leave unchanged when blank" field.
 pub async fn dbus_update_fortigate(
@@ -1466,8 +1470,8 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                     match signal.args() {
                         Ok(args) => {
                             let msg = AppMsg::AuthChallenge {
-                                user_code: args.user_code.to_owned(),
-                                verification_url: args.verification_url.to_owned(),
+                                user_code: args.user_code.clone(),
+                                verification_url: args.verification_url.clone(),
                             };
                             if tx.send(msg).is_err() {
                                 return;
@@ -1481,9 +1485,9 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                     match signal.args() {
                         Ok(args) => {
                             let msg = AppMsg::SshOperationProgress {
-                                operation_id: args.operation_id.to_owned(),
-                                host_label: args.host_label.to_owned(),
-                                message: args.message.to_owned(),
+                                operation_id: args.operation_id.clone(),
+                                host_label: args.host_label.clone(),
+                                message: args.message.clone(),
                             };
                             if tx.send(msg).is_err() {
                                 return;
@@ -1497,7 +1501,7 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                     match signal.args() {
                         Ok(args) => {
                             let msg = AppMsg::HostHealthChanged {
-                                host_id: args.host_id.to_owned(),
+                                host_id: args.host_id.clone(),
                                 reachable: args.reachable,
                             };
                             if tx.send(msg).is_err() {
@@ -1536,7 +1540,9 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
                 // Also refresh SSH state so the GUI is fully up-to-date.
                 let _ = fetch_initial_ssh_state(&app_state).await;
 
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let msg = AppMsg::DaemonConnected {
                     profiles: s.profiles.clone(),
                     state: s.vpn_state.clone(),
@@ -1608,10 +1614,9 @@ fn parse_rfc3339_secs(s: &str) -> Option<u64> {
     };
     let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
-    let day_of_year: u64 = days_in_month[..month as usize].iter().sum::<u64>()
-        + if leap && month > 2 { 1 } else { 0 }
-        + day
-        - 1;
+    let day_of_year: u64 =
+        days_in_month[..month as usize].iter().sum::<u64>() + u64::from(leap && month > 2) + day
+            - 1;
 
     const EPOCH_DAYS: u64 = 719_162; // days from year 0 to 1970-01-01
     let days = days_to_year(year) + day_of_year;
@@ -1647,8 +1652,7 @@ pub async fn generate_ssh_config() -> anyhow::Result<usize> {
     let (before, after) = if let Some(start) = existing.find(marker_start) {
         let end_pos = existing
             .find(marker_end)
-            .map(|p| p + marker_end.len())
-            .unwrap_or(existing.len());
+            .map_or(existing.len(), |p| p + marker_end.len());
         // Trim trailing newline after marker.
         let after_pos = if existing[end_pos..].starts_with('\n') {
             end_pos + 1

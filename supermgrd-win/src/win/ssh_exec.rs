@@ -354,7 +354,7 @@ impl KeyChange {
     }
 }
 
-/// Drain the channel until the peer sends Eof + ExitStatus.
+/// Drain the channel until the peer sends Eof + `ExitStatus`.
 async fn collect_output(
     channel: &mut russh::Channel<client::Msg>,
 ) -> Result<(String, String, i32), russh::Error> {

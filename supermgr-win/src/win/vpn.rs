@@ -239,7 +239,7 @@ pub(super) fn show_status(ctx: &Ctx, s: model::Status) {
         tray::set_tooltip(&match s.phase {
             model::Phase::Connected => format!("SuperManager — connected to {named}"),
             model::Phase::Connecting => format!("SuperManager — connecting to {named}…"),
-            model::Phase::Disconnecting => format!("SuperManager — disconnecting…"),
+            model::Phase::Disconnecting => "SuperManager — disconnecting…".to_string(),
             model::Phase::Failed => format!("SuperManager — couldn't connect to {named}"),
             model::Phase::Disconnected => "SuperManager — not connected".to_owned(),
         });

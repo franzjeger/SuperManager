@@ -46,7 +46,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::SystemServices::MAXIMUM_ALLOWED;
 
-/// Protected DACLs: no ProgramData write permissions may be inherited. Setting
+/// Protected DACLs: no `ProgramData` write permissions may be inherited. Setting
 /// the owner to Administrators also prevents a creating user's implicit right
 /// to change the DACL. Creation is restricted to the elevated service/admins.
 const ROOT_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FR;;;AU)";
@@ -78,9 +78,7 @@ pub fn ensure_root() -> io::Result<PathBuf> {
 }
 
 fn program_data_dir() -> PathBuf {
-    std::env::var_os("PROGRAMDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+    std::env::var_os("PROGRAMDATA").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
 }
 
 fn root_path_at(base: &Path) -> io::Result<PathBuf> {
@@ -216,7 +214,7 @@ fn secure_directory(path: &Path, sddl: &str, allow_existing: bool) -> io::Result
         bInheritHandle: 0,
     };
     let wide = wide_path(path)?;
-    if unsafe { CreateDirectoryW(wide.as_ptr(), &attributes) } == 0 {
+    if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
         let error = io::Error::last_os_error();
         if !allow_existing || error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
             return Err(error);
@@ -258,7 +256,7 @@ fn open_trusted_path(path: &Path) -> io::Result<(OwnedHandle, bool)> {
     }
     let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
     let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    if unsafe { GetFileInformationByHandle(raw, &mut info) } == 0 {
+    if unsafe { GetFileInformationByHandle(raw, &raw mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }
     if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.nNumberOfLinks > 1 {
@@ -274,11 +272,11 @@ fn open_trusted_path(path: &Path) -> io::Result<(OwnedHandle, bool)> {
             raw,
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,
-            &mut owner,
+            &raw mut owner,
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
-            &mut descriptor,
+            &raw mut descriptor,
         )
     };
     let _descriptor = SecurityDescriptor(descriptor);
@@ -308,8 +306,14 @@ fn set_dacl(handle: &OwnedHandle, sddl: &str) -> io::Result<()> {
     let mut present = 0;
     let mut defaulted = 0;
     let mut dacl = ptr::null_mut();
-    if unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted) }
-        == 0
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor.0,
+            &raw mut present,
+            &raw mut dacl,
+            &raw mut defaulted,
+        )
+    } == 0
     {
         return Err(io::Error::last_os_error());
     }
@@ -361,7 +365,7 @@ impl SecurityDescriptor {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
                 SDDL_REVISION_1,
-                &mut descriptor,
+                &raw mut descriptor,
                 ptr::null_mut(),
             )
         } == 0
@@ -397,7 +401,12 @@ mod tests {
         let mut dacl = ptr::null_mut();
         assert_ne!(
             unsafe {
-                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+                GetSecurityDescriptorDacl(
+                    descriptor.0,
+                    &raw mut present,
+                    &raw mut dacl,
+                    &raw mut defaulted,
+                )
             },
             0
         );
@@ -410,15 +419,18 @@ mod tests {
                     sid_type,
                     ptr::null_mut(),
                     sid.as_mut_ptr().cast(),
-                    &mut length,
+                    &raw mut length,
                 )
             },
             0
         );
         let mut trustee: TRUSTEE_W = unsafe { std::mem::zeroed() };
-        unsafe { BuildTrusteeWithSidW(&mut trustee, sid.as_mut_ptr().cast()) };
+        unsafe { BuildTrusteeWithSidW(&raw mut trustee, sid.as_mut_ptr().cast()) };
         let mut rights = 0;
-        win32_result(unsafe { GetEffectiveRightsFromAclW(dacl, &trustee, &mut rights) }).unwrap();
+        win32_result(unsafe {
+            GetEffectiveRightsFromAclW(dacl, &raw const trustee, &raw mut rights)
+        })
+        .unwrap();
         rights
     }
 
@@ -434,7 +446,7 @@ mod tests {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
-                &mut descriptor,
+                &raw mut descriptor,
             )
         })
         .unwrap();
@@ -473,7 +485,7 @@ mod tests {
                     WinBuiltinAdministratorsSid,
                     ptr::null_mut(),
                     admins_sid.as_mut_ptr().cast(),
-                    &mut length,
+                    &raw mut length,
                 )
             },
             0
@@ -484,7 +496,7 @@ mod tests {
                 CheckTokenMembership(
                     ptr::null_mut(),
                     admins_sid.as_mut_ptr().cast(),
-                    &mut is_admin,
+                    &raw mut is_admin,
                 )
             },
             0

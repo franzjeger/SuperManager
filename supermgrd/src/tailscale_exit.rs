@@ -233,10 +233,10 @@ async fn change_with(
         if current.profile != expected || !current.matches(&desired) {
             return Err("Account or exit-node selection changed during verification; the newer choice was kept.".into());
         }
-        if !network.probe(&baseline).await.is_empty() {
-            consecutive += 1;
-        } else {
+        if network.probe(&baseline).await.is_empty() {
             consecutive = 0;
+        } else {
+            consecutive += 1;
         }
         if consecutive >= 2 {
             let final_state = network.state().await?;
@@ -402,10 +402,7 @@ mod tests {
             f.pause_at = Some(round);
             assert!(change_with(&f, "account", "new").await.is_err());
             assert!(!f.state.lock().unwrap().running);
-            assert_eq!(
-                f.applied.lock().unwrap().len(),
-                if round == 1 { 0 } else { 1 }
-            );
+            assert_eq!(f.applied.lock().unwrap().len(), usize::from(round != 1));
         }
     }
 }

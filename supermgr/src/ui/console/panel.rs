@@ -143,7 +143,9 @@ pub fn build_console_page(
             "OpenAI API",
         ]))
         .build();
-    let settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+    let settings = app_settings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     provider.set_selected(match settings.ai_provider {
         crate::settings::AiProvider::Claude => 0,
         crate::settings::AiProvider::Codex => 1,
@@ -240,7 +242,11 @@ pub fn build_console_page(
             generation.fetch_add(1, Ordering::AcqRel);
             provider.set_sensitive(true);
             allow_changes.set_sensitive(true);
-            if let Some(task) = running.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some(task) = running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 task.abort();
             }
             busy.store(false, Ordering::Release);
@@ -263,7 +269,9 @@ pub fn build_console_page(
                 2 => crate::settings::AiProvider::OpenAi,
                 _ => crate::settings::AiProvider::Claude,
             };
-            let mut settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut settings = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if settings.ai_provider == chosen {
                 return;
             }
@@ -271,7 +279,7 @@ pub fn build_console_page(
             settings.save();
             app_state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .console_messages
                 .clear();
             super::claude::reset_session();
@@ -295,7 +303,7 @@ pub fn build_console_page(
             );
             app_state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .console_messages
                 .clear();
             super::claude::reset_session();
@@ -331,7 +339,7 @@ pub fn build_console_page(
             allow_changes.set_sensitive(false);
             let settings = app_settings
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             let actions_allowed = allow_changes.is_active();
             append_tagged(&chat_buffer, &format!("\nYou: {text}\n"), "user");
@@ -340,15 +348,16 @@ pub fn build_console_page(
             let text = text.clone();
             let app_state = Arc::clone(&app_state);
             let (messages, context) = {
-                let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+                let s = app_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let vpn = match &s.vpn_state {
                     VpnState::Connected { profile_id, .. } => {
                         let name = s
                             .profiles
                             .iter()
                             .find(|p| p.id == *profile_id)
-                            .map(|p| p.name.as_str())
-                            .unwrap_or("unknown");
+                            .map_or("unknown", |p| p.name.as_str());
                         format!("VPN: connected to '{name}'")
                     }
                     VpnState::Disconnected => "VPN: disconnected".into(),
@@ -409,8 +418,7 @@ pub fn build_console_page(
                             .hosts
                             .iter()
                             .find(|h| h.id.to_string() == *id)
-                            .map(|h| h.label.as_str())
-                            .unwrap_or(id);
+                            .map_or(id.as_str(), |h| h.label.as_str());
                         format!(
                             "- {}: {}",
                             label,
@@ -459,7 +467,9 @@ pub fn build_console_page(
                 };
                 let _ = done_tx.send(result);
             });
-            *running.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+            *running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task.abort_handle());
             let provider = provider.clone();
             let allow_changes = allow_changes.clone();
             let generation = Arc::clone(&generation);
@@ -488,15 +498,18 @@ pub fn build_console_page(
                     Ok(messages) => {
                         app_state
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .console_messages = messages
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .console_messages = messages;
                     }
                     Err(e) => {
                         let _ = tx.send(AppMsg::ConsoleResponse(format!("\nError: {e}\n")));
                     }
                 }
                 busy.store(false, Ordering::Release);
-                running.lock().unwrap_or_else(|e| e.into_inner()).take();
+                running
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
                 let _ = tx.send(AppMsg::ConsoleThinking(false));
                 provider.set_sensitive(true);
                 allow_changes.set_sensitive(true);
@@ -539,7 +552,11 @@ pub fn build_console_page(
             generation.fetch_add(1, Ordering::AcqRel);
             provider.set_sensitive(true);
             allow_changes.set_sensitive(true);
-            if let Some(task) = running.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some(task) = running
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 task.abort();
             }
             busy.store(false, Ordering::Release);
@@ -547,7 +564,7 @@ pub fn build_console_page(
             chat_buffer.set_text("");
             app_state
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .console_messages
                 .clear();
             super::claude::reset_session();

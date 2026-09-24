@@ -98,10 +98,10 @@ async fn run(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    if !allow_changes {
-        command.env("SUPERMGR_MCP_READ_ONLY", "1");
-    } else {
+    if allow_changes {
         command.env_remove("SUPERMGR_MCP_READ_ONLY");
+    } else {
+        command.env("SUPERMGR_MCP_READ_ONLY", "1");
     }
     let mut child = command.spawn().context("Could not start Codex. Install the Codex CLI and run 'codex login' with your ChatGPT account.")?;
     let mut stdin = child.stdin.take().context("Codex input unavailable")?;

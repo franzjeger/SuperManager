@@ -4,9 +4,9 @@
 //!
 //! macOS System Configuration has two layers:
 //!
-//!   Setup:/Network/Service/<uuid>/DNS  — persistent, survives reboot.
+//!   <Setup:/Network/Service>/<uuid>/DNS  — persistent, survives reboot.
 //!                                        Written by `networksetup`.
-//!   State:/Network/Service/<uuid>/DNS  — ephemeral, cleared on reboot.
+//!   <State:/Network/Service>/<uuid>/DNS  — ephemeral, cleared on reboot.
 //!                                        Written by scutil / VPN daemons.
 //!
 //! `networksetup -setdnsservers` writes to **Setup** — the user's saved

@@ -49,7 +49,7 @@ pub fn validate(device_type: &str, config: &str) -> anyhow::Result<usize> {
                 "edit"
                     if stack.last() == Some(&"config") && line.split_whitespace().count() >= 2 =>
                 {
-                    stack.push("edit")
+                    stack.push("edit");
                 }
                 "next" if line == "next" && stack.last() == Some(&"edit") => {
                     stack.pop();

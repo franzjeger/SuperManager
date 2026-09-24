@@ -37,11 +37,10 @@ pub(super) fn render_management(
                 Some(false) => "Tailscale paused",
                 None => "Local settings",
             })
-            .subtitle(
-                &active
-                    .map(|p| format!("{} · {}", p.account, p.tailnet))
-                    .unwrap_or_else(|| "No active account reported".into()),
-            )
+            .subtitle(active.map_or_else(
+                || "No active account reported".into(),
+                |p| format!("{} · {}", p.account, p.tailnet),
+            ))
             .title_lines(1)
             .subtitle_lines(2)
             .build();
@@ -238,7 +237,7 @@ pub(super) fn matches_node(node: &TailscaleNode, query: &str, filter: u32) -> bo
 pub(super) fn node_row(view: &TailscaleView, node: &TailscaleNode) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
         .title(node.display_name())
-        .subtitle(&format!(
+        .subtitle(format!(
             "{} · {}{}",
             node.primary_ip().unwrap_or("No address"),
             node.os,
@@ -338,7 +337,7 @@ pub(super) fn node_row(view: &TailscaleView, node: &TailscaleNode) -> adw::Expan
             ssh.connect_clicked(move |_| {
                 let keys = state
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .ssh_keys
                     .clone();
                 super::super::ssh::dialogs::show_add_host_dialog_prefilled(

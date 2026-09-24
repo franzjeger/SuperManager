@@ -99,7 +99,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
     // `launchctl print system/<label>` returns 0 if the job exists
     // and includes its current state. We grep for `state = running`.
     let out = Command::new("/bin/launchctl")
-        .args(["print", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["print", &format!("system/{LAUNCH_LABEL}")])
         .output()
         .context("running launchctl print")?;
 
@@ -145,7 +145,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // 2. Bootout any prior incarnation of the daemon. Failures are
     // expected on first install (job doesn't exist) — ignored.
     let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .status();
 
     // 3. Copy the bundled binary to its stable location. We copy
@@ -196,11 +196,11 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     }
 
     if !bootstrapped {
-        bail!("launchctl bootstrap failed: {}", last_err);
+        bail!("launchctl bootstrap failed: {last_err}");
     }
 
     let _ = Command::new("/bin/launchctl")
-        .args(["kickstart", "-k", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["kickstart", "-k", &format!("system/{LAUNCH_LABEL}")])
         .status();
 
     Ok(InstallResult {
@@ -215,7 +215,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 /// reinstall (whether ours or Tailscale.app's) will pick it up.
 pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     let _ = Command::new("/bin/launchctl")
-        .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .args(["bootout", &format!("system/{LAUNCH_LABEL}")])
         .status();
     if Path::new(LAUNCH_DAEMON_PLIST).exists() {
         let _ = fs::remove_file(LAUNCH_DAEMON_PLIST);
@@ -621,9 +621,9 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
         script.push(' ');
         script.push_str(s);
     }
-    script.push_str("\n");
+    script.push('\n');
     script.push_str(&format!("set State:/Network/Service/{uuid}/DNS\n"));
-    script.push_str(&format!("set State:/Network/Global/DNS\n"));
+    script.push_str("set State:/Network/Global/DNS\n");
     script.push_str("quit\n");
 
     let mut child = std::process::Command::new("/usr/sbin/scutil")
@@ -1253,7 +1253,7 @@ fn resolve_exit_node_ip(id: &str) -> Option<String> {
 ///   idle"). tailscale recovers when the link returns; routes stay valid (or the
 ///   reconciler reinstalls if the utun renumbered across sleep).
 /// - **uplink UP but egress still dead after a sustained window** → the exit
-///   PEER is genuinely dead while our own link is fine → fail open (panic_reset
+///   PEER is genuinely dead while our own link is fine → fail open (`panic_reset`
 ///   removes the routes, egress drops to the local uplink, reconciler
 ///   re-establishes when the peer returns).
 ///
@@ -1274,7 +1274,7 @@ pub(crate) fn local_uplink_up() -> bool {
         return false;
     }
     let s = String::from_utf8_lossy(&out.stdout);
-    let admin_up = s.lines().next().map(|l| l.contains("UP")).unwrap_or(false);
+    let admin_up = s.lines().next().is_some_and(|l| l.contains("UP"));
     // macOS prints `status: active` when a link/association is present,
     // `status: inactive` when not. Treat an explicit "inactive" as down; if the
     // field is absent (rare for hardware) fall back to admin-up + IPv4.
@@ -1415,7 +1415,7 @@ pub fn reconcile_exit_node() {
             crate::connectivity_watchdog::pause_for(20);
             match install_exit_routes(ExitRoutesArgs::default()) {
                 Ok(_) => {
-                    tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established")
+                    tracing::info!(utun = %ts_utun, "reconcile: exit-node routes re-established");
                 }
                 Err(e) => tracing::warn!("reconcile: install_exit_routes failed: {e}"),
             }
@@ -1425,7 +1425,7 @@ pub fn reconcile_exit_node() {
             "reconcile: exit node not reachable yet — staying on local uplink"
         ),
         Err(e) => {
-            tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink")
+            tracing::debug!("reconcile: reachability test failed: {e} — staying on local uplink");
         }
     }
 }
@@ -1609,12 +1609,12 @@ fn render_launchd_plist() -> String {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{label}</string>
+    <string>{LAUNCH_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{daemon}</string>
-        <string>--state={state}/tailscaled.state</string>
-        <string>--statedir={state}</string>
+        <string>{DAEMON_INSTALL_PATH}</string>
+        <string>--state={STATE_DIR}/tailscaled.state</string>
+        <string>--statedir={STATE_DIR}</string>
         <string>--socket=/var/run/tailscaled.socket</string>
         <string>--port=41641</string>
     </array>
@@ -1631,9 +1631,6 @@ fn render_launchd_plist() -> String {
 </dict>
 </plist>
 "#,
-        label = LAUNCH_LABEL,
-        daemon = DAEMON_INSTALL_PATH,
-        state = STATE_DIR,
     )
 }
 
@@ -1799,7 +1796,7 @@ mod tests {
     }
 
     /// A changed plist reloads regardless of the daemon's current state —
-    /// the new EnvironmentVariables only take effect after a re-bootstrap.
+    /// the new `EnvironmentVariables` only take effect after a re-bootstrap.
     #[test]
     fn changed_plist_always_writes_and_reloads() {
         assert_eq!(plist_action(false, true), PlistAction::WriteThenReload);
@@ -1808,7 +1805,7 @@ mod tests {
 
     /// The watchdog pause both wake paths arm before scheduling reconciles
     /// (`connectivity_watchdog::pause_for(45)`, main.rs wake detector and the
-    /// system_wake RPC arm). Mirrored here because the coupling is what makes
+    /// `system_wake` RPC arm). Mirrored here because the coupling is what makes
     /// the post-wake re-install safe.
     const WAKE_WATCHDOG_PAUSE_SECS: u64 = 45;
 

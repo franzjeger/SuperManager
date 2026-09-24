@@ -269,11 +269,7 @@ pub fn populate_key_usage(
             _ => "Deployment recorded · Not assigned for login",
         };
         let row = adw::ActionRow::builder()
-            .title(
-                &host
-                    .map(|host| host.label.clone())
-                    .unwrap_or_else(|| format!("Removed host · {id}")),
-            )
+            .title(host.map_or_else(|| format!("Removed host · {id}"), |host| host.label.clone()))
             .subtitle(usage)
             .title_lines(1)
             .subtitle_lines(2)

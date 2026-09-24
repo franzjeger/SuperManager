@@ -1,4 +1,4 @@
-//! Embed a Windows VS_FIXEDFILEINFO version resource into
+//! Embed a Windows `VS_FIXEDFILEINFO` version resource into
 //! `supermgr-mcp.exe`. Skipped on non-Windows hosts.
 
 fn main() {

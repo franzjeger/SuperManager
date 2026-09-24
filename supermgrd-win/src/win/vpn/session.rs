@@ -399,7 +399,7 @@ async fn dropped(daemon: &Arc<DaemonState>, tick: u32) -> Option<String> {
     if let Some(reason) = vpn.forticlient.exited().await {
         return Some(reason);
     }
-    if tick % RAS_CHECK_EVERY == 0 {
+    if tick.is_multiple_of(RAS_CHECK_EVERY) {
         if let Some(reason) = vpn.fortigate.dropped().await {
             return Some(reason);
         }

@@ -122,8 +122,7 @@ pub async fn fortigate_api(
         let msg = e.to_string().replace(&token, "***");
         if e.is_timeout() {
             RpcError::Backend(format!(
-                "FortiGate {hostname}:{api_port} did not respond within {:?}",
-                API_TIMEOUT_SHORT
+                "FortiGate {hostname}:{api_port} did not respond within {API_TIMEOUT_SHORT:?}"
             ))
         } else if e.is_connect() {
             RpcError::Backend(format!(
@@ -217,8 +216,7 @@ pub async fn fortigate_backup_config(
             let msg = e.to_string().replace(&token, "***");
             if e.is_timeout() {
                 RpcError::Backend(format!(
-                    "FortiGate {hostname}:{api_port} backup did not respond within {:?}",
-                    API_TIMEOUT_LONG
+                    "FortiGate {hostname}:{api_port} backup did not respond within {API_TIMEOUT_LONG:?}"
                 ))
             } else if e.is_connect() {
                 RpcError::Backend(format!(

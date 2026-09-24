@@ -329,7 +329,7 @@ mod generated {
         /// `routes` is a list of CIDR strings (e.g. `["10.0.0.0/8", "192.168.1.0/24"]`).
         /// These replace the catch-all `0.0.0.0/0` when `full_tunnel = false` is active.
         /// Passing an empty list clears split routes (split-tunnel will then fall back
-        /// to whatever explicit prefixes are in the peer's AllowedIPs after stripping
+        /// to whatever explicit prefixes are in the peer's `AllowedIPs` after stripping
         /// catch-alls, which may cause a connect-time error if none remain).
         ///
         /// Only valid for WireGuard profiles; returns an error for other backends.
@@ -448,7 +448,7 @@ mod generated {
 
         /// List nodes in the local tailnet via `tailscale status --json`.
         ///
-        /// Returns a JSON array of TailscaleNode objects (defined in the
+        /// Returns a JSON array of `TailscaleNode` objects (defined in the
         /// daemon's `tailscale` module). Errors string-wise when the
         /// tailscale CLI isn't installed or tailscaled isn't running.
         async fn tailscale_list_nodes(&self) -> fdo::Result<String>;

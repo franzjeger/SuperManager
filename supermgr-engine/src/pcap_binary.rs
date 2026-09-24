@@ -375,7 +375,7 @@ mod tests {
     }
 
     /// Build a minimal TLS ClientHello payload with the given
-    /// legacy_version. We only need bytes through legacy_version
+    /// `legacy_version`. We only need bytes through `legacy_version`
     /// — everything after is ignored by our parser.
     fn build_clienthello(legacy_version: u16) -> Vec<u8> {
         let mut p = Vec::new();
@@ -500,10 +500,10 @@ mod tests {
         assert!(hellos.is_empty());
     }
 
-    /// End-to-end: detect_tls_downgrade_clients on a synthetic
+    /// End-to-end: `detect_tls_downgrade_clients` on a synthetic
     /// pcap with TWO downgrade attempts from the same client
     /// (one TLS 1.0, one TLS 1.1) should produce 2 findings —
-    /// the cluster key is (src_ip, version), so different
+    /// the cluster key is (`src_ip`, version), so different
     /// versions don't merge.
     #[tokio::test]
     async fn detect_two_versions_from_same_client_yields_two_findings() {

@@ -22,7 +22,7 @@
 //! - `BUILTIN\Administrators` — full control
 //! - `NT AUTHORITY\Authenticated Users` — read + write (no change-pipe-mode)
 //!
-//! That requires constructing a SECURITY_ATTRIBUTES with a SDDL string —
+//! That requires constructing a `SECURITY_ATTRIBUTES` with a SDDL string —
 //! tracked as a TODO in the issue tracker; the current default ACL is safe
 //! on single-user workstations but should not ship to enterprise.
 
@@ -52,7 +52,7 @@ const MAX_INSTANCES: usize = 32;
 /// console mode and too strict in service mode. The SDDL-driven security
 /// descriptor in [`PipeSecurity`] handles both correctly. The function
 /// itself is unsafe because the underlying Win32 entry point dereferences
-/// the SECURITY_ATTRIBUTES pointer; our `PipeSecurity` upholds its
+/// the `SECURITY_ATTRIBUTES` pointer; our `PipeSecurity` upholds its
 /// validity-for-the-pointer-lifetime contract.
 #[allow(unsafe_code)] // creates the pipe with our security attributes
 fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurity)> {

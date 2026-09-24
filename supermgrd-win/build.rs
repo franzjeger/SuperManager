@@ -1,4 +1,4 @@
-//! Embed a Windows VS_FIXEDFILEINFO version resource into the daemon
+//! Embed a Windows `VS_FIXEDFILEINFO` version resource into the daemon
 //! `.exe`. The values appear in:
 //!
 //! - File Explorer's *Properties* dialog (Details tab).
@@ -14,8 +14,8 @@
 //! Releases are versioned by git tag (v1.7.0) while the crate version
 //! stays at 1.0.0, so release CI exports `SUPERMGR_RELEASE_VERSION` from
 //! the tag and it wins over `CARGO_PKG_VERSION` here. The numeric
-//! FILEVERSION matters beyond cosmetics: the MSI's ProductVersion binds to
-//! it, and that is the value Windows Installer's MajorUpgrade compares —
+//! FILEVERSION matters beyond cosmetics: the MSI's `ProductVersion` binds to
+//! it, and that is the value Windows Installer's `MajorUpgrade` compares —
 //! before this override every release MSI carried 1.0.0 and only the
 //! filename knew the real version.
 
@@ -53,9 +53,9 @@ fn main() {
     }
 }
 
-/// `"1.7.0"` → the four 16-bit fields of a VS_FIXEDFILEINFO version,
+/// `"1.7.0"` → the four 16-bit fields of a `VS_FIXEDFILEINFO` version,
 /// packed major.minor.patch.0. `None` when the string is not dotted
-/// numbers, in which case winres keeps its CARGO_PKG_VERSION default.
+/// numbers, in which case winres keeps its `CARGO_PKG_VERSION` default.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn pack_version(v: &str) -> Option<u64> {
     let mut parts = v.split('.');

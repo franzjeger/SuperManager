@@ -46,7 +46,10 @@ pub async fn refresh(tx: &mpsc::Sender<AppMsg>) {
     let health = crate::dbus_client::dbus_tailscale_health()
         .await
         .map_err(|e| format!("{e:#}"));
-    let nodes = if health.as_ref().is_ok_and(|health| health.is_running()) {
+    let nodes = if health
+        .as_ref()
+        .is_ok_and(supermgr_core::tailscale::TailscaleHealth::is_running)
+    {
         Some(
             crate::dbus_client::dbus_tailscale_list_nodes()
                 .await
@@ -426,7 +429,7 @@ impl TailscaleView {
         let window = self.window.clone();
         let profile = Rc::clone(&self.profile_id);
         button.connect_clicked(move |_| {
-            accounts::show(&window, &rt, &tx, profile.borrow().as_deref().unwrap_or(""))
+            accounts::show(&window, &rt, &tx, profile.borrow().as_deref().unwrap_or(""));
         });
     }
 

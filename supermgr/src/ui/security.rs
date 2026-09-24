@@ -554,6 +554,41 @@ fn severity_label(s: Severity) -> String {
     .to_owned()
 }
 
+fn load_scope(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>, scope: String) {
+    let tx = tx.clone();
+    rt.spawn(async move {
+        let result = async {
+            Ok::<_, anyhow::Error>((
+                crate::dbus_client::dbus_findings_summary(&scope).await?,
+                crate::dbus_client::dbus_findings_list(&scope).await?,
+            ))
+        }
+        .await
+        .map_err(|e| e.to_string());
+        tx.send(AppMsg::FindingsLoaded { scope, result }).ok();
+    });
+}
+
+fn matches_finding(f: &PersistedFinding, query: &str, filter: u32) -> bool {
+    let status = match filter {
+        1 => matches!(f.disposition, Disposition::Open),
+        2 => {
+            matches!(f.disposition, Disposition::Open)
+                && matches!(f.finding.severity, Severity::High | Severity::Critical)
+        }
+        3 => matches!(f.disposition, Disposition::AcceptedRisk { .. }),
+        4 => matches!(f.disposition, Disposition::Fixed { .. }),
+        _ => true,
+    };
+    status
+        && format!(
+            "{} {} {}",
+            f.finding.title, f.finding.host_ip, f.finding.detail
+        )
+        .to_lowercase()
+        .contains(&query.trim().to_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,39 +672,4 @@ mod tests {
         ));
         assert!(!matches!(severity_pill(Severity::Info), PillStatus::Error));
     }
-}
-
-fn load_scope(rt: &tokio::runtime::Handle, tx: &mpsc::Sender<AppMsg>, scope: String) {
-    let tx = tx.clone();
-    rt.spawn(async move {
-        let result = async {
-            Ok::<_, anyhow::Error>((
-                crate::dbus_client::dbus_findings_summary(&scope).await?,
-                crate::dbus_client::dbus_findings_list(&scope).await?,
-            ))
-        }
-        .await
-        .map_err(|e| e.to_string());
-        tx.send(AppMsg::FindingsLoaded { scope, result }).ok();
-    });
-}
-
-fn matches_finding(f: &PersistedFinding, query: &str, filter: u32) -> bool {
-    let status = match filter {
-        1 => matches!(f.disposition, Disposition::Open),
-        2 => {
-            matches!(f.disposition, Disposition::Open)
-                && matches!(f.finding.severity, Severity::High | Severity::Critical)
-        }
-        3 => matches!(f.disposition, Disposition::AcceptedRisk { .. }),
-        4 => matches!(f.disposition, Disposition::Fixed { .. }),
-        _ => true,
-    };
-    status
-        && format!(
-            "{} {} {}",
-            f.finding.title, f.finding.host_ip, f.finding.detail
-        )
-        .to_lowercase()
-        .contains(&query.trim().to_lowercase())
 }

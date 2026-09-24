@@ -887,7 +887,11 @@ impl EngineServer {
                     .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ");
-                pushed_dns = wg.dns.iter().map(|ip| ip.to_string()).collect();
+                pushed_dns = wg
+                    .dns
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect();
                 tracing::info!(
                     profile = %pid_str,
                     "wireguard render: extracting DNS ({dns}) for scutil — profile opted in"

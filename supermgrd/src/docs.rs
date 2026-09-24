@@ -79,10 +79,10 @@ pub fn render_customer_doc(customer: &str, profiles: &[Profile], hosts: &[Host])
                 ProfileConfig::OpenVpn(ov) => ov.username.clone().unwrap_or_default(),
                 _ => String::new(),
             };
-            let last = p
-                .last_connected_at
-                .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-                .unwrap_or_else(|| "never".to_owned());
+            let last = p.last_connected_at.map_or_else(
+                || "never".to_owned(),
+                |t| t.format("%Y-%m-%d %H:%M UTC").to_string(),
+            );
             let _ = writeln!(
                 out,
                 "| {name} | {backend} | {host} | {user} | {ft} | {ac} | {ks} | {last} |",
@@ -312,7 +312,7 @@ mod tests {
     fn render_match_is_case_insensitive_and_trims() {
         let profiles = vec![sample_fortigate_profile("p", "Sybr")];
         let md = render_customer_doc("  sYbR  ", &profiles, &[]);
-        assert!(md.contains("p"));
+        assert!(md.contains('p'));
     }
 
     #[test]
@@ -330,7 +330,7 @@ mod tests {
         ];
         let md = render_customer_doc("", &profiles, &[]);
         assert!(md.contains("# Ungrouped"));
-        assert!(md.contains("a"));
+        assert!(md.contains('a'));
         assert!(!md.contains("| b "));
     }
 

@@ -678,7 +678,7 @@ pub fn empty_state(icon: &str, title: &str, description: &str) -> adw::StatusPag
 
 /// Shared proportions and surfaces for the Linux application. Named GTK
 /// colours preserve custom accents and light/dark desktop preferences.
-pub const STYLESHEET: &str = r#"
+pub const STYLESHEET: &str = r"
 .supermgr-chat-surface {
   background: @card_bg_color;
   border: 1px solid alpha(@window_fg_color, 0.08);
@@ -775,7 +775,7 @@ paned.supermgr-split > separator:hover { background: @accent_bg_color; }
 .supermgr-profile-search { margin: 8px 14px 4px; border-radius: 8px; }
 .supermgr-list-heading { font-size: 18px; font-weight: 650; margin: 18px 18px 4px; }
 .supermgr-notice { padding: 12px 16px; border-radius: 10px; background: alpha(currentColor, 0.06); }
-"#;
+";
 
 /// Install [`STYLESHEET`], and the desktop's palette where there is one.
 ///

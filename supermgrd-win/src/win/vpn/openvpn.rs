@@ -842,7 +842,7 @@ mod tests {
     /// collapse into an escaped quote by accident.
     #[test]
     fn backslash_is_escaped_before_quote() {
-        assert_eq!(mgmt_escape(r#"a\b"#), r#"a\\b"#);
+        assert_eq!(mgmt_escape(r"a\b"), r"a\\b");
         assert_eq!(mgmt_escape(r#"\""#), r#"\\\""#);
     }
 }

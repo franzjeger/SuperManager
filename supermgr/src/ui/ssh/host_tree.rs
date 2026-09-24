@@ -127,9 +127,9 @@ fn host_menu_items(host: &HostSummary) -> Vec<(&'static str, &'static str)> {
 
 /// Resolve the WebAdmin / Controller URL for `host`, if one can be derived.
 ///
-/// FortiGate / pfSense / OpenWrt use `https://<hostname>:<api_port>/`
+/// FortiGate / pfSense / `OpenWrt` use `https://<hostname>:<api_port>/`
 /// (defaulting `api_port` to 443). UniFi uses `unifi_controller_url`
-/// directly. OpnSense and Sophos URL handling will be added in the
+/// directly. `OpnSense` and Sophos URL handling will be added in the
 /// follow-up PR that ties this menu to those device-type variants.
 fn web_admin_url(host: &HostSummary) -> Option<String> {
     match host.device_type {
@@ -328,7 +328,7 @@ pub fn populate_ssh_host_list(
             let tx_c = tx.clone();
             delete_btn.connect_clicked(move |_| {
                 let dialog = adw::AlertDialog::new(
-                    Some(&format!("Delete host \"{}\"?", host_label)),
+                    Some(&format!("Delete host \"{host_label}\"?")),
                     Some("This cannot be undone."),
                 );
                 dialog.add_response("cancel", "Cancel");
@@ -585,7 +585,7 @@ pub fn populate_ssh_host_list(
                     let action = gio::SimpleAction::new("delete", None);
                     action.connect_activate(move |_, _| {
                         let dialog = adw::AlertDialog::new(
-                            Some(&format!("Delete host \"{}\"?", host_label)),
+                            Some(&format!("Delete host \"{host_label}\"?")),
                             Some("This cannot be undone."),
                         );
                         dialog.add_response("cancel", "Cancel");

@@ -545,7 +545,7 @@ impl CustomerView {
             let sites_group = sites_group.clone();
             let editors = Rc::clone(&editors);
             add_site.connect_clicked(move |_| {
-                add_site_editor(&sites_group, &editors, Site::default(), false)
+                add_site_editor(&sites_group, &editors, Site::default(), false);
             });
         }
         form.append(&sites_group);

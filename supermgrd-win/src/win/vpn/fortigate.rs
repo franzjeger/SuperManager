@@ -8,13 +8,13 @@
 //! # When this works
 //!
 //! Modern FortiGate deployments that present a standards-compliant IKEv2
-//! IKE_AUTH with EAP-MSCHAPv2 authentication and a PSK for the IKE SA.
+//! `IKE_AUTH` with EAP-MSCHAPv2 authentication and a PSK for the IKE SA.
 //! That is the common case for greenfield FortiGate rollouts and for
 //! Azure VPN gateways configured for "IKEv2 with built-in client".
 //!
 //! # When this does **not** work
 //!
-//! - FortiGate IPsec with XAuth + mode-config (legacy IKEv1 aggressive
+//! - FortiGate IPsec with `XAuth` + mode-config (legacy IKEv1 aggressive
 //!   mode). Windows native IKEv2 doesn't speak it. Bundle FortiClient
 //!   VPN free edition for those — tracked separately.
 //! - FortiClient SSL VPN. Use `openfortivpn` instead.
@@ -269,7 +269,7 @@ async fn retrieve_string(
 /// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
 /// explicit EAP type defaults to EAP-TLS (type 13), which tries to show a
 /// certificate-selection dialog.  `rasdial` cannot display UI and exits with
-/// error 703 (ERROR_INTERACTIVE_MODE).
+/// error 703 (`ERROR_INTERACTIVE_MODE`).
 ///
 /// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
 /// the inner auth method so `rasdial` can feed credentials non-interactively.

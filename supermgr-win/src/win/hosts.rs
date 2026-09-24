@@ -218,7 +218,7 @@ pub(super) fn bind(window: &AppWindow, ctx: &Ctx) {
                     Ok(()) => {
                         ctx2.ui(|w| {
                             w.global::<Hosts>()
-                                .set_new_password(SharedString::default())
+                                .set_new_password(SharedString::default());
                         });
                         ctx2.toast_ok("Password saved to Windows Credential Manager.");
                     }

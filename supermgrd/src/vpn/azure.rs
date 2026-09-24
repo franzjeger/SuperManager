@@ -9,7 +9,7 @@
 //!    `auth_challenge` D-Bus signal to the GUI.
 //! 3. Poll `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`
 //!    every `interval` seconds until the user authenticates in the browser.
-//! 4. Extract the UPN / preferred_username from the JWT access token payload.
+//! 4. Extract the UPN / `preferred_username` from the JWT access token payload.
 //! 5. Write three temporary files to `/run/supermgrd/azure-<uuid>/`:
 //!    - `tls-auth.key`   — OpenVPN static key converted from `server_secret_hex` (tls-auth dir 1, SHA256).
 //!    - `ca.pem`         — PEM CA certificate from the profile.
@@ -217,7 +217,7 @@ async fn pkce_auth_code_flow(
     // browser on behalf of the daemon (which has no display access).
     // Empty user_code signals PKCE flow (no code to enter manually).
     info!("Azure: sending browser auth URL to GUI");
-    let _ = auth_tx.send(("".to_string(), auth_url.clone()));
+    let _ = auth_tx.send((String::new(), auth_url.clone()));
 
     // ── Wait for the redirect callback ────────────────────────────────────────
     let code = tokio::time::timeout(
@@ -315,7 +315,7 @@ async fn accept_auth_code(
         .nth(1)
         .ok_or_else(|| "malformed HTTP request line".to_string())?;
 
-    let query = path.split_once('?').map(|x| x.1).unwrap_or("");
+    let query = path.split_once('?').map_or("", |x| x.1);
 
     let mut code: Option<String> = None;
     let mut returned_state: Option<String> = None;
@@ -531,7 +531,7 @@ fn build_ovpn_config(
         s.push_str(
             &cfg.dns_servers
                 .iter()
-                .map(|ip| ip.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(" "),
         );
@@ -882,13 +882,14 @@ impl VpnBackend for AzureBackend {
                 nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
                 nix::sys::signal::Signal::SIGTERM,
             );
-            match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
-                Ok(_) => info!("Azure: openvpn exited cleanly"),
-                Err(_) => {
-                    warn!("Azure: openvpn did not exit in 5 s, killing");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
+            if let Ok(_) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await
+            {
+                info!("Azure: openvpn exited cleanly")
+            } else {
+                warn!("Azure: openvpn did not exit in 5 s, killing");
+                let _ = child.kill().await;
+                let _ = child.wait().await;
             }
         }
 
@@ -912,21 +913,18 @@ impl VpnBackend for AzureBackend {
         };
 
         // Non-blocking check: did the process exit?
-        match child.try_wait().map_err(BackendError::Io)? {
-            Some(exit) => {
-                warn!("Azure: openvpn exited unexpectedly: {exit}");
-                Ok(BackendStatus::Inactive)
-            }
-            None => {
-                let iface = st.interface.clone().unwrap_or_default();
-                let stats = super::read_iface_stats(&iface);
-                Ok(BackendStatus::Active {
-                    interface: iface,
-                    stats,
-                    virtual_ip: st.virtual_ip.clone(),
-                    active_routes: st.active_routes.clone(),
-                })
-            }
+        if let Some(exit) = child.try_wait().map_err(BackendError::Io)? {
+            warn!("Azure: openvpn exited unexpectedly: {exit}");
+            Ok(BackendStatus::Inactive)
+        } else {
+            let iface = st.interface.clone().unwrap_or_default();
+            let stats = super::read_iface_stats(&iface);
+            Ok(BackendStatus::Active {
+                interface: iface,
+                stats,
+                virtual_ip: st.virtual_ip.clone(),
+                active_routes: st.active_routes.clone(),
+            })
         }
     }
 

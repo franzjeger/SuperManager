@@ -411,7 +411,7 @@ impl SshSession {
     ) -> Result<russh::ChannelStream<Msg>, SshError> {
         let channel = self
             .handle
-            .channel_open_direct_tcpip(target_host, target_port as u32, "127.0.0.1", 0)
+            .channel_open_direct_tcpip(target_host, u32::from(target_port), "127.0.0.1", 0)
             .await
             .map_err(|e| SshError::ConnectionFailed {
                 host: format!("{target_host}:{target_port}"),
@@ -634,7 +634,7 @@ impl SshSession {
         remote_port: u16,
     ) -> Result<Channel<Msg>, SshError> {
         self.handle
-            .channel_open_direct_tcpip(remote_host, remote_port as u32, "127.0.0.1", 0u32)
+            .channel_open_direct_tcpip(remote_host, u32::from(remote_port), "127.0.0.1", 0u32)
             .await
             .map_err(|e| SshError::ConnectionFailed {
                 host: String::new(),

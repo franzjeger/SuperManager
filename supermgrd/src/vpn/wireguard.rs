@@ -76,7 +76,7 @@ struct WgState {
     interface: Option<String>,
 
     /// The full default IPv4 route message captured before we displaced it.
-    /// `None` if AllowedIPs did not include `0.0.0.0/0` or no pre-existing
+    /// `None` if `AllowedIPs` did not include `0.0.0.0/0` or no pre-existing
     /// default was found.
     saved_default_v4: Option<RouteMessage>,
 
@@ -113,7 +113,7 @@ struct WgState {
 // rtnetlink route helpers
 // ---------------------------------------------------------------------------
 
-/// Extract gateway IP and output interface index from a RouteMessage.
+/// Extract gateway IP and output interface index from a `RouteMessage`.
 fn route_gateway_and_oif(msg: &RouteMessage) -> Option<(IpAddr, u32)> {
     let mut gw: Option<IpAddr> = None;
     let mut oif: Option<u32> = None;
@@ -405,7 +405,7 @@ async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
     Ok(())
 }
 
-/// Add a route for an AllowedIP CIDR via a WireGuard interface.
+/// Add a route for an `AllowedIP` CIDR via a WireGuard interface.
 async fn add_allowed_ip_route(
     cidr: &str,
     iface_index: u32,
@@ -460,7 +460,7 @@ async fn add_allowed_ip_route(
     })
 }
 
-/// Parse a CIDR string like "10.0.0.1/32" into (IpAddr, prefix_len).
+/// Parse a CIDR string like "10.0.0.1/32" into (`IpAddr`, `prefix_len`).
 fn parse_cidr(cidr: &str) -> Result<(IpAddr, u8), BackendError> {
     let net: ipnet::IpNet = cidr
         .parse()
@@ -887,14 +887,14 @@ impl WireGuardBackend {
 
     /// Install kernel routes for every `AllowedIPs` entry across all peers.
     ///
-    /// For full-tunnel configs (`0.0.0.0/0` or `::/0` in AllowedIPs) the
+    /// For full-tunnel configs (`0.0.0.0/0` or `::/0` in `AllowedIPs`) the
     /// sequence is:
     /// 1. Capture the current default route via rtnetlink.
     /// 2. Add a `/32` (IPv4) or `/128` (IPv6) host route for **every** peer
     ///    endpoint via the original gateway, so WireGuard UDP traffic continues
     ///    to reach the server after the default is replaced.
     /// 3. Delete the original default route.
-    /// 4. Add the AllowedIPs routes (including `0.0.0.0/0 dev <wg> metric 100`).
+    /// 4. Add the `AllowedIPs` routes (including `0.0.0.0/0 dev <wg> metric 100`).
     ///
     /// Returns `(saved_v4, saved_v6, endpoint_host_routes)` for storage in
     /// `WgState` so `disconnect` can reverse the changes.
@@ -941,16 +941,17 @@ impl WireGuardBackend {
                 };
 
                 let ep_ip = match tokio::net::lookup_host(ep.as_str()).await {
-                    Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
-                        Some(ip) => ip,
-                        None => {
+                    Ok(mut addrs) => {
+                        if let Some(ip) = addrs.next().map(|sa| sa.ip()) {
+                            ip
+                        } else {
                             warn!(
                                 "endpoint {} resolved to zero addresses — skipping host route",
                                 ep
                             );
                             continue;
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!("could not resolve endpoint {} for host route: {e}", ep);
                         continue;
@@ -958,17 +959,9 @@ impl WireGuardBackend {
                 };
 
                 let (host_cidr, gw_info, family_active) = if ep_ip.is_ipv4() {
-                    (
-                        format!("{}/32", ep_ip),
-                        gw_v4.as_ref(),
-                        needs_full_tunnel_v4,
-                    )
+                    (format!("{ep_ip}/32"), gw_v4.as_ref(), needs_full_tunnel_v4)
                 } else {
-                    (
-                        format!("{}/128", ep_ip),
-                        gw_v6.as_ref(),
-                        needs_full_tunnel_v6,
-                    )
+                    (format!("{ep_ip}/128"), gw_v6.as_ref(), needs_full_tunnel_v6)
                 };
 
                 if !family_active {
@@ -1267,7 +1260,7 @@ impl WireGuardBackend {
 /// Remove a WireGuard kernel interface via rtnetlink.
 ///
 /// Deleting the interface automatically removes all kernel routes whose
-/// `dev` is that interface (including any AllowedIPs routes added by
+/// `dev` is that interface (including any `AllowedIPs` routes added by
 /// `add_routes`).  Endpoint host routes on the physical NIC are NOT
 /// removed here — the caller must do that separately.
 ///
@@ -1459,18 +1452,17 @@ impl VpnBackend for WireGuardBackend {
     async fn disconnect(&self) -> Result<(), BackendError> {
         let (iface_name, saved_v4, saved_v6, endpoint_host_routes, dns_ifindex) = {
             let state = self.state.lock().await;
-            match state.interface.clone() {
-                Some(name) => (
+            if let Some(name) = state.interface.clone() {
+                (
                     name,
                     state.saved_default_v4.clone(),
                     state.saved_default_v6.clone(),
                     state.endpoint_host_routes.clone(),
                     state.dns_configured_ifindex,
-                ),
-                None => {
-                    debug!("disconnect called but no interface is active — no-op");
-                    return Ok(());
-                }
+                )
+            } else {
+                debug!("disconnect called but no interface is active — no-op");
+                return Ok(());
             }
         };
 
@@ -1603,9 +1595,8 @@ impl VpnBackend for WireGuardBackend {
         const HANDSHAKE_GRACE_SECS: u64 = 30;
         const DEAD_PEER_SECS: i64 = 180;
         let now = chrono::Utc::now();
-        let been_up_long_enough = connected_at
-            .map(|t| t.elapsed().as_secs() >= HANDSHAKE_GRACE_SECS)
-            .unwrap_or(true);
+        let been_up_long_enough =
+            connected_at.is_none_or(|t| t.elapsed().as_secs() >= HANDSHAKE_GRACE_SECS);
 
         if been_up_long_enough {
             let peer_dead = match last_handshake {
@@ -1627,7 +1618,7 @@ impl VpnBackend for WireGuardBackend {
         // Use the first configured address as the virtual IP.
         let virtual_ip = cached_addresses
             .first()
-            .map(|a| a.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
 
         Ok(BackendStatus::Active {
@@ -1663,7 +1654,7 @@ impl VpnBackend for WireGuardBackend {
 mod module_hint_tests {
     use super::{kernel_module_tree_state, wireguard_unsupported_hint, ModuleTree};
 
-    /// The case a real CachyOS desktop hit: CONFIG_WIREGUARD=m in the running
+    /// The case a real CachyOS desktop hit: `CONFIG_WIREGUARD=m` in the running
     /// kernel, and `modprobe` still reporting
     /// "Module wireguard not found in directory /lib/modules/7.1.5-1-cachyos".
     /// A kernel update had removed the running kernel's module tree. The

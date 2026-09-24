@@ -8,7 +8,7 @@ use libadwaita::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 
 /// Run under Xvfb with `--ignored --test-threads=1`; writes to the supplied
-/// SUPERMGR_PREVIEW_DIR. No real hosts, credentials or connections are loaded.
+/// `SUPERMGR_PREVIEW_DIR`. No real hosts, credentials or connections are loaded.
 #[test]
 #[ignore = "requires a display and SUPERMGR_PREVIEW_DIR"]
 fn render_linux_preview() {

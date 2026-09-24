@@ -9,7 +9,7 @@
 //!    default gateway so IKE/ESP packets reach the peer on the physical NIC.
 //! 4. Initiates the IKE SA via `swanctl --initiate --child <name> --timeout 30`.
 //!    strongSwan/charon installs the XFRM policies and routes (including the
-//!    tunnel default route) in the kernel automatically upon CHILD_SA establishment.
+//!    tunnel default route) in the kernel automatically upon `CHILD_SA` establishment.
 //! 5. Configures `systemd-resolved` per-link DNS via D-Bus.
 //! 6. On disconnect: reverts DNS, terminates SA (charon removes its routes),
 //!    deletes config, removes the endpoint host route.
@@ -195,7 +195,7 @@ fn swanctl_failure(command: &str, stderr: &str) -> BackendError {
 /// Convert strongSwan's initiate diagnostics into a stable, user-facing
 /// category. The complete diagnostic stays in the journal; the GUI gets a
 /// sentence that explains the likely remedy without exposing connection IDs
-/// or raw CHILD_SA state-machine text.
+/// or raw `CHILD_SA` state-machine text.
 fn classify_initiate_failure(message: &str) -> BackendError {
     let upper = message.to_ascii_uppercase();
 
@@ -325,7 +325,7 @@ async fn run_swanctl(args: &[&str]) -> Result<std::process::Output, BackendError
 /// - DH groups 20 (ecp384), 21 (ecp521), and 14 (modp2048) as a legacy fallback
 ///   for FortiGates whose phase1 crypto hasn't been updated to ECP groups —
 ///   without a modp group in our proposal list, FortiOS silently drops the
-///   IKE_SA_INIT when it can't parse the KE payload's DH group.
+///   `IKE_SA_INIT` when it can't parse the KE payload's DH group.
 /// - `local { auth = eap-mschapv2; eap_id = <username> }`
 /// - `remote { auth = psk }`
 /// - `vips = 0.0.0.0` for mode-config virtual IP assignment
@@ -712,7 +712,7 @@ async fn capture_default_route_v4() -> Result<Option<String>, BackendError> {
 /// disconnect wiped NetworkManager's LAN DNS too, leaving the system unable
 /// to resolve anything until a manual `nmcli connection up`.
 ///
-/// Putting DNS on a dummy interface that we own end-to-end means RevertLink
+/// Putting DNS on a dummy interface that we own end-to-end means `RevertLink`
 /// only clears state we set, never NM's.  The dummy carries no IP and no
 /// route — systemd-resolved only needs a netdev to anchor DNS state to;
 /// query packets still leave the box via the real default route (the VPN).
@@ -1018,20 +1018,19 @@ impl VpnBackend for FortiGateBackend {
             let lookup_target = format!("{}:500", fg_cfg.host);
             let result = tokio::net::lookup_host(&lookup_target).await;
             match result {
-                Ok(mut addrs) => match addrs.next().map(|sa| sa.ip()) {
-                    Some(ip) => {
+                Ok(mut addrs) => {
+                    if let Some(ip) = addrs.next().map(|sa| sa.ip()) {
                         info!("resolved {} → {}", fg_cfg.host, ip);
                         ip
-                    }
-                    None => {
+                    } else {
                         let _ = tokio::fs::remove_file(&config_path).await;
                         return Err(BackendError::Interface(format!(
                             "FortiGate hostname '{}' resolved to zero addresses — \
-                             verify the hostname in the profile configuration",
+                         verify the hostname in the profile configuration",
                             fg_cfg.host
                         )));
                     }
-                },
+                }
                 Err(e) => {
                     let _ = tokio::fs::remove_file(&config_path).await;
                     let hint = if format!("{e}").contains("Name or service not known") {
@@ -1061,9 +1060,9 @@ impl VpnBackend for FortiGateBackend {
         let mut endpoint_host_routes: Vec<String> = Vec::new();
         if let Some((gw, dev)) = &gw_v4 {
             let host_cidr = if host_ip.is_ipv4() {
-                format!("{}/32", host_ip)
+                format!("{host_ip}/32")
             } else {
-                format!("{}/128", host_ip)
+                format!("{host_ip}/128")
             };
             info!(
                 "adding endpoint host route: ip route add {} via {} dev {}",
@@ -1206,7 +1205,7 @@ impl VpnBackend for FortiGateBackend {
                 match parse_virtual_ip(&list_stdout) {
                     Some(vip) => info!("mode-config assigned virtual IP: {}", vip),
                     None => {
-                        info!("no virtual IP in --list-sas output (split-tunnel or parse miss)")
+                        info!("no virtual IP in --list-sas output (split-tunnel or parse miss)");
                     }
                 }
             }
@@ -1414,10 +1413,10 @@ impl VpnBackend for FortiGateBackend {
             }
             pushed
         };
-        let effective_dns: Vec<std::net::IpAddr> = if !fg_cfg.dns_servers.is_empty() {
-            fg_cfg.dns_servers.clone()
-        } else {
+        let effective_dns: Vec<std::net::IpAddr> = if fg_cfg.dns_servers.is_empty() {
             pushed_dns.clone()
+        } else {
+            fg_cfg.dns_servers.clone()
         };
 
         // A pushed resolver never made it into the proposed selectors — those
@@ -1479,19 +1478,18 @@ impl VpnBackend for FortiGateBackend {
             saved_default_route,
         ) = {
             let state = self.state.lock().await;
-            match state.connection_name.clone() {
-                Some(name) => (
+            if let Some(name) = state.connection_name.clone() {
+                (
                     name,
                     state.config_path.clone(),
                     state.endpoint_host_routes.clone(),
                     state.dns_configured_ifindex,
                     state.tunnel_routes.clone(),
                     state.saved_default_route.clone(),
-                ),
-                None => {
-                    debug!("disconnect called but no SA is active — no-op");
-                    return Ok(());
-                }
+                )
+            } else {
+                debug!("disconnect called but no SA is active — no-op");
+                return Ok(());
             }
         };
 
@@ -1590,15 +1588,15 @@ impl VpnBackend for FortiGateBackend {
                 .await
                 .map_err(BackendError::Io)?;
             let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
+            if out.status.success() {
+                info!("ip route del {} → ok", cidr);
+            } else {
                 warn!(
                     "ip route del {} → exit={} stderr={:?} (may already be gone)",
                     cidr,
                     out.status,
                     stderr.trim()
                 );
-            } else {
-                info!("ip route del {} → ok", cidr);
             }
         }
 

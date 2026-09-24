@@ -10,8 +10,8 @@
 //! 1. **OAuth** — try to refresh a cached token via Credential Manager;
 //!    fall back to the PKCE browser flow if the refresh fails or no
 //!    cached token exists.
-//! 2. **PKCE** — generate a code_verifier + code_challenge, bind a local
-//!    TcpListener on `127.0.0.1:2023`, publish the auth URL for the GUI to
+//! 2. **PKCE** — generate a `code_verifier` + `code_challenge`, bind a local
+//!    `TcpListener` on `127.0.0.1:2023`, publish the auth URL for the GUI to
 //!    open (see below), await the redirect, exchange the code for an
 //!    access + refresh token.
 //! 3. **Tempfiles** — write `tls-auth.key`, `auth.txt`, `client.ovpn` to
@@ -433,21 +433,20 @@ async fn refresh_access_token(
         .json()
         .await
         .map_err(|e| VpnError::MissingDependency(format!("token refresh parse: {e}")))?;
-    match (
+    if let (Some(a), Some(r)) = (
         body["access_token"].as_str(),
         body["refresh_token"].as_str(),
     ) {
-        (Some(a), Some(r)) => Ok((a.to_owned(), r.to_owned())),
-        _ => {
-            let desc = body["error_description"]
-                .as_str()
-                .or_else(|| body["error"].as_str())
-                .unwrap_or("unknown")
-                .to_owned();
-            Err(VpnError::MissingDependency(format!(
-                "token refresh failed: {desc}"
-            )))
-        }
+        Ok((a.to_owned(), r.to_owned()))
+    } else {
+        let desc = body["error_description"]
+            .as_str()
+            .or_else(|| body["error"].as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        Err(VpnError::MissingDependency(format!(
+            "token refresh failed: {desc}"
+        )))
     }
 }
 
@@ -555,21 +554,20 @@ async fn pkce_browser_flow(
         .json()
         .await
         .map_err(|e| VpnError::MissingDependency(format!("token exchange parse: {e}")))?;
-    match body["access_token"].as_str() {
-        Some(a) => Ok((
+    if let Some(a) = body["access_token"].as_str() {
+        Ok((
             a.to_owned(),
             body["refresh_token"].as_str().map(str::to_owned),
-        )),
-        None => {
-            let desc = body["error_description"]
-                .as_str()
-                .or_else(|| body["error"].as_str())
-                .unwrap_or("unknown")
-                .to_owned();
-            Err(VpnError::MissingDependency(format!(
-                "token exchange failed: {desc}"
-            )))
-        }
+        ))
+    } else {
+        let desc = body["error_description"]
+            .as_str()
+            .or_else(|| body["error"].as_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        Err(VpnError::MissingDependency(format!(
+            "token exchange failed: {desc}"
+        )))
     }
 }
 
@@ -823,7 +821,7 @@ fn build_ovpn_config(
         s.push_str(
             &cfg.dns_servers
                 .iter()
-                .map(|ip| ip.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(" "),
         );

@@ -48,8 +48,7 @@ pub fn default_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         std::env::var_os("PROGRAMDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+            .map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from)
             .join("SuperManager")
     }
 

@@ -68,7 +68,7 @@ pub fn windows_prefers_dark() -> bool {
             RRF_RT_REG_DWORD,
             std::ptr::null_mut(),
             std::ptr::addr_of_mut!(data).cast(),
-            &mut size,
+            &raw mut size,
         )
     };
     status == 0 && data == 0

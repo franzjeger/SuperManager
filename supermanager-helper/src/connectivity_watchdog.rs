@@ -7,7 +7,7 @@
 //! - **2 misses (4s)**: trigger `route_guardian::force_restore()`
 //!   in case tailscaled out-raced our 500ms poll.
 //! - **3 misses (6s)**: fail-open `tailscale::panic_reset`
-//!   (clear_pref=false) — removes the exit-node split routes so
+//!   (`clear_pref=false`) — removes the exit-node split routes so
 //!   egress drops to the local uplink, DHCP-renews, but KEEPS the
 //!   exit-node pref + persisted intent so the reconciler can
 //!   re-establish it. Always recoverable; only acts on tailscale
@@ -30,7 +30,7 @@
 //!
 //! What if the user's ISP is genuinely out, or they're roaming
 //! between WiFi APs, or DHCP is mid-renewal? When NO exit node is
-//! active the watchdog still fires panic_reset, which is
+//! active the watchdog still fires `panic_reset`, which is
 //! acceptable because:
 //!
 //! 1. `panic_reset` (fail-open) only touches tailscale state —
@@ -64,14 +64,14 @@ static SPAWNED: Mutex<bool> = Mutex::new(false);
 
 /// Suspend-until timestamp. While `Instant::now() < *PAUSE_UNTIL`,
 /// the watchdog keeps probing for visibility but does NOT
-/// escalate to force_restore or panic_reset. Used by AppState
+/// escalate to `force_restore` or `panic_reset`. Used by `AppState`
 /// to grant exit-node-set / clear transitions a quiet window
 /// to settle without our defense kicking in mid-reconfig.
 static PAUSE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Pause watchdog escalation for `secs` seconds. Probes still
 /// run + log so the user can see what's happening, but no
-/// force_restore or panic_reset fires until pause expires.
+/// `force_restore` or `panic_reset` fires until pause expires.
 pub fn pause_for(secs: u64) {
     let new_until = Instant::now() + Duration::from_secs(secs);
     let mut g = PAUSE_UNTIL.lock().unwrap();
@@ -327,7 +327,7 @@ fn watchdog_loop() {
 /// the probe routes THROUGH the exit peer, and a DERP-relayed peer adds 3-6s
 /// of latency — a 1s budget false-negatives and the watchdog would tear down a
 /// perfectly healthy node (the user's reported flap). Use a generous 8s budget
-/// then (matching test_exit_reachability), and the snappy 1s otherwise. A
+/// then (matching `test_exit_reachability`), and the snappy 1s otherwise. A
 /// genuinely dead peer still fails at 8s and escalates, so this never hides a
 /// real outage.
 fn probe_internet() -> bool {

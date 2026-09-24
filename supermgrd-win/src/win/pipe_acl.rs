@@ -42,18 +42,18 @@ use windows_sys::Win32::Security::{
 /// - BA (Builtin Admins)     → GA
 /// - AU (Authenticated Users)→ GR | GW  (read + write data only)
 ///
-/// We don't grant FILE_WRITE_DAC / FILE_WRITE_OWNER to AU so a logged-in
+/// We don't grant `FILE_WRITE_DAC` / `FILE_WRITE_OWNER` to AU so a logged-in
 /// user can't re-permission the pipe after open.
 const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
 
-/// Owns the heap allocation behind a SECURITY_DESCRIPTOR + attributes
-/// pair. Hand `attrs_ptr()` to tokio's pipe ServerOptions and keep the
+/// Owns the heap allocation behind a `SECURITY_DESCRIPTOR` + attributes
+/// pair. Hand `attrs_ptr()` to tokio's pipe `ServerOptions` and keep the
 /// struct alive until the listener is replaced.
 pub struct PipeSecurity {
     /// Raw pointer returned by `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
     /// Allocated by the OS; freed via `LocalFree` in `Drop`.
     descriptor: *mut c_void,
-    /// SECURITY_ATTRIBUTES owned by this struct. Heap-pinned via `Box` so
+    /// `SECURITY_ATTRIBUTES` owned by this struct. Heap-pinned via `Box` so
     /// taking `&mut` to its address stays valid for the lifetime of `Self`.
     attrs: Box<SECURITY_ATTRIBUTES>,
 }
@@ -68,7 +68,7 @@ unsafe impl Sync for PipeSecurity {}
 
 impl PipeSecurity {
     /// Build a security descriptor from the SDDL constant and wrap it in
-    /// SECURITY_ATTRIBUTES.
+    /// `SECURITY_ATTRIBUTES`.
     pub fn restrictive() -> io::Result<Self> {
         // Convert the SDDL string to a wide-string buffer.
         let mut wide: Vec<u16> = PIPE_SDDL.encode_utf16().collect();
@@ -82,7 +82,7 @@ impl PipeSecurity {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 wide.as_ptr(),
                 SDDL_REVISION_1,
-                &mut descriptor,
+                &raw mut descriptor,
                 ptr::null_mut(),
             )
         };
@@ -112,7 +112,7 @@ impl Drop for PipeSecurity {
             // ConvertStringSecurityDescriptorToSecurityDescriptorW, which
             // documents LocalFree as the matching deallocator.
             unsafe {
-                LocalFree(self.descriptor as _);
+                LocalFree(self.descriptor.cast());
             }
             self.descriptor = ptr::null_mut();
         }

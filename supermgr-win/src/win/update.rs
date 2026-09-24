@@ -15,7 +15,7 @@
 //!    check there is; a download that has no sidecar is refused rather
 //!    than run unverified.
 //! 4. Start the installer and let the caller quit the GUI — the MSI's
-//!    MajorUpgrade replaces the old install and restarts the service in
+//!    `MajorUpgrade` replaces the old install and restarts the service in
 //!    the same transaction.
 
 use std::path::PathBuf;
@@ -219,19 +219,6 @@ pub fn launch(path: &std::path::Path) -> anyhow::Result<()> {
         .with_context(|| format!("starting {}", path.display()))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_version;
-
-    #[test]
-    fn version_ordering() {
-        assert!(parse_version("1.7.0") > parse_version("1.0.0"));
-        assert!(parse_version("v1.10.0") > parse_version("1.9.9"));
-        assert!(parse_version("1.7.0") == parse_version("v1.7"));
-        assert!(parse_version("2.0.0") > parse_version("1.99.99"));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The Settings page's Updates card
 // ---------------------------------------------------------------------------
@@ -373,4 +360,17 @@ pub(super) fn bind(window: &super::AppWindow, ctx: &super::Ctx) {
             });
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_version;
+
+    #[test]
+    fn version_ordering() {
+        assert!(parse_version("1.7.0") > parse_version("1.0.0"));
+        assert!(parse_version("v1.10.0") > parse_version("1.9.9"));
+        assert!(parse_version("1.7.0") == parse_version("v1.7"));
+        assert!(parse_version("2.0.0") > parse_version("1.99.99"));
+    }
 }

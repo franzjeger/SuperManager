@@ -9,7 +9,7 @@
 //!
 //! The watch list is persisted at
 //! `/var/lib/supermanager/auto_reconnect.json` so a helper
-//! restart (deploy_self, system reboot, crash) preserves the
+//! restart (`deploy_self`, system reboot, crash) preserves the
 //! user's always-on selections. The connect args are stored
 //! alongside — they're the same bytes the GUI passed to
 //! `wg_connect` / `ovpn_connect` / `vpn_connect` last time the
@@ -245,7 +245,7 @@ pub async fn guard_routes(
     Ok(())
 }
 
-/// Drop a RouteGuard registration on manual disconnect. Leaves an Always-on
+/// Drop a `RouteGuard` registration on manual disconnect. Leaves an Always-on
 /// entry intact — that's the user's standing intent, not something a single
 /// disconnect revokes (matching the pre-existing Always-on contract).
 pub async fn unguard_routes(profile_id: &str) -> Result<()> {
@@ -361,7 +361,7 @@ async fn check_and_reconnect(
         _ => unreachable!(),
     };
     match result {
-        Ok(_) => tracing::info!(
+        Ok(()) => tracing::info!(
             profile_id = %p.profile_id,
             backend = %p.backend,
             "auto-reconnect succeeded"
@@ -445,7 +445,7 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
 }
 
 /// True if THIS profile's IKEv2 SA is ESTABLISHED, regardless of whether its
-/// full-tunnel routes are present. The RouteGuard branch uses this to tell the
+/// full-tunnel routes are present. The `RouteGuard` branch uses this to tell the
 /// route-less case (SA up + routes gone → heal) apart from a genuinely dead SA
 /// (leave a manually-connected profile down). It is deliberately the
 /// route-UNaware half of `sw_connected`.

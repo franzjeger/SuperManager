@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use supermgr_core::client::DaemonClient;
 
 /// The canonical tool catalog used by MCP and both API providers.
+#[must_use]
 pub fn tool_definitions() -> Value {
     let mut catalog = json!([
         {
@@ -433,7 +434,7 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let host_json = json!({
                 "label": args.get("label").and_then(|v| v.as_str()).unwrap_or(""),
                 "hostname": args.get("hostname").and_then(|v| v.as_str()).unwrap_or(""),
-                "port": args.get("port").and_then(|v| v.as_u64()).unwrap_or(22),
+                "port": args.get("port").and_then(serde_json::Value::as_u64).unwrap_or(22),
                 "username": args.get("username").and_then(|v| v.as_str()).unwrap_or("root"),
                 "group": args.get("group").and_then(|v| v.as_str()).unwrap_or(""),
                 "device_type": args.get("device_type").and_then(|v| v.as_str()).unwrap_or("linux"),
@@ -494,7 +495,10 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
                 .get("token")
                 .and_then(|v| v.as_str())
                 .ok_or("missing token")?;
-            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            let port = args
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as u16;
             proxy
                 .ssh_set_api_token(host_id, token, port)
                 .await
@@ -583,6 +587,7 @@ fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {
 
 /// Only named, non-mutating data queries are available in read-only mode.
 /// Raw API and shell tools are never classified by inspecting their arguments.
+#[must_use]
 pub fn is_read_only(name: &str) -> bool {
     matches!(
         name,
@@ -605,6 +610,7 @@ pub fn is_read_only(name: &str) -> bool {
 }
 
 /// Catalog restricted to the operator's choice for this session.
+#[must_use]
 pub fn available_tools(allow_changes: bool) -> Value {
     Value::Array(
         tool_definitions()

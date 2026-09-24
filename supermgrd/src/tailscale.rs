@@ -313,12 +313,18 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
                     .collect()
             })
             .unwrap_or_default(),
-        online: v.get("Online").and_then(|x| x.as_bool()).unwrap_or(false),
+        online: v
+            .get("Online")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         is_self,
-        exit_node: v.get("ExitNode").and_then(|x| x.as_bool()).unwrap_or(false),
+        exit_node: v
+            .get("ExitNode")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         exit_node_option: v
             .get("ExitNodeOption")
-            .and_then(|x| x.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         last_seen: v
             .get("LastSeen")
@@ -328,8 +334,14 @@ fn parse_node(v: &serde_json::Value, is_self: bool) -> TailscaleNode {
             .filter(|s| !s.starts_with("0001-01-01"))
             .unwrap_or("")
             .to_owned(),
-        rx_bytes: v.get("RxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
-        tx_bytes: v.get("TxBytes").and_then(|x| x.as_u64()).unwrap_or(0),
+        rx_bytes: v
+            .get("RxBytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        tx_bytes: v
+            .get("TxBytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
         current_address: v
             .get("CurAddr")
             .and_then(|x| x.as_str())

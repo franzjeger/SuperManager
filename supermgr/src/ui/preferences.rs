@@ -50,7 +50,9 @@ pub fn show_settings_dialog(
         .model(&theme_model)
         .build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let idx = match s.color_scheme {
             ColorScheme::Default => 0,
             ColorScheme::Light => 1,
@@ -67,7 +69,7 @@ pub fn show_settings_dialog(
     let opacity_adj = gtk4::Adjustment::new(
         app_settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .opacity
             * 100.0,
         10.0,
@@ -102,7 +104,9 @@ pub fn show_settings_dialog(
         .subtitle("Uses `claude` CLI — requires Claude Code login")
         .build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         sub_row.set_active(s.use_claude_subscription);
     }
     console_group.add(&sub_row);
@@ -111,7 +115,9 @@ pub fn show_settings_dialog(
         .title("Anthropic API Key (only if subscription disabled)")
         .build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !s.anthropic_api_key.is_empty() {
             api_key_row.set_text(&s.anthropic_api_key);
         }
@@ -125,7 +131,9 @@ pub fn show_settings_dialog(
         sub_row.connect_active_notify(move |row| {
             let active = row.is_active();
             api_key_row.set_sensitive(!active);
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.use_claude_subscription = active;
             s.save();
         });
@@ -135,7 +143,9 @@ pub fn show_settings_dialog(
         let app_settings = Arc::clone(&app_settings);
         api_key_row.connect_changed(move |row| {
             let key = row.text().to_string();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.anthropic_api_key = key;
             s.save();
         });
@@ -195,7 +205,7 @@ pub fn show_settings_dialog(
         .adjustment(&gtk4::Adjustment::new(
             app_settings
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .auto_lock_minutes as f64,
             0.0,
             120.0,
@@ -209,7 +219,9 @@ pub fn show_settings_dialog(
     {
         let app_settings = Arc::clone(&app_settings);
         auto_lock_row.connect_value_notify(move |row| {
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
             {
                 s.auto_lock_minutes = row.value() as u64;
@@ -226,7 +238,9 @@ pub fn show_settings_dialog(
 
     let webhook_url_row = adw::EntryRow::builder().title("Webhook URL").build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !s.webhook_url.is_empty() {
             webhook_url_row.set_text(&s.webhook_url);
         }
@@ -240,7 +254,7 @@ pub fn show_settings_dialog(
     host_down_toggle.set_active(
         app_settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .webhook_on_host_down,
     );
     notify_group.add(&host_down_toggle);
@@ -252,7 +266,7 @@ pub fn show_settings_dialog(
     vpn_disconnect_toggle.set_active(
         app_settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .webhook_on_vpn_disconnect,
     );
     notify_group.add(&vpn_disconnect_toggle);
@@ -299,7 +313,9 @@ pub fn show_settings_dialog(
             let url = row.text().to_string();
             let on_host_down = host_down_toggle.is_active();
             let on_vpn_disconnect = vpn_disconnect_toggle.is_active();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.webhook_url = url.clone();
             s.save();
             push_webhook_to_daemon(&rt, url, on_host_down, on_vpn_disconnect);
@@ -314,7 +330,9 @@ pub fn show_settings_dialog(
         let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
         host_down_toggle.connect_active_notify(move |row| {
             let active = row.is_active();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.webhook_on_host_down = active;
             s.save();
             let url = webhook_url_row.text().to_string();
@@ -331,7 +349,9 @@ pub fn show_settings_dialog(
         let host_down_toggle = host_down_toggle.clone();
         vpn_disconnect_toggle.connect_active_notify(move |row| {
             let active = row.is_active();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.webhook_on_vpn_disconnect = active;
             s.save();
             let url = webhook_url_row.text().to_string();
@@ -373,14 +393,16 @@ pub fn show_settings_dialog(
     anthropic_model.set_text(
         &app_settings
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .anthropic_model,
     );
     console_group.add(&anthropic_model);
     {
         let settings = Arc::clone(&app_settings);
         anthropic_model.connect_changed(move |row| {
-            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.anthropic_model = row.text().trim().to_owned();
             s.save();
         });
@@ -396,7 +418,9 @@ pub fn show_settings_dialog(
         .build();
     let openai_model = adw::EntryRow::builder().title("OpenAI model").build();
     {
-        let settings = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         openai_key.set_text(&settings.openai_api_key);
         openai_model.set_text(&settings.openai_model);
     }
@@ -405,7 +429,9 @@ pub fn show_settings_dialog(
     {
         let settings = Arc::clone(&app_settings);
         openai_key.connect_changed(move |row| {
-            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.openai_api_key = row.text().trim().to_owned();
             s.save();
         });
@@ -413,7 +439,9 @@ pub fn show_settings_dialog(
     {
         let settings = Arc::clone(&app_settings);
         openai_model.connect_changed(move |row| {
-            let mut s = settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.openai_model = row.text().trim().to_owned();
             s.save();
         });
@@ -679,7 +707,9 @@ pub fn show_settings_dialog(
         .title("UI.com API Key")
         .build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !s.unifi_cloud_api_key.is_empty() {
             unifi_key_row.set_text(&s.unifi_cloud_api_key);
         }
@@ -690,7 +720,9 @@ pub fn show_settings_dialog(
         let app_settings = Arc::clone(&app_settings);
         unifi_key_row.connect_changed(move |row| {
             let key = row.text().to_string();
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.unifi_cloud_api_key = key;
             s.save();
         });
@@ -707,7 +739,9 @@ pub fn show_settings_dialog(
         .model(&rdp_model)
         .build();
     {
-        let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+        let s = app_settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let idx = match s.rdp_client.as_str() {
             "remmina" => 1,
             "xfreerdp3" => 2,
@@ -726,7 +760,9 @@ pub fn show_settings_dialog(
                 3 => "xfreerdp",
                 _ => "auto",
             };
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.rdp_client = client.to_owned();
             s.save();
         });
@@ -968,7 +1004,9 @@ pub fn show_settings_dialog(
                 ColorScheme::Dark => adw::ColorScheme::ForceDark,
             };
             adw::StyleManager::default().set_color_scheme(adw_scheme);
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.color_scheme = scheme;
             s.save();
         });
@@ -980,7 +1018,9 @@ pub fn show_settings_dialog(
         opacity_scale.connect_value_changed(move |scale| {
             let val = scale.value() / 100.0;
             window.set_opacity(val);
-            let mut s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let mut s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             s.opacity = val;
             s.save();
         });
@@ -1167,7 +1207,9 @@ fn show_change_password_dialog(
         let status = status.clone();
         let dialog = dialog.clone();
         save_btn.connect_clicked(move |_| {
-            let s = app_settings.lock().unwrap_or_else(|e| e.into_inner());
+            let s = app_settings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let has = crate::master_password::is_set();
             if has {
                 let cur = current_row.text().to_string();

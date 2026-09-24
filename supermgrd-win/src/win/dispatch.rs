@@ -651,7 +651,7 @@ async fn handle_import_forticlient_sslvpn(
 
 /// Import a FortiGate IKEv2 IPsec profile. Stores the EAP password (and a
 /// PSK, if one is given) in Credential Manager, persists a
-/// `FortiGateConfig` profile that the FortiGateBackend then dials via
+/// `FortiGateConfig` profile that the `FortiGateBackend` then dials via
 /// Windows RAS (`Add-VpnConnection` + `rasdial`) — no third-party client
 /// needed on a standards-compliant FortiGate deployment (EAP-MSCHAPv2).
 ///

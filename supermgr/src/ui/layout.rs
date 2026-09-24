@@ -11,7 +11,8 @@ pub fn split(
 ) -> gtk4::Paned {
     sidebar.set_size_request(240, -1);
     sidebar.add_css_class("supermgr-list-pane");
-    let pane = gtk4::Paned::builder()
+
+    gtk4::Paned::builder()
         .orientation(gtk4::Orientation::Horizontal)
         .start_child(sidebar)
         .end_child(content)
@@ -24,8 +25,7 @@ pub fn split(
         .vexpand(true)
         .hexpand(true)
         .css_classes(["supermgr-split"])
-        .build();
-    pane
+        .build()
 }
 
 pub fn remember_split(
@@ -35,7 +35,7 @@ pub fn remember_split(
 ) {
     let initial = settings
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .layout
         .sidebar_widths
         .get(section)
@@ -48,7 +48,7 @@ pub fn remember_split(
         if pane.is_mapped() && pane.position() >= 240 && pane.position() <= 560 {
             settings
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .layout
                 .sidebar_widths
                 .insert(section.into(), pane.position());
@@ -71,7 +71,7 @@ pub fn remember_window(
 ) {
     let saved = settings
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .layout
         .clone();
     window.set_default_size(
@@ -84,7 +84,9 @@ pub fn remember_window(
     let window = window.clone();
     let settings = Arc::clone(settings);
     app.connect_shutdown(move |_| {
-        let mut settings = settings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut settings = settings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         settings.layout.maximized = window.is_maximized();
         // GTK maintains the most recent normal size across maximize/fullscreen.
         let (width, height) = window.default_size();
