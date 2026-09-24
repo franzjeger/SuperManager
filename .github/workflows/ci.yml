@@ -190,6 +190,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
       # Vendor pins first: it is seconds of curl, and it is the check most
       # likely to fail for reasons that have nothing to do with the commit
       # under test.
@@ -222,6 +224,13 @@ jobs:
       # fails before anything compiles.
       - name: Cargo.lock is in sync with the manifests
         run: cargo metadata --locked --format-version 1 > /dev/null
+
+      # Formatting is checked, not hoped for: a diff should show what changed,
+      # not what an editor reflowed. `--all` covers the Windows- and
+      # macOS-only crates as well — rustfmt reads every module whatever its
+      # cfg — so one Linux step is enough.
+      - name: Formatting
+        run: cargo fmt --all -- --check
 
       # tcpdump is a runtime dependency of the engine's traffic-sniff
       # analysis, and its tests shell out to it. Installed explicitly rather
