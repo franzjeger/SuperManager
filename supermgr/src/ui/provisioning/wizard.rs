@@ -4344,117 +4344,58 @@ fn show_batch_dialog(
     dialog.present();
 }
 
-/// Export configs as a minimal uncompressed ZIP archive (no external crate needed).
+/// Export configs as an uncompressed ZIP archive, one file per config.
 fn export_configs_as_zip(
     path: &std::path::Path,
     configs: &[(String, String)],
 ) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| format!("Create file: {e}"))?;
-    let mut writer = std::io::BufWriter::new(file);
-
-    let mut central_dir = Vec::new();
-    let mut offset: u32 = 0;
-
+    let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     for (name, content) in configs {
-        let name_bytes = name.as_bytes();
-        let content_bytes = content.as_bytes();
-        let crc = crc32_simple(content_bytes);
-
-        let local_header = build_zip_local_header(name_bytes, content_bytes, crc);
-        writer
-            .write_all(&local_header)
+        zip.start_file(name.as_str(), options)
             .map_err(|e| format!("Write: {e}"))?;
-        writer
-            .write_all(content_bytes)
+        zip.write_all(content.as_bytes())
             .map_err(|e| format!("Write: {e}"))?;
-
-        let cd_entry = build_zip_cd_entry(name_bytes, content_bytes, crc, offset);
-        central_dir.push(cd_entry);
-
-        offset += local_header.len() as u32 + content_bytes.len() as u32;
     }
-
-    let cd_offset = offset;
-    let mut cd_size: u32 = 0;
-    for entry in &central_dir {
-        writer.write_all(entry).map_err(|e| format!("Write: {e}"))?;
-        cd_size += entry.len() as u32;
-    }
-
-    let num_entries = configs.len() as u16;
-    let eocd = build_zip_eocd(num_entries, cd_size, cd_offset);
-    writer.write_all(&eocd).map_err(|e| format!("Write: {e}"))?;
-
+    zip.finish()
+        .map_err(|e| format!("Write: {e}"))?
+        .into_inner()
+        .map_err(|e| format!("Write: {}", e.error()))?;
     Ok(())
 }
 
-fn build_zip_local_header(name: &[u8], content: &[u8], crc: u32) -> Vec<u8> {
-    let mut h = Vec::new();
-    h.extend_from_slice(&0x04034b50u32.to_le_bytes()); // local file header signature
-    h.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    h.extend_from_slice(&0u16.to_le_bytes()); // flags
-    h.extend_from_slice(&0u16.to_le_bytes()); // compression: store
-    h.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    h.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    h.extend_from_slice(&crc.to_le_bytes());
-    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
-    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-    h.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-    h.extend_from_slice(name);
-    h
-}
+#[cfg(test)]
+mod zip_tests {
+    use super::export_configs_as_zip;
+    use std::io::Read as _;
 
-fn build_zip_cd_entry(name: &[u8], content: &[u8], crc: u32, offset: u32) -> Vec<u8> {
-    let mut h = Vec::new();
-    h.extend_from_slice(&0x02014b50u32.to_le_bytes()); // central dir signature
-    h.extend_from_slice(&20u16.to_le_bytes()); // version made by
-    h.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    h.extend_from_slice(&0u16.to_le_bytes()); // flags
-    h.extend_from_slice(&0u16.to_le_bytes()); // compression: store
-    h.extend_from_slice(&0u16.to_le_bytes()); // mod time
-    h.extend_from_slice(&0u16.to_le_bytes()); // mod date
-    h.extend_from_slice(&crc.to_le_bytes());
-    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // compressed size
-    h.extend_from_slice(&(content.len() as u32).to_le_bytes()); // uncompressed size
-    h.extend_from_slice(&(name.len() as u16).to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes()); // extra field length
-    h.extend_from_slice(&0u16.to_le_bytes()); // comment length
-    h.extend_from_slice(&0u16.to_le_bytes()); // disk number start
-    h.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-    h.extend_from_slice(&0u32.to_le_bytes()); // external attrs
-    h.extend_from_slice(&offset.to_le_bytes()); // local header offset
-    h.extend_from_slice(name);
-    h
-}
+    #[test]
+    fn exported_configs_read_back_from_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configs.zip");
+        let configs = [
+            (
+                "fw1.conf".to_owned(),
+                "config system global\nend\n".to_owned(),
+            ),
+            ("empty.txt".to_owned(), String::new()),
+        ];
+        export_configs_as_zip(&path, &configs).unwrap();
 
-fn build_zip_eocd(num_entries: u16, cd_size: u32, cd_offset: u32) -> Vec<u8> {
-    let mut h = Vec::new();
-    h.extend_from_slice(&0x06054b50u32.to_le_bytes()); // end of central dir signature
-    h.extend_from_slice(&0u16.to_le_bytes()); // disk number
-    h.extend_from_slice(&0u16.to_le_bytes()); // cd start disk
-    h.extend_from_slice(&num_entries.to_le_bytes()); // entries on disk
-    h.extend_from_slice(&num_entries.to_le_bytes()); // total entries
-    h.extend_from_slice(&cd_size.to_le_bytes());
-    h.extend_from_slice(&cd_offset.to_le_bytes());
-    h.extend_from_slice(&0u16.to_le_bytes()); // comment length
-    h
-}
-
-/// Simple CRC-32 (ISO 3309) without external crate.
-fn crc32_simple(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFF_FFFF;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB8_8320;
-            } else {
-                crc >>= 1;
-            }
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(archive.len(), configs.len());
+        for (name, content) in &configs {
+            let mut read = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut read)
+                .unwrap();
+            assert_eq!(&read, content, "{name}");
         }
     }
-    !crc
 }
 
 // ---------------------------------------------------------------------------

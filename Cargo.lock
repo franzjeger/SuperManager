@@ -7209,6 +7209,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "zbus 4.4.0",
+ "zip",
 ]
 
 [[package]]
