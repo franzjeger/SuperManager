@@ -370,19 +370,16 @@ impl WireGuard {
     pub async fn status(&mut self, args: &WgStatusArgs) -> anyhow::Result<WgStatusResult> {
         let name = interface_name(&args.profile_id);
 
-        let utun_name = match read_name_mapping(&name) {
-            Some(u) => u,
-            None => {
-                // No mapping file → tunnel was never up, or it was
-                // brought down (wg-quick removes the file on `down`).
-                return Ok(WgStatusResult {
-                    state: WgState::Disconnected,
-                    rx_bytes: None,
-                    tx_bytes: None,
-                    last_handshake_unix: None,
-                    peer_endpoint: None,
-                });
-            }
+        let Some(utun_name) = read_name_mapping(&name) else {
+            // No mapping file → tunnel was never up, or it was
+            // brought down (wg-quick removes the file on `down`).
+            return Ok(WgStatusResult {
+                state: WgState::Disconnected,
+                rx_bytes: None,
+                tx_bytes: None,
+                last_handshake_unix: None,
+                peer_endpoint: None,
+            });
         };
 
         let wg_quick = locate_wg_quick()?;

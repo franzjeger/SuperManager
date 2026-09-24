@@ -433,14 +433,13 @@ const PATH_RULES: &[PathRule] = &[
 pub async fn enumerate(host: &str, port: u16, tls: bool) -> (Vec<PathProbe>, Vec<Finding>) {
     let scheme = if tls { "https" } else { "http" };
     let base = format!("{scheme}://{host}:{port}");
-    let client = match reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(4))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-    {
-        Ok(c) => c,
-        Err(_) => return (Vec::new(), Vec::new()),
+    else {
+        return (Vec::new(), Vec::new());
     };
 
     let sema = std::sync::Arc::new(tokio::sync::Semaphore::new(8));

@@ -640,13 +640,10 @@ async fn revert_link_dns(ifindex: i32) {
 #[async_trait]
 impl VpnBackend for AzureBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
-        let cfg = match &profile.config {
-            ProfileConfig::AzureVpn(c) => c,
-            _ => {
-                return Err(BackendError::Interface(
-                    "wrong profile type for AzureBackend".into(),
-                ))
-            }
+        let ProfileConfig::AzureVpn(cfg) = &profile.config else {
+            return Err(BackendError::Interface(
+                "wrong profile type for AzureBackend".into(),
+            ));
         };
 
         info!("Azure: connecting profile '{}'", profile.name);

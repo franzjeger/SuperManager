@@ -630,9 +630,8 @@ fn parse_sa_bytes(output: &str) -> (u64, u64) {
             None => continue,
         };
         // after_spi = "<N> bytes, ..."
-        let bytes_token = match after_spi.split_whitespace().next() {
-            Some(t) => t,
-            None => continue,
+        let Some(bytes_token) = after_spi.split_whitespace().next() else {
+            continue;
         };
         if let Ok(n) = bytes_token.parse::<u64>() {
             match dir {

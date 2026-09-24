@@ -195,13 +195,10 @@ impl OpenVpnBackend {
             tear_down(prev).await;
         }
 
-        let cfg = match &profile.config {
-            ProfileConfig::OpenVpn(c) => c,
-            _ => {
-                return Err(VpnError::MissingDependency(
-                    "profile is not an OpenVPN profile".into(),
-                ));
-            }
+        let ProfileConfig::OpenVpn(cfg) = &profile.config else {
+            return Err(VpnError::MissingDependency(
+                "profile is not an OpenVPN profile".into(),
+            ));
         };
 
         let openvpn_exe = locate_openvpn()?;

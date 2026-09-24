@@ -52,9 +52,8 @@ const SKIP_EXTENSIONS: &[&str] = &[".pub", ".txt", ".bak", ".old", ".orig", ".lo
 /// Keys that cannot be parsed at all are silently skipped.
 #[must_use]
 pub fn scan_ssh_directory(directory: &Path) -> Vec<ImportCandidate> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(rd) => rd,
-        Err(_) => return Vec::new(),
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
     };
 
     let skip_names: HashSet<&str> = SKIP_NAMES.iter().copied().collect();
@@ -90,9 +89,8 @@ pub fn scan_ssh_directory(directory: &Path) -> Vec<ImportCandidate> {
         }
 
         // Read file contents.
-        let raw = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => continue,
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
         };
 
         // Quick sniff: must look like a PEM private key.

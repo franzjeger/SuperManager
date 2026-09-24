@@ -615,9 +615,8 @@ async fn accept_auth_code(
 async fn answer_callback(stream: tokio::net::TcpStream, expected_state: &str) -> Callback {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
-    let request_line = match lines.next_line().await {
-        Ok(Some(line)) => line,
-        _ => return Callback::Other,
+    let Ok(Some(request_line)) = lines.next_line().await else {
+        return Callback::Other;
     };
     let callback = parse_callback(&request_line, expected_state);
     let (status, heading, body) = match &callback {

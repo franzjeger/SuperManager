@@ -1755,9 +1755,8 @@ pub async fn terminate_and_sweep() {
             continue;
         };
         while let Ok(Some(entry)) = entries.next_entry().await {
-            let fname = match entry.file_name().into_string() {
-                Ok(s) => s,
-                Err(_) => continue,
+            let Ok(fname) = entry.file_name().into_string() else {
+                continue;
             };
             // Only touch our namespace; leave other strongSwan configs alone.
             if !fname.starts_with("supermanager-") || !fname.ends_with(".conf") {

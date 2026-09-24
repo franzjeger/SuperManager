@@ -244,14 +244,13 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
     let creds = default_creds_for_service("http");
     for pair in creds {
         sleep(Duration::from_millis(800)).await;
-        let resp = match client
+        let Ok(resp) = client
             .get(&url)
             .basic_auth(&pair.username, Some(&pair.password))
             .send()
             .await
-        {
-            Ok(r) => r,
-            Err(_) => continue,
+        else {
+            continue;
         };
         let status = resp.status().as_u16();
         if status == 200 || status == 302 {

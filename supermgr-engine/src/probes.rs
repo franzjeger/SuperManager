@@ -827,9 +827,8 @@ async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
         let _ = stdin.write_all(b"\n").await;
         let _ = stdin.shutdown().await;
     }
-    let output = match timeout(Duration::from_secs(4), child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
-        _ => return Ok(false), // timeout / spawn error = treat as not supported
+    let Ok(Ok(output)) = timeout(Duration::from_secs(4), child.wait_with_output()).await else {
+        return Ok(false); // timeout / spawn error = treat as not supported
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -943,9 +942,8 @@ async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<b
         let _ = stdin.write_all(b"\n").await;
         let _ = stdin.shutdown().await;
     }
-    let output = match timeout(Duration::from_secs(4), child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
-        _ => return Ok(false),
+    let Ok(Ok(output)) = timeout(Duration::from_secs(4), child.wait_with_output()).await else {
+        return Ok(false); // timeout / spawn error = treat as not supported
     };
     let combined = format!(
         "{}{}",

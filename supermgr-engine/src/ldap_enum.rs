@@ -58,9 +58,9 @@ pub struct LdapInfo {
 /// (auth required) or the server didn't speak `LDAPv3`.
 pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)> {
     let target = format!("{host}:{port}");
-    let mut stream = match timeout(Duration::from_secs(4), TcpStream::connect(&target)).await {
-        Ok(Ok(s)) => s,
-        _ => return None,
+    let Ok(Ok(mut stream)) = timeout(Duration::from_secs(4), TcpStream::connect(&target)).await
+    else {
+        return None;
     };
 
     // -- Anonymous BindRequest (LDAPv3) --

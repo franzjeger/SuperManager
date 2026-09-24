@@ -2808,9 +2808,8 @@ pub fn build_ui(
             let s = app_state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let host_id = match s.selected_ssh_host.clone() {
-                Some(id) => id,
-                None => return,
+            let Some(host_id) = s.selected_ssh_host.clone() else {
+                return;
             };
             let keys = s.ssh_keys.clone();
             drop(s);
@@ -4320,9 +4319,8 @@ pub fn build_ui(
         let tx = tx.clone();
         let rt = rt.clone();
         drop_target.connect_drop(move |_, value, _x, _y| {
-            let file = match value.get::<gio::File>() {
-                Ok(f) => f,
-                Err(_) => return false,
+            let Ok(file) = value.get::<gio::File>() else {
+                return false;
             };
             let Some(path) = file.path() else {
                 return false;

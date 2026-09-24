@@ -329,13 +329,10 @@ pub async fn render_customer_report(
             writeln!(out, "### Devices").unwrap();
             writeln!(out).unwrap();
             for host_id_str in &site.host_ids {
-                let host_id = match uuid::Uuid::parse_str(host_id_str) {
-                    Ok(id) => id,
-                    Err(_) => continue,
+                let Ok(host_id) = uuid::Uuid::parse_str(host_id_str) else {
+                    continue;
                 };
-                let host = if let Some(h) = host_lookup.get(&host_id) {
-                    h
-                } else {
+                let Some(host) = host_lookup.get(&host_id) else {
                     writeln!(
                         out,
                         "- _(host {host_id_str} no longer exists in inventory)_"

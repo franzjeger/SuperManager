@@ -168,9 +168,8 @@ impl OpenVpnBackend {
 #[async_trait]
 impl VpnBackend for OpenVpnBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
-        let cfg = match &profile.config {
-            ProfileConfig::OpenVpn(c) => c,
-            _ => return Err(BackendError::Interface("wrong profile type".into())),
+        let ProfileConfig::OpenVpn(cfg) = &profile.config else {
+            return Err(BackendError::Interface("wrong profile type".into()));
         };
 
         info!("OpenVPN3: starting session for '{}'", profile.name);
@@ -397,9 +396,8 @@ impl VpnBackend for OpenVpnBackend {
             'poll: for _ in 0..MAX_POLLS {
                 tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
 
-                let (list_out, _, _) = match run_openvpn3(&["sessions-list"]).await {
-                    Ok(r) => r,
-                    Err(_) => continue,
+                let Ok((list_out, _, _)) = run_openvpn3(&["sessions-list"]).await else {
+                    continue;
                 };
 
                 // Find the block for our session.

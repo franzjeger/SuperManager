@@ -256,9 +256,8 @@ fn parse_arp(text: &str) -> Vec<DiscoveredHost> {
             continue;
         }
         // Parse "? (IP) at MAC on IFACE …"
-        let ip = match extract_between(line, '(', ')') {
-            Some(s) => s,
-            None => continue,
+        let Some(ip) = extract_between(line, '(', ')') else {
+            continue;
         };
         let mac = match line.split(" at ").nth(1) {
             Some(rest) => match rest.split_whitespace().next() {
@@ -358,10 +357,7 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
     for service_type in &interesting_types {
         let result =
             tokio::time::timeout(Duration::from_millis(800), run_dns_sd_browse(service_type)).await;
-        let entries = match result {
-            Ok(Ok(v)) => v,
-            _ => continue,
-        };
+        let Ok(Ok(entries)) = result else { continue };
         for entry in entries {
             // entry: (instance_name, hostname-ish, ip, port)
             let key = entry.ip.clone().unwrap_or_else(|| entry.instance.clone());

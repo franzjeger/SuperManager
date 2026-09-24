@@ -50,15 +50,12 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let render_value = match params.get("render_request").cloned() {
-            Some(v) => v,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing render_request".to_owned(),
-                )
-            }
+        let Some(render_value) = params.get("render_request").cloned() else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing render_request".to_owned(),
+            );
         };
         let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value) {
             Ok(r) => r,
@@ -97,15 +94,12 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let render_value = match params.get("render_request").cloned() {
-            Some(v) => v,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing render_request".to_owned(),
-                )
-            }
+        let Some(render_value) = params.get("render_request").cloned() else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing render_request".to_owned(),
+            );
         };
         let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value) {
             Ok(r) => r,

@@ -2155,13 +2155,10 @@ impl DaemonService {
             .get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject(format!("profile {id} not found")))?;
 
-        let fg = match &mut profile.config {
-            ProfileConfig::FortiGate(fg) => fg,
-            _ => {
-                return Err(fdo::Error::InvalidArgs(
-                    "profile is not a FortiGate profile".into(),
-                ))
-            }
+        let ProfileConfig::FortiGate(fg) = &mut profile.config else {
+            return Err(fdo::Error::InvalidArgs(
+                "profile is not a FortiGate profile".into(),
+            ));
         };
 
         fg.host = sanitize_fortigate_host(host);
@@ -2215,13 +2212,10 @@ impl DaemonService {
             .get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject(format!("profile {id} not found")))?;
 
-        let ov = match &mut profile.config {
-            ProfileConfig::OpenVpn(ov) => ov,
-            _ => {
-                return Err(fdo::Error::InvalidArgs(
-                    "profile is not an OpenVPN profile".into(),
-                ))
-            }
+        let ProfileConfig::OpenVpn(ov) = &mut profile.config else {
+            return Err(fdo::Error::InvalidArgs(
+                "profile is not an OpenVPN profile".into(),
+            ));
         };
 
         // Update username (allow empty to clear it).
@@ -8446,9 +8440,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("ssh")).unwrap();
         std::fs::write(dir.path().join("ssh/known_hosts.json"), "}{ not json").unwrap();
-        let err = match DaemonState::new(dir.path().join("profiles")) {
-            Err(e) => e,
-            Ok(_) => panic!("a corrupt known_hosts.json must not be started over"),
+        let Err(err) = DaemonState::new(dir.path().join("profiles")) else {
+            panic!("a corrupt known_hosts.json must not be started over")
         };
         assert!(
             err.to_string().contains("known-hosts"),

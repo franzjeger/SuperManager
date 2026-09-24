@@ -129,9 +129,8 @@ pub fn scan_backups(dir: &Path) -> Vec<BackupFile> {
         if !path.is_file() {
             continue;
         }
-        let name = match entry.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
         };
         if let Some((host, ts, compressed)) = parse_backup_filename(&name) {
             out.push(BackupFile {

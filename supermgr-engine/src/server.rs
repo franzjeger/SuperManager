@@ -79,9 +79,7 @@ impl EngineServer {
             match listener.accept().await {
                 Ok((stream, _addr)) => {
                     let server = Arc::clone(&self);
-                    let permit = if let Ok(p) = Arc::clone(&conn_sema).try_acquire_owned() {
-                        p
-                    } else {
+                    let Ok(permit) = Arc::clone(&conn_sema).try_acquire_owned() else {
                         warn!("connection refused: 256 concurrent clients reached");
                         continue;
                     };

@@ -127,13 +127,10 @@ impl FortiGateBackend {
             tear_down(prev).await;
         }
 
-        let cfg = match &profile.config {
-            ProfileConfig::FortiGate(c) => c,
-            _ => {
-                return Err(VpnError::MissingDependency(
-                    "profile is not a FortiGate profile".into(),
-                ));
-            }
+        let ProfileConfig::FortiGate(cfg) = &profile.config else {
+            return Err(VpnError::MissingDependency(
+                "profile is not a FortiGate profile".into(),
+            ));
         };
 
         let store = self.secret_store.as_ref().ok_or_else(|| {

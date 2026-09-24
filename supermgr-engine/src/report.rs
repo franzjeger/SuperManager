@@ -76,16 +76,13 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     //   2. `xelatex`/`lualatex` — Unicode-friendly LaTeX (MacTeX)
     //   3. `pdflatex`   — classic, ASCII-only (BasicTeX)
     //   4. `wkhtmltopdf`/`weasyprint` — HTML→PDF, no LaTeX needed
-    let engine = match pick_pdf_engine() {
-        Some(e) => e,
+    let Some(engine) = pick_pdf_engine() else {
         // anyhow::Error::new() wraps the EngineError so the handler
         // can `downcast_ref::<EngineError>()` to recognise this
         // specific case structurally — not by error-message regex.
-        None => {
-            return Err(anyhow::Error::new(
-                crate::error::EngineError::PdfEngineMissing,
-            ))
-        }
+        return Err(anyhow::Error::new(
+            crate::error::EngineError::PdfEngineMissing,
+        ));
     };
 
     // Markdown input — written + closed before invoking pandoc.

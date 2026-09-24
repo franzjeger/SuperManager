@@ -35,9 +35,8 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
+        let Some(pid_str) = params.get("id").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned());
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -131,9 +130,8 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
+        let Some(pid_str) = params.get("id").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned());
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -211,9 +209,8 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
+        let Some(pid_str) = params.get("id").and_then(|v| v.as_str()) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned());
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -548,37 +545,28 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
         let state = self.state.lock().await;
-        let profile = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
         drop(state);
-        let cfg = match profile.config {
-            ProfileConfig::AzureVpn(c) => c,
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    format!("profile is {} not azure_vpn", profile.config.backend_name()),
-                )
-            }
+        let ProfileConfig::AzureVpn(cfg) = profile.config else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("profile is {} not azure_vpn", profile.config.backend_name()),
+            );
         };
 
         match crate::azure_oauth::start_device_flow(&cfg.tenant_id, &cfg.client_id).await {
@@ -604,15 +592,12 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -630,22 +615,16 @@ impl EngineServer {
         };
 
         let state = self.state.lock().await;
-        let profile = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
         drop(state);
-        let cfg = match profile.config.clone() {
-            ProfileConfig::AzureVpn(c) => c,
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    format!("profile is {} not azure_vpn", profile.config.backend_name()),
-                )
-            }
+        let ProfileConfig::AzureVpn(cfg) = profile.config.clone() else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("profile is {} not azure_vpn", profile.config.backend_name()),
+            );
         };
 
         match crate::azure_oauth::poll_token(&cfg.tenant_id, &device_code).await {
@@ -720,15 +699,12 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -743,15 +719,12 @@ impl EngineServer {
         };
         drop(state);
 
-        let cfg = match profile.config {
-            ProfileConfig::AzureVpn(c) => c,
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    format!("profile is {} not azure_vpn", profile.config.backend_name()),
-                )
-            }
+        let ProfileConfig::AzureVpn(cfg) = profile.config else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                format!("profile is {} not azure_vpn", profile.config.backend_name()),
+            );
         };
 
         // Azure point-to-site ALWAYS renders split-tunnel: the gateway pushes
@@ -795,15 +768,12 @@ impl EngineServer {
         use std::fmt::Write as _;
         use supermgr_core::vpn::profile::ProfileConfig;
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1009,32 +979,26 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::ProfileConfig;
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let full_tunnel = match params
+        let Some(full_tunnel) = params
             .get("full_tunnel")
             .and_then(serde_json::Value::as_bool)
-        {
-            Some(b) => b,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing full_tunnel".to_owned(),
-                )
-            }
+        else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing full_tunnel".to_owned(),
+            );
         };
         let routes = parse_ipnet_list(params.get("routes"));
 
@@ -1050,11 +1014,8 @@ impl EngineServer {
         }
 
         let mut state = self.state.lock().await;
-        let mut profile = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(mut profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
 
         // Splice the new routing into the backend-specific config.
@@ -1100,15 +1061,12 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1126,11 +1084,8 @@ impl EngineServer {
             );
         }
         let mut state = self.state.lock().await;
-        let mut profile = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(mut profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
         profile.name = new_name;
         profile.updated_at = chrono::Utc::now();
@@ -1166,15 +1121,12 @@ impl EngineServer {
     ) -> Response {
         use supermgr_core::vpn::profile::{ProfileConfig, SecretRef};
 
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
@@ -1182,11 +1134,8 @@ impl EngineServer {
         };
 
         let mut state = self.state.lock().await;
-        let source = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(source) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
 
         // Walk the backend-specific config and clone secrets +
@@ -1332,25 +1281,19 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
-            Some(b) => b,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned())
-            }
+        let Some(enabled) = params.get("enabled").and_then(serde_json::Value::as_bool) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned());
         };
         let mut state = self.state.lock().await;
         let Some(mut profile) = state.profiles.get(&pid).cloned() else {
@@ -1376,32 +1319,23 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let pid_str = match params.get("profile_id").and_then(|v| v.as_str()) {
-            Some(s) => s,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing profile_id".to_owned(),
-                )
-            }
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
         };
         let pid = match uuid::Uuid::parse_str(pid_str) {
             Ok(u) => u,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
         };
-        let enabled = match params.get("enabled").and_then(serde_json::Value::as_bool) {
-            Some(b) => b,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned())
-            }
+        let Some(enabled) = params.get("enabled").and_then(serde_json::Value::as_bool) else {
+            return Response::err(id, protocol::INVALID_PARAMS, "missing enabled".to_owned());
         };
         let mut state = self.state.lock().await;
-        let mut profile = match state.profiles.get(&pid).cloned() {
-            Some(p) => p,
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned())
-            }
+        let Some(mut profile) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
         };
         profile.kill_switch = enabled;
         profile.updated_at = chrono::Utc::now();
