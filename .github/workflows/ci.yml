@@ -247,25 +247,26 @@ jobs:
             -p supermgr-mcp \
             -p supermgrd \
             -p supermgr
-      # `-D warnings` is what makes this step a gate rather than a report.
-      # It covers every rustc lint (unused imports and variables, dead
-      # code, unreachable patterns) plus clippy's correctness, suspicious
-      # and perf groups — the categories that catch defects. Two real bugs
-      # were sitting in that output while the step ran `-W warnings` and
-      # could never fail: a mail port reported as cleartext because its
-      # match arm was unreachable, and a kill switch whose two branches
-      # were identical.
+      # `-D warnings` is what makes this step a gate rather than a report,
+      # and the workspace's own lint policy decides what a warning is:
+      # every rustc lint, and clippy's `all` and `pedantic` groups less the
+      # exceptions `[workspace.lints]` in Cargo.toml lists with their
+      # reasons. Code that breaks a lint on purpose says why in an `expect`,
+      # which fails here too if the reason stops applying.
       #
-      # style, complexity and pedantic stay advisory. They are ~76 mostly
-      # cosmetic findings (doc-comment indentation is the bulk of it);
-      # gating on them would have meant a churn-heavy diff for no defect
-      # caught. Promote them once they're worked down.
+      # Two real bugs sat in this output while the step ran `-W warnings`
+      # and could never fail: a mail port reported as cleartext because its
+      # match arm was unreachable, and a kill switch whose two branches were
+      # identical. Taking pedantic found more: a daemon that SIGTERMed its
+      # own process group, an LDAP probe whose every request was malformed,
+      # and ports that wrapped (65558 became 22). The macOS and Windows jobs
+      # run the same gate over their crates.
       #
       # The toolchain above is `stable`, which floats. A new Rust can add
       # or sharpen a lint and turn this step red on a PR that changed
       # nothing related — that is not a mystery failure, it is the float.
-      # When it happens, fix the lint; reach for `#[allow]` only when the
-      # finding genuinely isn't worth acting on, and say why in the code.
+      # When it happens, fix the lint; reach for `#[expect(lint, reason =
+      # "…")]` only when the finding genuinely isn't worth acting on.
       # To reproduce a CI-only finding locally, match the version rather
       # than guessing:
       #
@@ -282,10 +283,7 @@ jobs:
             -p supermgr-mcp \
             -p supermgrd \
             -p supermgr \
-            -- -D warnings \
-               -A clippy::pedantic \
-               -A clippy::style \
-               -A clippy::complexity
+            -- -D warnings
       - name: Tests
         run: |
           cargo test \
@@ -303,6 +301,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
 
       # The macOS installer, on macOS, under the interpreter it will actually
       # meet: Apple ships /bin/bash 3.2 and has since 2007, while the `shell`
@@ -353,6 +353,17 @@ jobs:
             -p supermgr-engine \
             -p supermgrd-mac \
             -p supermanager-helper
+
+      # The same gate as the Linux job's Clippy step, over the code only a
+      # macOS build compiles (the Keychain, launchd, the helper).
+      - name: Clippy (Mac crates)
+        run: |
+          cargo clippy --all-targets \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgrd-mac \
+            -p supermanager-helper \
+            -- -D warnings
 
       - name: Tests (Mac crates)
         run: |
@@ -410,6 +421,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
 
       - name: Build (Windows crates)
         run: |
@@ -418,6 +431,17 @@ jobs:
             -p supermgr-mcp `
             -p supermgrd-win `
             -p supermgr-win
+
+      # The same gate as the Linux job's Clippy step, over the code only a
+      # Windows build compiles (the service, the pipe ACL, the Slint GUI).
+      - name: Clippy (Windows crates)
+        run: |
+          cargo clippy --all-targets `
+            -p supermgr-core `
+            -p supermgr-mcp `
+            -p supermgrd-win `
+            -p supermgr-win `
+            -- -D warnings
 
       # Runs the Windows crates' own tests — the daemon's host-key checks
       # against an in-process SSH server among them — and compiles their
