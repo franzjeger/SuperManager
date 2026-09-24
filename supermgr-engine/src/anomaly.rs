@@ -85,6 +85,7 @@ pub fn save(customer_slug: &str, host_ip: &str, baseline: &HostBaseline) -> Resu
 ///   - findings for ports that existed before but are now missing
 ///     (stable port disappeared — could be a host going down OR
 ///     a service being stopped intentionally).
+///
 /// Side effect: persists the updated baseline.
 pub fn reconcile_host(
     customer_slug: &str,

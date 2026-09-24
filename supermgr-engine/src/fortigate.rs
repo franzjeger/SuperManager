@@ -621,7 +621,7 @@ fn parse_resource(body: &str) -> Option<DashboardResource> {
 }
 
 /// Parse `/api/v2/monitor/system/interface`. We filter to physical
-/// + aggregate interfaces and skip loopbacks / sub-VLANs to keep
+/// and aggregate interfaces and skip loopbacks / sub-VLANs to keep
 /// the GUI table compact. Shape (results is keyed by ifname):
 /// ```json
 /// {

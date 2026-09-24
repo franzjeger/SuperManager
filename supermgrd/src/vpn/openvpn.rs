@@ -3,19 +3,19 @@
 //! # Lifecycle
 //!
 //! 1. `connect`:
-//!    a. If credentials are configured, write a temporary `.ovpn` with an
+//!    1. If credentials are configured, write a temporary `.ovpn` with an
 //!       `<auth-user-pass>` inline block appended.
-//!    b. Run `openvpn3 config-import --config <tmp> --name <uuid>` to load
+//!    2. Run `openvpn3 config-import --config <tmp> --name <uuid>` to load
 //!       the configuration into the openvpn3 config manager.  The temp file
 //!       is deleted immediately after import.
-//!    c. Run `openvpn3 config-manage --config <uuid> --allow-compression asym`
+//!    3. Run `openvpn3 config-manage --config <uuid> --allow-compression asym`
 //!       so the client accepts server-pushed compression (VORACLE-safe: only
 //!       receives compressed, never sends).
-//!    d. Run `openvpn3 session-start --config <uuid> --background`.
+//!    4. Run `openvpn3 session-start --config <uuid> --background`.
 //!       Parse the session path from stdout.
 //! 2. `disconnect`:
-//!    a. `openvpn3 session-manage --session-path <path> --disconnect`
-//!    b. `openvpn3 config-remove --config <uuid> --force`
+//!    1. `openvpn3 session-manage --session-path <path> --disconnect`
+//!    2. `openvpn3 config-remove --config <uuid> --force`
 //! 3. `status`: checks `openvpn3 sessions-list` for the stored session path.
 
 use std::{path::PathBuf, sync::Arc};

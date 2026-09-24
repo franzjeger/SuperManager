@@ -14,7 +14,7 @@
 //!    - `tls-auth.key`   — OpenVPN static key converted from `server_secret_hex` (tls-auth dir 1, SHA256).
 //!    - `ca.pem`         — PEM CA certificate from the profile.
 //!    - `auth.txt`       — Two-line `openvpn --auth-user-pass` credentials file
-//!                         (`<upn>\n<access_token>`).
+//!      (`<upn>\n<access_token>`).
 //!    - `client.ovpn`    — Assembled OpenVPN configuration.
 //! 6. Spawn `openvpn --config client.ovpn` and capture stdout/stderr until
 //!    "Initialization Sequence Completed" appears (or the process exits with

@@ -28,9 +28,9 @@ use tokio::sync::RwLock;
 ///
 ///   - `mac` — exact MAC address match. Wins over prefix.
 ///   - `oui` — three-octet OUI prefix match. Lets the
-///             operator classify every `UniFi` device on a
-///             newly-encountered Ubiquiti OUI in one stroke
-///             instead of repeating per host.
+///     operator classify every `UniFi` device on a
+///     newly-encountered Ubiquiti OUI in one stroke
+///     instead of repeating per host.
 ///
 /// Cheap to clone (Arc-shared). One global instance lives
 /// on `DaemonState`.

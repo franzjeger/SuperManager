@@ -11,7 +11,7 @@
 //!    or `%ProgramFiles%\SuperManager\bin\openfortivpn.exe` from the MSI).
 //! 2. Resolve the user's password from Credential Manager.
 //! 3. Spawn `openfortivpn <host>:<port> -u <user>` with `--pppd-no-peerdns`
-//!    + `--no-routes` (split-tunnel) or `--set-routes` (full-tunnel),
+//!    and `--no-routes` (split-tunnel) or `--set-routes` (full-tunnel),
 //!    feeding the password on stdin.
 //! 4. Stream stdout/stderr, looking for `Tunnel is up and running.` or a
 //!    fatal error (`Could not authenticate`, `Connection refused`).

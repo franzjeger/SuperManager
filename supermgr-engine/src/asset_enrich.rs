@@ -7,8 +7,8 @@
 //!    each IP — much more useful than a bare IP for the operator.
 //!    Best-effort (~1s timeout per IP, parallel).
 //! 2. **Zone classification.** Tags each host as `internal` /
-//!    `dmz` / `wan` / `loopback` based on RFC 1918 + RFC 6598
-//!    + 169.254 link-local rules. Drives the per-finding
+//!    `dmz` / `wan` / `loopback` based on RFC 1918, RFC 6598 and
+//!    169.254 link-local rules. Drives the per-finding
 //!    "exposure" judgement: a Critical CVE on an `internal` host
 //!    is bad, on `wan` it's incident-response material.
 //!

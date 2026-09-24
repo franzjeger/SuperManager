@@ -2,7 +2,7 @@
 //!
 //! Architectural note — controllers are NOT tied to an SSH host.
 //! Earlier iterations of this codebase stored `unifi_controller_url`
-//! + creds inline on each `Host`, conflating "an SSH host that
+//! and creds inline on each `Host`, conflating "an SSH host that
 //! happens to be a `UniFi` controller machine" with "any `UniFi`
 //! controller the MSP runs anywhere." The new model treats
 //! controllers as first-class top-level entities. Reasoning:
@@ -963,13 +963,13 @@ pub async fn devmgr_command(
 /// sysinfo. Dispatches based on auth method:
 ///
 ///   - `ApiKey`  → Integration API at
-///                 `/proxy/network/integration/v1/info`. The
-///                 classic /api/.../stat/sysinfo path requires
-///                 a cookie session and 404s for API-key
-///                 callers, so we MUST take the Integration
-///                 API path here.
+///     `/proxy/network/integration/v1/info`. The
+///     classic /api/.../stat/sysinfo path requires
+///     a cookie session and 404s for API-key
+///     callers, so we MUST take the Integration
+///     API path here.
 ///   - `Password`→ classic /api/s/<site>/stat/sysinfo via the
-///                 logged-in cookie session.
+///     logged-in cookie session.
 pub async fn test_connection(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,

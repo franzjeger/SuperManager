@@ -852,8 +852,8 @@ fn oui_database() -> HashMap<String, String> {
 ///   - System Wireshark.app: bundled inside the .app
 ///
 /// File format is one line per OUI:
-///     08:00:20	Sun	Oracle Corporation
-///     8C:ED:E1	`UbiquitiI`	Ubiquiti Inc
+///     08:00:20    Sun    Oracle Corporation
+///     8C:ED:E1    `UbiquitiI`    Ubiquiti Inc
 /// We just take the first two whitespace-separated fields per
 /// line, lowercase the prefix, and overwrite our curated entry
 /// only when the curated table has no entry (so a curated

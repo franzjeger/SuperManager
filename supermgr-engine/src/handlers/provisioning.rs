@@ -39,7 +39,7 @@ impl EngineServer {
     /// Render the template, fetch live config via SSH, return
     /// per-section diff. Heavy operation (one full SSH session
     /// + a `show full-configuration`) so the GUI surfaces a
-    /// spinner while it runs.
+    ///   spinner while it runs.
     pub(crate) async fn handle_provisioning_diff_preview(
         &self,
         id: u64,
