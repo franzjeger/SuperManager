@@ -37,7 +37,7 @@ impl EngineServer {
         let limit = params
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .map_or(200, |n| n as usize);
+            .map_or(200, |n| usize::try_from(n).unwrap_or(usize::MAX));
         let events = crate::activity_log::timeline(&slug, limit);
         match serde_json::to_value(&events) {
             Ok(v) => Response::ok(id, v),

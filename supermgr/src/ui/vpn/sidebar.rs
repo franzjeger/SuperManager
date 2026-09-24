@@ -473,8 +473,7 @@ pub fn populate_vpn_sidebar(
             let gesture = gtk4::GestureClick::builder().button(3).build();
             let popover_ref = popover.clone();
             gesture.connect_pressed(move |_gesture, _n, x, y| {
-                popover_ref
-                    .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover_ref.set_pointing_to(Some(&crate::ui::point_at(x, y)));
                 popover_ref.popup();
             });
             row.add_controller(gesture);
@@ -486,9 +485,9 @@ pub fn populate_vpn_sidebar(
     // Highlight the selected profile, falling back to the active one.
     let highlight_id = selected_id.or(active_id.as_deref());
     if let Some(hid) = highlight_id {
-        for (i, profile) in sorted.iter().enumerate() {
+        for (i, profile) in (0..).zip(sorted.iter()) {
             if profile.id.to_string() == hid {
-                if let Some(row) = list_box.row_at_index(i as i32) {
+                if let Some(row) = list_box.row_at_index(i) {
                     list_box.select_row(Some(&row));
                 }
                 break;

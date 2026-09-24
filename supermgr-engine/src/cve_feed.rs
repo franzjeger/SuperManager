@@ -243,6 +243,10 @@ fn pick_cvss(metrics: &serde_json::Value) -> Option<(Severity, f32)> {
     for key in ["cvssMetricV31", "cvssMetricV30", "cvssMetricV2"] {
         if let Some(arr) = metrics.get(key).and_then(|v| v.as_array()) {
             if let Some(first) = arr.first() {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "a CVSS score is 0.0 to 10.0, to one decimal"
+                )]
                 let cvss = first
                     .get("cvssData")
                     .and_then(|d| d.get("baseScore"))

@@ -100,7 +100,11 @@ pub(super) fn render_management(
             })
             .collect::<Vec<_>>();
         let model = gtk4::StringList::new(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-        let selected = data.profiles.iter().position(|p| p.selected).unwrap_or(0) as u32;
+        let selected = data
+            .profiles
+            .iter()
+            .position(|p| p.selected)
+            .map_or(0, crate::ui::list_position);
         let picker = adw::ComboRow::builder()
             .title("Saved account")
             .model(&model)

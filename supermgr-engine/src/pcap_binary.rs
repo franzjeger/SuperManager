@@ -330,7 +330,7 @@ mod tests {
         buf.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
         // Per-packet header
         buf.extend_from_slice(&[0; 8]); // ts_sec, ts_usec
-        let len = packet.len() as u32;
+        let len = u32::try_from(packet.len()).unwrap();
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(packet);
@@ -354,7 +354,7 @@ mod tests {
         let ip_total_len = 20 + 20 + payload.len();
         frame.push(0x45); // version 4, IHL 5
         frame.push(0x00); // DSCP/ECN
-        frame.extend_from_slice(&(ip_total_len as u16).to_be_bytes());
+        frame.extend_from_slice(&u16::try_from(ip_total_len).unwrap().to_be_bytes());
         frame.extend_from_slice(&[0; 4]); // id + flags + frag_offset
         frame.push(64); // TTL
         frame.push(6); // protocol TCP
@@ -515,7 +515,7 @@ mod tests {
         let mut pcap = pcap_with_one_packet(&f1);
         // Append the second packet record manually
         pcap.extend_from_slice(&[0; 8]); // ts
-        let len = f2.len() as u32;
+        let len = u32::try_from(f2.len()).unwrap();
         pcap.extend_from_slice(&len.to_le_bytes());
         pcap.extend_from_slice(&len.to_le_bytes());
         pcap.extend_from_slice(&f2);

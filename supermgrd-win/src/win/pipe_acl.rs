@@ -91,7 +91,7 @@ impl PipeSecurity {
         }
 
         let attrs = Box::new(SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            nLength: super::paths::win32_size_of::<SECURITY_ATTRIBUTES>(),
             lpSecurityDescriptor: descriptor,
             bInheritHandle: 0,
         });

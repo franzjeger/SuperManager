@@ -785,7 +785,7 @@ async fn list_devices_integration(
         let total = parsed
             .get("totalCount")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(out.len() as u64) as usize;
+            .map_or(out.len(), |n| usize::try_from(n).unwrap_or(usize::MAX));
         offset += data.len();
         if offset >= total {
             break;

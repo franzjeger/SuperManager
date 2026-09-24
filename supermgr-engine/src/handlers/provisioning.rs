@@ -132,7 +132,7 @@ impl EngineServer {
         let limit = params
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(50) as usize;
+            .map_or(50, |n| usize::try_from(n).unwrap_or(usize::MAX));
         match crate::provisioning::list_deployments(&host_id.simple().to_string(), limit) {
             Ok(list) => match serde_json::to_value(&list) {
                 Ok(v) => Response::ok(id, v),

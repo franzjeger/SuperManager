@@ -814,7 +814,7 @@ fn summarise_sections(sections: &[SectionDiff]) -> DiffSummary {
         added,
         modified,
         equal,
-        total: sections.len() as u32,
+        total: u32::try_from(sections.len()).unwrap_or(u32::MAX),
     }
 }
 

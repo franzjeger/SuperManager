@@ -549,7 +549,7 @@ pub fn summary(customer_slug: &str) -> Result<StoreSummary> {
         }
     }
     Ok(StoreSummary {
-        total: store.findings.len() as u32,
+        total: u32::try_from(store.findings.len()).unwrap_or(u32::MAX),
         open,
         accepted_risk: accepted,
         fixed,

@@ -174,7 +174,8 @@ async fn check_dnssec(domain: &str) -> DnssecState {
     // DS records live at the parent zone — `dig DS <domain>` asks
     // the parent. Count of records ≥ 1 indicates DNSSEC delegation.
     let res = dig(domain, "DS").await;
-    let count = res.iter().filter(|line| !line.is_empty()).count() as u32;
+    let count =
+        u32::try_from(res.iter().filter(|line| !line.is_empty()).count()).unwrap_or(u32::MAX);
     if count == 0 {
         DnssecState::Disabled
     } else {

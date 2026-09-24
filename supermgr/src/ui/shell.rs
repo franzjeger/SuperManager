@@ -231,8 +231,8 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
                 return;
             };
             for (list, group) in &rows {
-                for (index, section) in group.iter().enumerate() {
-                    if let Some(row) = list.row_at_index(index as i32) {
+                for (index, section) in (0..).zip(group.iter()) {
+                    if let Some(row) = list.row_at_index(index) {
                         if section.id == name {
                             row.add_css_class("active");
                         } else {
@@ -263,9 +263,9 @@ pub fn build(stack: &adw::ViewStack, content: &impl IsA<gtk4::Widget>) -> Shell 
 
     stack.set_visible_child_name("vpn");
     for (list, group) in &rows {
-        for (index, section) in group.iter().enumerate() {
+        for (index, section) in (0..).zip(group.iter()) {
             if section.id == "vpn" {
-                if let Some(row) = list.row_at_index(index as i32) {
+                if let Some(row) = list.row_at_index(index) {
                     row.add_css_class("active");
                 }
             }

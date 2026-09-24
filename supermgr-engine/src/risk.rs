@@ -119,9 +119,18 @@ pub fn score_hosts(
             let base = base_weight(f.finding.severity);
             let days = (now - f.first_seen).num_days().max(0);
             oldest_days = oldest_days.max(days);
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "exact to 2^24 days, and the factor stops at 2.0 after 50"
+            )]
             let age_factor = (1.0 + 0.02 * days as f32).min(2.0);
             weight_sum += base * age_factor * exposure;
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "at most 100, and never below 0: no weight is negative"
+        )]
         let score = weight_sum.min(100.0).round() as u8;
         let band = RiskBand::from_score(score);
         let hint = format!(
@@ -142,7 +151,7 @@ pub fn score_hosts(
             host_ip,
             score,
             band,
-            open_findings: fs.len() as u32,
+            open_findings: u32::try_from(fs.len()).unwrap_or(u32::MAX),
             hint,
             critical: crit,
             high,

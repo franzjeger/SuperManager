@@ -805,7 +805,8 @@ async fn fetch_unifi_cloud_devices(
                             .ok()
                             .map(|dt| {
                                 let now = chrono::Utc::now();
-                                (now - dt.with_timezone(&chrono::Utc)).num_seconds().max(0) as u64
+                                u64::try_from((now - dt.with_timezone(&chrono::Utc)).num_seconds())
+                                    .unwrap_or(0)
                             })
                     };
 
@@ -1287,7 +1288,11 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
         update_label_by_name(flow_box, &format!("cpu-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{cpu}%"));
         });
-        update_progress_by_name(flow_box, &format!("cpu-bar-{host_id}"), cpu as f64 / 100.0);
+        update_progress_by_name(
+            flow_box,
+            &format!("cpu-bar-{host_id}"),
+            percent_fraction(cpu),
+        );
     }
 
     // Memory.
@@ -1296,7 +1301,11 @@ fn apply_fortigate_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value,
         update_label_by_name(flow_box, &format!("mem-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{mem}%"));
         });
-        update_progress_by_name(flow_box, &format!("mem-bar-{host_id}"), mem as f64 / 100.0);
+        update_progress_by_name(
+            flow_box,
+            &format!("mem-bar-{host_id}"),
+            percent_fraction(mem),
+        );
     }
 
     // VPN tunnels + last backup.
@@ -1467,7 +1476,11 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
         update_label_by_name(flow_box, &format!("cpu-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{cpu}%"));
         });
-        update_progress_by_name(flow_box, &format!("cpu-bar-{host_id}"), cpu as f64 / 100.0);
+        update_progress_by_name(
+            flow_box,
+            &format!("cpu-bar-{host_id}"),
+            percent_fraction(cpu),
+        );
     }
 
     // Memory.
@@ -1478,7 +1491,11 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
         update_label_by_name(flow_box, &format!("mem-pct-{host_id}"), |lbl| {
             lbl.set_label(&format!("{mem}%"));
         });
-        update_progress_by_name(flow_box, &format!("mem-bar-{host_id}"), mem as f64 / 100.0);
+        update_progress_by_name(
+            flow_box,
+            &format!("mem-bar-{host_id}"),
+            percent_fraction(mem),
+        );
     }
 
     // Connected clients.
@@ -1491,6 +1508,11 @@ fn apply_unifi_status(flow_box: &gtk4::FlowBox, host_id: &str, data: &Value) {
 
 /// Extract CPU or memory value from FortiGate resource data.
 /// Handles both `u64` and array `[{"current": N}]` formats.
+/// A percentage as a progress bar's fraction; past 100, a full bar.
+fn percent_fraction(percent: u64) -> f64 {
+    f64::from(u8::try_from(percent.min(100)).unwrap_or(100)) / 100.0
+}
+
 fn extract_resource_val(resource: Option<&Value>, results: &Value, key: &str) -> Option<u64> {
     resource
         .and_then(|r| r.get(key))

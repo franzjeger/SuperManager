@@ -358,7 +358,7 @@ impl CustomerView {
                     })
                 })
                 .unwrap_or(0);
-            dropdown.set_selected(current as u32);
+            dropdown.set_selected(crate::ui::list_position(current));
             {
                 let choices = choices.clone();
                 let host_id = host.id.to_string();
@@ -436,7 +436,7 @@ impl CustomerView {
                 .iter()
                 .position(|(slug, _)| slug == &profile.customer)
                 .unwrap_or(0);
-            dropdown.set_selected(current as u32);
+            dropdown.set_selected(crate::ui::list_position(current));
             {
                 let choices = choices.clone();
                 let profile_id = profile.id.to_string();

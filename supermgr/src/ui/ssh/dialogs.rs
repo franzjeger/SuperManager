@@ -61,7 +61,7 @@ fn device_type_index(dt: supermgr_core::DeviceType) -> u32 {
     DEVICE_TYPES
         .iter()
         .position(|(variant, _)| *variant == dt)
-        .unwrap_or(0) as u32
+        .map_or(0, crate::ui::list_position)
 }
 
 // ---------------------------------------------------------------------------
@@ -608,8 +608,8 @@ pub fn show_import_keys_dialog(
             // Gather selected paths by checking which CheckButtons are active.
             let paths = scan_results.borrow();
             let mut selected_paths: Vec<String> = Vec::new();
-            for (i, path) in paths.iter().enumerate() {
-                if let Some(_row) = results_list.row_at_index(i as i32) {
+            for (i, path) in (0..).zip(paths.iter()) {
+                if let Some(_row) = results_list.row_at_index(i) {
                     // The check button is the prefix of the ActionRow child.
                     // Since we always add all of them as active, default to including.
                     selected_paths.push(path.clone());
@@ -696,7 +696,7 @@ pub fn show_push_key_dialog(
     if let Some(pre_id) = preselected_key_id {
         for (i, k) in keys.iter().enumerate() {
             if k.id.to_string() == pre_id {
-                key_row.set_selected(i as u32);
+                key_row.set_selected(crate::ui::list_position(i));
                 break;
             }
         }
@@ -853,7 +853,7 @@ pub fn show_revoke_key_dialog(
     if let Some(pre_id) = preselected_key_id {
         for (i, k) in keys.iter().enumerate() {
             if k.id.to_string() == pre_id {
-                key_row.set_selected(i as u32);
+                key_row.set_selected(crate::ui::list_position(i));
                 break;
             }
         }
@@ -1038,14 +1038,14 @@ pub fn show_edit_host_dialog(
     let missing_index = if missing_key {
         key_names.push("Missing assigned key — choose a replacement".into());
         key_ids.push(host.auth_key_id.map(|id| id.to_string()));
-        Some((key_names.len() - 1) as u32)
+        Some(crate::ui::list_position(key_names.len() - 1))
     } else {
         None
     };
     let current_key_idx = host
         .auth_key_id
         .and_then(|id| keys.iter().position(|key| key.id == id))
-        .map(|index| index as u32 + 1)
+        .map(|index| crate::ui::list_position(index + 1))
         .or(missing_index)
         .unwrap_or(0);
     let key_model =
@@ -1096,7 +1096,7 @@ pub fn show_edit_host_dialog(
     let vpn_idx = host
         .vpn_profile_id
         .and_then(|vid| vpn_profiles.iter().position(|p| p.id == vid))
-        .map_or(0, |i| (i + 1) as u32);
+        .map_or(0, |i| crate::ui::list_position(i + 1));
     let vpn_row = adw::ComboRow::builder()
         .title("VPN Profile")
         .subtitle("Auto-connect VPN before SSH")
@@ -1117,7 +1117,7 @@ pub fn show_edit_host_dialog(
     let jump_idx = host
         .proxy_jump
         .and_then(|jid| other_hosts.iter().position(|h| h.id == jid))
-        .map_or(0, |i| (i + 1) as u32);
+        .map_or(0, |i| crate::ui::list_position(i + 1));
     let jump_row = adw::ComboRow::builder()
         .title("Jump Host")
         .subtitle("Connect via bastion/jump host (ProxyJump)")

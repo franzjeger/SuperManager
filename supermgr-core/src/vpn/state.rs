@@ -234,6 +234,10 @@ fn is_zero_u64(n: &u64) -> bool {
 impl TunnelStats {
     /// Format `bytes` as a human-readable string (e.g. `"1.23 GiB"`).
     #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "shown to two decimals, and exact below 8 PiB"
+    )]
     pub fn format_bytes(bytes: u64) -> String {
         const KIB: u64 = 1024;
         const MIB: u64 = KIB * 1024;

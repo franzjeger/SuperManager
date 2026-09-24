@@ -59,7 +59,7 @@ pub async fn walk(host: &str) -> Option<SnmpDetail> {
             }
             detail.interfaces = snmpwalk_iface(host, community).await;
             if !detail.interfaces.is_empty() {
-                detail.raw_count += detail.interfaces.len() as u32;
+                detail.raw_count += u32::try_from(detail.interfaces.len()).unwrap_or(u32::MAX);
             }
             return Some(detail);
         }

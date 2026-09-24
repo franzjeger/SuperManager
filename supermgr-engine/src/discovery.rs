@@ -207,7 +207,7 @@ pub async fn passive_scan(
                 technique: crate::engagement::Technique::Recon,
                 target: customer_slug.unwrap_or("local").to_owned(),
                 action: "passive_scan".to_owned(),
-                findings: result.hosts.len() as u32,
+                findings: u32::try_from(result.hosts.len()).unwrap_or(u32::MAX),
                 notes: format!("{} hosts discovered", result.hosts.len()),
             },
         );
@@ -1302,7 +1302,7 @@ pub async fn active_scan(
                 technique: crate::engagement::Technique::Discovery,
                 target: format!("{} hosts", targets.len()),
                 action: "active_scan".into(),
-                findings: result.findings.len() as u32,
+                findings: u32::try_from(result.findings.len()).unwrap_or(u32::MAX),
                 notes: format!(
                     "{} hosts × {} ports → {} findings ({})",
                     result.hosts.len(),

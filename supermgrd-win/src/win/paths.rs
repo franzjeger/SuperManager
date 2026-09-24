@@ -209,14 +209,14 @@ fn secure_existing_children(dir: &Path, sddl: &str) -> io::Result<()> {
 fn secure_directory(path: &Path, sddl: &str, allow_existing: bool) -> io::Result<OwnedHandle> {
     let descriptor = SecurityDescriptor::parse(sddl)?;
     let attributes = SECURITY_ATTRIBUTES {
-        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        nLength: win32_size_of::<SECURITY_ATTRIBUTES>(),
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: 0,
     };
     let wide = wide_path(path)?;
     if unsafe { CreateDirectoryW(wide.as_ptr(), &raw const attributes) } == 0 {
         let error = io::Error::last_os_error();
-        if !allow_existing || error.raw_os_error() != Some(ERROR_ALREADY_EXISTS as i32) {
+        if !allow_existing || error.raw_os_error() != Some(ERROR_ALREADY_EXISTS.cast_signed()) {
             return Err(error);
         }
     }
@@ -348,11 +348,24 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
     Ok(wide)
 }
 
+/// `size_of::<T>()` as the `u32` a Win32 struct records its size in,
+/// checked when this is compiled.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "checked at compile time, just above"
+)]
+pub(crate) const fn win32_size_of<T>() -> u32 {
+    const { assert!(std::mem::size_of::<T>() <= u32::MAX as usize) };
+    std::mem::size_of::<T>() as u32
+}
+
 fn win32_result(code: u32) -> io::Result<()> {
     if code == 0 {
         Ok(())
     } else {
-        Err(io::Error::from_raw_os_error(code as i32))
+        // Win32 error codes are DWORDs; io::Error keeps them as the same
+        // bits in an i32.
+        Err(io::Error::from_raw_os_error(code.cast_signed()))
     }
 }
 
@@ -412,7 +425,7 @@ mod tests {
         );
         assert_ne!(present, 0);
         let mut sid = [0u32; 17];
-        let mut length = std::mem::size_of_val(&sid) as u32;
+        let mut length = win32_size_of::<[u32; 17]>();
         assert_ne!(
             unsafe {
                 CreateWellKnownSid(
@@ -478,7 +491,7 @@ mod tests {
         // Service filesystem tests require an elevated runner and use only
         // temporary paths. No security setup error is accepted as a test pass.
         let mut admins_sid = [0u32; 17];
-        let mut length = std::mem::size_of_val(&admins_sid) as u32;
+        let mut length = win32_size_of::<[u32; 17]>();
         assert_ne!(
             unsafe {
                 CreateWellKnownSid(

@@ -1350,7 +1350,7 @@ impl DaemonService {
                 Ok(BackendStatus::Active { stats, .. }) => {
                     let lhs = stats
                         .last_handshake
-                        .map_or(0, |dt| dt.timestamp().max(0) as u64);
+                        .map_or(0, |dt| u64::try_from(dt.timestamp()).unwrap_or(0));
                     (stats.bytes_sent, stats.bytes_received, lhs)
                 }
                 _ => (0, 0, 0),
@@ -4846,7 +4846,7 @@ impl DaemonService {
         secrets::import_secrets_raw(&backup.secrets)
             .await
             .map_err(|e| fdo::Error::Failed(format!("restore secrets: {e}")))?;
-        let imported_secrets = backup.secrets.len() as u32;
+        let imported_secrets = u32::try_from(backup.secrets.len()).unwrap_or(u32::MAX);
 
         let mut imported_profiles: u32 = 0;
         let mut imported_keys: u32 = 0;
@@ -7986,7 +7986,8 @@ pub fn spawn_monitor_task(
                     {
                         let uptime_secs = match &current_state {
                             VpnState::Connected { since, .. } => {
-                                (chrono::Utc::now() - *since).num_seconds().max(0) as u64
+                                u64::try_from((chrono::Utc::now() - *since).num_seconds())
+                                    .unwrap_or(0)
                             }
                             _ => 0,
                         };

@@ -621,8 +621,9 @@ fn init_tags(buffer: &gtk4::TextBuffer) {
 
 pub fn append_tagged(buffer: &gtk4::TextBuffer, text: &str, tag_name: &str) {
     let mut end = buffer.end_iter();
+    let start = end.offset();
     buffer.insert(&mut end, text);
-    let start = buffer.iter_at_offset(end.offset() - text.chars().count() as i32);
+    let start = buffer.iter_at_offset(start);
     if let Some(tag) = buffer.tag_table().lookup(tag_name) {
         buffer.apply_tag(&tag, &start, &end);
     }

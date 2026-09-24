@@ -494,13 +494,13 @@ fn build_step1_customer_info(
         let state = Rc::clone(state);
         let host_ids = Rc::clone(&host_ids);
         host_row.connect_selected_notify(move |row| {
-            let idx = row.selected() as usize;
+            let position = row.selected();
             let ids = host_ids.borrow();
-            if let Some(id) = ids.get(idx) {
+            if let Some(id) = usize::try_from(position).ok().and_then(|i| ids.get(i)) {
                 state.borrow_mut().target_host_id = id.clone();
             }
             if let Some(model) = row.model() {
-                if let Some(item) = model.item(idx as u32) {
+                if let Some(item) = model.item(position) {
                     if let Ok(s) = item.downcast::<gtk4::StringObject>() {
                         state.borrow_mut().target_host_label = s.string().to_string();
                     }
@@ -1558,7 +1558,7 @@ fn build_step3_services(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget {
     {
         let state = Rc::clone(state);
         https_port_row.connect_value_notify(move |row| {
-            state.borrow_mut().admin_https_port = row.value() as u32;
+            state.borrow_mut().admin_https_port = crate::ui::spin_value(row);
         });
     }
 
@@ -2562,12 +2562,11 @@ fn generate_network_svg(state: &WizardState) -> String {
         state.wan_ip.clone()
     };
 
-    let vlan_count = state.vlans.len().max(1);
+    let vlan_count = u32::try_from(state.vlans.len().max(1)).unwrap_or(u32::MAX);
     let vlan_box_w: u32 = 160;
     let vlan_box_h: u32 = 80;
     let vlan_spacing: u32 = 24;
-    let total_vlan_width =
-        (vlan_count as u32) * vlan_box_w + (vlan_count as u32).saturating_sub(1) * vlan_spacing;
+    let total_vlan_width = vlan_count * vlan_box_w + vlan_count.saturating_sub(1) * vlan_spacing;
     let svg_w = total_vlan_width.max(600) + 100;
     let svg_h: u32 = if state.vpn_site_to_site || state.vpn_remote_access {
         580
@@ -2624,7 +2623,7 @@ fn generate_network_svg(state: &WizardState) -> String {
     ));
 
     // WAN link (cloud to firewall)
-    let ip_label_w = wan_ip_label.len() as u32 * 8 + 16;
+    let ip_label_w = u32::try_from(wan_ip_label.len()).unwrap_or(0) * 8 + 16;
     svg.push_str(&format!(
         r##"<line x1="{cx}" y1="88" x2="{cx}" y2="{fw_y}" stroke="#555" stroke-width="2.5" stroke-dasharray="6,3"/>
 <rect x="{ip_x}" y="110" width="{ip_label_w}" height="20" rx="4" fill="white" stroke="#ccc" stroke-width="0.5"/>
@@ -2682,8 +2681,8 @@ fn generate_network_svg(state: &WizardState) -> String {
             }
         ));
     } else {
-        for (i, vlan) in state.vlans.iter().enumerate() {
-            let bx = vlan_start_x + (i as u32) * (vlan_box_w + vlan_spacing);
+        for (i, vlan) in (0..).zip(state.vlans.iter()) {
+            let bx = vlan_start_x + i * (vlan_box_w + vlan_spacing);
             let bcx = bx + vlan_box_w / 2;
             let color = vlan_color(&vlan.name);
             let text_c = text_color_for(color);
@@ -2739,12 +2738,12 @@ fn generate_network_svg(state: &WizardState) -> String {
             lock_y = fw_mid + 5,
         ));
 
-        for (i, label) in vpn_labels.iter().enumerate() {
+        for (i, label) in (0u32..).zip(vpn_labels.iter()) {
             svg.push_str(&format!(
                 r##"<text x="{tx}" y="{ty}" text-anchor="start" class="label" fill="#e65100">{label}</text>
 "##,
                 tx = fw_x + fw_w + 92,
-                ty = fw_mid - 2 + (i as u32) * 16,
+                ty = fw_mid - 2 + i * 16,
             ));
         }
 

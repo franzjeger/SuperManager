@@ -449,6 +449,11 @@ pub fn tally(checks: &[CheckResult]) -> (u32, u32, u32, u32) {
 /// penalty (an unknown is worse than a known-good but better than
 /// a known-bad — they need investigation). Clamped to [0, 100].
 #[must_use]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=100 first"
+)]
 pub fn score(results: &[CheckResult]) -> u8 {
     let mut s: f64 = 100.0;
     for r in results {
@@ -2201,19 +2206,27 @@ mod tests {
         let passed = checks
             .iter()
             .filter(|c| matches!(c.status, Status::Pass))
-            .count() as u32;
+            .count()
+            .try_into()
+            .unwrap();
         let failed = checks
             .iter()
             .filter(|c| matches!(c.status, Status::Fail))
-            .count() as u32;
+            .count()
+            .try_into()
+            .unwrap();
         let errored = checks
             .iter()
             .filter(|c| matches!(c.status, Status::Error))
-            .count() as u32;
+            .count()
+            .try_into()
+            .unwrap();
         let skipped = checks
             .iter()
             .filter(|c| matches!(c.status, Status::Skip))
-            .count() as u32;
+            .count()
+            .try_into()
+            .unwrap();
         ComplianceRun {
             id: id.to_owned(),
             host_id: "00000000-0000-0000-0000-000000000000".to_owned(),

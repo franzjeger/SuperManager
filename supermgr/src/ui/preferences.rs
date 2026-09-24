@@ -203,10 +203,15 @@ pub fn show_settings_dialog(
         .title("Auto-lock timeout")
         .subtitle("Minutes of inactivity (0 = disabled)")
         .adjustment(&gtk4::Adjustment::new(
-            app_settings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .auto_lock_minutes as f64,
+            f64::from(
+                u32::try_from(
+                    app_settings
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .auto_lock_minutes,
+                )
+                .unwrap_or(u32::MAX),
+            ),
             0.0,
             120.0,
             1.0,
@@ -222,10 +227,7 @@ pub fn show_settings_dialog(
             let mut s = app_settings
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-            {
-                s.auto_lock_minutes = row.value() as u64;
-            }
+            s.auto_lock_minutes = u64::from(crate::ui::spin_value(row));
             s.save();
         });
     }

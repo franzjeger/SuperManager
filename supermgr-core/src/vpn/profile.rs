@@ -534,7 +534,9 @@ impl From<&Profile> for ProfileSummary {
             auto_connect: p.auto_connect,
             full_tunnel: p.full_tunnel,
             split_routes,
-            last_connected_secs: p.last_connected_at.map(|dt| dt.timestamp().max(0) as u64),
+            last_connected_secs: p
+                .last_connected_at
+                .map(|dt| u64::try_from(dt.timestamp()).unwrap_or(0)),
             host: match &p.config {
                 ProfileConfig::FortiGate(fg) => Some(fg.host.clone()),
                 ProfileConfig::ForticlientSslvpn(fc) => Some(fc.host.clone()),

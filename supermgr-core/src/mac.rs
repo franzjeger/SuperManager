@@ -166,10 +166,14 @@ impl MacClient {
     }
 
     async fn exchange(&self, frame: &[u8], want_id: u64) -> Result<Response, MacError> {
+        // Before the stream is taken: `invoke` keeps requests far below
+        // this, and a request refused here leaves the connection usable.
+        let length = u32::try_from(frame.len())
+            .map_err(|_| MacError::Protocol(format!("request exceeds {MAX_FRAME_BYTES} bytes")))?;
         let mut guard = self.inner.io.lock().await;
         let mut stream = guard.take().ok_or(MacError::Disconnected)?;
         stream
-            .write_all(&(frame.len() as u32).to_be_bytes())
+            .write_all(&length.to_be_bytes())
             .await
             .map_err(MacError::Io)?;
         stream.write_all(frame).await.map_err(MacError::Io)?;
@@ -587,7 +591,7 @@ mod tests {
 
     fn frame(value: Value) -> Vec<u8> {
         let body = serde_json::to_vec(&value).unwrap();
-        let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+        let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
         frame.extend(body);
         frame
     }

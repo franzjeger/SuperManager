@@ -424,8 +424,7 @@ pub fn populate_ssh_key_list(
             let gesture = gtk4::GestureClick::builder().button(3).build();
             let popover_ref = popover.clone();
             gesture.connect_pressed(move |_gesture, _n, x, y| {
-                popover_ref
-                    .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                popover_ref.set_pointing_to(Some(&crate::ui::point_at(x, y)));
                 popover_ref.popup();
             });
             row.add_controller(gesture);
@@ -436,9 +435,9 @@ pub fn populate_ssh_key_list(
 
     // Highlight selected key.
     if let Some(sid) = selected_id {
-        for (i, key) in sorted.iter().enumerate() {
+        for (i, key) in (0..).zip(sorted.iter()) {
             if key.id.to_string() == sid {
-                if let Some(row) = list_box.row_at_index(i as i32) {
+                if let Some(row) = list_box.row_at_index(i) {
                     list_box.select_row(Some(&row));
                 }
                 break;

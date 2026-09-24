@@ -386,7 +386,7 @@ async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
     let len = f.metadata().await?.len();
     let start = len.saturating_sub(want_bytes);
     f.seek(SeekFrom::Start(start)).await?;
-    let mut buf = Vec::with_capacity(want_bytes as usize);
+    let mut buf = Vec::with_capacity(usize::try_from(len - start).unwrap_or(0));
     f.read_to_end(&mut buf).await?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
@@ -436,8 +436,9 @@ async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> 
         };
 
         let resp_bytes = serde_json::to_vec(&response)?;
-        let len = (resp_bytes.len() as u32).to_be_bytes();
-        stream.write_all(&len).await?;
+        let len = u32::try_from(resp_bytes.len())
+            .with_context(|| format!("response too large to send: {} bytes", resp_bytes.len()))?;
+        stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(&resp_bytes).await?;
     }
 }

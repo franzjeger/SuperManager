@@ -57,7 +57,8 @@ pub fn windows_prefers_dark() -> bool {
     let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
     let value = wide("AppsUseLightTheme");
     let mut data: u32 = 1;
-    let mut size = std::mem::size_of::<u32>() as u32;
+    // The bytes in `data`.
+    let mut size = u32::BITS / 8;
     // SAFETY: NUL-terminated strings, and a DWORD-sized buffer whose size
     // is passed alongside it.
     let status = unsafe {

@@ -132,7 +132,7 @@ async fn fetch_public_ip() -> Result<String> {
 fn parse_hex_mask(hex: &str) -> Option<u8> {
     let stripped = hex.strip_prefix("0x").unwrap_or(hex);
     let n = u32::from_str_radix(stripped, 16).ok()?;
-    Some(n.count_ones() as u8)
+    u8::try_from(n.count_ones()).ok()
 }
 
 /// Compute the network address by AND-ing the IP with the mask.

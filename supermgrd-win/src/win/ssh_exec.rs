@@ -371,7 +371,9 @@ async fn collect_output(
             }
             ChannelMsg::ExtendedData { .. } => {}
             ChannelMsg::ExitStatus { exit_status } => {
-                exit = exit_status as i32;
+                // Not `as`: a status past i32::MAX must not wrap round to
+                // -1, which here means none was sent.
+                exit = i32::try_from(exit_status).unwrap_or(i32::MAX);
             }
             ChannelMsg::Eof => break,
             _ => {}

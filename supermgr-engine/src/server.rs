@@ -140,8 +140,10 @@ impl EngineServer {
 
             // Write response with length prefix.
             let resp_bytes = serde_json::to_vec(&response)?;
-            let len = (resp_bytes.len() as u32).to_be_bytes();
-            stream.write_all(&len).await?;
+            let len = u32::try_from(resp_bytes.len()).map_err(|_| {
+                anyhow::anyhow!("response too large to send: {} bytes", resp_bytes.len())
+            })?;
+            stream.write_all(&len.to_be_bytes()).await?;
             stream.write_all(&resp_bytes).await?;
         }
     }

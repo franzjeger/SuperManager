@@ -198,7 +198,8 @@ impl SecurityView {
             .unwrap_or(0);
         *self.scopes.borrow_mut() = options;
         self.scope_picker.set_model(Some(&model));
-        self.scope_picker.set_selected(index as u32);
+        self.scope_picker
+            .set_selected(crate::ui::list_position(index));
         self.scope_picker.set_sensitive(model.n_items() > 0);
     }
 

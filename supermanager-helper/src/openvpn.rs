@@ -964,7 +964,7 @@ fn netmask_to_prefix_len(mask: &str) -> Option<u8> {
     if leading + trailing != 32 {
         return None;
     }
-    Some(leading as u8)
+    u8::try_from(leading).ok()
 }
 
 // ---------------------------------------------------------------------------

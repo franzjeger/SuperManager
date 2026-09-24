@@ -67,7 +67,7 @@ async fn rpc_call(socket_path: &str, method: &str, params: Value, id: u64) -> Va
         "id": id,
     });
     let body = serde_json::to_vec(&req).unwrap();
-    let len = (body.len() as u32).to_be_bytes();
+    let len = u32::try_from(body.len()).unwrap().to_be_bytes();
     stream.write_all(&len).await.expect("write len");
     stream.write_all(&body).await.expect("write body");
 
@@ -120,7 +120,7 @@ async fn malformed_json_returns_parse_error() {
 
     // Length-prefixed garbage (length is correct but body isn't JSON).
     let body = b"this is not json";
-    let len = (body.len() as u32).to_be_bytes();
+    let len = u32::try_from(body.len()).unwrap().to_be_bytes();
     stream.write_all(&len).await.unwrap();
     stream.write_all(body).await.unwrap();
 
@@ -164,7 +164,7 @@ async fn parallel_connections_all_succeed() {
 
     for (i, h) in handles.into_iter().enumerate() {
         let resp = h.await.expect("task");
-        assert_eq!(resp["id"].as_u64().unwrap() as usize, i);
+        assert_eq!(resp["id"].as_u64(), Some(u64::try_from(i).unwrap()));
         assert!(resp["result"].is_object());
     }
 }

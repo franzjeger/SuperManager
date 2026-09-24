@@ -71,6 +71,10 @@ use self::vpn::sidebar::populate_vpn_sidebar;
 // ---------------------------------------------------------------------------
 
 /// Format a byte count as a human-readable string.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "shown to one decimal, and exact below 8 PiB"
+)]
 pub fn format_bytes(n: u64) -> String {
     const KIB: u64 = 1_024;
     const MIB: u64 = 1_024 * KIB;
@@ -84,6 +88,32 @@ pub fn format_bytes(n: u64) -> String {
     } else {
         format!("{n} B")
     }
+}
+
+/// A 1×1 rectangle at a pointer position, for a popover to point at.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "`as` saturates, and a pointer position is on screen"
+)]
+pub(crate) fn point_at(x: f64, y: f64) -> gtk4::gdk::Rectangle {
+    gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)
+}
+
+/// A spin row's value as the whole number its adjustment makes it. `as`
+/// saturates, so a value outside `u32`, which no row here allows, would be
+/// clamped rather than wrapped.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "saturating by definition; see above"
+)]
+pub(crate) fn spin_value(row: &adw::SpinRow) -> u32 {
+    row.value().round() as u32
+}
+
+/// `index` as a position in a GTK list model; past `u32::MAX`, none.
+pub(crate) fn list_position(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(gtk4::INVALID_LIST_POSITION)
 }
 
 /// Format elapsed seconds as "X ago".
@@ -849,7 +879,7 @@ pub fn build_ui(
         let gesture = gtk4::GestureClick::builder().button(3).build();
         let popover_ref = popover.clone();
         gesture.connect_pressed(move |_, _, x, y| {
-            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.set_pointing_to(Some(&point_at(x, y)));
             popover_ref.popup();
         });
         vpn_profile_list.add_controller(gesture);
@@ -878,7 +908,7 @@ pub fn build_ui(
         let gesture = gtk4::GestureClick::builder().button(3).build();
         let popover_ref = popover.clone();
         gesture.connect_pressed(move |_, _, x, y| {
-            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.set_pointing_to(Some(&point_at(x, y)));
             popover_ref.popup();
         });
         ssh_host_list.add_controller(gesture);
@@ -915,7 +945,7 @@ pub fn build_ui(
         let gesture = gtk4::GestureClick::builder().button(3).build();
         let popover_ref = popover.clone();
         gesture.connect_pressed(move |_, _, x, y| {
-            popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+            popover_ref.set_pointing_to(Some(&point_at(x, y)));
             popover_ref.popup();
         });
         ssh_key_list.add_controller(gesture);

@@ -80,7 +80,7 @@ impl EngineServer {
         let limit = params
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .map_or(50, |n| n as usize);
+            .map_or(50, |n| usize::try_from(n).unwrap_or(usize::MAX));
         match crate::compliance::load_history(&host_id.simple().to_string(), limit) {
             Ok(history) => match serde_json::to_value(&history) {
                 Ok(v) => Response::ok(id, v),

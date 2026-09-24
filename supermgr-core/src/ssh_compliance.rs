@@ -1097,7 +1097,7 @@ mod tests {
 
         assert_eq!(
             run.errored,
-            check_count() as u32,
+            u32::try_from(check_count()).unwrap(),
             "every check is inconclusive"
         );
         assert_eq!(run.failed, 0, "a permission error is not a finding");
@@ -1130,7 +1130,7 @@ mod tests {
             })
         })
         .await;
-        assert_eq!(run.errored, check_count() as u32);
+        assert_eq!(run.errored, u32::try_from(check_count()).unwrap());
         assert_eq!(run.failed, 0);
     }
 
@@ -1445,7 +1445,7 @@ mod tests {
             run.checks.iter().all(|c| matches!(c.status, Status::Pass)),
             "all should be Pass"
         );
-        assert_eq!(run.passed, check_count() as u32);
+        assert_eq!(run.passed, u32::try_from(check_count()).unwrap());
         assert_eq!(run.failed, 0);
         assert_eq!(run.errored, 0);
         assert_eq!(run.score, 100, "no failures → max score");
@@ -1466,7 +1466,7 @@ mod tests {
             run.checks.iter().all(|c| matches!(c.status, Status::Fail)),
             "all should be Fail with non-matching output"
         );
-        assert_eq!(run.failed, check_count() as u32);
+        assert_eq!(run.failed, u32::try_from(check_count()).unwrap());
         assert_eq!(run.passed, 0);
         assert_eq!(run.errored, 0);
         assert!(run.score < 100, "failures must drop score below 100");
@@ -1494,7 +1494,7 @@ mod tests {
                 .as_deref()
                 .is_some_and(|s| s.contains("simulated ssh disconnect")));
         }
-        assert_eq!(run.errored, check_count() as u32);
+        assert_eq!(run.errored, u32::try_from(check_count()).unwrap());
         assert_eq!(run.failed, 0);
     }
 
@@ -1525,26 +1525,34 @@ mod tests {
         .await;
 
         // Recount independently — the tally must match exactly.
-        let manual_passed = run
+        let manual_passed: u32 = run
             .checks
             .iter()
             .filter(|c| matches!(c.status, Status::Pass))
-            .count() as u32;
-        let manual_failed = run
+            .count()
+            .try_into()
+            .unwrap();
+        let manual_failed: u32 = run
             .checks
             .iter()
             .filter(|c| matches!(c.status, Status::Fail))
-            .count() as u32;
-        let manual_errored = run
+            .count()
+            .try_into()
+            .unwrap();
+        let manual_errored: u32 = run
             .checks
             .iter()
             .filter(|c| matches!(c.status, Status::Error))
-            .count() as u32;
-        let manual_skipped = run
+            .count()
+            .try_into()
+            .unwrap();
+        let manual_skipped: u32 = run
             .checks
             .iter()
             .filter(|c| matches!(c.status, Status::Skip))
-            .count() as u32;
+            .count()
+            .try_into()
+            .unwrap();
 
         assert_eq!(
             run.passed, manual_passed,
@@ -1555,7 +1563,7 @@ mod tests {
         assert_eq!(run.skipped, manual_skipped, "skipped tally");
         assert_eq!(
             run.passed + run.failed + run.errored + run.skipped,
-            run.checks.len() as u32,
+            u32::try_from(run.checks.len()).unwrap(),
             "tallies must sum to total check count"
         );
 

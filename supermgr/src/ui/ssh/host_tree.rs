@@ -634,9 +634,7 @@ pub fn populate_ssh_host_list(
                     .build();
                 let popover_ref = popover.clone();
                 gesture.connect_pressed(move |_gesture, _n, x, y| {
-                    popover_ref.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(
-                        x as i32, y as i32, 1, 1,
-                    )));
+                    popover_ref.set_pointing_to(Some(&crate::ui::point_at(x, y)));
                     popover_ref.popup();
                 });
                 row.add_controller(gesture);
@@ -650,9 +648,9 @@ pub fn populate_ssh_host_list(
 
     // Highlight selected host.
     if let Some(sid) = selected_id {
-        for (i, entry) in host_row_map.iter().enumerate() {
+        for (i, entry) in (0..).zip(host_row_map.iter()) {
             if entry.as_deref() == Some(sid) {
-                if let Some(row) = list_box.row_at_index(i as i32) {
+                if let Some(row) = list_box.row_at_index(i) {
                     list_box.select_row(Some(&row));
                 }
                 break;

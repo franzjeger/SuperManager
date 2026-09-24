@@ -1083,7 +1083,8 @@ impl WireGuardBackend {
         // Interface index (i32 — D-Bus `i` type).
         // ----------------------------------------------------------------
         let ifindex: i32 = match nix::net::if_::if_nametoindex(iface_name) {
-            Ok(idx) => idx as i32,
+            // resolved takes the kernel's own type for it, a C int.
+            Ok(idx) => idx.cast_signed(),
             Err(e) => {
                 error!("if_nametoindex({iface_name}): {e}");
                 return None;
@@ -1566,8 +1567,10 @@ impl VpnBackend for WireGuardBackend {
             if let Some(lhs) = peer.stats.last_handshake_time {
                 use std::time::UNIX_EPOCH;
                 let secs: u64 = lhs.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-                // chrono 0.4.27+: from_timestamp returns Option<DateTime<Utc>>.
-                if let Some(dt) = chrono::DateTime::from_timestamp(secs as i64, 0) {
+                let dt = i64::try_from(secs)
+                    .ok()
+                    .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+                if let Some(dt) = dt {
                     last_handshake = Some(
                         last_handshake
                             .map_or(dt, |prev: chrono::DateTime<chrono::Utc>| prev.max(dt)),

@@ -551,7 +551,8 @@ async fn configure_dns_for_link(iface_name: &str, dns_servers: &[IpAddr]) -> Opt
     }
 
     let ifindex: i32 = match nix::net::if_::if_nametoindex(iface_name) {
-        Ok(idx) => idx as i32,
+        // resolved takes the kernel's own type for it, a C int.
+        Ok(idx) => idx.cast_signed(),
         Err(e) => {
             error!("Azure DNS: if_nametoindex({iface_name}): {e}");
             return None;
