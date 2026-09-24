@@ -33,3 +33,6 @@ zbus        = { workspace = true }
 # builds skip the resource compile cleanly.
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winres = "0.1"
+
+[lints]
+workspace = true

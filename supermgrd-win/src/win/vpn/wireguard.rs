@@ -98,6 +98,7 @@ impl WireGuardBackend {
 
     /// Load `wireguard.dll`. Surfaces a typed [`VpnError::MissingDependency`]
     /// when the driver isn't installed so the GUI can prompt the user.
+    #[allow(unsafe_code)] // loads wireguard.dll
     fn ensure_lib() -> Result<wireguard_nt::Wireguard, VpnError> {
         if let Some(lib) = WG_LIB.get() {
             return Ok(lib.clone());

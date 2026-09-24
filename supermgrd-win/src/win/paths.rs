@@ -18,6 +18,10 @@
 //! | `ovpn\`           | Imported OpenVPN configs — **private**: they carry keys inline |
 //! | `runtime\`        | Per-connect VPN scratch files — **private**        |
 
+// FFI: creates the state directories with explicit Win32 security
+// descriptors, and checks them, through the C interfaces.
+#![allow(unsafe_code)]
+
 use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;

@@ -26,6 +26,9 @@
 //! must outlive the `NamedPipeServer` instance that references it.
 //! Dropping it calls `LocalFree` on the security descriptor.
 
+// FFI: builds and frees a Win32 security descriptor for the pipe.
+#![allow(unsafe_code)]
+
 use std::{ffi::c_void, io, ptr};
 
 use windows_sys::Win32::Foundation::LocalFree;

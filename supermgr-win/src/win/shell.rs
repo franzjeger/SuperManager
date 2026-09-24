@@ -12,6 +12,7 @@ use crate::model;
 ///
 /// `ShellExecuteW` with the URL as the file, never a command line: nothing
 /// in it is parsed by a shell.
+#[allow(unsafe_code)] // ShellExecuteW
 pub fn open_url(url: &str) -> bool {
     const REPOSITORY: &str = "https://github.com/franzjeger/SuperManager";
     let allowed = model::is_sign_in_url(url)
@@ -49,6 +50,7 @@ pub fn open_url(url: &str) -> bool {
 ///
 /// Read once when the operator switches back to "Use Windows setting"
 /// mid-session; at startup the fluent style follows Windows by itself.
+#[allow(unsafe_code)] // RegGetValueW
 pub fn windows_prefers_dark() -> bool {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
     let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();

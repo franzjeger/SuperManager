@@ -91,17 +91,5 @@ wireguard-nt = "0.5"
 # `russh-cryptovec`, which declares the features it needs (`basetsd`,
 # `minwindef`, `memoryapi`) rather than relying on ours.
 
-# The workspace-wide `unsafe_code = "forbid"` lint is incompatible with
-# Win32 integration: `define_windows_service!` expands to an `extern "system"`
-# entry point that windows-service marks `unsafe`, and SDDL parsing for the
-# named-pipe ACL eventually needs raw FFI. We override the rust lint group
-# while keeping the clippy lints in sync with the rest of the workspace,
-# so style/correctness checks stay strict.
-[lints.rust]
-unsafe_code = "allow"
-
-[lints.clippy]
-all       = { level = "warn", priority = -1 }
-pedantic  = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-missing_errors_doc      = "allow"
+[lints]
+workspace = true

@@ -97,7 +97,12 @@ tera        = { version = "1.20", default-features = false, features = ["builtin
 # Workspace-wide lint configuration
 # ---------------------------------------------------------------------------
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Denied everywhere; a module whose job is FFI opts in with
+# `#![allow(unsafe_code)]` and says why, so every `unsafe` in the tree sits
+# somewhere a reviewer can find by grepping for that one line. (`forbid`
+# would allow no opt-in, and pushed four crates into allowing unsafe code
+# wholesale instead.)
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all       = { level = "warn", priority = -1 }

@@ -31,6 +31,9 @@
 //! and even if it somehow did, the kernel force-sleeps at its own deadline,
 //! so the worst case is a bounded delay, never a permanent block.
 
+// FFI: IOKit power notifications and a CoreFoundation run loop.
+#![allow(unsafe_code)]
+
 use std::os::raw::{c_int, c_long, c_void};
 
 // mach_port_t / io_object_t / io_connect_t are all `mach_port_t` == u32.

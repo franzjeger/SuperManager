@@ -54,6 +54,7 @@ const MAX_INSTANCES: usize = 32;
 /// itself is unsafe because the underlying Win32 entry point dereferences
 /// the SECURITY_ATTRIBUTES pointer; our `PipeSecurity` upholds its
 /// validity-for-the-pointer-lifetime contract.
+#[allow(unsafe_code)] // creates the pipe with our security attributes
 fn create_listener(first: bool) -> std::io::Result<(NamedPipeServer, PipeSecurity)> {
     let mut security = PipeSecurity::restrictive()?;
     let mut options = ServerOptions::new();

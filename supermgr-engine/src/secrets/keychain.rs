@@ -52,6 +52,11 @@
 //! block the rest of the migration. The original file is renamed (not
 //! deleted) so a recovery is always possible.
 
+// FFI: the Security framework's SecItem* calls, made directly because the
+// `security-framework` crate's helpers do not expose
+// `kSecUseDataProtectionKeychain`.
+#![allow(unsafe_code)]
+
 use anyhow::Context;
 use async_trait::async_trait;
 use core_foundation::base::{CFType, TCFType};

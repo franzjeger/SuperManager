@@ -87,15 +87,5 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 slint-build = "1.8"
 winres      = "0.1"
 
-[lints.rust]
-# Slint's generated code intentionally emits patterns clippy::pedantic
-# considers stylistic warts (single-letter idents, large enums). We mirror
-# the workspace clippy config but relax the rust-side `unsafe_code` because
-# slint-build emits `unsafe extern "C"` shims in its generated module.
-unsafe_code = "allow"
-
-[lints.clippy]
-all       = { level = "warn", priority = -1 }
-pedantic  = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
-missing_errors_doc      = "allow"
+[lints]
+workspace = true
