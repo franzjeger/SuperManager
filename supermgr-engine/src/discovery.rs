@@ -1422,8 +1422,8 @@ pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
 }
 
 /// Expand a list of targets (hosts and CIDRs) into a flat list
-/// of IPs. Caps total at 4096 to avoid runaways. Anything
-/// invalid is silently skipped.
+/// of IPs, at most `cap` of them: a block with more hosts than
+/// are left is skipped whole. Anything invalid is silently skipped.
 #[must_use]
 pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -1448,49 +1448,64 @@ pub fn expand_targets(targets: &[String], cap: usize) -> Vec<String> {
     out
 }
 
+/// The addresses a host can have in an IPv4 CIDR block: all of a /31 or
+/// /32, the rest without the network and broadcast addresses. `None` when
+/// `cidr` is not a block; none at all when it holds more than `cap`.
 fn expand_cidr(cidr: &str, cap: usize) -> Option<Vec<String>> {
-    let parts: Vec<&str> = cidr.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let prefix: u32 = parts[1].parse().ok()?;
-    if prefix > 32 {
-        return None;
-    }
-    let octets: Vec<u32> = parts[0]
-        .split('.')
-        .map(|s| s.parse::<u32>().ok())
-        .collect::<Option<Vec<_>>>()?;
-    if octets.len() != 4 {
-        return None;
-    }
-    let base = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
-    let mask = if prefix == 0 {
-        0u32
-    } else {
-        !0u32 << (32 - prefix)
-    };
-    let net = base & mask;
-    let host_count = if prefix >= 31 {
-        1u64 << (32 - prefix)
-    } else {
-        (1u64 << (32 - prefix)) - 2
-    };
-    if host_count > cap as u64 {
-        // Don't allow pathologically large CIDRs.
+    let net: ipnet::Ipv4Net = cidr.parse().ok()?;
+    // Don't allow pathologically large CIDRs. (`count` is arithmetic on
+    // the range, not a walk through it.)
+    if net.hosts().count() > cap {
         return Some(Vec::new());
     }
-    let start = if prefix >= 31 { net } else { net + 1 };
-    let mut out = Vec::with_capacity(host_count as usize);
-    for i in 0..host_count {
-        let ip = start + i as u32;
-        out.push(format!(
-            "{}.{}.{}.{}",
-            (ip >> 24) & 0xff,
-            (ip >> 16) & 0xff,
-            (ip >> 8) & 0xff,
-            ip & 0xff
-        ));
+    Some(net.hosts().map(|ip| ip.to_string()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
     }
-    Some(out)
+
+    #[test]
+    fn a_block_expands_to_its_host_addresses() {
+        let hosts = |cidr| expand_cidr(cidr, 512);
+        assert_eq!(
+            hosts("192.0.2.0/30"),
+            Some(strings(&["192.0.2.1", "192.0.2.2"]))
+        );
+        // RFC 3021: a /31 has no network or broadcast address.
+        assert_eq!(
+            hosts("192.0.2.4/31"),
+            Some(strings(&["192.0.2.4", "192.0.2.5"]))
+        );
+        assert_eq!(hosts("192.0.2.7/32"), Some(strings(&["192.0.2.7"])));
+        assert_eq!(hosts("192.0.2.9/30").map(|h| h.len()), Some(2));
+        assert_eq!(
+            hosts("255.255.255.255/32"),
+            Some(strings(&["255.255.255.255"]))
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_block_expands_to_nothing() {
+        // 300 used to be shifted into the first octet as 44.
+        for cidr in ["300.0.2.0/24", "192.0.2.0/33", "192.0.2/24", "192.0.2.0/x"] {
+            assert_eq!(expand_cidr(cidr, 512), None, "{cidr}");
+        }
+    }
+
+    #[test]
+    fn a_block_larger_than_the_cap_is_skipped_whole() {
+        assert_eq!(expand_cidr("192.0.2.0/24", 253), Some(Vec::new()));
+        assert_eq!(expand_cidr("192.0.2.0/24", 254).map(|h| h.len()), Some(254));
+        assert_eq!(expand_cidr("0.0.0.0/0", 1 << 24), Some(Vec::new()));
+        let targets = strings(&["192.0.2.0/30", "host.example", "198.51.100.0/24"]);
+        assert_eq!(
+            expand_targets(&targets, 10),
+            strings(&["192.0.2.1", "192.0.2.2", "host.example"])
+        );
+    }
 }
