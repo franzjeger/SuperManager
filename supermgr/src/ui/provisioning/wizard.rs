@@ -253,27 +253,18 @@ pub fn build_provisioning_page(
             let back_btn = back_btn.clone();
             let next_btn = next_btn.clone();
             let current_step = Rc::clone(&current_step);
-            let state = Rc::clone(&state);
             move || {
                 let step = *current_step.borrow();
                 step_label.set_label(&format!("Step {step} of {TOTAL_STEPS}"));
                 back_btn.set_sensitive(step > 1);
-
-                // Skip security step for UniFi
-                let is_fortigate = state.borrow().device_type == "FortiGate";
-                let effective_max = if is_fortigate {
-                    TOTAL_STEPS
+                // The last step is the same for every device: UniFi skips
+                // step 4 (security), not the review.
+                next_btn.set_label(if step >= TOTAL_STEPS {
+                    "Finish"
                 } else {
-                    TOTAL_STEPS
-                };
-
-                if step >= effective_max {
-                    next_btn.set_label("Finish");
-                    next_btn.set_css_classes(&["suggested-action", "pill"]);
-                } else {
-                    next_btn.set_label("Next");
-                    next_btn.set_css_classes(&["suggested-action", "pill"]);
-                }
+                    "Next"
+                });
+                next_btn.set_css_classes(&["suggested-action", "pill"]);
             }
         });
 

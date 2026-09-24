@@ -37,7 +37,7 @@ use supermgr_core::{
 
 use supermgr_core::host::{AuthMethod, Host, HostSummary};
 use supermgr_core::secret_lifecycle::{LiveSecrets, SecretOwner};
-use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key, PushResult};
+use supermgr_core::ssh::authorized_keys::{push_public_key, revoke_public_key};
 use supermgr_core::ssh::key::{SshKey, SshKeySummary, SshKeyType};
 use supermgr_core::ssh::known_hosts::KnownHostsStore;
 
@@ -3586,8 +3586,6 @@ impl DaemonService {
 
         // Spawn the batch push operation
         tokio::spawn(async move {
-            let mut results = Vec::new();
-
             for host in &hosts_info {
                 let _ = DaemonService::ssh_operation_progress(
                     &ctx_owned,
@@ -3601,7 +3599,7 @@ impl DaemonService {
                 let session_result =
                     connect_to_ssh_host(host, &private_key_pem_opt, &state_arc).await;
 
-                let result = match session_result {
+                match session_result {
                     Err(e) => {
                         let msg = format!("Connection failed: {e}");
                         let _ = DaemonService::ssh_operation_progress(
@@ -3611,12 +3609,6 @@ impl DaemonService {
                             msg.clone(),
                         )
                         .await;
-                        PushResult {
-                            host_id: host.id.to_string(),
-                            host_label: host.label.clone(),
-                            success: false,
-                            message: msg,
-                        }
                     }
                     Ok(session) => {
                         let _ = DaemonService::ssh_operation_progress(
@@ -3662,12 +3654,6 @@ impl DaemonService {
                                     msg.clone(),
                                 )
                                 .await;
-                                PushResult {
-                                    host_id: host.id.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: true,
-                                    message: msg,
-                                }
                             }
                             Err(e) => {
                                 crate::ssh::audit::append_audit(
@@ -3690,18 +3676,10 @@ impl DaemonService {
                                     msg.clone(),
                                 )
                                 .await;
-                                PushResult {
-                                    host_id: host.id.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: false,
-                                    message: msg,
-                                }
                             }
                         }
                     }
-                };
-
-                results.push(result);
+                }
             }
 
             // Final progress signal
@@ -3779,8 +3757,6 @@ impl DaemonService {
 
         // Spawn the batch revoke operation
         tokio::spawn(async move {
-            let mut _results = Vec::new();
-
             for host in &hosts_info {
                 let _ = DaemonService::ssh_operation_progress(
                     &ctx_owned,
@@ -3793,7 +3769,7 @@ impl DaemonService {
                 let session_result =
                     connect_to_ssh_host(host, &private_key_pem_opt, &state_arc).await;
 
-                let result = match session_result {
+                match session_result {
                     Err(e) => {
                         let msg = format!("Connection failed: {e}");
                         let _ = DaemonService::ssh_operation_progress(
@@ -3803,12 +3779,6 @@ impl DaemonService {
                             msg.clone(),
                         )
                         .await;
-                        PushResult {
-                            host_id: host.id.to_string(),
-                            host_label: host.label.clone(),
-                            success: false,
-                            message: msg,
-                        }
                     }
                     Ok(session) => {
                         let _ = DaemonService::ssh_operation_progress(
@@ -3852,12 +3822,6 @@ impl DaemonService {
                                     msg.clone(),
                                 )
                                 .await;
-                                PushResult {
-                                    host_id: host.id.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: true,
-                                    message: msg,
-                                }
                             }
                             Err(e) => {
                                 crate::ssh::audit::append_audit(
@@ -3880,18 +3844,10 @@ impl DaemonService {
                                     msg.clone(),
                                 )
                                 .await;
-                                PushResult {
-                                    host_id: host.id.to_string(),
-                                    host_label: host.label.clone(),
-                                    success: false,
-                                    message: msg,
-                                }
                             }
                         }
                     }
-                };
-
-                _results.push(result);
+                }
             }
 
             // Final progress signal
