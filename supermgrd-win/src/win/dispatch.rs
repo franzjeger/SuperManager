@@ -74,18 +74,18 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
 
         // ----- SSH keys -----
         "ssh_generate_key" => handle_ssh_generate_key(state, &req.args).await,
-        "ssh_list_keys" => handle_ssh_list_keys(state).await,
+        "ssh_list_keys" => handle_ssh_list_keys(state),
         "ssh_delete_key" => handle_ssh_delete_key(state, &req.args).await,
-        "ssh_export_public_key" => handle_ssh_export_public_key(state, &req.args).await,
+        "ssh_export_public_key" => handle_ssh_export_public_key(state, &req.args),
 
         // ----- Hosts -----
-        "list_hosts" => handle_list_hosts(state).await,
-        "get_host" => handle_get_host(state, &req.args).await,
-        "add_host" => handle_add_host(state, &req.args).await,
+        "list_hosts" => handle_list_hosts(state),
+        "get_host" => handle_get_host(state, &req.args),
+        "add_host" => handle_add_host(state, &req.args),
         "delete_host" => handle_delete_host(state, &req.args).await,
         "ssh_execute_command" => handle_ssh_execute_command(state, &req.args).await,
         "test_host_connection" => handle_test_host_connection(state, &req.args).await,
-        "toggle_host_pin" => handle_toggle_host_pin(state, &req.args).await,
+        "toggle_host_pin" => handle_toggle_host_pin(state, &req.args),
         "ssh_list_known_hosts" => handle_ssh_list_known_hosts(state).await,
         "ssh_forget_host_key" => handle_ssh_forget_host_key(state, &req.args).await,
         "ssh_trust_host_key" => handle_ssh_trust_host_key(state, &req.args).await,
@@ -833,7 +833,7 @@ async fn handle_ssh_generate_key(
     Ok(Value::String(meta.to_string()))
 }
 
-async fn handle_ssh_list_keys(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+fn handle_ssh_list_keys(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let dir = state.root.join("keys");
     let mut out: Vec<Value> = Vec::new();
     let entries =
@@ -889,10 +889,7 @@ async fn handle_ssh_delete_key(state: &Arc<DaemonState>, args: &Value) -> Result
     Ok(Value::Null)
 }
 
-async fn handle_ssh_export_public_key(
-    state: &Arc<DaemonState>,
-    args: &Value,
-) -> Result<Value, RpcError> {
+fn handle_ssh_export_public_key(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let key_id = arg_id(args, "key_id")?;
     let path = state.root.join("keys").join(format!("{key_id}.json"));
     let bytes =
@@ -910,7 +907,7 @@ async fn handle_ssh_export_public_key(
 // Host handlers — partial, on-disk JSON store.
 // ---------------------------------------------------------------------------
 
-async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     let dir = state.root.join("hosts");
     let mut out: Vec<Value> = Vec::new();
     let entries =
@@ -929,7 +926,7 @@ async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
     Ok(Value::String(Value::Array(out).to_string()))
 }
 
-async fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
@@ -938,7 +935,7 @@ async fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value
     Ok(Value::String(v.to_string()))
 }
 
-async fn handle_add_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+fn handle_add_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_json = arg_str(args, "host_json")?;
     let mut value: Value = serde_json::from_str(host_json)
         .map_err(|e| RpcError::Other(format!("parse host_json: {e}")))?;
@@ -1101,7 +1098,7 @@ async fn handle_ssh_trust_host_key(
     Ok(Value::Null)
 }
 
-async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
+fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;

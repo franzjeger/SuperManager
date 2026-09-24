@@ -286,7 +286,7 @@ impl EngineServer {
         Response::ok(id, serde_json::json!(key_id.to_string()))
     }
 
-    pub(crate) async fn handle_ssh_import_keys_scan(
+    pub(crate) fn handle_ssh_import_keys_scan(
         &self,
         id: u64,
         params: serde_json::Value,

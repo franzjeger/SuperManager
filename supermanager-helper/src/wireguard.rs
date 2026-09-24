@@ -234,7 +234,7 @@ impl WireGuard {
             });
         }
 
-        let interface = detect_interface(&wg_quick, &name).await.ok();
+        let interface = detect_interface(&wg_quick, &name).ok();
 
         if !args.dns_servers.is_empty() {
             crate::dns::set_vpn_dns(&args.dns_servers);
@@ -571,7 +571,7 @@ fn interface_exists(name: &str) -> bool {
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from
 /// the mapping file rather than re-deriving it via `wg show`.
-async fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
+fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
     read_name_mapping(name)
         .ok_or_else(|| anyhow!("no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"))
 }

@@ -256,11 +256,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_discovery_findings(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_discovery_findings(&self, id: u64, params: serde_json::Value) -> Response {
         let slug = match params.get("customer_slug").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
             None => {
@@ -348,7 +344,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_discovery_inventory(
+    pub(crate) fn handle_discovery_inventory(
         &self,
         id: u64,
         params: serde_json::Value,

@@ -40,11 +40,7 @@ impl EngineServer {
         ))
     }
 
-    pub(crate) async fn handle_findings_list(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_findings_list(&self, id: u64, params: serde_json::Value) -> Response {
         let scope = match Self::resolve_findings_scope(&params) {
             Ok(s) => s,
             Err(mut r) => {
@@ -61,11 +57,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_findings_summary(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_findings_summary(&self, id: u64, params: serde_json::Value) -> Response {
         let scope = match Self::resolve_findings_scope(&params) {
             Ok(s) => s,
             Err(mut r) => {
@@ -82,7 +74,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_findings_set_disposition(
+    pub(crate) fn handle_findings_set_disposition(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -128,7 +120,7 @@ impl EngineServer {
     /// Compute per-host risk scores for a customer scope. Combines
     /// the persisted findings + (when available) the discovered-host
     /// inventory's `zone` field for exposure weighting.
-    pub(crate) async fn handle_findings_risk_hosts(
+    pub(crate) fn handle_findings_risk_hosts(
         &self,
         id: u64,
         params: serde_json::Value,

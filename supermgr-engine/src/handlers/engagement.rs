@@ -8,7 +8,7 @@ use crate::protocol::{self, Response};
 use crate::server::EngineServer;
 
 impl EngineServer {
-    pub(crate) async fn handle_engagement_list(&self, id: u64) -> Response {
+    pub(crate) fn handle_engagement_list(&self, id: u64) -> Response {
         match crate::engagement::list_all() {
             Ok(list) => match serde_json::to_value(&list) {
                 Ok(v) => Response::ok(id, v),
@@ -18,11 +18,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_save(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_engagement_save(&self, id: u64, params: serde_json::Value) -> Response {
         let mut engagement: crate::engagement::Engagement = match serde_json::from_value(params) {
             Ok(e) => e,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
@@ -39,11 +35,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_delete(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_engagement_delete(&self, id: u64, params: serde_json::Value) -> Response {
         let engagement_id = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
@@ -54,7 +46,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_set_schedule(
+    pub(crate) fn handle_engagement_set_schedule(
         &self,
         id: u64,
         params: serde_json::Value,
@@ -92,11 +84,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) async fn handle_engagement_report(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
+    pub(crate) fn handle_engagement_report(&self, id: u64, params: serde_json::Value) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => {

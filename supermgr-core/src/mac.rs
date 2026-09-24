@@ -224,6 +224,14 @@ fn read_error(error: std::io::Error) -> MacError {
 // those return Unsupported without sending a request.
 // ---------------------------------------------------------------------------
 
+// Callers reach this client through `client::DaemonClient`, which is the
+// D-Bus proxy on Linux and the pipe client on Windows, and await every
+// method alike. The methods the engine cannot serve here answer at once,
+// but keep the shared signature.
+#[expect(
+    clippy::unused_async,
+    reason = "one signature for the client on every platform"
+)]
 impl MacClient {
     // ----- VPN profile lifecycle -----
 

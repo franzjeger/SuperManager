@@ -1201,7 +1201,7 @@ impl DaemonService {
     ///
     /// Returns up to 500 lines, oldest first.  Each line is a pre-formatted
     /// string of the form `[HH:MM:SS] LEVEL target: message`.
-    async fn get_logs(&self) -> fdo::Result<Vec<String>> {
+    fn get_logs(&self) -> fdo::Result<Vec<String>> {
         let buf = self
             .log_buffer
             .lock()
@@ -4430,7 +4430,7 @@ impl DaemonService {
     }
 
     /// Return recent SSH audit log entries.
-    async fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> {
+    fn ssh_get_audit_log(&self, max_lines: u32) -> fdo::Result<Vec<String>> {
         Ok(crate::ssh::audit::read_audit(max_lines as usize))
     }
 
@@ -5787,7 +5787,7 @@ impl DaemonService {
     /// List saved config versions for a customer.
     ///
     /// Returns a JSON array of objects with `filename` and `timestamp` fields.
-    async fn list_config_versions(&self, customer: &str) -> fdo::Result<String> {
+    fn list_config_versions(&self, customer: &str) -> fdo::Result<String> {
         let dir = PathBuf::from("/etc/supermgrd/configs");
         if !dir.exists() {
             return Ok("[]".into());
@@ -5838,7 +5838,7 @@ impl DaemonService {
     }
 
     /// Retrieve a previously saved config version by filename.
-    async fn get_config_version(&self, filename: &str) -> fdo::Result<String> {
+    fn get_config_version(&self, filename: &str) -> fdo::Result<String> {
         // Sanitize: only allow simple filenames (no path traversal)
         if filename.contains('/') || filename.contains("..") {
             return Err(fdo::Error::InvalidArgs("invalid filename".into()));
@@ -6151,7 +6151,7 @@ impl DaemonService {
     }
 
     /// Run summaries for a host, newest first.
-    async fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String> {
+    fn compliance_history(&self, host_id: &str, limit: u32) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let history =
@@ -6162,7 +6162,7 @@ impl DaemonService {
     }
 
     /// One stored run in full.
-    async fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
+    fn compliance_get_run(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let run = supermgr_core::compliance::load_run(&id.simple().to_string(), run_id)
@@ -6171,14 +6171,14 @@ impl DaemonService {
     }
 
     /// The check library, including any user-supplied checks.
-    async fn compliance_list_checks(&self) -> fdo::Result<String> {
+    fn compliance_list_checks(&self) -> fdo::Result<String> {
         let checks = supermgr_core::compliance::list_checks();
         serde_json::to_string(&checks)
             .map_err(|e| fdo::Error::Failed(format!("serialise checks: {e}")))
     }
 
     /// Names of persisted scopes, including archived customers and hosts.
-    async fn findings_scopes(&self) -> fdo::Result<Vec<String>> {
+    fn findings_scopes(&self) -> fdo::Result<Vec<String>> {
         supermgr_core::findings_store::list_scopes()
             .map_err(|e| fdo::Error::Failed(format!("list scopes: {e}")))
     }
@@ -6190,7 +6190,7 @@ impl DaemonService {
     /// the bus at all cannot already read. That the bus is now restricted to
     /// root and the `supermgr` group is what makes that true — see
     /// `contrib/dbus/org.supermgr.Daemon.conf`.
-    async fn findings_list(&self, scope: &str) -> fdo::Result<String> {
+    fn findings_list(&self, scope: &str) -> fdo::Result<String> {
         let findings = supermgr_core::findings_store::list_findings(scope)
             .map_err(|e| fdo::Error::Failed(format!("list findings: {e:#}")))?;
         serde_json::to_string(&findings)
@@ -6198,7 +6198,7 @@ impl DaemonService {
     }
 
     /// Counts for a scope, for a dashboard tile without loading every finding.
-    async fn findings_summary(&self, scope: &str) -> fdo::Result<String> {
+    fn findings_summary(&self, scope: &str) -> fdo::Result<String> {
         let summary = supermgr_core::findings_store::summary(scope)
             .map_err(|e| fdo::Error::Failed(format!("findings summary: {e:#}")))?;
         serde_json::to_string(&summary)
@@ -6255,7 +6255,7 @@ impl DaemonService {
     }
 
     /// What changed between a run and the one before it.
-    async fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
+    fn compliance_drift(&self, host_id: &str, run_id: &str) -> fdo::Result<String> {
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
         let report =

@@ -94,6 +94,10 @@ impl PipeClient {
     /// VPN `connect()` method below — that lets the GUI/MCP call
     /// `client.connect(profile_id)` with identical syntax on both Linux
     /// and Windows.
+    #[expect(
+        clippy::unused_async,
+        reason = "awaited like the D-Bus and macOS clients' constructors"
+    )]
     pub async fn open() -> Result<Self, PipeError> {
         // ClientOptions::open performs the actual CreateFileW. We do not
         // retry on `PIPE_BUSY` here — the daemon configures a high
