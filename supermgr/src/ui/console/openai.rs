@@ -8,8 +8,6 @@ use std::sync::mpsc;
 
 fn tools(allow_changes: bool) -> Vec<Value> {
     supermgr_mcp::available_tools(allow_changes)
-        .as_array()
-        .unwrap()
         .iter()
         .map(|tool| {
             json!({
@@ -213,10 +211,7 @@ mod tests {
 
     #[test]
     fn api_tool_names_match_the_mcp_catalog() {
-        assert_eq!(
-            tools(true).len(),
-            supermgr_mcp::tool_definitions().as_array().unwrap().len()
-        );
+        assert_eq!(tools(true).len(), supermgr_mcp::tool_definitions().len());
         assert!(tools(false)
             .iter()
             .all(|t| supermgr_mcp::is_read_only(t["name"].as_str().unwrap())));

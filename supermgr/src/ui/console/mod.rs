@@ -23,7 +23,7 @@ pub fn provider_name(provider: AiProvider) -> &'static str {
 }
 
 pub fn anthropic_tools(allow_changes: bool) -> Value {
-    Value::Array(supermgr_mcp::available_tools(allow_changes).as_array().unwrap().iter().map(|tool| json!({
+    Value::Array(supermgr_mcp::available_tools(allow_changes).iter().map(|tool| json!({
         "name":tool["name"], "description":tool["description"], "input_schema":tool["inputSchema"]
     })).collect())
 }

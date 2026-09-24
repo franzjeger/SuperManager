@@ -79,8 +79,6 @@ async fn run(
             .arg(format!(
                 "mcp_servers.supermgr.enabled_tools={}",
                 json!(supermgr_mcp::available_tools(allow_changes)
-                    .as_array()
-                    .unwrap()
                     .iter()
                     .map(|t| t["name"].clone())
                     .collect::<Vec<_>>())

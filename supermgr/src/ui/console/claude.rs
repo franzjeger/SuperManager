@@ -97,8 +97,6 @@ pub async fn send_message_subscription(
     });
 
     let allowed_tools = supermgr_mcp::available_tools(allow_changes)
-        .as_array()
-        .unwrap()
         .iter()
         .filter_map(|tool| {
             tool["name"]
@@ -582,9 +580,9 @@ fn finalize_tool_block(
 }
 
 #[cfg(test)]
-    use std::fmt::Write as _;
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     #[test]
     fn subscription_overrides_old_cli_models_and_respects_explicit_model_choices() {

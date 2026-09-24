@@ -235,12 +235,17 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
     let mut findings = Vec::new();
     let scheme = if tls { "https" } else { "http" };
     let url = format!("{scheme}://{host}:{port}/");
-    let client = reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(4))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("build client");
+    else {
+        // No TLS backend: nothing to test with, and no reason to take the
+        // engine down over one probe.
+        tracing::warn!("default-credential test of {url} skipped: no HTTP client");
+        return findings;
+    };
     let creds = default_creds_for_service("http");
     for pair in creds {
         sleep(Duration::from_millis(800)).await;

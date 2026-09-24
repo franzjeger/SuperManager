@@ -221,8 +221,6 @@ mod tests {
     /// Every tool this server advertises, by name.
     fn advertised_tool_names() -> Vec<String> {
         tool_definitions()
-            .as_array()
-            .expect("tool_definitions is a JSON array")
             .iter()
             .map(|t| {
                 t.get("name")
@@ -239,7 +237,7 @@ mod tests {
     fn every_tool_carries_what_a_client_needs_to_call_it() {
         // A tool missing any of these is advertised but unusable: the
         // client has nothing to render and no schema to validate against.
-        for tool in tool_definitions().as_array().expect("array") {
+        for tool in &tool_definitions() {
             let name = tool.get("name").and_then(Value::as_str);
             assert!(
                 name.is_some_and(|n| !n.is_empty()),
@@ -276,7 +274,7 @@ mod tests {
 
     #[test]
     fn input_schemas_are_json_schema_objects() {
-        for tool in tool_definitions().as_array().expect("array") {
+        for tool in &tool_definitions() {
             let name = tool["name"].as_str().unwrap_or("<unnamed>");
             let schema = &tool["inputSchema"];
             assert_eq!(
@@ -296,7 +294,7 @@ mod tests {
         // Naming a required parameter that isn't in `properties` gives the
         // model a field it cannot see how to fill — it will either omit it
         // and fail validation, or invent a shape.
-        for tool in tool_definitions().as_array().expect("array") {
+        for tool in &tool_definitions() {
             let name = tool["name"].as_str().unwrap_or("<unnamed>");
             let schema = &tool["inputSchema"];
             let properties = schema["properties"].as_object().expect("properties object");
@@ -316,7 +314,7 @@ mod tests {
 
     #[test]
     fn every_property_describes_itself() {
-        for tool in tool_definitions().as_array().expect("array") {
+        for tool in &tool_definitions() {
             let name = tool["name"].as_str().unwrap_or("<unnamed>");
             for (field, spec) in tool["inputSchema"]["properties"]
                 .as_object()

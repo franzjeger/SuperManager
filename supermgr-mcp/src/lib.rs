@@ -5,9 +5,9 @@ use supermgr_core::client::DaemonClient;
 
 /// The canonical tool catalog used by MCP and both API providers.
 #[must_use]
-pub fn tool_definitions() -> Value {
-    let mut catalog = json!([
-        {
+pub fn tool_definitions() -> Vec<Value> {
+    let mut catalog = vec![
+        json!({
             "name": "list_hosts",
             "description": "List all configured SSH hosts with their connection details (hostname, port, username, device type, auth method).",
             "inputSchema": {
@@ -15,8 +15,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
-        },
-        {
+        }),
+        json!({
             "name": "ssh_list_keys",
             "description": "List all managed SSH keys with their type, fingerprint, and deployment status.",
             "inputSchema": {
@@ -24,8 +24,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
-        },
-        {
+        }),
+        json!({
             "name": "ssh_execute",
             "description": "Execute a shell command on a remote SSH host managed by SuperManager. The host must be configured and reachable (VPN must be active if the host is behind one). Returns stdout, stderr, and exit code.",
             "inputSchema": {
@@ -42,8 +42,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "command"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "vpn_status",
             "description": "Get the current VPN connection status (connected/disconnected, active profile, tunnel stats).",
             "inputSchema": {
@@ -51,8 +51,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
-        },
-        {
+        }),
+        json!({
             "name": "vpn_list_profiles",
             "description": "List all configured VPN profiles with their backend type and connection state.",
             "inputSchema": {
@@ -60,8 +60,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
-        },
-        {
+        }),
+        json!({
             "name": "vpn_connect",
             "description": "Connect to a VPN profile by UUID. Returns immediately; the connection is established asynchronously.",
             "inputSchema": {
@@ -74,8 +74,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["profile_id"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "vpn_disconnect",
             "description": "Disconnect the currently active VPN connection.",
             "inputSchema": {
@@ -83,8 +83,8 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
-        },
-        {
+        }),
+        json!({
             "name": "add_host",
             "description": "Add a new SSH host configuration.",
             "inputSchema": {
@@ -101,8 +101,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["label", "hostname", "username", "auth_method"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "test_host_connection",
             "description": "Test SSH and (optionally) FortiGate API connectivity for a host. Returns a JSON object like {\"ssh\": \"ok\", \"api\": \"ok\"} or {\"ssh\": \"timeout\", \"api\": \"auth_failed\"}.",
             "inputSchema": {
@@ -115,8 +115,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "toggle_host_pin",
             "description": "Pin or unpin an SSH host (toggle its favourite/pinned state). Returns the refreshed host list.",
             "inputSchema": {
@@ -129,8 +129,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "ssh_set_password",
             "description": "Store an SSH password for a host in the secret store. Used for password-based authentication.",
             "inputSchema": {
@@ -147,8 +147,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "password"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "ssh_set_api_token",
             "description": "Store a FortiGate REST API token and optional port for a host. Pass port 0 to keep the existing port.",
             "inputSchema": {
@@ -169,8 +169,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "token"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "unifi_set_inform",
             "description": "Execute set-inform on a UniFi device via SSH. Tells the device to adopt to the given controller URL.",
             "inputSchema": {
@@ -187,8 +187,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "inform_url"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "unifi_api",
             "description": "Call the UniFi Controller REST API on a host. Requires controller credentials to be configured via unifi_set_controller first.",
             "inputSchema": {
@@ -213,8 +213,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "method", "path"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "fortigate_push_ssh_key",
             "description": "Push an SSH public key to a FortiGate admin user via REST API. The host must have an API token configured.",
             "inputSchema": {
@@ -235,8 +235,8 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "key_id", "admin_user"]
             }
-        },
-        {
+        }),
+        json!({
             "name": "fortigate_backup_config",
             "description": "Download the FortiGate running configuration and save it to disk. Returns the backup filename on success.",
             "inputSchema": {
@@ -249,11 +249,10 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id"]
             }
-        }
-    ]);
+        }),
+    ];
     #[cfg(target_os = "linux")]
     {
-        let definitions = catalog.as_array_mut().expect("tool array");
         for (name, description, properties, required) in [
             ("customer_catalog", "Read the customer/site catalog and managed asset links.", json!({}), json!([])),
             ("host_health", "Read the daemon's last reachability result for managed hosts; this is not a new scan.", json!({}), json!([])),
@@ -268,13 +267,13 @@ pub fn tool_definitions() -> Value {
             ("compliance_list_checks", "List available Linux and FortiGate baseline checks, their scope and remediation.", json!({}), json!([])),
             ("fortigate_compliance_check", "Run the FortiGate configuration baseline over its API and store the findings. Requires operator-enabled actions.", json!({"host_id":{"type":"string","description":"UUID of the managed host from list_hosts"}}), json!(["host_id"])),
         ] {
-            definitions.push(json!({"name":name,"description":description,"inputSchema":{
+            catalog.push(json!({"name":name,"description":description,"inputSchema":{
                 "type":"object","properties":properties,"required":required
             }}));
         }
     }
     // This API is available on both Linux and Windows.
-    catalog.as_array_mut().expect("tool array").push(json!({
+    catalog.push(json!({
         "name":"fortigate_api", "description":"Call a managed FortiGate REST API. Requires operator-enabled actions.",
         "inputSchema":{"type":"object","properties":{
             "host_id":{"type":"string","description":"UUID of the managed host from list_hosts"},"method":{"type":"string","description":"HTTP method to send","enum":["GET","POST","PUT","DELETE"]},
@@ -611,16 +610,11 @@ pub fn is_read_only(name: &str) -> bool {
 
 /// Catalog restricted to the operator's choice for this session.
 #[must_use]
-pub fn available_tools(allow_changes: bool) -> Value {
-    Value::Array(
-        tool_definitions()
-            .as_array()
-            .expect("catalog array")
-            .iter()
-            .filter(|t| allow_changes || is_read_only(t["name"].as_str().unwrap_or("")))
-            .cloned()
-            .collect(),
-    )
+pub fn available_tools(allow_changes: bool) -> Vec<Value> {
+    tool_definitions()
+        .into_iter()
+        .filter(|t| allow_changes || is_read_only(t["name"].as_str().unwrap_or("")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -640,10 +634,6 @@ mod tests {
         }
         assert!(is_read_only("findings_list"));
         let filtered = available_tools(false);
-        assert!(!filtered
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["name"] == "ssh_execute"));
+        assert!(!filtered.iter().any(|t| t["name"] == "ssh_execute"));
     }
 }

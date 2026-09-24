@@ -71,6 +71,14 @@ pub struct OperationRegistry {
 }
 
 impl OperationRegistry {
+    /// The registry. Every change under the lock is one insert or remove,
+    /// so a panic elsewhere while it was held cannot leave it half-updated.
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -93,7 +101,7 @@ impl OperationRegistry {
             started_at: Utc::now(),
             cancel_requested: false,
         };
-        let mut g = self.inner.lock().expect("operations lock poisoned");
+        let mut g = self.entries();
         g.insert(
             id.clone(),
             Entry {
@@ -110,7 +118,7 @@ impl OperationRegistry {
 
     /// Snapshot of every running operation, in start-order.
     pub fn list(&self) -> Vec<OperationInfo> {
-        let g = self.inner.lock().expect("operations lock poisoned");
+        let g = self.entries();
         let mut out: Vec<OperationInfo> = g
             .values()
             .map(|e| {
@@ -127,7 +135,7 @@ impl OperationRegistry {
     /// the id was known. Cancellation is cooperative — workers
     /// only honour the flag at safe checkpoints.
     pub fn cancel(&self, id: &str) -> bool {
-        let g = self.inner.lock().expect("operations lock poisoned");
+        let g = self.entries();
         match g.get(id) {
             Some(e) => {
                 e.cancel.store(true, Ordering::Release);
@@ -138,7 +146,7 @@ impl OperationRegistry {
     }
 
     fn unregister(&self, id: &str) {
-        let mut g = self.inner.lock().expect("operations lock poisoned");
+        let mut g = self.entries();
         g.remove(id);
     }
 }

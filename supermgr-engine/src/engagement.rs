@@ -374,7 +374,11 @@ pub fn save(engagement: &Engagement) -> Result<()> {
             .context("invalid customer_slug on engagement")?;
     }
     let lock = engagement_lock(&engagement.id);
-    let _guard = lock.lock().expect("engagement lock poisoned");
+    // The lock guards no data, only the file; a writer that panicked left
+    // nothing behind it to distrust.
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let dir = engagements_dir();
     std::fs::create_dir_all(&dir).context("create engagements dir")?;
@@ -407,7 +411,11 @@ pub fn log_event(engagement_id: &str, event: EngagementEvent) -> Result<()> {
     // race: both load the same state, append different events,
     // and one of them overwrites the other on save.
     let lock = engagement_lock(engagement_id);
-    let _guard = lock.lock().expect("engagement lock poisoned");
+    // The lock guards no data, only the file; a writer that panicked left
+    // nothing behind it to distrust.
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let mut e = load(engagement_id)?;
     e.log.push(event);
