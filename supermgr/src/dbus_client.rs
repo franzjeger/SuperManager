@@ -1576,54 +1576,11 @@ pub async fn run_signal_listener(app_state: Arc<Mutex<AppState>>, tx: mpsc::Send
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse an RFC-3339 / ISO-8601 datetime string like `"2026-03-17T20:31:06Z"`
-/// into Unix epoch seconds without an external time crate.
-///
-/// Handles only the subset that `chrono` produces: `YYYY-MM-DDTHH:MM:SS[.f]Z`
-/// or `YYYY-MM-DDTHH:MM:SS[.f]+HH:MM`.  Returns `None` on malformed input.
+/// An RFC 3339 timestamp such as `"2026-03-17T20:31:06Z"` as Unix epoch
+/// seconds; `None` if it is not one, or is before 1970.
 fn parse_rfc3339_secs(s: &str) -> Option<u64> {
-    // Minimum: "2006-01-02T15:04:05Z" = 20 chars
-    if s.len() < 20 {
-        return None;
-    }
-    let (date, rest) = s.split_once('T')?;
-    let mut parts = date.splitn(3, '-');
-    let year: u64 = parts.next()?.parse().ok()?;
-    let month: u64 = parts.next()?.parse().ok()?;
-    let day: u64 = parts.next()?.parse().ok()?;
-
-    // Strip timezone suffix (Z or ±HH:MM) and optional fractional seconds.
-    let time_part = rest
-        .split_once('Z')
-        .map(|(t, _)| t)
-        .or_else(|| rest.split_once('+').map(|(t, _)| t))
-        .or_else(|| rest.rfind('-').map(|i| &rest[..i]))
-        .unwrap_or(rest);
-    let time_part = time_part.split('.').next().unwrap_or(time_part);
-
-    let mut tparts = time_part.splitn(3, ':');
-    let hour: u64 = tparts.next()?.parse().ok()?;
-    let minute: u64 = tparts.next()?.parse().ok()?;
-    let second: u64 = tparts.next()?.parse().ok()?;
-
-    // Days since Unix epoch (1970-01-01) using the proleptic Gregorian calendar.
-    // Algorithm: days from year 0 to given date, minus days from year 0 to epoch.
-    let days_to_year = |y: u64| {
-        let y = y - 1;
-        y * 365 + y / 4 - y / 100 + y / 400
-    };
-    let days_in_month = [0u64, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
-    let day_of_year: u64 =
-        days_in_month[..month as usize].iter().sum::<u64>() + u64::from(leap && month > 2) + day
-            - 1;
-
-    const EPOCH_DAYS: u64 = 719_162; // days from year 0 to 1970-01-01
-    let days = days_to_year(year) + day_of_year;
-    if days < EPOCH_DAYS {
-        return None;
-    }
-    Some((days - EPOCH_DAYS) * 86_400 + hour * 3_600 + minute * 60 + second)
+    let time = chrono::DateTime::parse_from_rfc3339(s).ok()?;
+    u64::try_from(time.timestamp()).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1811,5 +1768,36 @@ mod tests {
             "the daemon no longer says 'which was not completed' — \
              describe_daemon_error cannot tell a cancelled prompt from a refusal"
         );
+    }
+
+    #[test]
+    fn a_timestamp_is_read_with_its_offset() {
+        assert_eq!(parse_rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_rfc3339_secs("2026-03-17T20:31:06Z"),
+            Some(1_773_779_466)
+        );
+        assert_eq!(
+            parse_rfc3339_secs("2026-03-17T20:31:06.123456Z"),
+            Some(1_773_779_466)
+        );
+        // The hand-written parser this replaced dropped the offset.
+        assert_eq!(
+            parse_rfc3339_secs("2026-03-17T22:31:06+02:00"),
+            Some(1_773_779_466)
+        );
+    }
+
+    #[test]
+    fn what_is_not_a_timestamp_is_none() {
+        // Month 14 used to index past the end of a table: a panic.
+        for s in [
+            "2026-14-01T00:00:00Z",
+            "2026-03-00T00:00:00Z",
+            "1969-12-31T23:59:59Z",
+            "",
+        ] {
+            assert_eq!(parse_rfc3339_secs(s), None, "{s}");
+        }
     }
 }
