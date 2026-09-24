@@ -566,7 +566,8 @@ impl PipeClient {
         .await
     }
 
-    /// Store an API token for a host (FortiGate, UniFi, OPNsense, etc.).
+    /// Store an API token for a host (FortiGate, UniFi, OPNsense, etc.),
+    /// and the port its API listens on; 0 keeps the port the host has.
     pub async fn ssh_set_api_token(
         &self,
         host_id: &str,

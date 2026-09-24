@@ -448,7 +448,9 @@ impl EngineServer {
             }
         };
 
-        merge_host_update(&mut host, &incoming);
+        if let Err(e) = merge_host_update(&mut host, &incoming) {
+            return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
+        }
         host.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.save_ssh_host(&host) {
@@ -710,10 +712,11 @@ impl EngineServer {
                 )
             }
         };
-        let api_port = params
-            .get("api_port")
-            .and_then(serde_json::Value::as_u64)
-            .map_or(443, |v| v as u16);
+        // No port, or 0, keeps the one the host has.
+        let api_port = match supermgr_core::port::optional_field(&params, "api_port") {
+            Ok(port) => port,
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
+        };
 
         let label = format!("ssh/{}/fortigate-api-token", host_id.simple());
         let mut state = self.state.lock().await;
@@ -733,7 +736,9 @@ impl EngineServer {
             }
         };
         host.api_token_ref = Some(supermgr_core::vpn::profile::SecretRef::new(label.clone()));
-        host.api_port = Some(api_port);
+        if api_port.is_some() {
+            host.api_port = api_port;
+        }
         host.updated_at = chrono::Utc::now();
         let snapshot = host.clone();
         if let Err(e) = state.save_ssh_host(&snapshot) {
@@ -745,7 +750,7 @@ impl EngineServer {
             serde_json::json!({
                 "stored": true,
                 "label": label,
-                "api_port": api_port,
+                "api_port": snapshot.api_port.unwrap_or(443),
             }),
         )
     }

@@ -34,6 +34,7 @@ pub mod mac;
 pub mod paths;
 #[cfg(target_os = "windows")]
 pub mod pipe;
+pub mod port;
 pub mod protocol;
 pub mod recon;
 pub mod secret_lifecycle;

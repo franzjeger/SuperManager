@@ -3032,6 +3032,26 @@ impl DaemonService {
         let updates: serde_json::Value = serde_json::from_str(host_json)
             .map_err(|e| fdo::Error::InvalidArgs(format!("invalid host JSON: {e}")))?;
 
+        // Ports are checked before anything changes, so a wrong one refuses
+        // the update instead of being wrapped into another port (`as u16`
+        // made 65558 port 22) or leaving the fields before it applied.
+        // `null` leaves a port as it is; for RDP and VNC, 0 clears it.
+        let port_update = |key: &str| {
+            supermgr_core::port::field(&updates, key)
+                .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))
+        };
+        let new_port = port_update("port")?;
+        let new_api_port = port_update("api_port")?;
+        let optional_port_update = |key: &str| {
+            updates
+                .get(key)
+                .map(|v| supermgr_core::port::parse_optional(key, v))
+                .transpose()
+                .map_err(|e| fdo::Error::InvalidArgs(e.to_string()))
+        };
+        let new_rdp_port = optional_port_update("rdp_port")?;
+        let new_vnc_port = optional_port_update("vnc_port")?;
+
         let mut state = self.state.lock().await;
         let current = state
             .hosts
@@ -3044,11 +3064,7 @@ impl DaemonService {
             .trim()
             .trim_end_matches('.')
             .to_owned();
-        let proposed_port = updates
-            .get("port")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|v| u16::try_from(v).ok())
-            .unwrap_or(current.port);
+        let proposed_port = new_port.unwrap_or(current.port);
         if let Some(existing) = state.hosts.values().find(|existing| {
             existing.id != id && same_host_endpoint(existing, &proposed_hostname, proposed_port)
         }) {
@@ -3069,8 +3085,8 @@ impl DaemonService {
         if updates.get("hostname").is_some() {
             host.hostname = proposed_hostname;
         }
-        if let Some(v) = updates.get("port").and_then(serde_json::Value::as_u64) {
-            host.port = v as u16;
+        if let Some(port) = new_port {
+            host.port = port;
         }
         if let Some(v) = updates.get("username").and_then(|v| v.as_str()) {
             host.username = v.to_owned();
@@ -3115,15 +3131,14 @@ impl DaemonService {
         if let Some(v) = updates.get("proxy_jump") {
             host.proxy_jump = v.as_str().and_then(|s| Uuid::parse_str(s).ok());
         }
-        if let Some(v) = updates.get("api_port").and_then(serde_json::Value::as_u64) {
-            host.api_port = Some(v as u16);
+        if let Some(api_port) = new_api_port {
+            host.api_port = Some(api_port);
         }
-        // RDP/VNC ports: 0 or null means "not configured".
-        if let Some(v) = updates.get("rdp_port") {
-            host.rdp_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+        if let Some(rdp_port) = new_rdp_port {
+            host.rdp_port = rdp_port;
         }
-        if let Some(v) = updates.get("vnc_port") {
-            host.vnc_port = v.as_u64().filter(|&p| p > 0).map(|p| p as u16);
+        if let Some(vnc_port) = new_vnc_port {
+            host.vnc_port = vnc_port;
         }
         if let Some(v) = updates.get("pinned").and_then(serde_json::Value::as_bool) {
             host.pinned = v;
@@ -3989,7 +4004,8 @@ impl DaemonService {
         Ok(())
     }
 
-    /// Store a FortiGate REST API token and optional port for the given host.
+    /// Store a FortiGate REST API token for the given host, and the port its
+    /// API listens on; 0 keeps the port the host has.
     async fn ssh_set_api_token(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -4013,13 +4029,19 @@ impl DaemonService {
             .get_mut(&id)
             .ok_or_else(|| fdo::Error::UnknownObject("host not found".into()))?;
         host.api_token_ref = Some(SecretRef::new(&label));
-        host.api_port = Some(port);
+        if port > 0 {
+            host.api_port = Some(port);
+        }
         host.updated_at = chrono::Utc::now();
+        let host = host.clone();
         state
-            .save_host(&state.hosts[&id].clone())
+            .save_host(&host)
             .map_err(|e| fdo::Error::Failed(format!("save host: {e}")))?;
 
-        info!("stored FortiGate API token for host {id} (port {})", port);
+        info!(
+            "stored FortiGate API token for host {id} (port {})",
+            host.api_port.unwrap_or(443)
+        );
         Ok(())
     }
 

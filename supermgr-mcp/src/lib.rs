@@ -495,10 +495,10 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
                 .get("token")
                 .and_then(|v| v.as_str())
                 .ok_or("missing token")?;
-            let port = args
-                .get("port")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0) as u16;
+            // No port, or 0, keeps the one the host has.
+            let port = supermgr_core::port::optional_field(args, "port")
+                .map_err(|e| e.to_string())?
+                .unwrap_or(0);
             proxy
                 .ssh_set_api_token(host_id, token, port)
                 .await

@@ -57,18 +57,21 @@ impl EngineServer {
                     .collect()
             })
             .unwrap_or_default();
-        let ports: Vec<u16> = params.get("ports").and_then(|v| v.as_array()).map_or_else(
-            || crate::probes::COMMON_PORTS.to_vec(),
-            |arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_u64().map(|n| n as u16))
-                    .collect()
+        let ports: Vec<u16> = match params.get("ports").and_then(|v| v.as_array()) {
+            None => crate::probes::COMMON_PORTS.to_vec(),
+            Some(arr) => match arr
+                .iter()
+                .map(|x| supermgr_core::port::parse("ports", x))
+                .collect()
+            {
+                Ok(ports) => ports,
+                Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
             },
-        );
+        };
         let cap = params
             .get("max_targets")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(512) as usize;
+            .map_or(512, |n| usize::try_from(n).unwrap_or(usize::MAX));
         let targets = crate::discovery::expand_targets(&targets_raw, cap);
         if targets.is_empty() {
             return Response::err(

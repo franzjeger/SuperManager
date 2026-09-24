@@ -132,11 +132,12 @@ fn arg_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, RpcError> {
         .ok_or_else(|| RpcError::Protocol(format!("missing string arg: {name}")))
 }
 
-/// Boilerplate-saver: extract a required u64 arg.
-fn arg_u64(args: &Value, name: &str) -> Result<u64, RpcError> {
-    args.get(name)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| RpcError::Protocol(format!("missing integer arg: {name}")))
+/// Boilerplate-saver: extract a required port arg, 1 to 65535.
+fn arg_port(args: &Value, name: &str) -> Result<u16, RpcError> {
+    let value = args
+        .get(name)
+        .ok_or_else(|| RpcError::Protocol(format!("missing integer arg: {name}")))?;
+    supermgr_core::port::parse(name, value).map_err(|e| RpcError::Protocol(e.to_string()))
 }
 
 /// Standard response for methods that aren't ported yet. Lets the GUI/MCP
@@ -589,7 +590,8 @@ async fn handle_import_forticlient_sslvpn(
         return Err(RpcError::Other("profile name must not be empty".into()));
     }
     let host = arg_str(args, "host")?;
-    let port = args.get("port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let port = supermgr_core::port::field_or(args, "port", 443)
+        .map_err(|e| RpcError::Protocol(e.to_string()))?;
     let username = arg_str(args, "username")?;
     let password = arg_str(args, "password")?;
     let trusted_cert = args
@@ -1046,8 +1048,7 @@ async fn handle_ssh_forget_host_key(
     args: &Value,
 ) -> Result<Value, RpcError> {
     let hostname = arg_str(args, "hostname")?;
-    let port = u16::try_from(arg_u64(args, "port")?)
-        .map_err(|_| RpcError::Protocol("port must be from 0 to 65535".into()))?;
+    let port = arg_port(args, "port")?;
     let removed = state
         .known_hosts
         .forget(hostname, port)
@@ -1072,8 +1073,7 @@ async fn handle_ssh_trust_host_key(
     args: &Value,
 ) -> Result<Value, RpcError> {
     let hostname = arg_str(args, "hostname")?;
-    let port = u16::try_from(arg_u64(args, "port")?)
-        .map_err(|_| RpcError::Protocol("port must be from 0 to 65535".into()))?;
+    let port = arg_port(args, "port")?;
     let algorithm = arg_str(args, "algorithm")?;
     let fingerprint = arg_str(args, "fingerprint")?;
     let fingerprint = fingerprint.strip_prefix("SHA256:").unwrap_or(fingerprint);
@@ -1139,7 +1139,16 @@ async fn handle_ssh_set_api_token(
 ) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let token = arg_str(args, "token")?;
-    let port = arg_u64(args, "port")? as u16;
+    // No port, or 0, keeps the one the host has.
+    let port = supermgr_core::port::optional_field(args, "port")
+        .map_err(|e| RpcError::Protocol(e.to_string()))?;
+    // The host first: a token stored for a host that is not there would be
+    // left in Credential Manager with nothing pointing at it.
+    let host_path = state.root.join("hosts").join(format!("{host_id}.json"));
+    let bytes =
+        std::fs::read(&host_path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+    let mut host: Value =
+        serde_json::from_slice(&bytes).map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
     let label = format!("supermgr/host/{host_id}/api-token");
     state
         .secret_store
@@ -1148,14 +1157,10 @@ async fn handle_ssh_set_api_token(
         .map_err(|e| RpcError::Secret(e.to_string()))?;
     // Persist the port alongside the host metadata so subsequent calls
     // know where to hit the appliance.
-    let host_path = state.root.join("hosts").join(format!("{host_id}.json"));
-    if let Ok(bytes) = std::fs::read(&host_path) {
-        if let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("api_port".into(), Value::Number(port.into()));
-            }
-            let _ = std::fs::write(&host_path, v.to_string());
-        }
+    if let (Some(port), Some(obj)) = (port, host.as_object_mut()) {
+        obj.insert("api_port".into(), port.into());
+        std::fs::write(&host_path, host.to_string())
+            .map_err(|e| RpcError::Other(format!("write host: {e}")))?;
     }
     Ok(Value::Null)
 }

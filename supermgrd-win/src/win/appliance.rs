@@ -43,6 +43,14 @@ fn read_host(root: &Path, host_id: &str) -> Result<Value, RpcError> {
         .map_err(|e| RpcError::Other(format!("parse host json: {e}")))
 }
 
+/// The port the host's API listens on: its `api_port`, or `default` when
+/// it has none. 0 is how "none" has been stored.
+fn api_port(meta: &Value, default: u16) -> Result<u16, RpcError> {
+    supermgr_core::port::optional_field(meta, "api_port")
+        .map(|port| port.unwrap_or(default))
+        .map_err(|e| RpcError::Other(format!("host {e}")))
+}
+
 /// Read SSH-key JSON from `%PROGRAMDATA%\SuperManager\keys\<id>.json`.
 fn read_key(root: &Path, key_id: &str) -> Result<Value, RpcError> {
     let path = root.join("keys").join(format!("{key_id}.json"));
@@ -86,7 +94,7 @@ pub async fn fortigate_api(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
-    let api_port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let api_port = api_port(&meta, 443)?;
 
     let token_bytes = secret_store
         .retrieve(&format!("supermgr/host/{host_id}/api-token"))
@@ -190,7 +198,7 @@ pub async fn fortigate_backup_config(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
-    let api_port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let api_port = api_port(&meta, 443)?;
 
     let token_bytes = secret_store
         .retrieve(&format!("supermgr/host/{host_id}/api-token"))
@@ -445,7 +453,7 @@ pub async fn opnsense_api(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
-    let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let port = api_port(&meta, 443)?;
     let (status, body) =
         opnsense_request(&secret_store, host_id, hostname, port, method, path, body).await?;
     if status >= 400 {
@@ -471,7 +479,7 @@ pub async fn opnsense_backup_config(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
-    let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let port = api_port(&meta, 443)?;
     let (status, body) = opnsense_request(
         &secret_store,
         host_id,
@@ -561,7 +569,7 @@ pub async fn sophos_xml_api(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
-    let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(4444) as u16;
+    let port = api_port(&meta, 4444)?;
 
     let creds_bytes = secret_store
         .retrieve(&format!("supermgr/host/{host_id}/sophos-credentials"))

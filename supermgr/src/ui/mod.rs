@@ -1974,9 +1974,9 @@ pub fn build_ui(
                         if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
                             arr.iter().find_map(|entry| {
                                 let eid = entry["host_id"].as_str()?;
-                                let elp = entry["local_port"].as_u64()? as u16;
+                                let elp = supermgr_core::port::from_json(&entry["local_port"])?;
                                 let erh = entry["remote_host"].as_str()?;
-                                let erp = entry["remote_port"].as_u64()? as u16;
+                                let erp = supermgr_core::port::from_json(&entry["remote_port"])?;
                                 if eid == host_id && elp == local_port && erh == remote_host && erp == remote_port {
                                     Some(entry["forward_id"].as_str()?.to_owned())
                                 } else {

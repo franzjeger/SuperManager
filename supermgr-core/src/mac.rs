@@ -439,7 +439,8 @@ impl MacClient {
         .await
     }
 
-    /// Store an API token for a host (FortiGate, UniFi, OPNsense, etc.).
+    /// Store an API token for a host (FortiGate, UniFi, OPNsense, etc.),
+    /// and the port its API listens on; 0 keeps the port the host has.
     pub async fn ssh_set_api_token(
         &self,
         host_id: &str,
@@ -448,7 +449,7 @@ impl MacClient {
     ) -> Result<(), MacError> {
         self.invoke_unit(
             "ssh_set_api_token",
-            serde_json::json!({ "host_id": host_id, "token": token, "api_port": if port == 0 { 443 } else { port } }),
+            serde_json::json!({ "host_id": host_id, "token": token, "api_port": port }),
         )
         .await
     }

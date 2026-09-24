@@ -152,7 +152,8 @@ async fn open_session(
         .get("hostname")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname' field".into()))?;
-    let port = meta.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
+    let port = supermgr_core::port::field_or(&meta, "port", 22)
+        .map_err(|e| RpcError::Other(format!("host {e}")))?;
     let username = meta
         .get("username")
         .and_then(Value::as_str)

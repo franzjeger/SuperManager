@@ -80,10 +80,10 @@ impl EngineServer {
             Some(s) => s.to_owned(),
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing host".to_owned()),
         };
-        let port = params
-            .get("port")
-            .and_then(serde_json::Value::as_u64)
-            .map_or(22, |n| n as u16);
+        let port = match supermgr_core::port::field_or(&params, "port", 22) {
+            Ok(port) => port,
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
+        };
         let service = params
             .get("service")
             .and_then(|v| v.as_str())
