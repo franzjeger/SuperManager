@@ -163,8 +163,8 @@ fn parse_vuln(item: &serde_json::Value) -> Option<FeedEntry> {
     let (severity, cvss) = pick_cvss(metrics).unwrap_or((Severity::Medium, 5.0));
 
     // Affected products — derive product keywords from CPE matches.
-    let mut keywords: std::collections::HashSet<String> = Default::default();
-    let mut versions: std::collections::HashSet<String> = Default::default();
+    let mut keywords = std::collections::HashSet::<String>::new();
+    let mut versions = std::collections::HashSet::<String>::new();
     if let Some(configs) = cve.get("configurations").and_then(|c| c.as_array()) {
         for cfg in configs {
             if let Some(nodes) = cfg.get("nodes").and_then(|n| n.as_array()) {

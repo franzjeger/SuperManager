@@ -135,7 +135,7 @@ fn render_linux_preview() {
             let view = super::tailscale::build_tailscale_page(rt.handle(), &tx, &window, &state);
             let nodes = serde_json::from_value(serde_json::json!([
                 {"id":"self","hostname":"linux-workstation","dns_name":"linux-workstation.example.ts.net","os":"linux","tailscale_ips":["100.64.0.10"],"online":true,"is_self":true,"exit_node":false,"last_seen":"","rx_bytes":0,"tx_bytes":0},
-                {"id":"peer","hostname":"office-gateway","dns_name":"office-gateway.example.ts.net","os":"linux","tailscale_ips":["100.64.0.20","fd7a:115c:a1e0::20"],"online":true,"is_self":false,"exit_node":false,"exit_node_option":true,"last_seen":"2026-09-09T18:00:00Z","rx_bytes":18452388,"tx_bytes":5001234,"current_address":"192.168.10.1:41641","relay":"Oslo"},
+                {"id":"peer","hostname":"office-gateway","dns_name":"office-gateway.example.ts.net","os":"linux","tailscale_ips":["100.64.0.20","fd7a:115c:a1e0::20"],"online":true,"is_self":false,"exit_node":false,"exit_node_option":true,"last_seen":"2026-09-09T18:00:00Z","rx_bytes":18_452_388,"tx_bytes":5_001_234,"current_address":"192.168.10.1:41641","relay":"Oslo"},
                 {"id":"offline","hostname":"office-mac","dns_name":"office-mac.example.ts.net","os":"macOS","tailscale_ips":["100.64.0.30"],"online":false,"is_self":false,"exit_node":false,"last_seen":"2026-09-08T12:00:00Z","rx_bytes":0,"tx_bytes":0}
             ])).unwrap();
             view.render(&Ok(nodes));
@@ -159,7 +159,7 @@ fn render_linux_preview() {
                 rt.handle(),
                 &tx,
                 "",
-                &Default::default(),
+                &std::collections::HashMap::new(),
             );
             let side = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
             side.append(

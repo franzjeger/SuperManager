@@ -139,7 +139,7 @@ async fn resolve_inventory(network: Ipv4Net, managed: Vec<Host>) -> (InventoryMa
                 Ok(Ok(addresses)) => Ok(addresses
                     .filter_map(|a| match a.ip() {
                         std::net::IpAddr::V4(ip) => Some(ip),
-                        _ => None,
+                        std::net::IpAddr::V6(_) => None,
                     })
                     .collect()),
                 _ => Err(format!("Inventory DNS lookup failed: {}", host.hostname)),

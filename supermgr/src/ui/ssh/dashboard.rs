@@ -489,15 +489,14 @@ pub fn populate_dashboard(
         rt.spawn(async move {
             // Quick reachability check.
             let addr = format!("{hostname}:{api_port}");
-            let reachable = match tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            {
-                Ok(Ok(_)) => true,
-                _ => false,
-            };
+            let reachable = matches!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await,
+                Ok(Ok(_))
+            );
 
             if !reachable {
                 let _ = tx.send(AppMsg::DashboardDeviceStatus {

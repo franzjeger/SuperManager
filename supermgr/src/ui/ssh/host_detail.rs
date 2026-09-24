@@ -430,7 +430,7 @@ pub fn build_ssh_host_detail() -> (SshHostDetail, gtk4::Widget) {
         auth_method_row,
         jump_host_row,
         connection_notice,
-        connection_issue_host: Default::default(),
+        connection_issue_host: std::rc::Rc::default(),
         host_key_row,
         forget_host_key_btn,
         connect_btn,
@@ -1011,22 +1011,19 @@ pub fn refresh_fortigate_dashboard(
         // Quick TCP check before making the full API call — avoids a 30s
         // timeout when the host is unreachable (e.g. VPN not connected).
         let addr = format!("{hostname}:{api_port}");
-        match tokio::time::timeout(
+        let Ok(Ok(_)) = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             tokio::net::TcpStream::connect(&addr),
         )
         .await
-        {
-            Ok(Ok(_)) => {} // reachable, proceed
-            _ => {
-                // Not reachable — show "Unreachable" without error toast.
-                let _ = tx.send(AppMsg::FortigateStatus {
-                    host_id,
-                    data: serde_json::json!({ "error": "host unreachable" }),
-                });
-                return;
-            }
-        }
+        else {
+            // Not reachable — show "Unreachable" without error toast.
+            let _ = tx.send(AppMsg::FortigateStatus {
+                host_id,
+                data: serde_json::json!({ "error": "host unreachable" }),
+            });
+            return;
+        };
 
         let result = async {
             let conn = zbus::Connection::system().await?;

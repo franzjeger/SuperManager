@@ -391,7 +391,7 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
         out.push_str("_No open findings._\n\n");
         return;
     }
-    let mut by_sev: std::collections::BTreeMap<u8, Vec<&PersistedFinding>> = Default::default();
+    let mut by_sev = std::collections::BTreeMap::<u8, Vec<&PersistedFinding>>::new();
     for f in &open {
         by_sev
             .entry(sev_rank(&f.finding.severity))

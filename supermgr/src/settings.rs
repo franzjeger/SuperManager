@@ -228,7 +228,7 @@ impl Default for LayoutSettings {
             window_width: 1280,
             window_height: 800,
             maximized: false,
-            sidebar_widths: Default::default(),
+            sidebar_widths: std::collections::BTreeMap::new(),
         }
     }
 }

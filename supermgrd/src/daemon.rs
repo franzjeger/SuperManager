@@ -4466,10 +4466,10 @@ impl DaemonService {
             let state = self.state.lock().await;
             if let Some(host) = state.hosts.get(&id) {
                 if let Some(vpn_id) = host.vpn_profile_id {
-                    let already_connected = match &state.vpn_state {
-                        VpnState::Connected { profile_id, .. } if *profile_id == vpn_id => true,
-                        _ => false,
-                    };
+                    let already_connected = matches!(
+                        &state.vpn_state,
+                        VpnState::Connected { profile_id, .. } if *profile_id == vpn_id
+                    );
                     if !already_connected {
                         if state.vpn_state.is_idle() {
                             if let Some(profile) = state.profiles.get(&vpn_id).cloned() {

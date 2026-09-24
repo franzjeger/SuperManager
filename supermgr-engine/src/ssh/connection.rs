@@ -336,7 +336,7 @@ impl SshSession {
                 Some(russh::ChannelMsg::Data { data }) => {
                     stdout.extend_from_slice(&data);
                 }
-                Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
+                Some(russh::ChannelMsg::ExtendedData { data, ext: 1 }) => {
                     // ext == 1 is stderr
                     stderr.extend_from_slice(&data);
                 }

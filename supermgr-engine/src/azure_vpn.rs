@@ -931,7 +931,13 @@ mod tests {
         }
         buf.extend_from_slice(&bit_len.to_be_bytes());
 
-        let mut h: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+        let mut h: [u32; 5] = [
+            0x6745_2301,
+            0xefcd_ab89,
+            0x98ba_dcfe,
+            0x1032_5476,
+            0xc3d2_e1f0,
+        ];
         for chunk in buf.chunks(64) {
             let mut w = [0u32; 80];
             for (i, word) in chunk.chunks(4).enumerate() {
@@ -943,10 +949,10 @@ mod tests {
             let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
             for i in 0..80 {
                 let (f, k) = match i {
-                    0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
-                    20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                    _ => (b ^ c ^ d, 0xca62c1d6),
+                    0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999),
+                    20..=39 => (b ^ c ^ d, 0x6ed9_eba1),
+                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc),
+                    _ => (b ^ c ^ d, 0xca62_c1d6),
                 };
                 let temp = a
                     .rotate_left(5)

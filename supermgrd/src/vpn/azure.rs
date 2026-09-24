@@ -884,8 +884,9 @@ impl VpnBackend for AzureBackend {
                     nix::sys::signal::Signal::SIGTERM,
                 );
             }
-            if let Ok(_) =
-                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await
+            if tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+                .await
+                .is_ok()
             {
                 info!("Azure: openvpn exited cleanly");
             } else {
