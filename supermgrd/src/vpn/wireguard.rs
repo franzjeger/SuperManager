@@ -68,6 +68,10 @@ use crate::secrets;
 // Internal state
 // ---------------------------------------------------------------------------
 
+/// What `add_routes` changed, for `disconnect` to reverse: the IPv4 and
+/// IPv6 default routes it replaced, and the endpoint host routes it added.
+type SavedRoutes = (Option<RouteMessage>, Option<RouteMessage>, Vec<String>);
+
 /// Tracks whether a WireGuard interface is currently owned by this backend,
 /// and saves state that must be restored at disconnect time.
 #[derive(Debug, Default)]
@@ -723,10 +727,8 @@ impl WireGuardBackend {
             }
 
             for allowed_ip in &peer.allowed_ips {
-                peer_builder = peer_builder.add_allowed_ip(
-                    allowed_ip.addr(),
-                    u8::try_from(allowed_ip.prefix_len()).expect("prefix length fits in u8"),
-                );
+                peer_builder =
+                    peer_builder.add_allowed_ip(allowed_ip.addr(), allowed_ip.prefix_len());
             }
 
             if let Some(ka) = peer.persistent_keepalive {
@@ -905,7 +907,7 @@ impl WireGuardBackend {
         &self,
         iface_name: &str,
         wg_cfg: &WireGuardConfig,
-    ) -> Result<(Option<RouteMessage>, Option<RouteMessage>, Vec<String>), BackendError> {
+    ) -> Result<SavedRoutes, BackendError> {
         let mut saved_v4: Option<RouteMessage> = None;
         let mut saved_v6: Option<RouteMessage> = None;
         let mut endpoint_host_routes: Vec<String> = Vec::new();

@@ -113,6 +113,10 @@ pub const NOTIFICATION_HISTORY_LIMIT: usize = 100;
 // Inter-thread messages
 // ---------------------------------------------------------------------------
 
+/// Customers, with the hosts and VPN profiles they are assigned, as read
+/// together.
+pub type CustomerSnapshot = (Vec<Customer>, Vec<HostSummary>, Vec<ProfileSummary>);
+
 /// Messages sent from tokio background tasks to the GTK main thread.
 ///
 /// All variants are `Send`; GTK widget references live only on the main thread
@@ -161,7 +165,7 @@ pub enum AppMsg {
     /// Customer catalog and asset summaries were refreshed as one snapshot.
     CustomerDataRefreshed {
         /// Snapshot, or a persistent page error.
-        result: Result<(Vec<Customer>, Vec<HostSummary>, Vec<ProfileSummary>), String>,
+        result: Result<CustomerSnapshot, String>,
         /// Optional success message for a completed write.
         toast: Option<String>,
     },

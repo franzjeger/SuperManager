@@ -263,8 +263,8 @@ MIIB
         for (drop, needle) in [("remote ", "remote"), ("dev ", "dev"), ("<ca>", "CA")] {
             let text: String = CLIENT_OVPN
                 .lines()
-                .filter(|l| !l.starts_with(drop) && !(drop == "<ca>" && l.starts_with("</ca>")))
-                .map(|l| format!("{l}\n"))
+                .filter(|l| !(l.starts_with(drop) || (drop == "<ca>" && l.starts_with("</ca>"))))
+                .flat_map(|l| [l, "\n"])
                 .collect();
             let err = validate_ovpn_config(&text).unwrap_err();
             assert!(err.contains(needle), "dropping {drop:?} gave: {err}");

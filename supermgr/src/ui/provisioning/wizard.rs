@@ -2463,8 +2463,8 @@ fn build_step5_review(
                     .take();
                 if let Some(json) = maybe {
                     btn.set_sensitive(true);
-                    if json.starts_with("ERROR:") {
-                        tracing::warn!("failed to list config versions: {}", &json[6..]);
+                    if let Some(error) = json.strip_prefix("ERROR:") {
+                        tracing::warn!("failed to list config versions: {error}");
                         return glib::ControlFlow::Break;
                     }
                     show_history_dialog(&json, &config_buffer, &rt2);
@@ -3850,8 +3850,8 @@ fn compute_unified_diff(old: &str, new: &str) -> String {
             for k in (j + 1)..new_lines.len().min(j + 5) {
                 if i < old_lines.len() && new_lines[k] == old_lines[i] {
                     // Lines j..k in new are additions
-                    for add in j..k {
-                        output.push_str(&format!("+{}\n", new_lines[add]));
+                    for line in &new_lines[j..k] {
+                        output.push_str(&format!("+{line}\n"));
                     }
                     j = k;
                     found_in_new = true;
@@ -3863,8 +3863,8 @@ fn compute_unified_diff(old: &str, new: &str) -> String {
                 let mut found_in_old = false;
                 for k in (i + 1)..old_lines.len().min(i + 5) {
                     if j < new_lines.len() && old_lines[k] == new_lines[j] {
-                        for del in i..k {
-                            output.push_str(&format!("-{}\n", old_lines[del]));
+                        for line in &old_lines[i..k] {
+                            output.push_str(&format!("-{line}\n"));
                         }
                         i = k;
                         found_in_old = true;

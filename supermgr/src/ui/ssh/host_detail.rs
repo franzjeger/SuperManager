@@ -1248,10 +1248,7 @@ pub fn launch_ssh_terminal(ssh_cmd: &str) {
                     info!("launched SSH session in {term}: {ssh_cmd}");
                     return;
                 }
-                Err(e) => {
-                    error!("failed to launch {term}: {e}");
-                    continue;
-                }
+                Err(e) => error!("failed to launch {term}: {e}"),
             }
         }
     }
@@ -1343,10 +1340,7 @@ pub fn launch_rdp(
                     info!("launched RDP via {client} to {hostname}:{port}");
                     return Ok(format!("Launching RDP to {hostname}:{port} via {client}"));
                 }
-                Err(e) => {
-                    error!("failed to launch {client}: {e}");
-                    continue;
-                }
+                Err(e) => error!("failed to launch {client}: {e}"),
             }
         }
     }
@@ -1383,10 +1377,7 @@ pub fn launch_vnc(hostname: &str, port: u16) -> Result<String, String> {
                     info!("launched VNC session via {client} to {hostname}:{port}");
                     return Ok(format!("Launching VNC to {hostname}:{port} via {client}"));
                 }
-                Err(e) => {
-                    error!("failed to launch {client}: {e}");
-                    continue;
-                }
+                Err(e) => error!("failed to launch {client}: {e}"),
             }
         }
     }

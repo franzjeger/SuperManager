@@ -86,9 +86,9 @@ impl RiskBand {
 /// scope. `host_zones` is optional context from `asset_enrich`:
 /// when provided, public-zone hosts get a 1.5× exposure multiplier.
 #[must_use]
-pub fn score_hosts(
+pub fn score_hosts<S: std::hash::BuildHasher>(
     findings: &[PersistedFinding],
-    host_zones: &HashMap<String, String>,
+    host_zones: &HashMap<String, String, S>,
 ) -> Vec<HostRisk> {
     let mut by_host: HashMap<String, Vec<&PersistedFinding>> = HashMap::new();
     for f in findings {

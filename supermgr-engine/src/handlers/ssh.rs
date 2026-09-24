@@ -295,9 +295,9 @@ impl EngineServer {
             .get("directory")
             .and_then(|v| v.as_str())
             .unwrap_or("~/.ssh");
-        let expanded = if directory.starts_with("~/") {
+        let expanded = if let Some(rest) = directory.strip_prefix("~/") {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-            format!("{}/{}", home, &directory[2..])
+            format!("{home}/{rest}")
         } else {
             directory.to_owned()
         };

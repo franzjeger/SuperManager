@@ -351,8 +351,7 @@ pub fn populate_dashboard(
         s.hosts
             .iter()
             .filter(|h| {
-                (h.device_type == DeviceType::Fortigate && h.has_api)
-                    || (h.device_type == DeviceType::UniFi && h.has_api)
+                h.has_api && matches!(h.device_type, DeviceType::Fortigate | DeviceType::UniFi)
             })
             .cloned()
             .collect()

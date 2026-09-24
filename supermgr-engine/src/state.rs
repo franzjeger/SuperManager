@@ -271,7 +271,7 @@ fn save_toml<T: serde::Serialize>(dir: &PathBuf, name: &str, value: &T) -> anyho
     Ok(())
 }
 
-fn delete_toml(dir: &PathBuf, name: &str) -> anyhow::Result<()> {
+fn delete_toml(dir: &Path, name: &str) -> anyhow::Result<()> {
     let path = dir.join(format!("{name}.toml"));
     if path.exists() {
         std::fs::remove_file(path)?;

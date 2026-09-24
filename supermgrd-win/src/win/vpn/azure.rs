@@ -606,7 +606,8 @@ async fn accept_auth_code(
         {
             Ok(Callback::Code(code)) => return Ok(code),
             Ok(Callback::Refused(reason)) => return Err(reason),
-            Ok(Callback::Other) | Err(_) => continue,
+            // Not the redirect (a favicon, a probe) or too slow: keep listening.
+            Ok(Callback::Other) | Err(_) => {}
         }
     }
 }
