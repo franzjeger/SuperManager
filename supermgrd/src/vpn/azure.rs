@@ -640,6 +640,8 @@ async fn revert_link_dns(ifindex: i32) {
 #[async_trait]
 impl VpnBackend for AzureBackend {
     async fn connect(&self, profile: &Profile) -> Result<(), BackendError> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
         let ProfileConfig::AzureVpn(cfg) = &profile.config else {
             return Err(BackendError::Interface(
                 "wrong profile type for AzureBackend".into(),
@@ -747,7 +749,6 @@ impl VpnBackend for AzureBackend {
             .ok_or_else(|| BackendError::Interface("openvpn stderr pipe unavailable".into()))?;
 
         // Merge stdout + stderr into a single line stream.
-        use tokio::io::{AsyncBufReadExt, BufReader};
         let mut out_lines = BufReader::new(stdout).lines();
         let mut err_lines = BufReader::new(stderr).lines();
 

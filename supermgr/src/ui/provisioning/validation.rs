@@ -84,12 +84,13 @@ pub fn validate(device_type: &str, config: &str) -> anyhow::Result<usize> {
         "Unsupported target device type"
     );
     if device_type == "UniFi" {
+        use std::io::Write as _;
+
         if is_controller_json(config) {
             let _: serde_json::Value = serde_json::from_str(config)?;
             return Ok(commands);
         }
         // Parse only. The local shell does not execute the draft or substitutions.
-        use std::io::Write as _;
         let mut file = tempfile::NamedTempFile::new()?;
         file.write_all(config.as_bytes())?;
         ensure!(

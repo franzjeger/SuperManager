@@ -165,11 +165,12 @@ async fn ifname_to_index(name: &str) -> Result<u32, BackendError> {
 
 /// Resolve an interface index to its name via rtnetlink.
 async fn ifindex_to_name(idx: u32) -> Option<String> {
+    use netlink_packet_route::link::LinkAttribute;
+
     let (conn, handle, _) = rtnetlink::new_connection().ok()?;
     tokio::spawn(conn);
     let mut links = handle.link().get().match_index(idx).execute();
     let link = links.try_next().await.ok()??;
-    use netlink_packet_route::link::LinkAttribute;
     link.attributes.iter().find_map(|a| {
         if let LinkAttribute::IfName(name) = a {
             Some(name.clone())
@@ -201,12 +202,13 @@ async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, Backe
         .await
         .map_err(|e| BackendError::Interface(format!("rtnetlink route get: {e}")))?
     {
+        use netlink_packet_route::route::{RouteHeader, RouteType};
+
         // Default route has destination prefix length 0.
         if route.header.destination_prefix_length != 0 {
             continue;
         }
         // Only consider unicast routes in the main table.
-        use netlink_packet_route::route::{RouteHeader, RouteType};
         if route.header.kind != RouteType::Unicast {
             continue;
         }
@@ -1534,6 +1536,12 @@ impl VpnBackend for WireGuardBackend {
     }
 
     async fn status(&self) -> Result<BackendStatus, BackendError> {
+        // How long a new tunnel has for its first handshake, and how long
+        // without one before the peer counts as gone (dead-peer detection,
+        // below).
+        const HANDSHAKE_GRACE_SECS: u64 = 30;
+        const DEAD_PEER_SECS: i64 = 180;
+
         let (iface_name, cached_addresses, connected_at): (
             String,
             Vec<ipnet::IpNet>,
@@ -1595,8 +1603,6 @@ impl VpnBackend for WireGuardBackend {
         // and no handshake has been seen in the last 180 s (WireGuard's
         // REJECT_AFTER_TIME), treat the peer as gone and report Inactive so
         // the monitor task can trigger kill-switch strict mode / reconnect.
-        const HANDSHAKE_GRACE_SECS: u64 = 30;
-        const DEAD_PEER_SECS: i64 = 180;
         let now = chrono::Utc::now();
         let been_up_long_enough =
             connected_at.is_none_or(|t| t.elapsed().as_secs() >= HANDSHAKE_GRACE_SECS);

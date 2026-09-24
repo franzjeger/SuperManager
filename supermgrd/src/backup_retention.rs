@@ -434,6 +434,9 @@ mod tests {
 
     #[test]
     fn compress_in_place_round_trip() {
+        use flate2::read::GzDecoder;
+        use std::io::Read as _;
+
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("h_20260101_120000.conf");
         std::fs::write(&path, b"hello world").unwrap();
@@ -443,8 +446,6 @@ mod tests {
         assert!(!path.exists(), "original should be deleted");
 
         // Decompress and verify.
-        use flate2::read::GzDecoder;
-        use std::io::Read as _;
         let bytes = std::fs::read(&new_path).unwrap();
         let mut dec = GzDecoder::new(&bytes[..]);
         let mut out = Vec::new();

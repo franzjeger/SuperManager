@@ -3154,6 +3154,8 @@ fn html_escape(s: &str) -> String {
 
 /// Build a detailed prompt from the wizard state for Claude to generate config.
 fn build_generation_prompt(s: &WizardState) -> String {
+    use rand::Rng;
+
     let mut prompt = format!(
         "Generate a complete, production-ready {device} configuration for the following deployment:\n\n\
          ## Customer\n\
@@ -3285,7 +3287,6 @@ fn build_generation_prompt(s: &WizardState) -> String {
 
     // Auto-generate secure passwords/PSKs for the config.
     // rand 0.9 renamed thread_rng()→rng() and Rng::gen_range→random_range.
-    use rand::Rng;
     let mut rng = rand::rng();
     let mut gen_pass = |len: usize| -> String {
         const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*";

@@ -1424,6 +1424,12 @@ pub fn list_checks() -> Vec<CheckDefinition> {
 /// (so a typo in one TOML doesn't blank everything else) but
 /// don't fail the call.
 fn load_user_checks() -> Result<Vec<CheckDefinition>> {
+    /// A file of several checks, as `[[checks]] ...`.
+    #[derive(Deserialize)]
+    struct Wrapper {
+        checks: Vec<CheckDefinition>,
+    }
+
     let mut dir = crate::paths::default_data_dir();
     dir.push("checks");
     if !dir.exists() {
@@ -1444,10 +1450,6 @@ fn load_user_checks() -> Result<Vec<CheckDefinition>> {
             }
         };
         // Try wrapped form first: `[[checks]] ...`.
-        #[derive(Deserialize)]
-        struct Wrapper {
-            checks: Vec<CheckDefinition>,
-        }
         if let Ok(wrapper) = toml::from_str::<Wrapper>(&bytes) {
             out.extend(wrapper.checks);
             continue;

@@ -76,6 +76,8 @@ impl TlsClientHello {
 /// TLS `ClientHellos` that attempt a deprecated protocol version.
 /// Returns one finding per (`client_ip`, version) cluster.
 pub async fn detect_tls_downgrade_clients(pcap_path: &Path) -> Result<Vec<Finding>> {
+    use std::collections::BTreeMap;
+
     let bytes = tokio::fs::read(pcap_path)
         .await
         .map_err(|e| anyhow!("read pcap {}: {e}", pcap_path.display()))?;
@@ -85,7 +87,6 @@ pub async fn detect_tls_downgrade_clients(pcap_path: &Path) -> Result<Vec<Findin
     // Cluster: one finding per (src_ip, version) so a client
     // that opens 50 TLS-1.0 connections produces ONE finding,
     // not 50.
-    use std::collections::BTreeMap;
     let mut by_cluster: BTreeMap<(String, u16), Vec<TlsClientHello>> = BTreeMap::new();
     for h in hellos {
         if !h.is_downgrade() {

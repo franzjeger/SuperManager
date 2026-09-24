@@ -533,8 +533,9 @@ pub fn summary(customer_slug: &str) -> Result<StoreSummary> {
     for f in store.findings.values() {
         match &f.disposition {
             Disposition::Open => {
-                open += 1;
                 use crate::severity::Severity;
+
+                open += 1;
                 match f.finding.severity {
                     Severity::Critical => critical += 1,
                     Severity::High => high += 1,

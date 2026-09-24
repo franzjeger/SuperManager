@@ -1786,8 +1786,9 @@ impl DaemonService {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         toml_text: &str,
     ) -> fdo::Result<String> {
-        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         use base64::Engine as _;
+
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
 
         // --- Parse into a generic TOML table to detect type -----------------
         let table: toml::map::Map<String, toml::Value> = toml::from_str(toml_text)
@@ -2349,8 +2350,9 @@ impl DaemonService {
         #[zbus(header)] hdr: zbus::message::Header<'_>,
         profile_id: &str,
     ) -> fdo::Result<String> {
-        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         use wireguard_control::KeyPair;
+
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
 
         let id = Uuid::parse_str(profile_id)
             .map_err(|_| fdo::Error::InvalidArgs(format!("invalid UUID: {profile_id}")))?;
@@ -6046,8 +6048,9 @@ impl DaemonService {
         host_id: &str,
         triggered_by: &str,
     ) -> fdo::Result<String> {
-        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
         use supermgr_core::compliance::TriggerKind;
+
+        crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_EXECUTE).await?;
 
         let id =
             Uuid::parse_str(host_id).map_err(|_| fdo::Error::InvalidArgs("invalid UUID".into()))?;
@@ -8174,6 +8177,13 @@ const BACKUP_COMPRESS_AFTER_DAYS: i64 = 7;
 /// (REST API + key/secret). Runs every `BACKUP_INTERVAL` (24 h by default).
 /// Failures for individual hosts are logged but do not stop the loop.
 pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connection) {
+    /// Whose API a scheduled backup goes through.
+    #[derive(Clone, Copy)]
+    enum Vendor {
+        FortiGate,
+        OpnSense,
+    }
+
     tokio::spawn(async move {
         // Wait a bit after daemon start before the first backup run.
         tokio::time::sleep(Duration::from_secs(120)).await;
@@ -8184,11 +8194,6 @@ pub fn spawn_backup_scheduler(state: Arc<Mutex<DaemonState>>, conn: zbus::Connec
             // Collect every host with API credentials, grouped by vendor so
             // we can dispatch to the right D-Bus method below. Each entry
             // is `(uuid, label, vendor_kind)`.
-            #[derive(Clone, Copy)]
-            enum Vendor {
-                FortiGate,
-                OpnSense,
-            }
             let targets: Vec<(Uuid, String, Vendor)> = {
                 let s = state.lock().await;
                 s.hosts

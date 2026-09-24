@@ -178,6 +178,8 @@ pub async fn render_customer_report(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     customer_slug: &str,
 ) -> Result<String> {
+    use std::fmt::Write;
+
     let customer = load(customer_slug)?;
     let host_lookup: std::collections::HashMap<uuid::Uuid, supermgr_core::host::Host> = {
         let st = state.lock().await;
@@ -185,7 +187,6 @@ pub async fn render_customer_report(
     };
 
     let mut out = String::with_capacity(8192);
-    use std::fmt::Write;
 
     // ============= Cover =============
     writeln!(

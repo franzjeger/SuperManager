@@ -107,6 +107,9 @@ pub async fn spawn_watchdog(
     ov: Arc<Mutex<OpenVpn>>,
     sw: Arc<Mutex<Strongswan>>,
 ) -> Result<()> {
+    // Avoid double-spawn — guard via a separate Once flag.
+    static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
     let state = STATE
         .get_or_init(|| async {
             let map = match fs::read_to_string(STATE_PATH) {
@@ -120,8 +123,6 @@ pub async fn spawn_watchdog(
         .await
         .clone();
 
-    // Avoid double-spawn — guard via a separate Once flag.
-    static SPAWNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     if SPAWNED.get().is_some() {
         return Ok(());
     }

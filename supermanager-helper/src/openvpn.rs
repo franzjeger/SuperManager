@@ -466,6 +466,23 @@ impl OpenVpn {
         // If we see a fatal marker, treat it as a failure with
         // the log content even though the parent exited cleanly.
         if !is_v3 {
+            // Markers openvpn writes when it bails mid-handshake
+            // *unrecoverably*. Recoverable signals (Connection
+            // reset, soft restart) intentionally don't appear here
+            // — the daemon retries those by design.
+            const FATAL: &[&str] = &[
+                "AUTH_FAILED",
+                "auth-failure",
+                "Cannot resolve host",
+                "Fatal TLS error",
+                "Options error",
+                "Cannot load CA certificate",
+                "Cannot load private key",
+                "Cannot load inline certificate",
+                "process exiting",
+                "SIGTERM[soft,init_instance]",
+            ];
+
             // 5s settle window. We only abort when openvpn writes
             // a TRULY fatal marker (AUTH_FAILED, "Cannot load CA",
             // etc) or its PID disappears. Notably absent:
@@ -488,22 +505,6 @@ impl OpenVpn {
                 log_body.len()
             );
 
-            // Markers openvpn writes when it bails mid-handshake
-            // *unrecoverably*. Recoverable signals (Connection
-            // reset, soft restart) intentionally don't appear here
-            // — the daemon retries those by design.
-            const FATAL: &[&str] = &[
-                "AUTH_FAILED",
-                "auth-failure",
-                "Cannot resolve host",
-                "Fatal TLS error",
-                "Options error",
-                "Cannot load CA certificate",
-                "Cannot load private key",
-                "Cannot load inline certificate",
-                "process exiting",
-                "SIGTERM[soft,init_instance]",
-            ];
             let fatal_hit = FATAL.iter().find(|m| log_body.contains(*m));
 
             if !pid_alive || fatal_hit.is_some() {
@@ -999,6 +1000,14 @@ fn select_openvpn(
     require_openvpn3: bool,
     is_available: impl Fn(&Path) -> bool,
 ) -> anyhow::Result<PathBuf> {
+    // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
+    // Useful for non-Azure profiles where 2.x works fine — kept
+    // for backwards compatibility but won't help with Azure VPN.
+    const PATCHED_PATHS: &[&str] = &[
+        "/opt/homebrew/bin/openvpn-patched",
+        "/usr/local/bin/openvpn-patched",
+    ];
+
     // OpenVPN 3 first. Required for Azure VPN with Entra ID.
     const OVPN3_PATHS: &[&str] = &[
         "/opt/homebrew/bin/openvpn3",
@@ -1017,13 +1026,6 @@ fn select_openvpn(
              Install OpenVPN 3 using contrib/build-openvpn3-mac.sh, then try again."
         ));
     }
-    // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
-    // Useful for non-Azure profiles where 2.x works fine — kept
-    // for backwards compatibility but won't help with Azure VPN.
-    const PATCHED_PATHS: &[&str] = &[
-        "/opt/homebrew/bin/openvpn-patched",
-        "/usr/local/bin/openvpn-patched",
-    ];
     for path in PATCHED_PATHS {
         if is_available(Path::new(path)) {
             return Ok(PathBuf::from(path));

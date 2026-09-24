@@ -338,6 +338,11 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
+        // OpenOptionsExt is gated behind unix cfg, so the import lives
+        // inside the (macOS-only) handler body to keep cross-platform
+        // builds clean.
+        use std::os::unix::fs::OpenOptionsExt as _;
+
         use std::io::Write as _;
         use supermgr_core::vpn::profile::{OpenVpnConfig, ProfileConfig};
 
@@ -375,10 +380,6 @@ impl EngineServer {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("mkdir ovpn: {e}"));
         }
         config_path.push(format!("{new_id}.ovpn"));
-        // OpenOptionsExt is gated behind unix cfg, so the import lives
-        // inside the (macOS-only) handler body to keep cross-platform
-        // builds clean.
-        use std::os::unix::fs::OpenOptionsExt as _;
         match std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
@@ -1119,36 +1120,6 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        use supermgr_core::vpn::profile::{ProfileConfig, SecretRef};
-
-        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
-            return Response::err(
-                id,
-                protocol::INVALID_PARAMS,
-                "missing profile_id".to_owned(),
-            );
-        };
-        let pid = match uuid::Uuid::parse_str(pid_str) {
-            Ok(u) => u,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
-        };
-
-        let mut state = self.state.lock().await;
-        let Some(source) = state.profiles.get(&pid).cloned() else {
-            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
-        };
-
-        // Walk the backend-specific config and clone secrets +
-        // any associated config-files into new keychain entries
-        // / paths under a freshly-minted UUID.
-        let new_id = uuid::Uuid::new_v4();
-        let mut new_profile = source.clone();
-        new_profile.id = new_id;
-        new_profile.name = format!("{} (copy)", source.name);
-        new_profile.last_connected_at = None;
-        new_profile.kill_switch = false;
-        new_profile.updated_at = chrono::Utc::now();
-
         // Helper closure for "retrieve from old SecretRef, store
         // under new_id-based label, return new SecretRef." We
         // bubble up the first error rather than partially-cloning,
@@ -1188,6 +1159,36 @@ impl EngineServer {
             }
             Ok(SecretRef::new(new_label))
         }
+
+        use supermgr_core::vpn::profile::{ProfileConfig, SecretRef};
+
+        let Some(pid_str) = params.get("profile_id").and_then(|v| v.as_str()) else {
+            return Response::err(
+                id,
+                protocol::INVALID_PARAMS,
+                "missing profile_id".to_owned(),
+            );
+        };
+        let pid = match uuid::Uuid::parse_str(pid_str) {
+            Ok(u) => u,
+            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, format!("bad uuid: {e}")),
+        };
+
+        let mut state = self.state.lock().await;
+        let Some(source) = state.profiles.get(&pid).cloned() else {
+            return Response::err(id, protocol::INVALID_PARAMS, "profile not found".to_owned());
+        };
+
+        // Walk the backend-specific config and clone secrets +
+        // any associated config-files into new keychain entries
+        // / paths under a freshly-minted UUID.
+        let new_id = uuid::Uuid::new_v4();
+        let mut new_profile = source.clone();
+        new_profile.id = new_id;
+        new_profile.name = format!("{} (copy)", source.name);
+        new_profile.last_connected_at = None;
+        new_profile.kill_switch = false;
+        new_profile.updated_at = chrono::Utc::now();
 
         match &mut new_profile.config {
             ProfileConfig::WireGuard(wg) => {

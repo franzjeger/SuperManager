@@ -29,12 +29,13 @@ pub fn anthropic_tools(allow_changes: bool) -> Value {
 }
 
 pub async fn execute_tool(name: &str, args: &Value, allow_changes: bool) -> anyhow::Result<Value> {
+    static CLIENT: tokio::sync::OnceCell<supermgr_core::client::DaemonClient> =
+        tokio::sync::OnceCell::const_new();
+
     anyhow::ensure!(
         allow_changes || supermgr_mcp::is_read_only(name),
         "This session is read-only. Enable Allow changes before requesting this operation."
     );
-    static CLIENT: tokio::sync::OnceCell<supermgr_core::client::DaemonClient> =
-        tokio::sync::OnceCell::const_new();
     let client = CLIENT
         .get_or_try_init(supermgr_core::client::connect)
         .await

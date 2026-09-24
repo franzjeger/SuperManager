@@ -91,6 +91,8 @@ async fn read_map() -> Result<HashMap<String, String>> {
 /// 3. `chmod 600` the tmp file (before rename so there is no readable window).
 /// 4. `rename` tmp -> target (atomic on Linux if on the same filesystem).
 async fn write_map(map: &HashMap<String, String>) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
     let path = secrets_path();
 
     // Ensure directory exists.
@@ -114,7 +116,6 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
         .await
         .with_context(|| format!("create secrets tmp file {}", tmp.display()))?;
 
-    use tokio::io::AsyncWriteExt;
     file.write_all(text.as_bytes())
         .await
         .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;

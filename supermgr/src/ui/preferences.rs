@@ -33,6 +33,26 @@ use tracing::error;
 use crate::app::AppMsg;
 use crate::settings::{AppSettings, ColorScheme};
 
+/// Push the current webhook settings to the daemon over D-Bus so the
+/// daemon's in-memory state stays in sync with the GUI settings file.
+fn push_webhook_to_daemon(
+    rt: &tokio::runtime::Handle,
+    url: String,
+    on_host_down: bool,
+    on_vpn_disconnect: bool,
+) {
+    rt.spawn(async move {
+        use supermgr_core::dbus::DaemonProxy;
+        if let Ok(conn) = zbus::Connection::system().await {
+            if let Ok(proxy) = DaemonProxy::new(&conn).await {
+                let _ = proxy
+                    .set_webhook(url, on_host_down, on_vpn_disconnect)
+                    .await;
+            }
+        }
+    });
+}
+
 /// Show the application settings dialog.
 pub fn show_settings_dialog(
     window: &adw::ApplicationWindow,
@@ -284,26 +304,6 @@ pub fn show_settings_dialog(
         .build();
     test_webhook_row.add_suffix(&test_webhook_btn);
     notify_group.add(&test_webhook_row);
-
-    // Helper: push the current webhook settings to the daemon over D-Bus so
-    // the daemon's in-memory state stays in sync with the GUI settings file.
-    fn push_webhook_to_daemon(
-        rt: &tokio::runtime::Handle,
-        url: String,
-        on_host_down: bool,
-        on_vpn_disconnect: bool,
-    ) {
-        rt.spawn(async move {
-            use supermgr_core::dbus::DaemonProxy;
-            if let Ok(conn) = zbus::Connection::system().await {
-                if let Ok(proxy) = DaemonProxy::new(&conn).await {
-                    let _ = proxy
-                        .set_webhook(url, on_host_down, on_vpn_disconnect)
-                        .await;
-                }
-            }
-        });
-    }
 
     // Save webhook URL on change.
     {
