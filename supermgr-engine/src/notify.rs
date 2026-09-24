@@ -66,7 +66,7 @@ pub fn save_config(cfg: &NotifyConfig) -> Result<()> {
         std::fs::create_dir_all(dir).ok();
     }
     let s = toml::to_string_pretty(cfg).context("serialize notify config")?;
-    std::fs::write(&path, s).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, s).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 

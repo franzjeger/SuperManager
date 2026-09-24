@@ -1310,7 +1310,7 @@ pub fn persist_run(run: &ComplianceRun) -> Result<()> {
     let mut path = dir;
     path.push(format!("{}.json", run.id));
     let serialized = serde_json::to_vec_pretty(run).context("serialize run")?;
-    std::fs::write(&path, serialized).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, serialized).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -1325,7 +1325,7 @@ pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
         return Ok(Vec::new());
     }
     let mut entries: Vec<RunSummary> = std::fs::read_dir(&dir)
-        .with_context(|| format!("read {dir:?}"))?
+        .with_context(|| format!("read {}", dir.display()))?
         .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
         .filter_map(|e| match std::fs::read(e.path()) {
@@ -1355,7 +1355,7 @@ pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
 pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
     let mut path = host_runs_dir(host_id);
     path.push(format!("{run_id}.json"));
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let run: ComplianceRun = serde_json::from_slice(&bytes).context("deserialize run")?;
     Ok(run)
 }

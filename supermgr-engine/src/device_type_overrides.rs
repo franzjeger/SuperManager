@@ -206,12 +206,14 @@ impl DeviceTypeOverrides {
         };
         let text = toml::to_string_pretty(&on_disk).context("serialize device-type overrides")?;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| format!("mkdir {parent:?}"))?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
         }
         let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text.as_bytes()).with_context(|| format!("write {tmp:?}"))?;
+        std::fs::write(&tmp, text.as_bytes())
+            .with_context(|| format!("write {}", tmp.display()))?;
         std::fs::rename(&tmp, &self.path)
-            .with_context(|| format!("rename {tmp:?} -> {:?}", self.path))?;
+            .with_context(|| format!("rename {} -> {}", tmp.display(), self.path.display()))?;
         Ok(())
     }
 }

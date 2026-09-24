@@ -214,8 +214,8 @@ fn default_category() -> String {
 }
 
 fn load_user_template_meta(toml_path: &std::path::Path) -> Result<TemplateInfo> {
-    let bytes =
-        std::fs::read_to_string(toml_path).with_context(|| format!("read {toml_path:?}"))?;
+    let bytes = std::fs::read_to_string(toml_path)
+        .with_context(|| format!("read {}", toml_path.display()))?;
     let parsed: UserTemplateToml = toml::from_str(&bytes)?;
     Ok(TemplateInfo {
         id: parsed.id,
@@ -238,7 +238,7 @@ fn template_body(template_id: &str) -> Result<String> {
     let mut path = templates_dir();
     path.push(format!("{template_id}.tera"));
     if path.exists() {
-        return std::fs::read_to_string(&path).with_context(|| format!("read {path:?}"));
+        return std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()));
     }
     Err(anyhow!("template not found: {template_id}"))
 }
@@ -660,7 +660,7 @@ fn save_deployment(record: &Deployment) -> Result<()> {
     let mut path = dir;
     path.push(format!("{}.json", record.id));
     let bytes = serde_json::to_vec_pretty(record)?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -691,7 +691,7 @@ pub fn list_deployments(host_id: &str, limit: usize) -> Result<Vec<Deployment>> 
 pub fn load_deployment(host_id: &str, deployment_id: &str) -> Result<Deployment> {
     let mut path = deployments_dir(host_id);
     path.push(format!("{deployment_id}.json"));
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -726,7 +726,7 @@ pub async fn pre_deploy_backup(
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let mut path = dir;
     path.push(format!("backup-{timestamp}.conf"));
-    std::fs::write(&path, cfg.as_bytes()).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, cfg.as_bytes()).with_context(|| format!("write {}", path.display()))?;
     let path_str = path.to_string_lossy().into_owned();
     tracing::info!("pre_deploy_backup: saved {path_str} ({} bytes)", cfg.len());
     Ok(path_str)

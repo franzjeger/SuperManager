@@ -89,8 +89,9 @@ pub fn load(slug: &str) -> Result<Customer> {
 }
 
 fn load_path(path: &Path) -> Result<Customer> {
-    let bytes = std::fs::read_to_string(path).with_context(|| format!("read {path:?}"))?;
-    toml::from_str(&bytes).with_context(|| format!("parse {path:?}"))
+    let bytes =
+        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    toml::from_str(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Validate that a customer / engagement slug is filesystem-safe.
@@ -139,8 +140,8 @@ pub fn save(customer: &Customer) -> Result<()> {
     path.push(format!("{}.toml", customer.slug));
     let tmp = path.with_extension("toml.tmp");
     let serialized = toml::to_string_pretty(customer).context("serialize customer")?;
-    std::fs::write(&tmp, serialized).with_context(|| format!("write {tmp:?}"))?;
-    std::fs::rename(&tmp, &path).with_context(|| format!("rename {path:?}"))?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 
@@ -149,7 +150,7 @@ pub fn delete(slug: &str) -> Result<()> {
     let mut path = customers_dir();
     path.push(format!("{slug}.toml"));
     if path.exists() {
-        std::fs::remove_file(&path).with_context(|| format!("delete {path:?}"))?;
+        std::fs::remove_file(&path).with_context(|| format!("delete {}", path.display()))?;
     }
     Ok(())
 }

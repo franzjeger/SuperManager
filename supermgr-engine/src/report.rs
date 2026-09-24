@@ -136,8 +136,8 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
         anyhow::bail!("pandoc ({engine}) failed: {stderr}");
     }
 
-    let bytes =
-        std::fs::read(&out_path).with_context(|| format!("read pdf output {out_path:?}"))?;
+    let bytes = std::fs::read(&out_path)
+        .with_context(|| format!("read pdf output {}", out_path.display()))?;
     let _ = std::fs::remove_file(&out_path);
     // `in_file` (still held) drops here and unlinks the markdown.
     Ok(bytes)

@@ -956,7 +956,7 @@ fn persist_inventory(customer_slug: &str, hosts: &[DiscoveredHost]) -> Result<()
     let mut path = dir;
     path.push("inventory.json");
     let bytes = serde_json::to_vec_pretty(hosts).context("serialize inventory")?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -966,7 +966,7 @@ pub fn load_inventory(customer_slug: &str) -> Result<Vec<DiscoveredHost>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let hosts: Vec<DiscoveredHost> =
         serde_json::from_slice(&bytes).context("deserialize inventory")?;
     Ok(hosts)
@@ -1397,11 +1397,12 @@ fn persist_active_scan(customer_slug: &str, result: &ActiveScanResult) -> Result
     let mut path = dir.clone();
     path.push("active_scan.json");
     let bytes = serde_json::to_vec_pretty(result).context("serialize")?;
-    std::fs::write(&path, bytes).with_context(|| format!("write {path:?}"))?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
     let mut findings_path = dir;
     findings_path.push("findings.json");
     let bytes = serde_json::to_vec_pretty(&result.findings).context("serialize findings")?;
-    std::fs::write(&findings_path, bytes).with_context(|| format!("write {findings_path:?}"))?;
+    std::fs::write(&findings_path, bytes)
+        .with_context(|| format!("write {}", findings_path.display()))?;
     Ok(())
 }
 
@@ -1411,7 +1412,7 @@ pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let findings: Vec<crate::vuln::Finding> =
         serde_json::from_slice(&bytes).context("deserialize findings")?;
     Ok(findings)
