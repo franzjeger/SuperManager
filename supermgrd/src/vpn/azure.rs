@@ -878,10 +878,14 @@ impl VpnBackend for AzureBackend {
         if let Some(mut child) = child_opt {
             info!("Azure: stopping openvpn child");
             // SIGTERM lets openvpn run its cleanup (delete routes, restore defaults).
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(child.id().unwrap_or(0) as i32),
-                nix::sys::signal::Signal::SIGTERM,
-            );
+            // No id means `status` has already reaped it. PID 0 is not the
+            // fallback: kill(0, …) signals the daemon's own process group.
+            if let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+            }
             if let Ok(_) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await
             {
