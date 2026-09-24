@@ -597,7 +597,7 @@ mod tests {
         (dir, client, peer)
     }
 
-    fn frame(value: Value) -> Vec<u8> {
+    fn frame(value: &Value) -> Vec<u8> {
         let body = serde_json::to_vec(&value).unwrap();
         let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
         frame.extend(body);
@@ -627,7 +627,7 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": 1, "result": null, "error": {"code": -1, "message": "bad"}}),
             json!({"jsonrpc": "2.0", "id": 1, "error": null}),
         ] {
-            let (_dir, client, peer) = client_with_reply(frame(response)).await;
+            let (_dir, client, peer) = client_with_reply(frame(&response)).await;
             assert!(matches!(
                 client.invoke("api_version", json!({})).await,
                 Err(MacError::Protocol(_))

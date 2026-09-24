@@ -17,7 +17,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_operation_cancel(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_operation_cancel(&self, id: u64, params: &serde_json::Value) -> Response {
         let op_id = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),

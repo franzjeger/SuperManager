@@ -68,8 +68,12 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_compliance_history(&self, id: u64, params: serde_json::Value) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+    pub(crate) fn handle_compliance_history(
+        &self,
+        id: u64,
+        params: &serde_json::Value,
+    ) -> Response {
+        let host_id = match get_uuid_param(params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };
@@ -86,8 +90,12 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_compliance_get_run(&self, id: u64, params: serde_json::Value) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+    pub(crate) fn handle_compliance_get_run(
+        &self,
+        id: u64,
+        params: &serde_json::Value,
+    ) -> Response {
+        let host_id = match get_uuid_param(params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };
@@ -118,8 +126,8 @@ impl EngineServer {
     /// immediately preceding it on the same host. The first run
     /// for a host has no baseline; the report renders all current
     /// failures as "newly failing" in that case.
-    pub(crate) fn handle_compliance_drift(&self, id: u64, params: serde_json::Value) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+    pub(crate) fn handle_compliance_drift(&self, id: u64, params: &serde_json::Value) -> Response {
+        let host_id = match get_uuid_param(params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };
@@ -301,9 +309,9 @@ impl EngineServer {
     pub(crate) fn handle_compliance_render_report(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+        let host_id = match get_uuid_param(params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };

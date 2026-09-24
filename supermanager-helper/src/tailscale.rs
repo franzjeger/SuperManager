@@ -121,7 +121,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 /// LaunchDaemon. Idempotent — calling on an already-installed
 /// daemon re-copies the binary (in case the version bundled with
 /// SuperManager has changed) and re-bootstraps.
-pub fn install(args: InstallArgs) -> Result<InstallResult> {
+pub fn install(args: &InstallArgs) -> Result<InstallResult> {
     let src = Path::new(&args.bundled_daemon_path);
     if !src.exists() {
         bail!("bundled daemon not found at {}", args.bundled_daemon_path);
@@ -602,7 +602,7 @@ fn rollback_exemptions(ips: &[String]) {
 /// We discover the service UUID dynamically from the State
 /// store, so this works regardless of the user's specific
 /// service ID.
-pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn force_dns_state(args: &SetDnsArgs) -> Result<InstallResult> {
     if args.servers.is_empty() {
         bail!("force_dns_state requires at least one server");
     }
@@ -673,7 +673,7 @@ fn scutil_find_service_uuid() -> Option<String> {
 /// from DHCP. Pass `["empty"]` to clear and let DHCP own DNS
 /// again. Pass `["1.1.1.1", "1.0.0.1"]` (or similar) for a
 /// known-good fallback when DHCP-provided DNS is broken.
-pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
+pub fn set_dns_servers(args: &SetDnsArgs) -> Result<InstallResult> {
     let service = detect_active_network_service().unwrap_or_else(|| "Wi-Fi".to_string());
 
     let mut cmd = Command::new("/usr/sbin/networksetup");
@@ -971,7 +971,7 @@ fn detect_tailscale_utun() -> Option<String> {
 /// When the daemon goes back to BackendState=Stopped (user
 /// disconnected), call with `install: false` so we leave a clean
 /// system. The file is owned by root:wheel, mode 0644.
-pub fn install_magicdns_resolver(args: MagicdnsResolverArgs) -> Result<InstallResult> {
+pub fn install_magicdns_resolver(args: &MagicdnsResolverArgs) -> Result<InstallResult> {
     let domain = args.tailnet_suffix.trim_matches('.');
     if domain.is_empty() || !domain.contains('.') {
         bail!("invalid tailnet_suffix '{}'", args.tailnet_suffix);
@@ -1048,7 +1048,7 @@ pub struct MagicdnsResolverArgs {
 /// drop the user's authenticated session. Just clearing the
 /// exit-node pref is enough on the daemon side; the route fix is
 /// `ipconfig set en0 DHCP` which is fast (< 1 s) and idempotent.
-pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
+pub fn panic_reset(args: &PanicResetArgs) -> Result<InstallResult> {
     // 0. Wipe the split-default exit-node routes FIRST. If the
     // user got here by selecting an exit-node that broke
     // routing, those /1 routes are why their internet is dead.

@@ -769,7 +769,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // calls finish in <100 ms.
         "tailscaled_install" => {
             match serde_json::from_value::<tailscale::InstallArgs>(req.params) {
-                Ok(args) => match tailscale::install(args) {
+                Ok(args) => match tailscale::install(&args) {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("tailscaled_install failed: {e:#}"))
@@ -808,7 +808,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // doesn't depend on tailscaled being responsive.
         "tailscale_panic_reset" => {
             match serde_json::from_value::<tailscale::PanicResetArgs>(req.params) {
-                Ok(args) => match tailscale::panic_reset(args) {
+                Ok(args) => match tailscale::panic_reset(&args) {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("tailscale_panic_reset failed: {e:#}"))
@@ -826,7 +826,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // `install_magicdns_resolver` for full reasoning.
         "tailscale_install_magicdns_resolver" => {
             match serde_json::from_value::<tailscale::MagicdnsResolverArgs>(req.params) {
-                Ok(args) => match tailscale::install_magicdns_resolver(args) {
+                Ok(args) => match tailscale::install_magicdns_resolver(&args) {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}")),
                 },
@@ -918,7 +918,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // is a baseline capability.
         "tailscale_set_dns_servers" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-                Ok(args) => match tailscale::set_dns_servers(args) {
+                Ok(args) => match tailscale::set_dns_servers(&args) {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("set_dns_servers failed: {e:#}")),
                 },
@@ -933,7 +933,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // nameserver shadowing the manual config).
         "tailscale_force_dns_state" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-                Ok(args) => match tailscale::force_dns_state(args) {
+                Ok(args) => match tailscale::force_dns_state(&args) {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("force_dns_state failed: {e:#}")),
                 },

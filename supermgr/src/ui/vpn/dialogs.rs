@@ -711,11 +711,11 @@ pub fn show_fortigate_dialog(
 pub fn show_edit_fortigate_dialog(
     window: &adw::ApplicationWindow,
     profile_id: String,
-    current_name: String,
-    current_host: String,
-    current_username: String,
-    current_dns_servers: String,
-    current_local_id: String,
+    current_name: &str,
+    current_host: &str,
+    current_username: &str,
+    current_dns_servers: &str,
+    current_local_id: &str,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
@@ -727,11 +727,11 @@ pub fn show_edit_fortigate_dialog(
         .build();
 
     let name_row = adw::EntryRow::builder().title("Name").build();
-    name_row.set_text(&current_name);
+    name_row.set_text(current_name);
     let host_row = adw::EntryRow::builder().title("Host").build();
-    host_row.set_text(&current_host);
+    host_row.set_text(current_host);
     let user_row = adw::EntryRow::builder().title("Username").build();
-    user_row.set_text(&current_username);
+    user_row.set_text(current_username);
     let pass_row = adw::PasswordEntryRow::builder()
         .title("Password (leave blank to keep)")
         .build();
@@ -741,14 +741,14 @@ pub fn show_edit_fortigate_dialog(
     let dns_row = adw::EntryRow::builder()
         .title("DNS Servers (optional)")
         .build();
-    dns_row.set_text(&current_dns_servers);
+    dns_row.set_text(current_dns_servers);
     // Prefilled from the profile, and blank clears it — that is the only way
     // back to the default IDi once one has been set, so this is deliberately
     // not a "blank means keep" field the way the password rows are.
     let local_id_row = adw::EntryRow::builder()
         .title("Local ID (optional, blank clears)")
         .build();
-    local_id_row.set_text(&current_local_id);
+    local_id_row.set_text(current_local_id);
 
     let group = adw::PreferencesGroup::new();
     group.add(&name_row);
@@ -879,7 +879,7 @@ pub fn show_edit_fortigate_dialog(
 pub fn show_edit_openvpn_dialog(
     window: &adw::ApplicationWindow,
     profile_id: String,
-    current_username: String,
+    current_username: &str,
     rt: &tokio::runtime::Handle,
     tx: &mpsc::Sender<AppMsg>,
 ) {
@@ -889,7 +889,7 @@ pub fn show_edit_openvpn_dialog(
         .build();
 
     let user_row = adw::EntryRow::builder().title("Username").build();
-    user_row.set_text(&current_username);
+    user_row.set_text(current_username);
     let pass_row = adw::PasswordEntryRow::builder()
         .title("Password (leave blank to keep)")
         .build();
@@ -1108,7 +1108,7 @@ pub fn show_auth_challenge_dialog(
 pub fn show_logs_dialog(
     window: &adw::ApplicationWindow,
     rt: &tokio::runtime::Handle,
-    app_settings: Arc<Mutex<AppSettings>>,
+    app_settings: &Arc<Mutex<AppSettings>>,
 ) {
     let log_window = adw::Window::builder()
         .title("Daemon Logs")

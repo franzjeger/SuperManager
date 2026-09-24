@@ -273,7 +273,7 @@ fn watchdog_loop() {
                             "{}s no internet with uplink UP — exit peer appears dead, failing open (panic_reset)",
                             consecutive_failures * 2
                         );
-                        match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
+                        match crate::tailscale::panic_reset(&crate::tailscale::PanicResetArgs {
                             clear_pref: false,
                         }) {
                             Ok(_) => {
@@ -293,7 +293,7 @@ fn watchdog_loop() {
                     // routes (no-op if none) and DHCP-renews; clear_pref=false
                     // keeps any intent. Fires once per outage.
                     tracing::error!("6s no internet — escalating to panic_reset (fail-open)");
-                    match crate::tailscale::panic_reset(crate::tailscale::PanicResetArgs {
+                    match crate::tailscale::panic_reset(&crate::tailscale::PanicResetArgs {
                         clear_pref: false,
                     }) {
                         Ok(_) => {

@@ -289,7 +289,7 @@ impl EngineServer {
     pub(crate) fn handle_ssh_import_keys_scan(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
         let directory = params
             .get("directory")

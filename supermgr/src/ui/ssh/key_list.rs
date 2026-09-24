@@ -407,13 +407,13 @@ pub fn populate_ssh_key_list(
                                 priv_path.clone(),
                                 pub_path.clone(),
                                 priv_name.clone(),
-                                rt.clone(),
+                                &rt,
                                 tx.clone(),
                             );
                         });
                         dialog.present(Some(&window_exp));
                     } else {
-                        do_export_to_ssh_dir(key_id, priv_path, pub_path, priv_name, rt, tx);
+                        do_export_to_ssh_dir(key_id, priv_path, pub_path, priv_name, &rt, tx);
                     }
                 });
                 action_group.add_action(&action);
@@ -480,7 +480,7 @@ fn do_export_to_ssh_dir(
     priv_path: std::path::PathBuf,
     pub_path: std::path::PathBuf,
     priv_name: String,
-    rt: tokio::runtime::Handle,
+    rt: &tokio::runtime::Handle,
     tx: mpsc::Sender<AppMsg>,
 ) {
     rt.spawn(async move {
@@ -545,14 +545,7 @@ pub fn export_all_keys_to_ssh_dir(
         let pub_path = ssh_dir.join(format!("{priv_name}.pub"));
         let key_id = key.id.to_string();
 
-        do_export_to_ssh_dir(
-            key_id,
-            priv_path,
-            pub_path,
-            priv_name,
-            rt.clone(),
-            tx.clone(),
-        );
+        do_export_to_ssh_dir(key_id, priv_path, pub_path, priv_name, rt, tx.clone());
     }
 
     if keys.is_empty() {

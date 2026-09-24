@@ -166,9 +166,9 @@ fn push_tray_update(
 /// Build and present the main application window.
 pub fn build_ui(
     app: &adw::Application,
-    app_state: Arc<Mutex<AppState>>,
-    app_settings: Arc<Mutex<AppSettings>>,
-    rt: tokio::runtime::Handle,
+    app_state: &Arc<Mutex<AppState>>,
+    app_settings: &Arc<Mutex<AppSettings>>,
+    rt: &tokio::runtime::Handle,
 ) {
     // The desktop's palette, then the two shapes libadwaita has no
     // equivalent of. Nothing here names a colour of its own.
@@ -201,7 +201,7 @@ pub fn build_ui(
         .default_width(1280)
         .default_height(800)
         .build();
-    layout::remember_window(&window, app, &app_settings);
+    layout::remember_window(&window, app, app_settings);
 
     // Apply persisted opacity.
     {
@@ -437,7 +437,7 @@ pub fn build_ui(
         // only what you could see.
         let notif_list = notif_list.clone();
         let notif_btn = notif_btn.clone();
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         notif_clear_btn.connect_clicked(move |_| {
             {
                 let mut s = app_state
@@ -485,7 +485,7 @@ pub fn build_ui(
     // VPN page
     // =========================================================================
     let (vpn_profile_list, vpn_search_entry, vpn_sidebar_page) =
-        vpn::sidebar::build_vpn_sidebar(&app_state, &tx, &rt, &window);
+        vpn::sidebar::build_vpn_sidebar(app_state, &tx, rt, &window);
 
     // VPN sidebar search entry — filters profiles by name as the user types.
     {
@@ -519,7 +519,7 @@ pub fn build_ui(
     let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
 
     let vpn_split = layout::split(&vpn_sidebar_page, &vpn_content_page, 320);
-    layout::remember_split(&vpn_split, &app_settings, "vpn");
+    layout::remember_split(&vpn_split, app_settings, "vpn");
 
     view_stack.add_titled(&vpn_split, Some("vpn"), "VPN");
     let vpn_page = view_stack.page(&vpn_split);
@@ -533,7 +533,7 @@ pub fn build_ui(
     // membership changes on a human timescale, and polling a subprocess for a
     // screen nobody is looking at is pure cost.
     // =========================================================================
-    let compliance_view = std::rc::Rc::new(compliance::build_compliance_page(&rt, &tx));
+    let compliance_view = std::rc::Rc::new(compliance::build_compliance_page(rt, &tx));
     view_stack.add_titled(&compliance_view.widget, Some("compliance"), "Compliance");
     let compliance_page_ref = view_stack.page(&compliance_view.widget);
     compliance_page_ref.set_icon_name(Some(design::icon_name(&[
@@ -541,12 +541,12 @@ pub fn build_ui(
         "dialog-ok",
     ])));
 
-    let tailscale_view = tailscale::build_tailscale_page(&rt, &tx, &window, &app_state);
+    let tailscale_view = tailscale::build_tailscale_page(rt, &tx, &window, app_state);
     view_stack.add_titled(&tailscale_view.widget, Some("tailscale"), "Tailscale");
     let tailscale_page_ref = view_stack.page(&tailscale_view.widget);
     tailscale_page_ref.set_icon_name(Some(design::icon_name(design::icons::MESH)));
     let tailscale_view = std::rc::Rc::new(tailscale_view);
-    tailscale::watch_environment(&rt, &tx);
+    tailscale::watch_environment(rt, &tx);
 
     // =========================================================================
     // Security page (standalone, full-width)
@@ -555,7 +555,7 @@ pub fn build_ui(
     // demand per scope rather than on startup: the store is per-customer and
     // nobody wants every customer's findings deserialised to open the app.
     // =========================================================================
-    let security_view = std::rc::Rc::new(security::build_security_page(&rt, &tx));
+    let security_view = std::rc::Rc::new(security::build_security_page(rt, &tx));
     view_stack.add_titled(&security_view.widget, Some("security"), "Security");
     let security_page_ref = view_stack.page(&security_view.widget);
     security_page_ref.set_icon_name(Some(design::icon_name(design::icons::SHIELD)));
@@ -563,7 +563,7 @@ pub fn build_ui(
     // =========================================================================
     // Customers page — stable customer/site catalog and asset ownership
     // =========================================================================
-    let customer_view = customers::build_customer_page(&window, &rt, &tx);
+    let customer_view = customers::build_customer_page(&window, rt, &tx);
     view_stack.add_titled(&customer_view.widget, Some("customers"), "Customers");
     let customer_page_ref = view_stack.page(&customer_view.widget);
     customer_page_ref.set_icon_name(Some(design::icon_name(&[
@@ -574,7 +574,7 @@ pub fn build_ui(
     // before the customer page itself has ever been opened.
     customer_view.refresh(None);
 
-    let recon_view = recon::build_recon_page(&app_state, &window, &rt, &tx);
+    let recon_view = recon::build_recon_page(app_state, &window, rt, &tx);
     view_stack.add_titled(&recon_view.widget, Some("recon"), "Recon");
     let recon_page_ref = view_stack.page(&recon_view.widget);
     recon_page_ref.set_icon_name(Some(design::icon_name(design::icons::SEARCH)));
@@ -583,7 +583,7 @@ pub fn build_ui(
     // Dashboard page (standalone, full-width)
     // =========================================================================
     let (dashboard_flow_box, dashboard_stack, dashboard_widget) =
-        ssh::dashboard::build_ssh_dashboard(&app_state, &rt, &tx);
+        ssh::dashboard::build_ssh_dashboard(app_state, rt, &tx);
 
     // "fleet" is the id the navigation sidebar addresses this page by. The
     // two must agree: a mismatch is a nav row that silently does nothing.
@@ -655,7 +655,7 @@ pub fn build_ui(
         .css_classes(["flat"])
         .build();
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let window = window.clone();
         let rt = rt.clone();
         ssh_batch_btn.connect_clicked(move |_| {
@@ -721,7 +721,7 @@ pub fn build_ui(
         .build();
 
     let hosts_split = layout::split(&hosts_sidebar_page, &hosts_content_page, 320);
-    layout::remember_split(&hosts_split, &app_settings, "hosts");
+    layout::remember_split(&hosts_split, app_settings, "hosts");
 
     view_stack.add_titled(&hosts_split, Some("hosts"), "Hosts");
     let hosts_page_ref = view_stack.page(&hosts_split);
@@ -796,7 +796,7 @@ pub fn build_ui(
         .build();
 
     let keys_split = ssh::key_list::build_ssh_key_split(&keys_sidebar_page, &keys_content_page);
-    layout::remember_split(&keys_split, &app_settings, "keys");
+    layout::remember_split(&keys_split, app_settings, "keys");
 
     view_stack.add_titled(&keys_split, Some("keys"), "Keys");
     let keys_page_ref = view_stack.page(&keys_split);
@@ -815,7 +815,7 @@ pub fn build_ui(
             &s.ssh_keys,
             s.selected_ssh_key.as_deref(),
             &window,
-            &rt,
+            rt,
             &tx,
             "",
         );
@@ -825,7 +825,7 @@ pub fn build_ui(
             &s.hosts,
             s.selected_ssh_host.as_deref(),
             &window,
-            &rt,
+            rt,
             &tx,
             "",
             &health,
@@ -955,7 +955,7 @@ pub fn build_ui(
     // Console tab — built-in Claude AI chat
     // =========================================================================
     let (console_panel, console_widget) =
-        console::panel::build_console_page(&app_state, &app_settings, &tx, &rt);
+        console::panel::build_console_page(app_state, app_settings, &tx, rt);
 
     view_stack.add_titled(&console_widget, Some("console"), "Console");
     let console_page_ref = view_stack.page(&console_widget);
@@ -966,7 +966,7 @@ pub fn build_ui(
     // =========================================================================
     // Provisioning tab — automated FortiGate/UniFi device setup wizard
     // =========================================================================
-    let provisioning_widget = provisioning::wizard::build_provisioning_page(&app_state, &tx, &rt);
+    let provisioning_widget = provisioning::wizard::build_provisioning_page(app_state, &tx, rt);
 
     view_stack.add_titled(&provisioning_widget, Some("provisioning"), "Provisioning");
     let provisioning_page_ref = view_stack.page(&provisioning_widget);
@@ -1007,7 +1007,7 @@ pub fn build_ui(
         let nav_compliance_view = std::rc::Rc::clone(&compliance_view);
         let nav_security_view = std::rc::Rc::clone(&security_view);
         let nav_customer_view = std::rc::Rc::clone(&customer_view);
-        let nav_app_state = Arc::clone(&app_state);
+        let nav_app_state = Arc::clone(app_state);
         view_stack.connect_notify_local(Some("visible-child-name"), move |stack, _| {
             let page = stack.visible_child_name();
             let page = page.as_deref().unwrap_or("vpn");
@@ -1189,7 +1189,7 @@ pub fn build_ui(
         let ctr = inactivity_counter.clone();
         let outer_stack = outer_stack.clone();
         let lock_page = lock_page.clone();
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
             // Only tick when the app page is visible (not already locked).
             if outer_stack.visible_child_name().as_deref() == Some("app") {
@@ -1229,11 +1229,11 @@ pub fn build_ui(
     // --- Settings button ----------------------------------------------------
     {
         let window = window.clone();
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let tx = tx.clone();
         let rt = rt.clone();
         settings_btn.connect_clicked(move |_| {
-            preferences::show_settings_dialog(&window, Arc::clone(&app_settings), &tx, &rt);
+            preferences::show_settings_dialog(&window, &app_settings, &tx, &rt);
         });
     }
 
@@ -1251,9 +1251,9 @@ pub fn build_ui(
     {
         let window = window.clone();
         let rt = rt.clone();
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         logs_btn.connect_clicked(move |_| {
-            vpn::dialogs::show_logs_dialog(&window, &rt, Arc::clone(&app_settings));
+            vpn::dialogs::show_logs_dialog(&window, &rt, &app_settings);
         });
     }
 
@@ -1271,7 +1271,7 @@ pub fn build_ui(
         // WireGuard — import only.
         {
             let action = make_action("wg-import");
-            let app_state = Arc::clone(&app_state);
+            let app_state = Arc::clone(app_state);
             let toast_overlay = toast_overlay.clone();
             let popover = popover.clone();
             let tx = tx.clone();
@@ -1301,7 +1301,7 @@ pub fn build_ui(
         // OpenVPN — import only.
         {
             let action = make_action("ov-import");
-            let app_state = Arc::clone(&app_state);
+            let app_state = Arc::clone(app_state);
             let toast_overlay = toast_overlay.clone();
             let popover = popover.clone();
             let tx = tx.clone();
@@ -1331,7 +1331,7 @@ pub fn build_ui(
         // Universal TOML import — backend chosen by the file's [config] discriminator.
         {
             let action = make_action("toml-import");
-            let app_state = Arc::clone(&app_state);
+            let app_state = Arc::clone(app_state);
             let toast_overlay = toast_overlay.clone();
             let popover = popover.clone();
             let tx = tx.clone();
@@ -1363,7 +1363,7 @@ pub fn build_ui(
     }
     {
         let popover = popover.clone();
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -1396,7 +1396,7 @@ pub fn build_ui(
     }
     {
         let popover = popover.clone();
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_export_all_btn.connect_clicked(move |_| {
@@ -1410,7 +1410,7 @@ pub fn build_ui(
 
     // --- VPN profile row activated (sidebar selection) -----------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let vpn_status = vpn_detail.status.clone();
         let rename_btn = vpn_detail.rename_btn.clone();
         let edit_creds_btn = vpn_detail.edit_creds_btn.clone();
@@ -1509,7 +1509,7 @@ pub fn build_ui(
 
     // --- SSH key list selection ----------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let keys_content_stack = keys_content_stack.clone();
         let ssh_key_detail = &ssh_key_detail;
         let key_name_label = ssh_key_detail.key_name_label.clone();
@@ -1569,7 +1569,7 @@ pub fn build_ui(
 
     // --- SSH host list selection ---------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let hosts_content_stack = hosts_content_stack.clone();
         let host_detail = ssh_host_detail.clone();
         let _host_label_lbl = host_detail.host_label_lbl.clone();
@@ -1654,7 +1654,7 @@ pub fn build_ui(
 
     // --- SSH Forget Host Key button -------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -1731,7 +1731,7 @@ pub fn build_ui(
 
     // --- FortiGate dashboard refresh button -----------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_refresh_btn.connect_clicked(move |_| {
@@ -1754,7 +1754,7 @@ pub fn build_ui(
 
     // --- FortiGate backup config button -----------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_backup_btn.connect_clicked(move |_| {
@@ -1793,7 +1793,7 @@ pub fn build_ui(
 
     // --- FortiGate compliance check button -----------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_compliance_btn.connect_clicked(move |_| {
@@ -1808,7 +1808,7 @@ pub fn build_ui(
 
     // --- FortiGate Generate API Token button ----------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let toast_overlay = toast_overlay.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -1854,7 +1854,7 @@ pub fn build_ui(
 
     // --- FortiGate Copy API Token button ------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         ssh_host_detail.fg_copy_token_btn.connect_clicked(move |_| {
@@ -1890,7 +1890,7 @@ pub fn build_ui(
 
     // --- FortiGate Show/Hide API Token button ---------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         let token_row = ssh_host_detail.fg_api_token_row.clone();
@@ -1943,7 +1943,7 @@ pub fn build_ui(
 
     // --- Port Forward: "Add Forward" button ----------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -1963,7 +1963,7 @@ pub fn build_ui(
 
     // --- Port Forward: Start / Stop via listbox row activation ---------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         let pf_listbox = ssh_host_detail.pf_listbox.clone();
@@ -2057,7 +2057,7 @@ pub fn build_ui(
 
     // --- VPN Connect / Disconnect button ------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         vpn_detail.connect_btn.connect_clicked(move |_| {
@@ -2096,7 +2096,7 @@ pub fn build_ui(
 
     // --- Rename button ------------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         let window = window.clone();
@@ -2115,7 +2115,7 @@ pub fn build_ui(
 
     // --- Edit credentials button --------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2152,23 +2152,23 @@ pub fn build_ui(
                 vpn::dialogs::show_edit_fortigate_dialog(
                     &window,
                     profile_id,
-                    name,
-                    host,
-                    username,
-                    dns_servers,
-                    local_id,
+                    &name,
+                    &host,
+                    &username,
+                    &dns_servers,
+                    &local_id,
                     &rt,
                     &tx,
                 );
             } else if backend == "OpenVPN3" {
-                vpn::dialogs::show_edit_openvpn_dialog(&window, profile_id, username, &rt, &tx);
+                vpn::dialogs::show_edit_openvpn_dialog(&window, profile_id, &username, &rt, &tx);
             }
         });
     }
 
     // --- Auto-connect switch ------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         vpn_detail
@@ -2204,7 +2204,7 @@ pub fn build_ui(
 
     // --- Full-tunnel switch -------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let split_routes_row = vpn_detail.split_routes_row.clone();
@@ -2262,7 +2262,7 @@ pub fn build_ui(
 
     // --- Kill-switch switch -------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         vpn_detail
@@ -2298,7 +2298,7 @@ pub fn build_ui(
 
     // --- Rotate WireGuard key button ----------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         let window = window.clone();
@@ -2317,7 +2317,7 @@ pub fn build_ui(
 
     // --- Export profile button ----------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         let window = window.clone();
@@ -2381,7 +2381,7 @@ pub fn build_ui(
 
     // --- Duplicate profile button -------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let rt = rt.clone();
         let tx = tx.clone();
         vpn_detail.duplicate_btn.connect_clicked(move |_| {
@@ -2428,7 +2428,7 @@ pub fn build_ui(
 
     // --- Split-routes "Edit" button -----------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let split_routes_value = vpn_detail.split_routes_value.clone();
@@ -2514,7 +2514,7 @@ pub fn build_ui(
 
     // --- SSH Connect button (launch terminal) -------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let toast_overlay = toast_overlay.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -2552,7 +2552,7 @@ pub fn build_ui(
 
     // --- RDP button -----------------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         ssh_host_detail.rdp_btn.connect_clicked(move |_| {
@@ -2613,7 +2613,7 @@ pub fn build_ui(
 
     // --- VNC button -----------------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         ssh_host_detail.vnc_btn.connect_clicked(move |_| {
             let (hostname, port) = {
@@ -2642,7 +2642,7 @@ pub fn build_ui(
 
     // --- SSH Test Connection button -------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let toast_overlay = toast_overlay.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -2688,7 +2688,7 @@ pub fn build_ui(
 
     // --- SSH Edit Host button -----------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let window = window.clone();
         let rt = rt.clone();
         let tx = tx.clone();
@@ -2714,7 +2714,7 @@ pub fn build_ui(
 
     // --- SSH Push Key button ------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2735,7 +2735,7 @@ pub fn build_ui(
 
     // --- SSH Delete Key button (from detail panel) --------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2785,7 +2785,7 @@ pub fn build_ui(
 
     // --- SSH Host Push Key button -------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2799,7 +2799,7 @@ pub fn build_ui(
 
     // --- SSH Host Push Key via API button (FortiGate) -------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2910,7 +2910,7 @@ pub fn build_ui(
 
     // --- UniFi Set Inform button -----------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -2996,7 +2996,7 @@ pub fn build_ui(
 
     // --- SSH Host Delete button ---------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         let window = window.clone();
@@ -3043,7 +3043,7 @@ pub fn build_ui(
 
     // --- Pin toggle button ---------------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         ssh_host_detail.pin_btn.connect_clicked(move |_btn| {
@@ -3068,7 +3068,7 @@ pub fn build_ui(
 
     // --- Banner "Retry" button ----------------------------------------------
     {
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         banner.connect_button_clicked(move |_| {
@@ -3099,14 +3099,14 @@ pub fn build_ui(
     // --- Background signal listener -----------------------------------------
     {
         let tx = tx.clone();
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         rt.spawn(run_signal_listener(app_state, tx));
     }
 
     // =========================================================================
     // Message drain loop — polls mpsc channel every 50 ms
     // =========================================================================
-    let rx_app_state = Arc::clone(&app_state);
+    let rx_app_state = Arc::clone(app_state);
     let rx_profile_list = vpn_profile_list.clone();
     let rx_vpn_status = vpn_detail.status.clone();
     let rx_profile_name_label = vpn_detail.profile_name_label.clone();
@@ -4011,17 +4011,17 @@ pub fn build_ui(
                             vpn::dialogs::show_edit_fortigate_dialog(
                                 &rx_window,
                                 profile_id,
-                                name,
-                                host,
-                                username,
-                                dns_servers,
-                                local_id,
+                                &name,
+                                &host,
+                                &username,
+                                &dns_servers,
+                                &local_id,
                                 &rx_rt,
                                 &rx_tx,
                             );
                         } else if backend == "OpenVPN3" {
                             vpn::dialogs::show_edit_openvpn_dialog(
-                                &rx_window, profile_id, username, &rx_rt, &rx_tx,
+                                &rx_window, profile_id, &username, &rx_rt, &rx_tx,
                             );
                         }
                     }
@@ -4198,7 +4198,7 @@ pub fn build_ui(
         let console_input = console_panel.input_view.clone();
         let outer_stack_k = outer_stack.clone();
         let lock_page_k = lock_page.clone();
-        let _app_settings_k = Arc::clone(&app_settings);
+        let _app_settings_k = Arc::clone(app_settings);
         let key_ctrl = gtk4::EventControllerKey::new();
         key_ctrl.connect_key_pressed(move |_, key, _, mods| {
             let ctrl = mods.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
@@ -4254,7 +4254,7 @@ pub fn build_ui(
 
     // --- Unlock button -------------------------------------------------------
     {
-        let _app_settings = Arc::clone(&app_settings);
+        let _app_settings = Arc::clone(app_settings);
         let outer_stack = outer_stack.clone();
         let lock_page = lock_page.clone();
         let inactivity_counter = inactivity_counter.clone();
@@ -4477,7 +4477,7 @@ pub fn build_ui(
     // --- F5: Refresh current view -------------------------------------------
     {
         let refresh_action = gio::SimpleAction::new("refresh", None);
-        let app_state = Arc::clone(&app_state);
+        let app_state = Arc::clone(app_state);
         let tx = tx.clone();
         let rt = rt.clone();
         refresh_action.connect_activate(move |_, _| {

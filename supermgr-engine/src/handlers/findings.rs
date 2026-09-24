@@ -40,8 +40,8 @@ impl EngineServer {
         ))
     }
 
-    pub(crate) fn handle_findings_list(&self, id: u64, params: serde_json::Value) -> Response {
-        let scope = match Self::resolve_findings_scope(&params) {
+    pub(crate) fn handle_findings_list(&self, id: u64, params: &serde_json::Value) -> Response {
+        let scope = match Self::resolve_findings_scope(params) {
             Ok(s) => s,
             Err(mut r) => {
                 r.id = id;
@@ -57,8 +57,8 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_findings_summary(&self, id: u64, params: serde_json::Value) -> Response {
-        let scope = match Self::resolve_findings_scope(&params) {
+    pub(crate) fn handle_findings_summary(&self, id: u64, params: &serde_json::Value) -> Response {
+        let scope = match Self::resolve_findings_scope(params) {
             Ok(s) => s,
             Err(mut r) => {
                 r.id = id;
@@ -77,9 +77,9 @@ impl EngineServer {
     pub(crate) fn handle_findings_set_disposition(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
-        let scope = match Self::resolve_findings_scope(&params) {
+        let scope = match Self::resolve_findings_scope(params) {
             Ok(s) => s,
             Err(mut r) => {
                 r.id = id;
@@ -123,9 +123,9 @@ impl EngineServer {
     pub(crate) fn handle_findings_risk_hosts(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
-        let scope = match Self::resolve_findings_scope(&params) {
+        let scope = match Self::resolve_findings_scope(params) {
             Ok(s) => s,
             Err(mut r) => {
                 r.id = id;

@@ -175,9 +175,9 @@ fn main() -> anyhow::Result<()> {
     app.connect_activate(move |app| {
         build_ui(
             app,
-            Arc::clone(&app_state_for_activate),
-            Arc::clone(&app_settings_for_activate),
-            rt_handle.clone(),
+            &app_state_for_activate,
+            &app_settings_for_activate,
+            &rt_handle,
         );
     });
 

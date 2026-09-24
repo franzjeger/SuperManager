@@ -300,21 +300,21 @@ impl TailscaleView {
                 "SuperManager can install the tailscale package and start \
                  its service. An authentication prompt will appear.",
                 "Install Tailscale",
-                Remedy::Repair,
+                &Remedy::Repair,
             ),
             Ok(h) if !h.daemon_running => self.show_remedy(
                 "Tailscale is installed but not running",
                 "The tailscaled service is stopped. SuperManager can start \
                  it and enable it at boot.",
                 "Start Tailscale",
-                Remedy::Repair,
+                &Remedy::Repair,
             ),
             Ok(h) if h.needs_login() => self.show_remedy(
                 "This machine is logged out of Tailscale",
                 "Logging in opens a browser page. The tailnet appears here \
                  by itself once the login completes.",
                 "Log in to Tailscale",
-                Remedy::Login,
+                &Remedy::Login,
             ),
             Ok(h) if h.backend_state == "Stopped" => self.show_status(
                 design::icon_name(design::icons::VPN_OFF),
@@ -361,7 +361,7 @@ impl TailscaleView {
 
     /// A full-page status whose description names the next action and whose
     /// child performs it.
-    fn show_remedy(&self, title: &str, description: &str, button_label: &str, remedy: Remedy) {
+    fn show_remedy(&self, title: &str, description: &str, button_label: &str, remedy: &Remedy) {
         let page = design::empty_state(
             design::icon_name(design::icons::VPN_OFF),
             title,

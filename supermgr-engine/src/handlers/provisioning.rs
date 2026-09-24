@@ -117,9 +117,9 @@ impl EngineServer {
     pub(crate) fn handle_provisioning_list_deployments(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+        let host_id = match get_uuid_param(params, "host_id") {
             Ok(id) => id,
             Err(r) => return r,
         };

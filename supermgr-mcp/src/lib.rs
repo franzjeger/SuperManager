@@ -293,14 +293,14 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
     match name {
         #[cfg(target_os = "linux")]
         "customer_catalog" => {
-            parse_response(proxy.customer_catalog().await.map_err(|e| e.to_string())?)
+            parse_response(&proxy.customer_catalog().await.map_err(|e| e.to_string())?)
         }
         #[cfg(target_os = "linux")]
-        "host_health" => parse_response(proxy.ssh_host_health().await.map_err(|e| e.to_string())?),
+        "host_health" => parse_response(&proxy.ssh_host_health().await.map_err(|e| e.to_string())?),
         #[cfg(target_os = "linux")]
         "tailscale_health" => {
             let mut value =
-                parse_response(proxy.tailscale_health().await.map_err(|e| e.to_string())?)?;
+                parse_response(&proxy.tailscale_health().await.map_err(|e| e.to_string())?)?;
             if let Some(object) = value.as_object_mut() {
                 object.remove("auth_url");
             }
@@ -308,14 +308,14 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
         }
         #[cfg(target_os = "linux")]
         "tailscale_devices" => parse_response(
-            proxy
+            &proxy
                 .tailscale_list_nodes()
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         #[cfg(target_os = "linux")]
         "tailscale_management" => parse_response(
-            proxy
+            &proxy
                 .tailscale_management()
                 .await
                 .map_err(|e| e.to_string())?,
@@ -327,28 +327,28 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             .map_err(|e| e.to_string())?)),
         #[cfg(target_os = "linux")]
         "findings_summary" => parse_response(
-            proxy
+            &proxy
                 .findings_summary(required_str(args, "scope")?)
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         #[cfg(target_os = "linux")]
         "findings_list" => parse_response(
-            proxy
+            &proxy
                 .findings_list(required_str(args, "scope")?)
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         #[cfg(target_os = "linux")]
         "compliance_history" => parse_response(
-            proxy
+            &proxy
                 .compliance_history(required_str(args, "host_id")?, 20)
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         #[cfg(target_os = "linux")]
         "compliance_get_run" => parse_response(
-            proxy
+            &proxy
                 .compliance_get_run(
                     required_str(args, "host_id")?,
                     required_str(args, "run_id")?,
@@ -358,20 +358,20 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
         ),
         #[cfg(target_os = "linux")]
         "compliance_list_checks" => parse_response(
-            proxy
+            &proxy
                 .compliance_list_checks()
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         #[cfg(target_os = "linux")]
         "fortigate_compliance_check" => parse_response(
-            proxy
+            &proxy
                 .fortigate_compliance_check(required_str(args, "host_id")?)
                 .await
                 .map_err(|e| e.to_string())?,
         ),
         "fortigate_api" => parse_response(
-            proxy
+            &proxy
                 .fortigate_api(
                     required_str(args, "host_id")?,
                     required_str(args, "method")?,
@@ -577,8 +577,8 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
     }
 }
 
-fn parse_response(value: String) -> Result<Value, String> {
-    serde_json::from_str(&value).map_err(|e| format!("Unreadable daemon response: {e}"))
+fn parse_response(value: &str) -> Result<Value, String> {
+    serde_json::from_str(value).map_err(|e| format!("Unreadable daemon response: {e}"))
 }
 
 fn required_str<'a>(args: &'a Value, name: &str) -> Result<&'a str, String> {

@@ -35,7 +35,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_engagement_delete(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_engagement_delete(&self, id: u64, params: &serde_json::Value) -> Response {
         let engagement_id = match params.get("id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
             None => return Response::err(id, protocol::INVALID_PARAMS, "missing id".to_owned()),
@@ -49,7 +49,7 @@ impl EngineServer {
     pub(crate) fn handle_engagement_set_schedule(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
@@ -84,7 +84,7 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_engagement_report(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_engagement_report(&self, id: u64, params: &serde_json::Value) -> Response {
         let engagement_id = match params.get("engagement_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => {

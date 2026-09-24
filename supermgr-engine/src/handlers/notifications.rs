@@ -12,7 +12,11 @@ impl EngineServer {
         }
     }
 
-    pub(crate) fn handle_notify_set_webhook(&self, id: u64, params: serde_json::Value) -> Response {
+    pub(crate) fn handle_notify_set_webhook(
+        &self,
+        id: u64,
+        params: &serde_json::Value,
+    ) -> Response {
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing scope".to_owned()),
@@ -39,7 +43,7 @@ impl EngineServer {
     pub(crate) fn handle_notify_set_pagerduty(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
@@ -66,7 +70,7 @@ impl EngineServer {
     pub(crate) fn handle_notify_set_opsgenie(
         &self,
         id: u64,
-        params: serde_json::Value,
+        params: &serde_json::Value,
     ) -> Response {
         let scope = match params.get("scope").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),

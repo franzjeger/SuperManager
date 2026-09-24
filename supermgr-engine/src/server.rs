@@ -181,7 +181,7 @@ impl EngineServer {
             "ssh_delete_key" => self.handle_ssh_delete_key(id, req.params).await,
             "ssh_export_public_key" => self.handle_ssh_export_public_key(id, req.params).await,
             "ssh_import_key" => self.handle_ssh_import_key(id, req.params).await,
-            "ssh_import_keys_scan" => self.handle_ssh_import_keys_scan(id, req.params),
+            "ssh_import_keys_scan" => self.handle_ssh_import_keys_scan(id, &req.params),
 
             // -- SSH host methods --
             "ssh_add_host" => self.handle_ssh_add_host(id, req.params).await,
@@ -217,19 +217,19 @@ impl EngineServer {
 
             // -- Compliance methods --
             "compliance_run" => self.handle_compliance_run(id, req.params).await,
-            "compliance_history" => self.handle_compliance_history(id, req.params),
-            "compliance_get_run" => self.handle_compliance_get_run(id, req.params),
+            "compliance_history" => self.handle_compliance_history(id, &req.params),
+            "compliance_get_run" => self.handle_compliance_get_run(id, &req.params),
             "compliance_list_checks" => self.handle_compliance_list_checks(id),
-            "compliance_drift" => self.handle_compliance_drift(id, req.params),
-            "compliance_render_report" => self.handle_compliance_render_report(id, req.params),
+            "compliance_drift" => self.handle_compliance_drift(id, &req.params),
+            "compliance_render_report" => self.handle_compliance_render_report(id, &req.params),
             "compliance_scan_all" => self.handle_compliance_scan_all(id, req.params).await,
             "compliance_run_linux" => self.handle_compliance_run_linux(id, req.params).await,
             "compliance_list_linux_checks" => self.handle_compliance_list_linux_checks(id),
 
             // -- Customer / Provisioning methods --
             "customer_list" => self.handle_customer_list(id),
-            "customer_save" => self.handle_customer_save(id, req.params),
-            "customer_delete" => self.handle_customer_delete(id, req.params),
+            "customer_save" => self.handle_customer_save(id, &req.params),
+            "customer_delete" => self.handle_customer_delete(id, &req.params),
             "customer_report" => self.handle_customer_report(id, req.params).await,
             "provisioning_list_templates" => self.handle_provisioning_list_templates(id),
             "provisioning_render" => self.handle_provisioning_render(id, req.params),
@@ -242,7 +242,7 @@ impl EngineServer {
             }
             "provisioning_deploy" => self.handle_provisioning_deploy(id, req.params).await,
             "provisioning_list_deployments" => {
-                self.handle_provisioning_list_deployments(id, req.params)
+                self.handle_provisioning_list_deployments(id, &req.params)
             }
             "provisioning_rollback" => self.handle_provisioning_rollback(id, req.params).await,
 
@@ -279,11 +279,11 @@ impl EngineServer {
             // -- Engagement / Security methods --
             "engagement_list" => self.handle_engagement_list(id),
             "engagement_save" => self.handle_engagement_save(id, req.params),
-            "engagement_delete" => self.handle_engagement_delete(id, req.params),
+            "engagement_delete" => self.handle_engagement_delete(id, &req.params),
             "discovery_passive_scan" => self.handle_discovery_passive_scan(id, req.params).await,
-            "discovery_inventory" => self.handle_discovery_inventory(id, req.params),
+            "discovery_inventory" => self.handle_discovery_inventory(id, &req.params),
             "discovery_active_scan" => self.handle_discovery_active_scan(id, req.params).await,
-            "discovery_findings" => self.handle_discovery_findings(id, req.params),
+            "discovery_findings" => self.handle_discovery_findings(id, &req.params),
             "discovery_dns_axfr" => self.handle_discovery_dns_axfr(id, req.params).await,
             "discovery_analyse_pcap" => self.handle_discovery_analyse_pcap(id, req.params).await,
             "security_test_default_creds" => {
@@ -292,16 +292,16 @@ impl EngineServer {
             }
 
             // -- Track A: findings management --
-            "findings_list" => self.handle_findings_list(id, req.params),
-            "findings_summary" => self.handle_findings_summary(id, req.params),
-            "findings_risk_hosts" => self.handle_findings_risk_hosts(id, req.params),
-            "findings_set_disposition" => self.handle_findings_set_disposition(id, req.params),
-            "engagement_report" => self.handle_engagement_report(id, req.params),
+            "findings_list" => self.handle_findings_list(id, &req.params),
+            "findings_summary" => self.handle_findings_summary(id, &req.params),
+            "findings_risk_hosts" => self.handle_findings_risk_hosts(id, &req.params),
+            "findings_set_disposition" => self.handle_findings_set_disposition(id, &req.params),
+            "engagement_report" => self.handle_engagement_report(id, &req.params),
             "notify_get_config" => self.handle_notify_get_config(id),
-            "notify_set_webhook" => self.handle_notify_set_webhook(id, req.params),
-            "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, req.params),
-            "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, req.params),
-            "engagement_set_schedule" => self.handle_engagement_set_schedule(id, req.params),
+            "notify_set_webhook" => self.handle_notify_set_webhook(id, &req.params),
+            "notify_set_pagerduty" => self.handle_notify_set_pagerduty(id, &req.params),
+            "notify_set_opsgenie" => self.handle_notify_set_opsgenie(id, &req.params),
+            "engagement_set_schedule" => self.handle_engagement_set_schedule(id, &req.params),
             "api_version" => Response::ok(
                 id,
                 serde_json::json!({
@@ -319,9 +319,9 @@ impl EngineServer {
             "engagement_report_pdf" => self.handle_engagement_report_pdf(id, req.params).await,
             "engagement_report_html" => self.handle_engagement_report_html(id, req.params).await,
             "operation_list" => self.handle_operation_list(id),
-            "operation_cancel" => self.handle_operation_cancel(id, req.params),
-            "activity_timeline" => self.handle_activity_timeline(id, req.params),
-            "remediation_script" => self.handle_remediation_script(id, req.params),
+            "operation_cancel" => self.handle_operation_cancel(id, &req.params),
+            "activity_timeline" => self.handle_activity_timeline(id, &req.params),
+            "remediation_script" => self.handle_remediation_script(id, &req.params),
 
             _ => Response::err(
                 id,

@@ -4,7 +4,7 @@
 //! extracted from the Linux daemon, without any D-Bus dependencies.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracing::{info, warn};
@@ -74,12 +74,10 @@ impl DaemonState {
     ///
     /// On Linux: `/etc/supermgrd/` (root) or `$XDG_DATA_HOME/supermgrd/`.
     /// On macOS: `~/Library/Application Support/SuperManager/`.
-    pub fn new(
-        data_dir: PathBuf,
-    ) -> Result<Self, supermgr_core::ssh::known_hosts::KnownHostsError> {
+    pub fn new(data_dir: &Path) -> Result<Self, supermgr_core::ssh::known_hosts::KnownHostsError> {
         // Losing trust state must stop startup, not silently re-enroll every
         // host against an empty or shared temporary store.
-        let known_hosts = Arc::new(KnownHostsStore::open(&data_dir)?);
+        let known_hosts = Arc::new(KnownHostsStore::open(data_dir)?);
         Ok(Self {
             profiles: HashMap::new(),
             vpn_state: VpnState::Disconnected,
@@ -92,7 +90,7 @@ impl DaemonState {
             unifi_controllers: HashMap::new(),
             unifi_controller_dir: data_dir.join("unifi/controllers"),
             device_type_overrides: crate::device_type_overrides::DeviceTypeOverrides::open(
-                &data_dir,
+                data_dir,
             ),
             webhook_url: String::new(),
             webhook_on_host_down: true,
@@ -290,7 +288,7 @@ mod trust_startup_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("known_hosts.json");
         std::fs::write(&path, "invalid JSON").unwrap();
-        assert!(DaemonState::new(dir.path().to_owned()).is_err());
+        assert!(DaemonState::new(dir.path()).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid JSON");
     }
 }

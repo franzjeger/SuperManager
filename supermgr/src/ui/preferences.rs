@@ -56,7 +56,7 @@ fn push_webhook_to_daemon(
 /// Show the application settings dialog.
 pub fn show_settings_dialog(
     window: &adw::ApplicationWindow,
-    app_settings: Arc<Mutex<AppSettings>>,
+    app_settings: &Arc<Mutex<AppSettings>>,
     tx: &mpsc::Sender<AppMsg>,
     rt: &tokio::runtime::Handle,
 ) {
@@ -146,7 +146,7 @@ pub fn show_settings_dialog(
     console_group.add(&api_key_row);
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let api_key_row = api_key_row.clone();
         sub_row.connect_active_notify(move |row| {
             let active = row.is_active();
@@ -160,7 +160,7 @@ pub fn show_settings_dialog(
     }
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         api_key_row.connect_changed(move |row| {
             let key = row.text().to_string();
             let mut s = app_settings
@@ -199,7 +199,7 @@ pub fn show_settings_dialog(
             .build();
         pw_status_row.add_suffix(&remove_pw_btn);
 
-        let _app_settings_rm = Arc::clone(&app_settings);
+        let _app_settings_rm = Arc::clone(app_settings);
         let pw_status_row_rm = pw_status_row.clone();
         remove_pw_btn.connect_clicked(move |btn| {
             crate::master_password::clear();
@@ -212,10 +212,10 @@ pub fn show_settings_dialog(
 
     // Change / set password button -> opens a small inline dialog.
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let window = window.clone();
         change_pw_btn.connect_clicked(move |_| {
-            show_change_password_dialog(&window, Arc::clone(&app_settings));
+            show_change_password_dialog(&window, &app_settings);
         });
     }
 
@@ -242,7 +242,7 @@ pub fn show_settings_dialog(
     security_group.add(&auto_lock_row);
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         auto_lock_row.connect_value_notify(move |row| {
             let mut s = app_settings
                 .lock()
@@ -307,7 +307,7 @@ pub fn show_settings_dialog(
 
     // Save webhook URL on change.
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let rt = rt.clone();
         let host_down_toggle = host_down_toggle.clone();
         let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
@@ -326,7 +326,7 @@ pub fn show_settings_dialog(
 
     // Save host-down toggle on change.
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let rt = rt.clone();
         let webhook_url_row = webhook_url_row.clone();
         let vpn_disconnect_toggle = vpn_disconnect_toggle.clone();
@@ -345,7 +345,7 @@ pub fn show_settings_dialog(
 
     // Save VPN-disconnect toggle on change.
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let rt = rt.clone();
         let webhook_url_row = webhook_url_row.clone();
         let host_down_toggle = host_down_toggle.clone();
@@ -400,7 +400,7 @@ pub fn show_settings_dialog(
     );
     console_group.add(&anthropic_model);
     {
-        let settings = Arc::clone(&app_settings);
+        let settings = Arc::clone(app_settings);
         anthropic_model.connect_changed(move |row| {
             let mut s = settings
                 .lock()
@@ -429,7 +429,7 @@ pub fn show_settings_dialog(
     openai_group.add(&openai_key);
     openai_group.add(&openai_model);
     {
-        let settings = Arc::clone(&app_settings);
+        let settings = Arc::clone(app_settings);
         openai_key.connect_changed(move |row| {
             let mut s = settings
                 .lock()
@@ -439,7 +439,7 @@ pub fn show_settings_dialog(
         });
     }
     {
-        let settings = Arc::clone(&app_settings);
+        let settings = Arc::clone(app_settings);
         openai_model.connect_changed(move |row| {
             let mut s = settings
                 .lock()
@@ -719,7 +719,7 @@ pub fn show_settings_dialog(
     unifi_group.add(&unifi_key_row);
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         unifi_key_row.connect_changed(move |row| {
             let key = row.text().to_string();
             let mut s = app_settings
@@ -754,7 +754,7 @@ pub fn show_settings_dialog(
     }
     rdp_group.add(&rdp_row);
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         rdp_row.connect_selected_notify(move |row| {
             let client = match row.selected() {
                 1 => "remmina",
@@ -993,7 +993,7 @@ pub fn show_settings_dialog(
     }
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         theme_row.connect_selected_notify(move |row| {
             let scheme = match row.selected() {
                 1 => ColorScheme::Light,
@@ -1015,7 +1015,7 @@ pub fn show_settings_dialog(
     }
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let window = window.clone();
         opacity_scale.connect_value_changed(move |scale| {
             let val = scale.value() / 100.0;
@@ -1142,7 +1142,7 @@ fn strip_ansi(s: &str) -> String {
 /// Small dialog to set or change the master password.
 fn show_change_password_dialog(
     window: &adw::ApplicationWindow,
-    app_settings: Arc<Mutex<AppSettings>>,
+    app_settings: &Arc<Mutex<AppSettings>>,
 ) {
     let has_pw = crate::master_password::is_set();
 
@@ -1202,7 +1202,7 @@ fn show_change_password_dialog(
     dialog.set_child(Some(&vbox));
 
     {
-        let app_settings = Arc::clone(&app_settings);
+        let app_settings = Arc::clone(app_settings);
         let current_row = current_row.clone();
         let new_row = new_row.clone();
         let confirm_row = confirm_row.clone();
