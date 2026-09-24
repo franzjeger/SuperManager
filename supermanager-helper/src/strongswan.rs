@@ -1981,15 +1981,14 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("did not become ready"));
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
-        let pid: i32 = std::fs::read_to_string(pid_path)
+        let pid: u32 = std::fs::read_to_string(pid_path)
             .unwrap()
             .trim()
             .parse()
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_eq!(
-            unsafe { libc::kill(pid, 0) },
-            -1,
+        assert!(
+            !crate::sys::process_alive(pid),
             "timed-out probe was left running"
         );
         child.kill().await.unwrap();

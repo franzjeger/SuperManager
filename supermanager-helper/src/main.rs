@@ -61,6 +61,7 @@ mod openvpn;
 // mod power;
 mod route_guardian;
 mod strongswan;
+mod sys;
 mod tailscale;
 mod tailscale_state;
 mod traffic_capture;
@@ -214,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
     // `KeepAlive false`, so launchd expects a short-lived process.
     if std::env::args().nth(1).as_deref() == Some("vpn-dns-cleanup") {
         info!("vpn-dns-cleanup: boot-time DNS teardown guard starting");
-        let uid = unsafe { libc::geteuid() };
+        let uid = sys::effective_uid();
         if uid != 0 {
             anyhow::bail!("vpn-dns-cleanup must run as root (got uid={uid})");
         }
@@ -228,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
     // Make sure we are root — refuse to start otherwise. Running unprivileged
     // would create a confusing partial-install state where the GUI thinks
     // the helper is up but `swanctl` calls fail with permission errors.
-    let uid = unsafe { libc::geteuid() };
+    let uid = sys::effective_uid();
     if uid != 0 {
         anyhow::bail!("supermanager-helper must run as root (got uid={uid})");
     }
@@ -396,25 +397,12 @@ async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
 /// the Mac is already trusted to install software (which is what installing
 /// SuperManager is).
 fn set_socket_permissions(path: &PathBuf) -> anyhow::Result<()> {
-    use std::ffi::CString;
-
-    let cpath =
-        CString::new(path.as_os_str().as_encoded_bytes()).context("path contains nul byte")?;
     // group "admin" is gid 80 on every Mac since forever, but look it up
     // properly anyway.
-    let admin_gid = unsafe {
-        let name = CString::new("admin").unwrap();
-        let g = libc::getgrnam(name.as_ptr());
-        if g.is_null() {
-            80
-        } else {
-            (*g).gr_gid
-        }
-    };
-    let rc = unsafe { libc::chown(cpath.as_ptr(), 0, admin_gid) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error()).context("chown socket");
-    }
+    let admin_gid = sys::group_id("admin")
+        .context("look up group admin")?
+        .unwrap_or(80);
+    std::os::unix::fs::chown(path, Some(0), Some(admin_gid)).context("chown socket")?;
     let perms = std::fs::Permissions::from_mode(0o660);
     std::fs::set_permissions(path, perms).context("chmod socket")?;
     Ok(())

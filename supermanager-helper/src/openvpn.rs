@@ -277,7 +277,6 @@ impl OpenVpn {
             is_v3
         );
         let output = if is_v3 {
-            use std::os::unix::process::CommandExt as _;
             // Open the log file for stdout+stderr redirection.
             // ovpncli writes status to stderr; we merge both into
             // one log so the GUI can `cat` it for diagnostics.
@@ -318,14 +317,9 @@ impl OpenVpn {
                 .stdin(std::process::Stdio::null())
                 .stdout(log_for_stdout)
                 .stderr(log_for_stderr);
-            unsafe {
-                cmd.as_std_mut().pre_exec(|| {
-                    // New session — child won't get SIGHUP if the
-                    // helper restarts via deploy_self.
-                    libc::setsid();
-                    Ok(())
-                });
-            }
+            // New session — child won't get SIGHUP if the helper
+            // restarts via deploy_self.
+            crate::sys::new_session(cmd.as_std_mut());
             let child = cmd
                 .spawn()
                 .with_context(|| format!("spawn {} (ovpncli)", openvpn.display()))?;
@@ -487,9 +481,7 @@ impl OpenVpn {
             tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
 
             let log_body = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let pid_alive = read_pid_file(&pid_path)
-                .map(|p| unsafe { libc::kill(p as i32, 0) } == 0)
-                .unwrap_or(false);
+            let pid_alive = read_pid_file(&pid_path).is_some_and(crate::sys::process_alive);
             tracing::info!(
                 "ovpn_connect: post-spawn check pid_alive={} log_size={}",
                 pid_alive,
@@ -571,9 +563,7 @@ impl OpenVpn {
         if let Some(pid) = read_pid_file(&pid_path) {
             // SIGTERM lets openvpn flush its log + run its
             // `down` script, which is what we want.
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            crate::sys::terminate(pid);
             killed.push(pid);
         }
 
@@ -586,9 +576,7 @@ impl OpenVpn {
             if killed.contains(&pid) {
                 continue;
             }
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
+            crate::sys::terminate(pid);
             killed.push(pid);
         }
 
@@ -646,7 +634,7 @@ impl OpenVpn {
         let log_path = log_path_for(&safe);
 
         let live_pid: Option<u32> = match read_pid_file(&pid_path) {
-            Some(pid) if unsafe { libc::kill(pid as i32, 0) } == 0 => Some(pid),
+            Some(pid) if crate::sys::process_alive(pid) => Some(pid),
             Some(_) => {
                 // Stale file — clean up so subsequent polls don't
                 // keep finding it.
@@ -1110,21 +1098,17 @@ pub async fn terminate_all() -> usize {
             continue;
         };
         if let Some(pid) = read_pid_file(&entry.path()) {
-            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+            if crate::sys::process_alive(pid) {
                 // SIGTERM lets openvpn flush its log and run its down script.
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+                crate::sys::terminate(pid);
                 killed += 1;
             }
         }
         // Belt-and-braces: ps-scan for stragglers carrying this profile's
         // daemon-name fingerprint (catches a tunnel whose pidfile was lost).
         for pid in collect_openvpn_pids_for(safe).await {
-            if unsafe { libc::kill(pid as i32, 0) } == 0 {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
-                }
+            if crate::sys::process_alive(pid) {
+                crate::sys::terminate(pid);
                 killed += 1;
             }
         }
@@ -1164,7 +1148,7 @@ pub fn live_tunnel_interfaces() -> Vec<String> {
         };
         // Skip dead/stale pidfiles — a stale full-tunnel route from a dead
         // OpenVPN session SHOULD be swept, so we only protect live ones.
-        if unsafe { libc::kill(pid as i32, 0) } != 0 {
+        if !crate::sys::process_alive(pid) {
             continue;
         }
         let body = std::fs::read_to_string(log_path_for(safe)).unwrap_or_default();
@@ -1200,7 +1184,7 @@ pub fn has_live_tunnel() -> bool {
             continue;
         }
         if let Some(pid) = read_pid_file(&entry.path()) {
-            if unsafe { libc::kill(pid as i32, 0) } == 0 {
+            if crate::sys::process_alive(pid) {
                 return true;
             }
         }
