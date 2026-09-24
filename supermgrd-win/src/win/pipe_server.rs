@@ -14,17 +14,13 @@
 //!
 //! # Security
 //!
-//! For the skeleton we rely on the default DACL (which permits the
-//! creator's session). The production hardening step is to attach an
-//! explicit security descriptor allowing only:
-//!
-//! - `NT AUTHORITY\SYSTEM`   — full control
-//! - `BUILTIN\Administrators` — full control
-//! - `NT AUTHORITY\Authenticated Users` — read + write (no change-pipe-mode)
-//!
-//! That requires constructing a `SECURITY_ATTRIBUTES` with a SDDL string —
-//! tracked as a TODO in the issue tracker; the current default ACL is safe
-//! on single-user workstations but should not ship to enterprise.
+//! Every instance is created with the explicit security descriptor from
+//! [`super::pipe_acl`]: SYSTEM and Administrators get full control,
+//! authenticated local users read and write, and nobody else anything.
+//! The first instance is created with `first_pipe_instance`, so if another
+//! process already holds the name, a squatter waiting for the GUI to
+//! connect, the daemon refuses to listen rather than share it. Remote
+//! clients are refused, tokio's default for a pipe server.
 
 use std::sync::Arc;
 
