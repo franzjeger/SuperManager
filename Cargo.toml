@@ -127,3 +127,8 @@ similar_names           = "allow"
 # handlers, which are long and linear. The functions that are too long for
 # their structure are being split on their own merits, not to a line count.
 too_many_lines          = "allow"
+# Every file extension the code checks is one SuperManager gives the files it
+# writes itself: backups, generated configs, its own release assets. An exact
+# match is the right one; a case-insensitive match would take in files it did
+# not write.
+case_sensitive_file_extension_comparisons = "allow"

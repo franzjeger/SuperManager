@@ -70,11 +70,9 @@ pub struct BackupFile {
 /// Returns `None` for any file that doesn't follow the pattern, including
 /// files that match but whose timestamp segment is unparseable.
 pub fn parse_backup_filename(name: &str) -> Option<(String, DateTime<Utc>, bool)> {
-    let compressed = name.ends_with(".gz");
-    let stripped = if compressed {
-        &name[..name.len() - 3]
-    } else {
-        name
+    let (stripped, compressed) = match name.strip_suffix(".gz") {
+        Some(stripped) => (stripped, true),
+        None => (name, false),
     };
     BackupExt::recognise(stripped)?;
 
