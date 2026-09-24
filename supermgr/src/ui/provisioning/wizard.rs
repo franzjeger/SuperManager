@@ -2452,7 +2452,7 @@ fn build_step5_review(
                         Ok(json) => {
                             *slot
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(json)
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(json);
                         }
                         Err(e) => {
                             *slot

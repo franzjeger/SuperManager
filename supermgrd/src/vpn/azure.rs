@@ -885,7 +885,7 @@ impl VpnBackend for AzureBackend {
             if let Ok(_) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await
             {
-                info!("Azure: openvpn exited cleanly")
+                info!("Azure: openvpn exited cleanly");
             } else {
                 warn!("Azure: openvpn did not exit in 5 s, killing");
                 let _ = child.kill().await;

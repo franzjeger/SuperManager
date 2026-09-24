@@ -105,7 +105,23 @@ tera        = { version = "1.20", default-features = false, features = ["builtin
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
+# Everything clippy has, including pedantic, and CI denies warnings. The
+# pedantic lints this code does not follow are listed below with the reason;
+# a new exception needs one too.
 all       = { level = "warn", priority = -1 }
 pedantic  = { level = "warn", priority = -1 }
-module_name_repetitions = "allow"
+# Application code, not a published library: errors are explained where they
+# are produced, not in a section on every function returning Result.
 missing_errors_doc      = "allow"
+module_name_repetitions = "allow"
+# `a = b.clone()` reads plainly; reusing a's allocation matters nowhere here.
+assigning_clones        = "allow"
+# `s.push_str(&format!(…))` reads plainly, and none of it is on a hot path.
+format_push_string      = "allow"
+# Names here follow the domain — rx/tx, src/dst, ipv4/ipv6 — which is exactly
+# what a lint on edit distance between names flags.
+similar_names           = "allow"
+# Length alone says little about GTK/Slint view builders and protocol
+# handlers, which are long and linear. The functions that are too long for
+# their structure are being split on their own merits, not to a line count.
+too_many_lines          = "allow"
