@@ -4182,8 +4182,7 @@ pub fn build_ui(
                 }
                 // Provisioning messages — handled locally via polling in
                 // the wizard widget; these are reserved for future use.
-                AppMsg::ProvisioningConfigGenerated(_) => {}
-                AppMsg::ProvisioningPushDone => {}
+                AppMsg::ProvisioningConfigGenerated(_) | AppMsg::ProvisioningPushDone => {}
             }
         }
         glib::ControlFlow::Continue

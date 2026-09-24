@@ -343,10 +343,9 @@ impl SshSession {
                 Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
                     exit_status = code;
                 }
-                Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) => {
-                    // Keep draining until the channel is fully closed.
-                }
                 None => break,
+                // Eof or Close: keep draining until the channel is fully
+                // closed. Anything else is not output.
                 _ => {}
             }
         }
@@ -458,10 +457,10 @@ impl SshSession {
                             break;
                         }
                     }
-                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                    Ok(None) => break,
+                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None) | Err(_) => {
+                        break
+                    }
                     Ok(_) => {}
-                    Err(_) => break,
                 }
             }
         }

@@ -280,10 +280,9 @@ impl Ikev2Backend {
         let deadline = tokio::time::Instant::now() + OPENVPN_CONNECT_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let line = match timeout(remaining, watcher.recv()).await {
-                Ok(Some(line)) => line,
-                Ok(None) => break, // stdout closed → process exited
-                Err(_) => break,   // timeout
+            let Ok(Some(line)) = timeout(remaining, watcher.recv()).await else {
+                // stdout closed (the process exited), or the time is up.
+                break;
             };
             if line.contains("Initialization Sequence Completed") {
                 connected = true;

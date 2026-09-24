@@ -288,9 +288,6 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
             probe.web_paths = paths;
             probe.extra_findings.extend(findings);
         }
-        "telnet" | "ftp" | "smtp" => {
-            probe.banner = generic_banner(host, port).await.ok();
-        }
         "snmp" => {
             probe.banner = snmp_sysdescr(host).await.ok();
             // Deeper SNMP walk if we got anything back. The walk
@@ -316,6 +313,7 @@ pub async fn probe_port(host: &str, port: u16) -> Option<PortProbe> {
                 probe.extra_findings.extend(findings);
             }
         }
+        // telnet, ftp, smtp and the rest: whatever the service says first.
         _ => {
             probe.banner = generic_banner(host, port).await.ok();
         }

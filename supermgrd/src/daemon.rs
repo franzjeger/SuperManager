@@ -2913,9 +2913,8 @@ impl DaemonService {
     ) -> fdo::Result<String> {
         crate::polkit::authorize(conn, &hdr, crate::polkit::ACTION_MANAGE).await?;
         let kt: SshKeyType = match key_type {
-            "ED25519" | "ed25519" | "ssh-ed25519" => SshKeyType::Ed25519,
             "RSA" | "rsa" | "ssh-rsa" => SshKeyType::Rsa4096, // default RSA to 4096
-            _ => SshKeyType::Ed25519,
+            _ => SshKeyType::Ed25519, // "ed25519", "ssh-ed25519", or unnamed
         };
 
         let fingerprint = supermgr_core::ssh::keygen::compute_fingerprint(public_key)

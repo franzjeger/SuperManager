@@ -237,10 +237,8 @@ impl ForticlientBackend {
         let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let line = match timeout(remaining, rx.recv()).await {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(_) => break,
+            let Ok(Some(line)) = timeout(remaining, rx.recv()).await else {
+                break;
             };
             if let Some(name) = extract_ppp_iface(&line) {
                 iface = Some(name);

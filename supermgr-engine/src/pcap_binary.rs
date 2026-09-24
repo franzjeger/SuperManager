@@ -173,11 +173,11 @@ fn parse_pcap_for_clienthellos(bytes: &[u8]) -> Vec<TlsClientHello> {
     }
     let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let big_endian = match magic {
-        0xa1b2_c3d4 => false, // microsec, little-endian
-        0xd4c3_b2a1 => true,  // microsec, big-endian
-        0xa1b2_3c4d => false, // nanosec, little-endian (we treat the same)
-        0x4d3c_b2a1 => true,  // nanosec, big-endian
-        _ => return out,      // not a libpcap file
+        // Microsecond and nanosecond timestamps (we treat them the same),
+        // little-endian and big-endian.
+        0xa1b2_c3d4 | 0xa1b2_3c4d => false,
+        0xd4c3_b2a1 | 0x4d3c_b2a1 => true,
+        _ => return out, // not a libpcap file
     };
     let link_type = read_u32(&bytes[20..24], big_endian);
     if link_type != 1 {

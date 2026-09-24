@@ -369,14 +369,13 @@ async fn collect_output(
                 // ext == 1 is the SSH constant for stderr.
                 stderr.extend_from_slice(data);
             }
-            ChannelMsg::ExtendedData { .. } => {}
             ChannelMsg::ExitStatus { exit_status } => {
                 // Not `as`: a status past i32::MAX must not wrap round to
                 // -1, which here means none was sent.
                 exit = i32::try_from(exit_status).unwrap_or(i32::MAX);
             }
             ChannelMsg::Eof => break,
-            _ => {}
+            _ => {} // other extended-data streams, window adjustments, …
         }
     }
     Ok((

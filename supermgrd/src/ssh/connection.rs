@@ -119,11 +119,10 @@ impl SshSession {
         username: &str,
         password: &str,
     ) -> Result<bool, SshError> {
-        // 1. Try plain password auth.
-        match handle.authenticate_password(username, password).await {
-            Ok(true) => return Ok(true),
-            Ok(false) => {} // server rejected – try keyboard-interactive
-            Err(_) => {}    // protocol error – try keyboard-interactive
+        // 1. Try plain password auth. Rejected, or a protocol error: go on to
+        //    keyboard-interactive.
+        if let Ok(true) = handle.authenticate_password(username, password).await {
+            return Ok(true);
         }
 
         // 2. Try keyboard-interactive (macOS, some Linux PAM setups).
@@ -462,10 +461,9 @@ impl SshSession {
                 Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
                     exit_status = code;
                 }
-                Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) => {
-                    // Keep draining until the channel is fully closed.
-                }
                 None => break,
+                // Eof or Close: keep draining until the channel is fully
+                // closed. Anything else is not output.
                 _ => {}
             }
         }
@@ -577,10 +575,10 @@ impl SshSession {
                             break;
                         }
                     }
-                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                    Ok(None) => break,
+                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None) | Err(_) => {
+                        break
+                    }
                     Ok(_) => {}
-                    Err(_) => break,
                 }
             }
         }

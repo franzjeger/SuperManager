@@ -318,25 +318,18 @@ fn collect_tailscaled_underlay_ips(pid: u32) -> Vec<String> {
 /// Skip loopback (127), link-local (169.254), RFC1918 (10/8,
 /// 172.16/12, 192.168/16), CGNAT/tailnet (100.64/10), multicast.
 fn is_routeable_public_ipv4(ip: &str) -> bool {
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() != 4 {
+    let Ok(ip) = ip.parse::<std::net::Ipv4Addr>() else {
         return false;
-    }
-    let nums: Option<Vec<u8>> = parts.iter().map(|s| s.parse::<u8>().ok()).collect();
-    let n = match nums {
-        Some(v) if v.len() == 4 => v,
-        _ => return false,
     };
-    match n[0] {
-        0 | 127 => false,                           // unspecified, loopback
-        10 => false,                                // RFC1918
-        100 if (64..=127).contains(&n[1]) => false, // CGNAT / tailnet
-        169 if n[1] == 254 => false,                // link-local
-        172 if (16..=31).contains(&n[1]) => false,  // RFC1918
-        192 if n[1] == 168 => false,                // RFC1918
-        224..=239 => false,                         // multicast
-        _ => true,
-    }
+    let [first, second, ..] = ip.octets();
+    let this_network = first == 0;
+    let cgnat = first == 100 && (64..=127).contains(&second); // and tailnets
+    !(this_network
+        || cgnat
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_multicast())
 }
 
 /// State file recording the exemption routes installed for the
@@ -1780,6 +1773,36 @@ fn reload_daemon() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_public_ipv4_is_pinned_past_the_tunnel() {
+        for public in [
+            "1.1.1.1",
+            "8.8.8.8",
+            "100.63.255.255",
+            "100.128.0.1",
+            "172.32.0.1",
+        ] {
+            assert!(is_routeable_public_ipv4(public), "{public}");
+        }
+        for reserved in [
+            "0.1.2.3",         // this network
+            "127.0.0.1",       // loopback
+            "10.1.2.3",        // RFC 1918
+            "172.16.0.1",      // RFC 1918
+            "192.168.1.1",     // RFC 1918
+            "100.64.0.1",      // CGNAT, and tailnets
+            "100.127.255.255", // CGNAT, and tailnets
+            "169.254.1.1",     // link-local
+            "224.0.0.1",       // multicast
+            "239.255.255.255", // multicast
+            "1.2.3",           // not an address
+            "1.2.3.256",       // not an address
+            "fe80::1",         // not IPv4
+        ] {
+            assert!(!is_routeable_public_ipv4(reserved), "{reserved}");
+        }
+    }
 
     /// The whole point of the reload rework: a plist that already matches
     /// the template but a daemon that is NOT loaded must still reload.

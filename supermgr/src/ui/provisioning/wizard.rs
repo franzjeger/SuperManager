@@ -922,10 +922,9 @@ fn build_step2_network_design(state: &Rc<RefCell<WizardState>>) -> gtk4::Widget 
             wan_gw_row.set_visible(is_static);
             wan_dns_row.set_visible(is_static);
             let wt = match idx {
-                0 => "DHCP",
                 1 => "Static",
                 2 => "PPPoE",
-                _ => "DHCP",
+                _ => "DHCP", // 0
             };
             state.borrow_mut().wan_type = wt.to_string();
         });
@@ -4406,9 +4405,8 @@ async fn fetch_device_config(host_id: &str, device_type: &str) -> anyhow::Result
         .context("DaemonProxy creation failed")?;
 
     let command = match device_type {
-        "FortiGate" => "show full-configuration",
         "UniFi" => "cat /tmp/system.cfg",
-        _ => "show full-configuration",
+        _ => "show full-configuration", // FortiGate
     };
 
     let result = proxy

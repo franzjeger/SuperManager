@@ -1655,13 +1655,13 @@ pub fn compare(current: &ComplianceRun, previous: Option<&ComplianceRun>) -> Dri
 
 fn classify(prev: Option<&Status>, current: &Status) -> DriftKind {
     match (prev, current) {
-        (None, _) => DriftKind::Added,
         (Some(_), Status::Error) => DriftKind::Errored,
         (Some(Status::Pass), Status::Fail) => DriftKind::NewlyFailing,
         (Some(Status::Fail), Status::Pass) => DriftKind::NewlyPassing,
         (Some(Status::Fail), Status::Fail) => DriftKind::StillFailing,
         (Some(Status::Pass), Status::Pass) => DriftKind::StillPassing,
-        (Some(Status::Skip), _) | (Some(_), Status::Skip) => DriftKind::Added,
+        // New, or skipped on one side: nothing to compare it with.
+        (None | Some(Status::Skip), _) | (Some(_), Status::Skip) => DriftKind::Added,
         (Some(Status::Error), _) => DriftKind::Errored,
     }
 }

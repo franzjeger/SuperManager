@@ -398,9 +398,8 @@ impl OpenVpnBackend {
             loop {
                 line.clear();
                 match reader.read_line(&mut line).await {
-                    Ok(0) => return,
+                    Ok(0) | Err(_) => return,
                     Ok(_) => {}
-                    Err(_) => return,
                 }
             }
         });

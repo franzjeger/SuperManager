@@ -1202,10 +1202,9 @@ pub fn show_logs_dialog(
             let level = match idx {
                 0 => "error",
                 1 => "warn",
-                2 => "info",
                 3 => "debug",
                 4 => "trace",
-                _ => "info",
+                _ => "info", // 2
             };
             let level = level.to_owned();
             rt.spawn(async move {
