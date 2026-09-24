@@ -466,6 +466,10 @@ pub async fn dbus_set_auto_connect(profile_id: String, auto_connect: bool) -> an
 /// `local_id` is the IKE identity (`IDi`). Empty clears it — which is the only
 /// way back to the default once one has been set, so this is deliberately not
 /// a "leave unchanged when blank" field.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments of the D-Bus method it calls"
+)]
 pub async fn dbus_update_fortigate(
     profile_id: String,
     name: String,

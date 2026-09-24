@@ -216,6 +216,10 @@ pub fn build_vpn_sidebar(
 ///
 /// The row matching the currently active profile receives a connected icon and
 /// is selected in the list box so it is visually highlighted.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a view's data plus the window, runtime and channel every view takes"
+)]
 pub fn populate_vpn_sidebar(
     list_box: &gtk4::ListBox,
     profiles: &[ProfileSummary],

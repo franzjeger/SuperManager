@@ -708,6 +708,10 @@ pub fn show_fortigate_dialog(
 // ---------------------------------------------------------------------------
 
 /// Show the "Edit FortiGate connection" dialog pre-filled with current values.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a view's data plus the window, runtime and channel every view takes"
+)]
 pub fn show_edit_fortigate_dialog(
     window: &adw::ApplicationWindow,
     profile_id: String,

@@ -163,6 +163,10 @@ pub fn build_ssh_host_list() -> gtk4::ListBox {
 ///
 /// Ungrouped hosts (empty group string) appear under an "Ungrouped" header.
 /// Group headers are non-activatable bold labels.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a view's data plus the window, runtime and channel every view takes"
+)]
 pub fn populate_ssh_host_list(
     list_box: &gtk4::ListBox,
     hosts: &[HostSummary],

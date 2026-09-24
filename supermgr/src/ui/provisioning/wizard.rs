@@ -88,6 +88,10 @@ struct VlanEntry {
 
 /// All data collected across the wizard steps.
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one per checkbox in the wizard"
+)]
 struct WizardState {
     // Step 1: Customer info
     customer_name: String,

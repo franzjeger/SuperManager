@@ -351,6 +351,10 @@ impl ProfileConfig {
 /// Profiles are stored as TOML files in the daemon's configuration directory
 /// (`/etc/supermgrd/profiles/`).  Secret material is **never** written to disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent settings, stored in profile files as booleans"
+)]
 pub struct Profile {
     /// Stable identifier — generated at import time, never changes.
     pub id: Uuid,
@@ -459,6 +463,10 @@ impl Profile {
 /// Only non-secret, non-bulky fields are included so the GUI can populate a
 /// list without deserialising full configs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the profile's independent settings, for the list view"
+)]
 pub struct ProfileSummary {
     /// Stable profile identifier.
     pub id: Uuid,

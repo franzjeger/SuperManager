@@ -82,6 +82,10 @@ impl BackendStatus {
 /// offer the right UI options (e.g. hide the "split-tunnel" toggle for backends
 /// that manage routing themselves).
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per feature a backend may or may not have"
+)]
 pub struct Capabilities {
     /// The backend can be configured for split-tunnel mode.
     pub split_tunnel: bool,

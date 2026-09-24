@@ -1545,6 +1545,10 @@ impl DaemonService {
     /// Create and persist a FortiGate IPsec/IKEv2 profile.
     ///
     /// Returns the new profile's UUID string.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the arguments of the D-Bus method"
+    )]
     async fn import_fortigate(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,
@@ -2125,6 +2129,10 @@ impl DaemonService {
     }
 
     /// Update a FortiGate profile's connection details and credentials.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the arguments of the D-Bus method"
+    )]
     async fn update_fortigate(
         &self,
         #[zbus(connection)] conn: &zbus::Connection,

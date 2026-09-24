@@ -145,6 +145,10 @@ pub struct Host {
 
 /// Lightweight summary of an [`Host`] for list views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about a host, each shown on its own"
+)]
 pub struct HostSummary {
     /// Unique identifier.
     pub id: Uuid,

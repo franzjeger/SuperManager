@@ -52,6 +52,10 @@ pub struct TailscaleDnsReport {
 /// upstream shape: that schema moves between minor versions, and pinning the
 /// GUI to it would make every tailscale upgrade a potential breakage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the independent flags Tailscale reports for a node"
+)]
 pub struct TailscaleNode {
     /// Stable Tailscale node ID.
     pub id: String,

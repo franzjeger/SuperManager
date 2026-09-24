@@ -186,6 +186,12 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 // above are still held to `#![warn(missing_docs)]`.
 mod generated {
     #![allow(missing_docs)]
+    // Each method takes the arguments of the D-Bus method it calls. `allow`:
+    // the lint fires in code the proxy macro generates.
+    #![allow(
+        clippy::too_many_arguments,
+        reason = "each method takes the arguments of its D-Bus method"
+    )]
 
     use zbus::fdo;
 
