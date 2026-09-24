@@ -491,6 +491,10 @@ pub fn parse_exec(json: &str) -> (String, String, i32) {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`key_type` is the daemon's name for it, and the UI's"
+)]
 pub struct Key {
     pub id: String,
     pub name: String,

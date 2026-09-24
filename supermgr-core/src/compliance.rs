@@ -2251,6 +2251,10 @@ mod tests {
     // -- Severity penalties --------------------------------------------
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "the ladder is exact constants, and this pins them"
+    )]
     fn severity_penalty_ladder() {
         // Higher severity ⇒ larger penalty. The ladder powers `score()`;
         // changing these numbers shifts every customer's compliance

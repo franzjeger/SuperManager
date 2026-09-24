@@ -577,6 +577,10 @@ fn unified_diff(old: &str, new: &str, path: &str) -> String {
 
 /// LCS via dynamic programming. O(n*m) which is fine for our
 /// section sizes (< 200 lines typically).
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the textbook names of the recurrence"
+)]
 fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
     let n = a.len();
     let m = b.len();

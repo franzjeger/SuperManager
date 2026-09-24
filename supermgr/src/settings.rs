@@ -150,6 +150,10 @@ mod model_tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "0.8 read from JSON is exactly the f64 the literal is"
+    )]
     fn legacy_settings_recover_retired_or_empty_models_without_losing_other_settings() {
         for model in ["", "  ", "claude-sonnet-4-20250514", " claude-sonnet-4-0 "] {
             let saved = serde_json::json!({"anthropic_model":model,"use_claude_subscription":true,"opacity":0.8});

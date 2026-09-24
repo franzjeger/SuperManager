@@ -921,6 +921,11 @@ mod tests {
     /// in the `sha1` crate), but we don't want a new dep just
     /// for one test. Hand-rolled implementation matches the
     /// 5-stage block transform from RFC 3174.
+    #[expect(
+        clippy::many_single_char_names,
+        clippy::needless_range_loop,
+        reason = "RFC 3174's own names and indexing, to check it against"
+    )]
     fn sha1_hex(data: &[u8]) -> String {
         // Padding: append 0x80, zeros, then 64-bit length.
         let bit_len = (data.len() as u64) * 8;

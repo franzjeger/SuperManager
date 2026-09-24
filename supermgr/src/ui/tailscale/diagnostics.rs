@@ -1,3 +1,8 @@
+// `allow`, not `expect`: clippy never reports this lint as fulfilled.
+#[allow(
+    clippy::wildcard_imports,
+    reason = "one part of the Tailscale page, sharing the parent's imports"
+)]
 use super::*;
 
 pub(super) fn show(window: &adw::ApplicationWindow, rt: &tokio::runtime::Handle, profile: &str) {
