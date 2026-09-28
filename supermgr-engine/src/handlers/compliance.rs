@@ -256,9 +256,10 @@ impl EngineServer {
                 let session = &session;
                 async move {
                     let (status, stdout, stderr) = session
-                        .exec(&cmd)
+                        .exec(&cmd, Some(std::time::Duration::from_secs(60)))
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // Each check reads a config file or a setting.
                     // Combine — checks read stdout but error messages tend to
                     // land on stderr. The exit status goes through too: it is
                     // how the runner tells "the setting is wrong" from "the

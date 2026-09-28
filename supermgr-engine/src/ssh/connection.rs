@@ -99,6 +99,44 @@ pub struct SshSession {
     handle: Handle<SshClientHandler>,
 }
 
+/// Settings every session uses. The keepalive is what bounds a session
+/// whose peer has gone: without one, a server that died or dropped off the
+/// network after the handshake left every later await (an exec, an SFTP
+/// transfer, a shell prompt) pending for good. A peer that answers nothing
+/// for `KEEPALIVE_MAX` + 1 intervals is dropped; any traffic, its replies to
+/// the keepalives included, keeps a quiet but live session going, such as
+/// one running a long, silent command.
+fn client_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: KEEPALIVE_MAX,
+        ..client::Config::default()
+    })
+}
+
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const KEEPALIVE_MAX: usize = 3;
+
+/// Budget for each command run through `RemoteShell`.
+const REMOTE_SHELL_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// `future`, or a `ConnectionFailed` naming `step` if it takes longer than
+/// `secs`. Authentication needs one as much as the connect: a server that
+/// completed the handshake and then went quiet used to hold it forever.
+async fn within<T>(
+    secs: u64,
+    addr: &str,
+    step: &str,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, SshError> {
+    tokio::time::timeout(std::time::Duration::from_secs(secs), future)
+        .await
+        .map_err(|_| SshError::ConnectionFailed {
+            host: addr.to_owned(),
+            reason: format!("{step} timed out after {secs}s"),
+        })
+}
+
 impl SshSession {
     // -- constructors -------------------------------------------------------
 
@@ -116,7 +154,6 @@ impl SshSession {
         timeout_secs: u64,
         known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
-        let config = Arc::new(client::Config::default());
         let addr = format!("{hostname}:{port}");
         let handler = SshClientHandler {
             known_hosts,
@@ -124,24 +161,26 @@ impl SshSession {
             port,
         };
 
-        let mut handle = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            client::connect(config, &addr as &str, handler),
+        let mut handle = within(
+            timeout_secs,
+            &addr,
+            "connection",
+            client::connect(client_config(), &addr as &str, handler),
         )
-        .await
-        .map_err(|_| SshError::ConnectionFailed {
-            host: addr.clone(),
-            reason: format!("connection timed out after {timeout_secs}s"),
-        })?
+        .await?
         .map_err(|e| SshError::ConnectionFailed {
             host: addr.clone(),
             reason: e.to_string(),
         })?;
 
-        let auth_ok = handle
-            .authenticate_password(username, password)
-            .await
-            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+        let auth_ok = within(
+            timeout_secs,
+            &addr,
+            "authentication",
+            handle.authenticate_password(username, password),
+        )
+        .await?
+        .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
         if !auth_ok {
             return Err(SshError::AuthFailed(
@@ -227,7 +266,6 @@ impl SshSession {
         let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
-        let config = Arc::new(client::Config::default());
         let addr = format!("{hostname}:{port}");
         let handler = SshClientHandler {
             known_hosts,
@@ -235,15 +273,13 @@ impl SshSession {
             port,
         };
 
-        let mut handle = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            client::connect(config, &addr as &str, handler),
+        let mut handle = within(
+            timeout_secs,
+            &addr,
+            "connection",
+            client::connect(client_config(), &addr as &str, handler),
         )
-        .await
-        .map_err(|_| SshError::ConnectionFailed {
-            host: addr.clone(),
-            reason: format!("connection timed out after {timeout_secs}s"),
-        })?
+        .await?
         .map_err(|e| SshError::ConnectionFailed {
             host: addr.clone(),
             reason: e.to_string(),
@@ -261,9 +297,13 @@ impl SshSession {
             // here, and the non-fatal fallback below then silently drops to
             // plain pubkey auth despite a cert that validated fine on save.
             match ssh_key::Certificate::from_openssh(cert_data.trim()) {
-                Ok(cert) => match handle
-                    .authenticate_openssh_cert(username, Arc::clone(&key_pair), cert)
-                    .await
+                Ok(cert) => match within(
+                    timeout_secs,
+                    &addr,
+                    "certificate authentication",
+                    handle.authenticate_openssh_cert(username, Arc::clone(&key_pair), cert),
+                )
+                .await?
                 {
                     Ok(true) => return Ok(Self { handle }),
                     Ok(false) => {
@@ -290,10 +330,14 @@ impl SshSession {
             }
         }
 
-        let auth_ok = handle
-            .authenticate_publickey(username, key_pair)
-            .await
-            .map_err(|e| SshError::AuthFailed(e.to_string()))?;
+        let auth_ok = within(
+            timeout_secs,
+            &addr,
+            "authentication",
+            handle.authenticate_publickey(username, key_pair),
+        )
+        .await?
+        .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
         if !auth_ok {
             return Err(SshError::AuthFailed(
@@ -306,10 +350,29 @@ impl SshSession {
 
     // -- command execution --------------------------------------------------
 
-    /// Execute a command on the remote host.
+    /// Execute a command on the remote host and return
+    /// `(exit_status, stdout, stderr)`.
     ///
-    /// Returns `(exit_status, stdout, stderr)`.
-    pub async fn exec(&self, command: &str) -> Result<(u32, String, String), SshError> {
+    /// `budget` bounds the whole call, from opening the channel to the exit
+    /// status. `None` waits for as long as the command runs; the keepalive
+    /// still drops a peer that has gone.
+    pub async fn exec(
+        &self,
+        command: &str,
+        budget: Option<std::time::Duration>,
+    ) -> Result<(u32, String, String), SshError> {
+        let Some(budget) = budget else {
+            return self.run_command(command).await;
+        };
+        tokio::time::timeout(budget, self.run_command(command))
+            .await
+            .map_err(|_| SshError::ConnectionFailed {
+                host: String::new(),
+                reason: format!("command did not finish within {}s", budget.as_secs()),
+            })?
+    }
+
+    async fn run_command(&self, command: &str) -> Result<(u32, String, String), SshError> {
         let mut channel =
             self.handle
                 .channel_open_session()
@@ -329,7 +392,7 @@ impl SshSession {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_status: u32 = 1;
+        let mut exit_status: Option<u32> = None;
 
         loop {
             match channel.wait().await {
@@ -341,7 +404,7 @@ impl SshSession {
                     stderr.extend_from_slice(&data);
                 }
                 Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
-                    exit_status = code;
+                    exit_status = Some(code);
                 }
                 Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) => {
                     // Keep draining until the channel is fully closed.
@@ -351,6 +414,19 @@ impl SshSession {
             }
         }
 
+        let exit_status = match exit_status {
+            Some(code) => code,
+            // The session died under the command: whatever it did, it didn't
+            // exit 1, and callers read exit codes as answers (`grep -q`).
+            None if self.handle.is_closed() => {
+                return Err(SshError::ConnectionFailed {
+                    host: String::new(),
+                    reason: "connection lost before the command finished".into(),
+                });
+            }
+            // A live server that closed the channel without an exit status.
+            None => 1,
+        };
         let stdout_str = String::from_utf8_lossy(&stdout).into_owned();
         let stderr_str = String::from_utf8_lossy(&stderr).into_owned();
 
@@ -567,10 +643,158 @@ fn sftp_err(op: &str, path: &str, e: &impl std::fmt::Display) -> SshError {
 impl RemoteShell for SshSession {
     async fn exec(&self, command: &str) -> Result<(u32, String, String), SshError> {
         // Inherent method — the trait method is the one being defined here.
-        SshSession::exec(self, command).await
+        // Core's callers run short housekeeping commands (`echo $HOME`,
+        // `chmod`, `grep -q` on authorized_keys).
+        SshSession::exec(self, command, Some(REMOTE_SHELL_BUDGET)).await
     }
 
     async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
         Ok(Box::new(SftpFiles(self.sftp().await?)))
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use russh::server::{self, Auth, Msg, Session};
+    use russh::{Channel, ChannelId};
+
+    /// How the test server behaves once a client is in.
+    #[derive(Clone, Copy)]
+    enum Server {
+        /// Never answers the password.
+        StallAuth,
+        /// Accepts every command and never finishes it.
+        StallExec,
+        /// Drops the whole connection when asked to run a command.
+        DropOnExec,
+        /// Answers every command with "ok" and exit status 0.
+        Answer,
+    }
+
+    struct Handler(Server);
+
+    #[async_trait::async_trait]
+    impl server::Handler for Handler {
+        type Error = russh::Error;
+
+        async fn auth_password(&mut self, _: &str, _: &str) -> Result<Auth, Self::Error> {
+            if let Server::StallAuth = self.0 {
+                std::future::pending::<()>().await;
+            }
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            _: Channel<Msg>,
+            _: &mut Session,
+        ) -> Result<bool, Self::Error> {
+            Ok(true)
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel: ChannelId,
+            _: &[u8],
+            session: &mut Session,
+        ) -> Result<(), Self::Error> {
+            match self.0 {
+                Server::Answer => {
+                    session.data(channel, russh::CryptoVec::from_slice(b"ok\n"));
+                    session.exit_status_request(channel, 0);
+                    session.close(channel);
+                }
+                Server::DropOnExec => return Err(russh::Error::Disconnect),
+                Server::StallExec | Server::StallAuth => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// Serve one connection on a loopback port, and log in to it.
+    async fn login(behaviour: Server, timeout_secs: u64) -> Result<SshSession, SshError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let config = Arc::new(server::Config {
+            keys: vec![russh_keys::key::KeyPair::generate_ed25519()],
+            auth_rejection_time: std::time::Duration::ZERO,
+            ..server::Config::default()
+        });
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            if let Ok(session) = server::run_stream(config, socket, Handler(behaviour)).await {
+                let _ = session.await;
+            }
+        });
+        let known_hosts = tempfile::tempdir().unwrap();
+        let known_hosts = Arc::new(KnownHostsStore::open(known_hosts.path()).unwrap());
+        SshSession::connect_password(
+            "127.0.0.1",
+            port,
+            "ops",
+            "secret",
+            timeout_secs,
+            known_hosts,
+        )
+        .await
+    }
+
+    fn reason(error: &SshError) -> &str {
+        match error {
+            SshError::ConnectionFailed { reason, .. } => reason,
+            other => panic!("expected ConnectionFailed, got {other:?}"),
+        }
+    }
+
+    /// A server that completed the handshake and then never answered the
+    /// login used to hold the caller forever.
+    #[tokio::test]
+    async fn a_login_that_is_never_answered_times_out() {
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            login(Server::StallAuth, 1),
+        )
+        .await
+        .expect("the login is still waiting")
+        .err()
+        .expect("login succeeded");
+        assert!(
+            reason(&error).contains("authentication timed out"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_never_finishes_ends_at_its_budget() {
+        let session = login(Server::StallExec, 5).await.unwrap();
+        let exec = session.exec("sleep forever", Some(std::time::Duration::from_millis(300)));
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), exec)
+            .await
+            .expect("the command is still waiting")
+            .expect_err("command finished");
+        assert!(reason(&error).contains("did not finish"), "{error}");
+    }
+
+    /// Callers read exit codes as answers (`grep -q`), so a dropped session
+    /// must not come back as the command's exit 1.
+    #[tokio::test]
+    async fn a_lost_connection_is_an_error_not_an_exit_status() {
+        let session = login(Server::DropOnExec, 5).await.unwrap();
+        let error = session
+            .exec("true", Some(std::time::Duration::from_secs(5)))
+            .await
+            .expect_err("a dropped session returned an exit status");
+        assert!(reason(&error).contains("connection lost"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_finished_command_returns_its_status_and_output() {
+        let session = login(Server::Answer, 5).await.unwrap();
+        let (status, stdout, _) = session
+            .exec("true", Some(std::time::Duration::from_secs(5)))
+            .await
+            .unwrap();
+        assert_eq!((status, stdout.as_str()), (0, "ok\n"));
     }
 }

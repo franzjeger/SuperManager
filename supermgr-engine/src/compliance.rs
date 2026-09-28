@@ -45,7 +45,11 @@ async fn extract_cli(
         .cli_grep
         .as_deref()
         .ok_or_else(|| anyhow!("cli check {} missing cli_grep", def.id))?;
-    let (_, stdout, _) = session.exec(command).await.context("ssh exec")?;
+    // A `show` read: seconds, even on a busy unit.
+    let (_, stdout, _) = session
+        .exec(command, Some(std::time::Duration::from_secs(60)))
+        .await
+        .context("ssh exec")?;
     // Find the first line containing the grep token, then return
     // the LAST whitespace-separated token from that line. FortiOS
     // `show` output looks like `    set admin-sport 8443`, so the
