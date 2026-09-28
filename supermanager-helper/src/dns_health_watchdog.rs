@@ -40,7 +40,12 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+// Bounded external commands: `Command` here is `proc::Bounded`, whose
+// `output()` / `status()` cannot hang. The binaries this module drives all read
+// or write live network state, and every one of them can block indefinitely
+// when that state is broken (a route to a torn-down utun, a wedged configd) —
+// on threads where losing the caller means losing a watchdog or an RPC worker.
+use crate::proc::Bounded as Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;

@@ -25,7 +25,7 @@ import Foundation
 /// `/usr/local/bin/tailscale` for Homebrew installs, or the App
 /// Store app's bundled binary at
 /// `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. We probe
-/// both, in that order, and report a clear "not installed" error
+/// both, preferring our managed service, and report a clear "not installed" error
 /// if neither exists. The user installs Tailscale through their
 /// own preferred channel; we don't try to install it.
 enum TailscaleClient {
@@ -46,56 +46,61 @@ enum TailscaleClient {
         }
     }
 
-    /// Probe candidate paths in priority order. Returns the first
-    /// path that's both executable on disk *and* actually runs (a
-    /// dead App Store shim at `/usr/local/bin/tailscale` is
-    /// executable but exec-ing it returns 126 — we want to skip
-    /// those).
-    ///
-    /// Priority:
-    ///   1. The bundled binary inside SuperManager.app — guarantees
-    ///      a working tailscale even if the user has uninstalled
-    ///      Tailscale.app or homebrew's formula.
-    ///   2. Homebrew on Apple Silicon.
-    ///   3. Homebrew on Intel + the legacy App Store shim path.
-    ///   4. App Store / DMG install location.
-    ///
-    /// Result is cached under a lock for the process lifetime — the
-    /// validate step does fork+exec which costs ~30 ms per call, and
-    /// the binary doesn't move while we're running.
-    private static func locateBinary() -> URL? {
-        binaryCache.resolve { cached in
-            if let cached { return cached }
-            var candidates: [String] = []
-            // 1. Our own bundled copy. Build phase
-            // `bundle_tailscale.sh` writes here.
-            if let bundled = Bundle.main.url(
-                forResource: "tailscale",
-                withExtension: nil,
-                subdirectory: "tailscale-bin"
-            ) {
-                candidates.append(bundled.path)
-            }
-            // 2-4. Common system locations as fallback. Order matters:
-            // /opt/homebrew first on arm64 because it's most likely the
-            // *real* binary; /usr/local/bin last because it's where the
-            // App Store leaves a dead shim.
-            candidates.append(contentsOf: [
-                "/opt/homebrew/bin/tailscale",
-                "/opt/homebrew/opt/tailscale/bin/tailscale",
-                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-                "/usr/local/bin/tailscale",
-            ])
+    static let nativeAppBinaryPath = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    static let managedSocketPath = "/var/run/tailscaled.socket"
 
-            for path in candidates {
-                guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-                let url = URL(fileURLWithPath: path)
-                if validateBinary(at: url) {
-                    return url
-                }
-            }
-            return nil
+    /// Prefer SuperManager's service so its lifecycle and complete feature
+    /// set remain under our control. Tailscale.app is a compatibility fallback
+    /// for builds without a managed CLI. Never let a cached fallback override
+    /// a subsequently installed bundled/Homebrew CLI.
+    static func resolveBinary(
+        bundledPath: String?, cached: URL?,
+        isExecutable: (String) -> Bool,
+        validate: (URL) -> Bool
+    ) -> URL? {
+        var candidates: [String] = []
+        if let bundledPath { candidates.append(bundledPath) }
+        candidates.append(contentsOf: [
+            "/opt/homebrew/bin/tailscale",
+            "/opt/homebrew/opt/tailscale/bin/tailscale",
+            nativeAppBinaryPath,
+            "/usr/local/bin/tailscale",
+        ])
+        for path in candidates {
+            guard isExecutable(path) else { continue }
+            let url = URL(fileURLWithPath: path)
+            if url == cached || validate(url) { return url }
         }
+        return nil
+    }
+
+    private static func locateBinary() -> URL? {
+        let bundledPath = Bundle.main.url(forResource: "tailscale", withExtension: nil,
+                                          subdirectory: "tailscale-bin")?.path
+        return binaryCache.resolve { cached in
+            resolveBinary(
+                bundledPath: bundledPath, cached: cached,
+                isExecutable: { FileManager.default.isExecutableFile(atPath: $0) },
+                validate: validateBinary)
+        }
+    }
+
+    /// Native Tailscale manages routes, DNS and its service lifecycle.
+    /// SuperManager's open-source-daemon workarounds must not touch it.
+    static var usesNativeApp: Bool { locateBinary()?.path == nativeAppBinaryPath }
+
+    /// Do not rely on CLI auto-discovery: every managed command, including
+    /// login and preference changes, must address the helper's own daemon.
+    static func commandArguments(bin: URL, args: [String]) -> [String] {
+        bin.path == nativeAppBinaryPath ? args : ["--socket=\(managedSocketPath)"] + args
+    }
+
+    static func nativeAppIsConnected() async throws -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: nativeAppBinaryPath) else { return false }
+        let output = try await runTask(bin: URL(fileURLWithPath: nativeAppBinaryPath),
+                                       args: ["status", "--json"])
+        struct NativeStatus: Decodable { let BackendState: String }
+        return try JSONDecoder().decode(NativeStatus.self, from: Data(output.utf8)).BackendState == "Running"
     }
 
     /// Probe whether a candidate `tailscale` binary actually
@@ -114,8 +119,8 @@ enum TailscaleClient {
         process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
-            // waitUntilExit pumps the caller's run loop and can reenter
-            // discovery from SwiftUI while the cache lock is held.
+            // waitUntilExit pumps the calling run loop. During SwiftUI layout
+            // that can reenter binary lookup while its cache lock is held.
             guard exited.wait(timeout: .now() + 2) == .success else {
                 process.terminate()
                 return false
@@ -126,8 +131,9 @@ enum TailscaleClient {
         }
     }
 
-    /// Status, preferences and profile refreshes overlap. Protect the complete
-    /// read/resolve/write operation so no task retains a URL freed by another.
+    /// Status, preferences and profiles refresh concurrently. Protect the
+    /// entire read/resolve/write operation: racing URL assignments can free
+    /// the cached URL while another task is retaining or replacing it.
     final class BinaryCache: @unchecked Sendable {
         private let lock = NSLock()
         private var cached: URL?
@@ -292,7 +298,7 @@ enum TailscaleClient {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = bin
-            process.arguments = args
+            process.arguments = commandArguments(bin: bin, args: args)
             let stderr = Pipe()
             let stdout = Pipe()
             process.standardError = stderr
@@ -496,7 +502,7 @@ enum TailscaleClient {
             DebugLog.write("[ts/cli] $ \(bin.lastPathComponent) \(args.joined(separator: " "))")
             let process = Process()
             process.executableURL = bin
-            process.arguments = args
+            process.arguments = commandArguments(bin: bin, args: args)
             let stdout = Pipe()
             let stderr = Pipe()
             process.standardOutput = stdout

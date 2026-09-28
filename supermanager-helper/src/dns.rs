@@ -21,7 +21,12 @@
 //! the user's saved DNS nor configd's derived Global/DNS is overwritten.
 
 use std::io::Write as _;
-use std::process::Command;
+// Bounded external commands: `Command` here is `proc::Bounded`, whose
+// `output()` / `status()` cannot hang. The binaries this module drives all read
+// or write live network state, and every one of them can block indefinitely
+// when that state is broken (a route to a torn-down utun, a wedged configd) —
+// on threads where losing the caller means losing a watchdog or an RPC worker.
+use crate::proc::Bounded as Command;
 
 /// The one State-store key SuperManager ever writes DNS to.
 ///
@@ -86,7 +91,9 @@ pub fn clear_vpn_dns() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(script.as_bytes());
             }
-            let _ = child.wait();
+            // Bounded: a wedged configd leaves scutil alive and mute, and this
+            // runs on an RPC path.
+            let _ = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (clear DNS)");
             tracing::info!("clear_vpn_dns: removed {SUPERMGR_DNS_KEY} (if present)");
         }
         Err(e) => tracing::warn!("clear_vpn_dns: spawn scutil: {e}"),
@@ -120,7 +127,8 @@ pub(crate) fn find_service_uuid() -> Option<String> {
         let mut stdin = child.stdin.take()?;
         let _ = stdin.write_all(b"list Setup:/Network/Service/[^/]+/DNS\nquit\n");
     }
-    let out = child.wait_with_output().ok()?;
+    let out =
+        crate::proc::wait_bounded(child, crate::proc::PROBE, "scutil (list services)").ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in stdout.lines() {
         // Lines look like:
@@ -181,7 +189,7 @@ pub fn set_vpn_dns(servers: &[String]) {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(script.as_bytes());
             }
-            let _ = child.wait();
+            let _ = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (set DNS)");
         }
         Err(e) => tracing::warn!("set_vpn_dns: spawn scutil: {e}"),
     }

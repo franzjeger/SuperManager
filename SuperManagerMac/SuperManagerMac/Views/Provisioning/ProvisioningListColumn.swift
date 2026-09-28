@@ -80,7 +80,7 @@ struct ProvisioningListColumn: View {
 
     private var customerList: some View {
         List {
-            ForEach(appState.customers) { customer in
+            ForEach(appState.customerScopedCustomers) { customer in
                 Section {
                     Button(action: {
                         appState.selectedCustomerSlug = customer.slug

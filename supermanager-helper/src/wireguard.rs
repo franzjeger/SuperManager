@@ -562,14 +562,14 @@ fn read_name_mapping(name: &str) -> Option<String> {
 /// fallback path force-destroys it via `ifconfig`.
 fn interface_exists(name: &str) -> bool {
     // `ifconfig <name>` exits 0 if the interface exists, non-zero
-    // otherwise. We use the synchronous std::process::Command here
-    // because the helper's tokio context is fine with brief blocking
-    // shell-out, and not having to thread async into a single
-    // existence-check keeps this readable.
-    std::process::Command::new("/sbin/ifconfig")
+    // otherwise. Synchronous on purpose — threading async through a single
+    // existence check buys nothing — but BOUNDED, because "brief blocking
+    // shell-out" is exactly the assumption that wedged the helper: this runs on
+    // a tokio worker, and ifconfig on a half-torn-down interface does not
+    // always return.
+    crate::proc::Bounded::new("/sbin/ifconfig")
         .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .budget(crate::proc::PROBE)
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

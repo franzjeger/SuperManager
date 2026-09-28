@@ -43,15 +43,28 @@ final class HelperClient {
 
     // MARK: - Reachability
 
-    /// True when the LaunchDaemon socket exists and we can `connect()` to it.
-    /// This is cheap (<1ms) so callers can poll it for UI state.
+    /// True when the helper is not merely listening but actually ANSWERING.
+    ///
+    /// A bare `connect()` is not evidence of that. The helper's listen backlog
+    /// lives in the kernel, so connect() keeps succeeding after the helper's
+    /// runtime has stopped processing requests — and this function used to
+    /// report that state as "reachable". Everything downstream then kept its
+    /// last-known tunnel states and dots on screen as though they were current,
+    /// while the status polls behind them never returned. So: do a real `ping`
+    /// round trip on a short budget, and treat silence as unreachable.
+    ///
+    /// `callOnce` rather than `call` — a probe should not carry `call`'s retry,
+    /// and one deliberate round trip per poll is cheap.
     func isReachable() async -> Bool {
         guard FileManager.default.fileExists(atPath: Self.socketPath) else { return false }
         do {
-            let fd = try connectFD()
-            close(fd)
+            _ = try await callOnce(method: "ping", params: [:], timeoutSeconds: 3)
             return true
+        } catch HelperError.notInstalled {
+            return false
         } catch {
+            DebugLog.write(
+                "[helper] isReachable: socket accepted but no answer — \(error.localizedDescription)")
             return false
         }
     }
@@ -461,11 +474,26 @@ final class HelperClient {
         }
     }
 
-    /// One round-trip with a wall-clock timeout. macOS gives us
-    /// no socket-level read timeout by default, and a wedged
-    /// helper would otherwise hang the GUI thread until the user
-    /// force-quits. The timeout is per-call, applied via a
-    /// `Task.timeout` race.
+    /// One round-trip with a wall-clock timeout.
+    ///
+    /// The deadline is enforced TWICE, because each layer alone has a hole:
+    ///
+    /// 1. `SO_RCVTIMEO` / `SO_SNDTIMEO` on the socket. This is the one that
+    ///    actually works on a wedged helper. `read()` on a Unix socket is an
+    ///    uninterruptible blocking call as far as Swift concurrency is
+    ///    concerned — `Task.cancel()` does not touch it — so without a
+    ///    socket-level timeout the reading thread is simply gone, and the
+    ///    helper's own listen backlog means `connect()` still succeeds while
+    ///    nothing ever answers: the app waits forever on a "connected" socket.
+    /// 2. A structured race against a sleeper task, which covers the rest of
+    ///    the round trip (connect, JSON decode) and guarantees the caller is
+    ///    released even if the socket options were rejected.
+    ///
+    /// The previous version had only a `Task.detached` sleeper whose thrown
+    /// error nobody ever awaited — `try await work.value` waits on the work
+    /// task alone, so the timeout could not fire and a hung helper froze the
+    /// UI until force-quit, with every view still rendering last-known state
+    /// as though it were current.
     private func callOnce(
         method: String,
         params: [String: Any],
@@ -482,37 +510,40 @@ final class HelperClient {
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
 
-        let work = Task.detached(priority: .userInitiated) { [data] () -> [String: Any] in
-            let fd = try Self.connectFDStatic()
-            defer { close(fd) }
-            try Self.writeFrame(fd: fd, data: data)
-            let respData = try Self.readFrame(fd: fd)
-            guard let json = try? JSONSerialization.jsonObject(with: respData) as? [String: Any] else {
-                throw HelperError.decodeFailure("not a JSON object")
+        return try await withThrowingTaskGroup(of: [String: Any].self) { group in
+            group.addTask(priority: .userInitiated) { [data] () -> [String: Any] in
+                let fd = try Self.connectFDStatic(ioTimeoutSeconds: timeoutSeconds)
+                defer { close(fd) }
+                try Self.writeFrame(fd: fd, data: data)
+                let respData = try Self.readFrame(fd: fd)
+                guard let json = try? JSONSerialization.jsonObject(with: respData)
+                    as? [String: Any]
+                else {
+                    throw HelperError.decodeFailure("not a JSON object")
+                }
+                if let err = json["error"] as? [String: Any] {
+                    let code = err["code"] as? Int ?? 0
+                    let msg = err["message"] as? String ?? "unknown helper error"
+                    throw HelperError.rpcFailure(code: code, message: msg)
+                }
+                if let result = json["result"] as? [String: Any] { return result }
+                return [:]
             }
-            if let err = json["error"] as? [String: Any] {
-                let code = err["code"] as? Int ?? 0
-                let msg = err["message"] as? String ?? "unknown helper error"
-                throw HelperError.rpcFailure(code: code, message: msg)
+            // Deadline slightly past the socket's own, so a socket timeout —
+            // which carries the better diagnostic — wins the race when both
+            // are live.
+            group.addTask(priority: .userInitiated) {
+                try await Task.sleep(for: .seconds(timeoutSeconds) + .milliseconds(500))
+                throw HelperError.ioFailure(
+                    "RPC \(method) timed out after \(timeoutSeconds)s (helper not responding)")
             }
-            if let result = json["result"] as? [String: Any] { return result }
-            return [:]
-        }
-
-        // Race the work against a deadline. If the deadline wins,
-        // cancel the work and surface a clear timeout error.
-        let timeout = Task.detached(priority: .userInitiated) { () -> [String: Any] in
-            try await Task.sleep(for: .seconds(timeoutSeconds))
-            throw HelperError.ioFailure("RPC \(method) timed out after \(timeoutSeconds)s")
-        }
-        do {
-            let result = try await work.value
-            timeout.cancel()
-            return result
-        } catch {
-            work.cancel()
-            timeout.cancel()
-            throw error
+            defer { group.cancelAll() }
+            // First child to finish decides the call: a result, an RPC error,
+            // or the deadline.
+            guard let first = try await group.next() else {
+                throw HelperError.ioFailure("RPC \(method) produced no result")
+            }
+            return first
         }
     }
 
@@ -520,11 +551,23 @@ final class HelperClient {
         try Self.connectFDStatic()
     }
 
-    nonisolated private static func connectFDStatic() throws -> Int32 {
+    /// `ioTimeoutSeconds` arms `SO_RCVTIMEO`/`SO_SNDTIMEO` so no single
+    /// `read()`/`write()` on this socket can block longer than that. Without
+    /// it a helper that accepts the connection but never answers holds the
+    /// calling thread indefinitely.
+    nonisolated private static func connectFDStatic(
+        ioTimeoutSeconds: Int = 8
+    ) throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw HelperError.ioFailure("socket(): \(errno)")
         }
+        var tv = timeval(tv_sec: ioTimeoutSeconds, tv_usec: 0)
+        let tvLen = socklen_t(MemoryLayout<timeval>.size)
+        // Best-effort: a kernel that refuses these still has the task-group
+        // deadline above it, so we don't fail the call over it.
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, tvLen)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, tvLen)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let pathBytes = Array(Self.socketPath.utf8)
@@ -573,12 +616,29 @@ final class HelperClient {
             var written = 0
             while written < data.count {
                 let n = write(fd, buf.baseAddress!.advanced(by: written), data.count - written)
-                if n <= 0 {
-                    throw HelperError.ioFailure("write(): errno=\(errno)")
+                if n < 0 {
+                    let e = errno
+                    if e == EINTR { continue }
+                    throw Self.ioError(errno: e, verb: "write")
+                }
+                if n == 0 {
+                    throw HelperError.ioFailure("write(): helper closed the socket")
                 }
                 written += n
             }
         }
+    }
+
+    /// Turn an errno into the right diagnostic. A timeout here is not a
+    /// generic I/O failure — it means the helper took the connection and then
+    /// went silent, which is what the caller needs to be told (and what the
+    /// retry in `call` treats as worth one more attempt).
+    nonisolated private static func ioError(errno e: Int32, verb: String) -> HelperError {
+        if e == EAGAIN || e == EWOULDBLOCK {
+            return .ioFailure(
+                "\(verb)(): helper did not respond within the socket timeout")
+        }
+        return .ioFailure("\(verb)(): errno=\(e)")
     }
 
     nonisolated private static func readFrame(fd: Int32) throws -> Data {
@@ -602,7 +662,10 @@ final class HelperClient {
                     throw HelperError.ioFailure("EOF before frame complete")
                 }
                 if n < 0 {
-                    throw HelperError.ioFailure("read(): errno=\(errno)")
+                    let e = errno
+                    // EINTR is not a failure — a signal landed mid-read.
+                    if e == EINTR { continue }
+                    throw Self.ioError(errno: e, verb: "read")
                 }
                 got += n
             }

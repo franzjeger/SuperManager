@@ -907,6 +907,10 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
                 .env("SWANCTL_DIR", etc.join("swanctl"));
         }
     }
+    // kill_on_drop: callers race this against a timeout (see `status`), and
+    // dropping the future without it leaves the swanctl child alive forever,
+    // still holding its vici connection to the charon that wedged in the first
+    // place. Every poll would add another one.
     let output = command.args(args).kill_on_drop(true).output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1482,16 +1486,11 @@ fn swanctl_list_sas_established() -> Option<bool> {
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))
         .find(|p| p.exists())?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(
-            std::process::Command::new(&swanctl)
-                .arg("--list-sas")
-                .output(),
-        );
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-        Ok(Ok(o)) if o.status.success() => {
+    // Via proc::bounded rather than a bare worker thread: on timeout that
+    // SIGKILLs the wedged swanctl instead of abandoning it, so a 2s reaper
+    // cycle can't accumulate one stuck child (and one stuck thread) per tick.
+    match crate::proc::bounded(std::process::Command::new(&swanctl).arg("--list-sas"), 3) {
+        Ok(o) if o.status.success() => {
             Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
         }
         _ => None, // spawn error / non-zero exit / 3s timeout
@@ -1601,11 +1600,23 @@ fn install_ipv6_leak_block() {
 /// `route -n get <family> <dest>` (family = `-inet` or `-inet6`). Returns
 /// `None` if the lookup fails or prints no `interface:` line. Used to identify
 /// which backend owns a full-tunnel split-default route before we delete it.
+///
+/// BOUNDED, and this is the one that matters most: `route -n get` blocks
+/// FOREVER when the destination's route points at a utun that no longer
+/// exists — precisely the kernel state left behind when a VPN peer (a
+/// customer firewall) reboots and the tunnel's utun is torn down mid-flight.
+/// This function is called every 2s from the connectivity watchdog's orphan
+/// reaper and on every status poll from a tokio worker, so an unbounded hang
+/// here retires those threads one by one until the helper answers nothing at
+/// all and the GUI freezes on stale state. A timeout resolves to `None`, i.e.
+/// "cannot determine the owner", which every caller already treats as the
+/// cautious answer.
 pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-n", "get", family, dest])
-        .output()
-        .ok()?;
+    let out = crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-n", "get", family, dest]),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }

@@ -107,6 +107,43 @@ enum VPNKeychain {
         throw KeychainError.osStatus(errSecInternalComponent, "self-test deletion verification")
     }
 
+    struct MissingIKEv2Credentials: Error, LocalizedError {
+        let password: Bool
+        let sharedSecret: Bool
+
+        var errorDescription: String? {
+            "VPN credentials are missing from this Mac's Keychain. " +
+            "A profile restored from another Mac may not include its passwords. " +
+            "Enter the missing credentials in Edit profile, then connect again."
+        }
+    }
+
+    /// A nonempty reference is only an account name, not proof that its
+    /// secret survived a backup restore. An explicitly stored empty PSK
+    /// means certificate authentication; an absent item needs user input.
+    static func ikev2Credentials(
+        passwordAccount: String,
+        pskAccount: String,
+        read: (String) throws -> String = { try getString(account: $0) }
+    ) throws -> (password: String, sharedSecret: String) {
+        func stored(_ account: String) throws -> String? {
+            guard !account.isEmpty else { return nil }
+            do {
+                return try read(account)
+            } catch KeychainError.osStatus(let status, _) where status == errSecItemNotFound {
+                return nil
+            }
+        }
+
+        let password = try stored(passwordAccount)
+        let psk = pskAccount.isEmpty ? "" : try stored(pskAccount)
+        let missingPassword = password?.isEmpty != false
+        guard !missingPassword, let password, let psk else {
+            throw MissingIKEv2Credentials(password: missingPassword, sharedSecret: psk == nil)
+        }
+        return (password, psk)
+    }
+
     /// Delete an item. Missing items are ignored.
     static func delete(account: String) {
         let query = baseQuery(account: account)

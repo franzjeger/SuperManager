@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Compact toolbar control that scopes the entire app to a single
+/// Compact list-header control that scopes the entire app to a single
 /// customer. Persisted across launches via `@AppStorage`. When set,
 /// every section (SSH/Compliance/Provisioning/Security/Fleet) reads
 /// `appState.globalCustomerSlug` and filters their lists to records

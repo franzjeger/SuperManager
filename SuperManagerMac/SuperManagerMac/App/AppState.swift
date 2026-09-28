@@ -28,6 +28,7 @@ class AppState {
     /// Recompute `hostIndex` from the current stores. Cheap (O(hosts + sites)).
     func rebuildHostIndex() {
         hostIndex = HostIndex(hosts: sshHosts, customers: customers)
+        reconcileCustomerSelection()
     }
 
     // VPN
@@ -568,7 +569,16 @@ class AppState {
 
     /// Track byte position in the helper log so we only scan the
     /// new tail each poll instead of re-parsing 200 KB every time.
-    private var helperLogReadOffset: Int = 0
+    ///
+    /// `nil` means "not yet positioned": the first poll seeks to the CURRENT
+    /// end of the log rather than starting at 0. Starting at 0 replayed the
+    /// whole 5 MB history as if it had just happened — every past
+    /// `escalating to panic_reset` and `auto-reconnect succeeded` line fired a
+    /// fresh notification and wrote a fresh activity entry stamped with the
+    /// time of the replay, which is why a single incident shows up as a dozen
+    /// identically-timestamped "Connectivity watchdog fired" rows. We only
+    /// ever want lines the helper emits while we are watching.
+    private var helperLogReadOffset: Int?
 
     /// Poll the helper log for newly-emitted "auto-reconnect
     /// succeeded" / "panic_reset" lines and surface them as
@@ -578,14 +588,21 @@ class AppState {
         let path = "/var/log/supermanager-helper.log"
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
               let size = attrs[.size] as? Int else { return }
-        // Reset offset if log was truncated/rotated.
-        if size < helperLogReadOffset { helperLogReadOffset = 0 }
-        guard size > helperLogReadOffset else { return }
+        // First poll of this app run: start at the end. Anything already in
+        // the log happened before we were watching and has been notified about
+        // (or deliberately not) long ago.
+        guard var offset = helperLogReadOffset else {
+            helperLogReadOffset = size
+            return
+        }
+        // Log was truncated/rotated under us — start over from its new start.
+        if size < offset { offset = 0 }
+        guard size > offset else { return }
 
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
-        try? handle.seek(toOffset: UInt64(helperLogReadOffset))
-        let chunk = (try? handle.read(upToCount: size - helperLogReadOffset)) ?? Data()
+        try? handle.seek(toOffset: UInt64(offset))
+        let chunk = (try? handle.read(upToCount: size - offset)) ?? Data()
         helperLogReadOffset = size
 
         guard let text = String(data: chunk, encoding: .utf8) else { return }
@@ -1108,8 +1125,30 @@ class AppState {
     /// scopes its list to records belonging to this customer.
     /// Empty string = "All customers" (no filter).
     /// Persisted across launches via `@AppStorage("globalCustomerSlug")`
-    /// in the toolbar view; AppState just owns the in-memory state.
-    var globalCustomerSlug: String = ""
+    /// in the list header; AppState owns the in-memory state.
+    var globalCustomerSlug: String = "" {
+        didSet { reconcileCustomerSelection() }
+    }
+
+    var customerScopedCustomers: [Customer] {
+        globalCustomerSlug.isEmpty ? customers : customers.filter { $0.slug == globalCustomerSlug }
+    }
+
+    /// A detail pane must never retain actions for a record hidden by the
+    /// customer filter. Recheck after membership changes as well as selection.
+    func reconcileCustomerSelection() {
+        guard !globalCustomerSlug.isEmpty else { return }
+        if let id = selectedHostId,
+           !sshHosts.contains(where: {
+               $0.id == id && hostIndex.customerSlug(forHost: $0) == globalCustomerSlug
+           }) {
+            selectedHostId = nil
+        }
+        if let slug = selectedCustomerSlug, slug != globalCustomerSlug {
+            selectedCustomerSlug = nil
+            selectedSiteId = nil
+        }
+    }
 
     /// Selected customer slug + site id for the Provisioning view.
     /// Persisted only in memory — survives section navigation
@@ -1261,6 +1300,7 @@ class AppState {
     /// show "Install Tailscale daemon" — only meaningful when we
     /// actually have our own binary to install.
     var tailscaleIsBundled: Bool { TailscaleClient.bundledDaemonPath != nil }
+    var canInstallTailscaled: Bool { !TailscaleClient.usesNativeApp && tailscaleIsBundled }
 
     /// Last result of `tailscaled_status` from the helper. nil
     /// before the first poll. Drives the install/uninstall buttons

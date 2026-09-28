@@ -8,6 +8,23 @@ import XCTest
 /// auth-rejected, customer grouping vs manual grouping — that reads as one
 /// small string on screen and would regress without a sound.
 final class CardModelTests: XCTestCase {
+    func testSSHTestResultBelongsToItsConnection() throws {
+        func host(_ changes: [String: Any] = [:]) throws -> SshHostSummary {
+            let base: [String: Any] = ["id": "h1", "label": "Host", "hostname": "10.0.0.1",
+                                       "port": 22, "username": "frank", "auth_method": "key",
+                                       "auth_key_id": "key1", "device_type": "linux", "pinned": false]
+            let json = try JSONSerialization.data(withJSONObject: base.merging(changes) { _, new in new })
+            return try JSONDecoder().decode(SshHostSummary.self, from: json)
+        }
+        let original = try host()
+        for change: [String: Any] in [["id": "h2"], ["hostname": "10.0.0.2"],
+                                      ["port": 2222], ["username": "root"],
+                                      ["auth_key_id": "key2"], ["auth_method": "password"]] {
+            XCTAssertFalse(original.hasSameConnection(as: try host(change)))
+        }
+        XCTAssertTrue(original.hasSameConnection(as: try host(["label": "Renamed", "group": "acme", "pinned": true])))
+    }
+
 
     // MARK: VPN connection card
 

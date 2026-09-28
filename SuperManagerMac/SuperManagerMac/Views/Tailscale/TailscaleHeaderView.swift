@@ -159,7 +159,7 @@ struct TailscaleHeaderView: View {
             ProgressView()
                 .controlSize(.small)
                 .frame(maxWidth: .infinity)
-        } else if !daemonRunning && appState.tailscaleIsBundled {
+        } else if !daemonRunning && appState.canInstallTailscaled {
             // Daemon missing or stopped. We bundled tailscaled, so
             // we can install/start it ourselves rather than tossing
             // the user out to a Terminal.
@@ -268,7 +268,7 @@ struct TailscaleHeaderView: View {
                 Label("Always on (LaunchDaemon)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .help("tailscaled runs as a system LaunchDaemon — auto-starts at boot, auto-reconnects after sleep.")
-            } else if appState.tailscaleIsBundled {
+            } else if appState.canInstallTailscaled {
                 Button {
                     runAction { await appState.installTailscaled() }
                 } label: {

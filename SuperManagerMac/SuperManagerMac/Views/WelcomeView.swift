@@ -147,30 +147,33 @@ struct WelcomeView: View {
     // ----- Tailscale-card state machine -----
 
     private var tailscaleSubtitle: String {
+        if TailscaleClient.usesNativeApp {
+            return "Tailscale.app is installed. Manage its connection from Tailscale in the sidebar."
+        }
         if (appState.tailscaledInstalled ?? false) {
             return "Your daemon is installed and ready. Click Tailscale in the sidebar to authenticate."
         }
-        if appState.tailscaleIsBundled {
+        if appState.canInstallTailscaled {
             return "Install our bundled tailscaled as a system service — auto-starts at boot, auto-reconnects after sleep."
         }
         return "Tailscale binaries aren't bundled in this build."
     }
 
     private var tailscalePrimary: String {
-        if (appState.tailscaledInstalled ?? false) {
+        if TailscaleClient.usesNativeApp || (appState.tailscaledInstalled ?? false) {
             return "Open Tailscale"
         }
-        if appState.tailscaleIsBundled {
+        if appState.canInstallTailscaled {
             return "Install daemon"
         }
         return "Unavailable"
     }
 
     private var tailscalePrimaryAction: () -> Void {
-        if (appState.tailscaledInstalled ?? false) {
+        if TailscaleClient.usesNativeApp || (appState.tailscaledInstalled ?? false) {
             return { appState.selectedSection = .tailscale }
         }
-        if appState.tailscaleIsBundled {
+        if appState.canInstallTailscaled {
             return {
                 Task { await appState.installTailscaled() }
             }

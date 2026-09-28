@@ -175,7 +175,7 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
         }
         args.push("-net");
         args.push(net);
-        let _ = Command::new("/sbin/route").args(&args).output();
+        let _ = crate::proc::bounded(Command::new("/sbin/route").args(&args), crate::proc::MUTATE);
     }
 }
 
@@ -336,9 +336,16 @@ fn probe_internet() -> bool {
     } else {
         "1"
     };
-    let out = Command::new("/usr/bin/nc")
-        .args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"])
-        .output();
+    // nc's own -G/-w budget is the intended bound, but it applies to the
+    // connect and the transfer, not to nc getting stuck elsewhere. Wrap it
+    // anyway: this is the watchdog's own thread, and if the probe never
+    // returns the watchdog is gone — the single most expensive thread in the
+    // helper to lose, since it carries the no-brick route reaper.
+    let hard_cap = budget.parse::<u64>().unwrap_or(8) + 4;
+    let out = crate::proc::bounded(
+        Command::new("/usr/bin/nc").args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"]),
+        hard_cap,
+    );
     match out {
         Ok(o) => o.status.success(),
         Err(_) => false,

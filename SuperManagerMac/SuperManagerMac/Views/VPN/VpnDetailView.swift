@@ -87,6 +87,7 @@ struct VpnDetailView: View {
     /// routing). Sheet trigger in the kebab menu; saves via
     /// `vpn_update_ikev2_profile` (`EditVpnProfileSheet`).
     @State private var editingProfile = false
+    @State private var missingIKEv2Credentials: VPNKeychain.MissingIKEv2Credentials?
     @State private var showingAzureSignIn = false
     @State private var azureSummaryForSignIn: AzureVpnSummary?
     /// Inline-rename UI. Click the title in the header to enter
@@ -149,6 +150,7 @@ struct VpnDetailView: View {
             // last profile's answer.
             stateDetail = ""
             actionError = nil
+            missingIKEv2Credentials = nil
             strongswanMissing = false
             reconnectReason = nil
             live = LiveTunnel()
@@ -196,7 +198,9 @@ struct VpnDetailView: View {
             // A fresh `load()` after save picks up the new host /
             // username / routing from the daemon store.
             if let profile {
-                EditVpnProfileSheet(profile: profile) {
+                EditVpnProfileSheet(profile: profile, missingCredentials: missingIKEv2Credentials) {
+                    missingIKEv2Credentials = nil
+                    actionError = nil
                     Task { await load() }
                 }
             }
@@ -1402,15 +1406,17 @@ struct VpnDetailView: View {
             return
         }
         do {
+            // Resolve credentials before any helper installation or admin
+            // prompt. Restored profiles may only contain Keychain labels.
+            let credentials = try VPNKeychain.ikev2Credentials(
+                passwordAccount: cfg.password, pskAccount: cfg.psk)
+
             // Reachability alone can leave an old helper running after an
             // app update. install() verifies the bundled build and is a fast
             // no-op when it already matches; upgrades use the normal macOS
             // authorization path once.
             try await HelperInstaller.install()
             helperReachable = true
-
-            let password = try VPNKeychain.getString(account: cfg.password)
-            let psk = cfg.psk.isEmpty ? "" : (try VPNKeychain.getString(account: cfg.psk))
 
             vpnState = "connecting"
             // Pass split-tunnel routes through to the helper so it can
@@ -1427,8 +1433,8 @@ struct VpnDetailView: View {
                 name: profile.name,
                 host: cfg.host,
                 username: cfg.username,
-                password: password,
-                sharedSecret: psk,
+                password: credentials.password,
+                sharedSecret: credentials.sharedSecret,
                 fullTunnel: profile.fullTunnel,
                 routes: cfg.routes,
                 dnsServers: cfg.dnsServers,
@@ -1442,6 +1448,11 @@ struct VpnDetailView: View {
             // rather than waiting for the next poll tick.
             try? await Task.sleep(for: .milliseconds(500))
             await refreshHelperState()
+        } catch let missing as VPNKeychain.MissingIKEv2Credentials {
+            missingIKEv2Credentials = missing
+            actionError = missing.localizedDescription
+            vpnState = "disconnected"
+            editingProfile = true
         } catch {
             actionError = error.localizedDescription
             vpnState = "disconnected"

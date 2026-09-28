@@ -24,7 +24,12 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+// Bounded external commands: `Command` here is `proc::Bounded`, whose
+// `output()` / `status()` cannot hang. The binaries this module drives all read
+// or write live network state, and every one of them can block indefinitely
+// when that state is broken (a route to a torn-down utun, a wedged configd) —
+// on threads where losing the caller means losing a watchdog or an RPC worker.
+use crate::proc::Bounded as Command;
 
 /// Stable on-disk path for the daemon binary. The helper copies the
 /// bundled `tailscaled` here on install. We don't run it directly
@@ -181,6 +186,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     for attempt in 1..=5u32 {
         match Command::new("/bin/launchctl")
             .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .budget(crate::proc::SLOW)
             .output()
         {
             Ok(o) if o.status.success() => {
@@ -201,6 +207,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 
     let _ = Command::new("/bin/launchctl")
         .args(["kickstart", "-k", &format!("system/{}", LAUNCH_LABEL)])
+        .budget(crate::proc::SLOW)
         .status();
 
     Ok(InstallResult {
@@ -637,7 +644,8 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
         let mut stdin = child.stdin.take().context("stdin")?;
         stdin.write_all(script.as_bytes())?;
     }
-    let out = child.wait_with_output().context("waiting on scutil")?;
+    let out = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (set State DNS)")
+        .context("waiting on scutil")?;
     if !out.status.success() {
         bail!(
             "scutil failed: {}",
@@ -1106,6 +1114,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // disruption beyond the 50-100 ms reconfig window.
     let renew = Command::new("/usr/sbin/ipconfig")
         .args(["set", &active_iface, "DHCP"])
+        .budget(crate::proc::SLOW)
         .output()
         .context("running ipconfig set DHCP")?;
 
@@ -1747,6 +1756,7 @@ fn reload_daemon() {
     for attempt in 1..=5u32 {
         match Command::new("/bin/launchctl")
             .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .budget(crate::proc::SLOW)
             .output()
         {
             Ok(o) if o.status.success() => {
