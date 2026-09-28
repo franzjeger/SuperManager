@@ -49,145 +49,6 @@ use uuid::Uuid;
 /// with a hundred devices; 15 s is plenty.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How long a pending MFA challenge stays valid before the
-/// operator has to restart the add-controller flow. `UniFi`'s own
-/// email codes time out at 5 minutes, so matching that.
-const MFA_CHALLENGE_TTL: Duration = Duration::from_mins(5);
-
-/// In-flight MFA challenge state. Holds the partially-
-/// authenticated `reqwest::Client` (its cookie jar carries the
-/// session ID `UniFi` opened during the initial password POST)
-/// plus a pending `UnifiController` record that gets persisted
-/// once the second factor verifies. Auto-evicted after
-/// `MFA_CHALLENGE_TTL`.
-pub struct InflightMfaChallenge {
-    pub id: String,
-    pub controller: UnifiController,
-    pub client: reqwest::Client,
-    pub authenticators: Vec<MfaAuthenticator>,
-    pub created_at: std::time::Instant,
-}
-
-/// Process-global registry of in-flight MFA challenges, keyed
-/// by opaque challenge ID. `OnceLock` (std-stable since 1.70)
-/// gives us the lazy global without dragging in the `once_cell`
-/// crate — same shape, no new dependency.
-static MFA_CHALLENGES: std::sync::OnceLock<
-    tokio::sync::Mutex<HashMap<String, InflightMfaChallenge>>,
-> = std::sync::OnceLock::new();
-
-fn mfa_registry() -> &'static tokio::sync::Mutex<HashMap<String, InflightMfaChallenge>> {
-    MFA_CHALLENGES.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()))
-}
-
-/// Park a challenge in the registry, returning the opaque ID
-/// the GUI uses to reference it on the follow-up calls.
-async fn park_mfa_challenge(challenge: InflightMfaChallenge) -> String {
-    evict_expired_challenges().await;
-    let id = challenge.id.clone();
-    mfa_registry().lock().await.insert(id.clone(), challenge);
-    id
-}
-
-/// Look up + remove a challenge by ID. The caller takes
-/// ownership of the partially-authenticated client.
-async fn take_mfa_challenge(id: &str) -> Option<InflightMfaChallenge> {
-    evict_expired_challenges().await;
-    mfa_registry().lock().await.remove(id)
-}
-
-/// Borrow a challenge without consuming it — used by the
-/// "send email" step which needs to fire a request but leave
-/// the challenge in the registry for the eventual verify call.
-async fn with_mfa_challenge<F, R>(id: &str, f: F) -> Option<R>
-where
-    F: FnOnce(&InflightMfaChallenge) -> R,
-{
-    evict_expired_challenges().await;
-    let guard = mfa_registry().lock().await;
-    guard.get(id).map(f)
-}
-
-async fn evict_expired_challenges() {
-    let now = std::time::Instant::now();
-    let mut guard = mfa_registry().lock().await;
-    guard.retain(|_, c| now.duration_since(c.created_at) < MFA_CHALLENGE_TTL);
-}
-
-/// Outcome returned by save-with-MFA — either the save
-/// completed in one round-trip (no MFA), or the caller needs
-/// to drive the operator through an MFA challenge before the
-/// controller can be persisted.
-// `Saved` carries a full controller + sysinfo and `MfaRequired` two
-// short strings. Boxing the large variant would touch every
-// construction and match site for a win nobody has measured.
-#[allow(clippy::large_enum_variant)]
-pub enum SaveOutcome {
-    Saved {
-        controller: UnifiController,
-        sysinfo: UnifiSysInfo,
-    },
-    MfaRequired {
-        challenge_id: String,
-        authenticators: Vec<MfaAuthenticator>,
-    },
-}
-
-/// Park a pending controller registration that hit an MFA
-/// challenge. Returns the opaque challenge ID the GUI uses
-/// to subsequently call `unifi_controller_mfa_send` +
-/// `unifi_controller_mfa_complete`.
-pub async fn park_pending_save(
-    controller: UnifiController,
-    client: reqwest::Client,
-    authenticators: Vec<MfaAuthenticator>,
-) -> String {
-    let challenge = InflightMfaChallenge {
-        id: uuid::Uuid::new_v4().to_string(),
-        controller,
-        client,
-        authenticators,
-        created_at: std::time::Instant::now(),
-    };
-    park_mfa_challenge(challenge).await
-}
-
-/// Trigger the email leg of an in-flight MFA challenge. The
-/// challenge stays in the registry — the operator now waits
-/// for the email, then submits the code via `complete_pending_save`.
-pub async fn send_mfa_email_for_challenge(
-    challenge_id: &str,
-    authenticator_id: &str,
-) -> Result<()> {
-    let snapshot = with_mfa_challenge(challenge_id, |c| {
-        (c.client.clone(), c.controller.url.clone())
-    })
-    .await
-    .ok_or_else(|| anyhow!("MFA challenge not found or expired (5-min TTL)"))?;
-    let (client, url) = snapshot;
-    mfa_send_email(&client, &url, authenticator_id).await
-}
-
-/// Complete a pending controller registration by submitting
-/// the MFA code. On success: removes the challenge from the
-/// registry, verifies the controller via sysinfo, and returns
-/// the freshly-validated controller record + sysinfo.
-pub async fn complete_pending_save(
-    secrets: &Arc<dyn SecretStore>,
-    challenge_id: &str,
-    code: &str,
-) -> Result<(UnifiController, UnifiSysInfo)> {
-    let challenge = take_mfa_challenge(challenge_id)
-        .await
-        .ok_or_else(|| anyhow!("MFA challenge not found or expired (5-min TTL)"))?;
-    let _client =
-        mfa_complete_login(secrets, &challenge.controller, challenge.client, code).await?;
-    let sysinfo = test_connection(secrets, &challenge.controller).await?;
-    let mut verified = challenge.controller;
-    verified.verified_at = Some(chrono::Utc::now());
-    Ok((verified, sysinfo))
-}
-
 /// Which credential mechanism a controller uses. API key is
 /// the recommended path because it sidesteps MFA, can be
 /// rotated independently, and is what every modern integration
@@ -331,33 +192,13 @@ pub struct ControllerStateRef {
 // REST client helpers
 // ---------------------------------------------------------------------------
 
-/// One authenticator the controller offers during an MFA
-/// challenge. Surfaced to the GUI verbatim so the operator
-/// can pick which method to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MfaAuthenticator {
-    pub id: String,
-    /// `"email"`, `"webauthn"`, `"sms"`, `"push"`, `"totp"`, etc.
-    #[serde(default)]
-    pub kind: String,
-    /// User-facing name: email address, device nickname, etc.
-    pub name: String,
-}
-
-/// Structured outcome of an attempted password login.
-pub enum PasswordLoginOutcome {
-    /// Login succeeded — the `reqwest::Client` is fully
-    /// authenticated and ready for API calls.
-    Ok(reqwest::Client),
-    /// Controller demands a second factor. The caller must
-    /// route the operator through `mfa_send_email` then
-    /// `mfa_complete_login`. Carries enough context to do
-    /// that without re-prompting for the password.
-    MfaRequired {
-        client: reqwest::Client,
-        authenticators: Vec<MfaAuthenticator>,
-    },
-}
+/// Why a password account with a second factor is refused, and what to
+/// use instead. Every request here signs in afresh, and nobody is there
+/// to answer the second factor each time.
+const TWO_FACTOR_REFUSED: &str = "this UniFi account uses two-factor \
+    authentication, which SuperManager can't answer on every sign-in. Add the \
+    controller with an API key instead (in the controller: Admins → API → \
+    Create API Key); API keys aren't subject to two-factor authentication.";
 
 /// Build an authenticated `reqwest::Client` for a controller.
 /// Dispatches to the right strategy based on the controller's
@@ -368,30 +209,16 @@ pub enum PasswordLoginOutcome {
 ///     carries the token. Skips MFA entirely. This is the
 ///     recommended path for any controller running `UniFi`
 ///     Network 8.x or later.
-///   - `Password`: classic cookie-based login. Returns
-///     `MfaRequired` if the controller answers with 499
-///     `MFA_AUTH_REQUIRED` — the caller is expected to walk
-///     the operator through email-MFA and call this again
-///     after challenge completion (with the cookie jar
-///     carried forward — see `login_with_mfa_token`).
+///   - `Password`: classic cookie-based login, done again for every
+///     call. An account with a second factor is refused with
+///     directions to an API key (see `password_login`).
 async fn login_client(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,
 ) -> Result<reqwest::Client> {
     match controller.auth_method {
         UnifiAuthMethod::ApiKey => api_key_client(secrets, controller).await,
-        UnifiAuthMethod::Password => match password_login(secrets, controller).await? {
-            PasswordLoginOutcome::Ok(client) => Ok(client),
-            PasswordLoginOutcome::MfaRequired { .. } => Err(anyhow!(
-                "controller demands MFA — register it via \
-                 unifi_controller_save (which surfaces the challenge to the \
-                 GUI) before trying device API calls. \
-                 \
-                 Quickest fix: in the controller UI go to Admins → API, \
-                 mint a long-lived API key, then add the controller in \
-                 SuperManager with auth_method=api_key. API keys bypass MFA."
-            )),
-        },
+        UnifiAuthMethod::Password => password_login(secrets, controller).await,
     }
 }
 
@@ -430,13 +257,13 @@ async fn api_key_client(
         .context("build api-key client")
 }
 
-/// Password login flow with MFA detection. Returns a structured
-/// outcome so the caller can route the operator through the
-/// challenge UI when needed.
+/// Password login. An account with a second factor is refused with
+/// directions to an API key: there is no one to answer the second
+/// factor on each of the logins made here.
 pub async fn password_login(
     secrets: &Arc<dyn SecretStore>,
     controller: &UnifiController,
-) -> Result<PasswordLoginOutcome> {
+) -> Result<reqwest::Client> {
     let secret = secrets
         .retrieve(&controller.creds_ref.0)
         .await
@@ -467,143 +294,21 @@ pub async fn password_login(
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if (200..300).contains(&status) {
-        return Ok(PasswordLoginOutcome::Ok(client));
+        return Ok(client);
     }
 
-    // Ubiquiti returns HTTP 499 with code MFA_AUTH_REQUIRED
-    // when the account has a second factor enabled. Try to
-    // parse the authenticators list out of the response.
+    // Ubiquiti answers HTTP 499 with code MFA_AUTH_REQUIRED when the
+    // account has a second factor.
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
         let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
         if code == "MFA_AUTH_REQUIRED" || code == "MFA_REQUIRED" {
-            let auths_raw = json
-                .pointer("/data/authenticators")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let authenticators: Vec<MfaAuthenticator> = auths_raw
-                .into_iter()
-                .filter_map(|row| {
-                    let id = row.get("id").and_then(|v| v.as_str())?.to_owned();
-                    let kind = row
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_owned();
-                    let name = row
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_owned)
-                        .or_else(|| row.get("email").and_then(|v| v.as_str()).map(str::to_owned))
-                        .or_else(|| {
-                            row.get("provider_friendly_name")
-                                .and_then(|v| v.as_str())
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_else(|| kind.clone());
-                    Some(MfaAuthenticator { id, kind, name })
-                })
-                .collect();
-            return Ok(PasswordLoginOutcome::MfaRequired {
-                client,
-                authenticators,
-            });
+            return Err(anyhow!(TWO_FACTOR_REFUSED));
         }
     }
 
     Err(anyhow!(
         "UniFi login to {} failed ({status}): {}",
         controller.url,
-        text.chars().take(400).collect::<String>()
-    ))
-}
-
-/// Trigger the controller to send the email-MFA challenge for
-/// a specific authenticator. The cookie jar inside `client`
-/// carries the partial-login session forward so the controller
-/// knows which login attempt this challenge belongs to.
-pub async fn mfa_send_email(
-    client: &reqwest::Client,
-    controller_url: &str,
-    authenticator_id: &str,
-) -> Result<()> {
-    // Ubiquiti exposes this under /api/auth/mfa/email/.../send
-    // on the Network Application, and /api/sso/v2/... on the
-    // hosted Cloud variants. Try both endpoints so we work
-    // across self-hosted, UDM-Pro, and SSO-mode controllers.
-    let candidates = [
-        format!(
-            "{}/api/auth/mfa/email/authenticator/{}/send",
-            controller_url.trim_end_matches('/'),
-            authenticator_id
-        ),
-        format!(
-            "{}/api/sso/v2/user/self/mfa/email/authenticator/{}/send",
-            controller_url.trim_end_matches('/'),
-            authenticator_id
-        ),
-    ];
-    let mut last_err = anyhow!("no MFA-send endpoint reachable");
-    for url in candidates {
-        match client.post(&url).send().await {
-            Ok(resp) => {
-                let status = resp.status().as_u16();
-                if (200..300).contains(&status) {
-                    info!("MFA email triggered via {url}");
-                    return Ok(());
-                }
-                let text = resp.text().await.unwrap_or_default();
-                last_err = anyhow!(
-                    "MFA-send {url} returned {status}: {}",
-                    text.chars().take(200).collect::<String>()
-                );
-            }
-            Err(e) => last_err = anyhow!("POST {url}: {e}"),
-        }
-    }
-    Err(last_err)
-}
-
-/// Complete a password login by submitting the MFA code. The
-/// `client` is the same one used for the initial password POST
-/// (so its cookie jar carries the partial-auth state). Returns
-/// a fully-authenticated client on success.
-pub async fn mfa_complete_login(
-    secrets: &Arc<dyn SecretStore>,
-    controller: &UnifiController,
-    client: reqwest::Client,
-    code: &str,
-) -> Result<reqwest::Client> {
-    let secret = secrets
-        .retrieve(&controller.creds_ref.0)
-        .await
-        .context("load controller password from keychain")?;
-    let password = std::str::from_utf8(secret.as_ref())
-        .context("password is not valid UTF-8")?
-        .to_owned();
-    let login_url = format!("{}/api/auth/login", controller.url.trim_end_matches('/'));
-    // Ubiquiti accepts the code under either `token` or
-    // `ubic_2fa_token` depending on version; ship both so
-    // we don't fail on the field-name change between releases.
-    let body = serde_json::json!({
-        "username": controller.username,
-        "password": password,
-        "token": code.trim(),
-        "ubic_2fa_token": code.trim(),
-    });
-    let resp = client
-        .post(&login_url)
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| format!("POST {login_url}"))?;
-    let status = resp.status().as_u16();
-    if (200..300).contains(&status) {
-        return Ok(client);
-    }
-    let text = resp.text().await.unwrap_or_default();
-    Err(anyhow!(
-        "MFA verify failed ({status}): {}",
         text.chars().take(400).collect::<String>()
     ))
 }
@@ -1146,4 +851,64 @@ pub async fn cross_reference(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A controller at a loopback URL that answers one request with
+    /// `status` and a JSON `body`.
+    async fn controller_answering(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await;
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+        url
+    }
+
+    /// Every call signs in again, so a second factor would be asked
+    /// for every time: the answer is an API key, and the error says so.
+    #[tokio::test]
+    async fn a_password_account_with_two_factor_is_sent_to_an_api_key() {
+        let url = controller_answering(
+            "499 MFA Required",
+            r#"{"code":"MFA_AUTH_REQUIRED","data":{"authenticators":[{"id":"a1","type":"email"}]}}"#,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(crate::secrets::file::FileSecretStore::new(
+            dir.path().join("secrets.json"),
+        ));
+        secrets.store("unifi/test", b"hunter2").await.unwrap();
+        let now = Utc::now();
+        let controller = UnifiController {
+            id: Uuid::new_v4(),
+            label: "office".into(),
+            url,
+            site_id: "default".into(),
+            auth_method: UnifiAuthMethod::Password,
+            username: "admin".into(),
+            creds_ref: SecretRef::new("unifi/test"),
+            customer_slug: None,
+            verified_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let error = password_login(&secrets, &controller)
+            .await
+            .expect_err("a two-factor account signed in with its password")
+            .to_string();
+        assert!(error.contains("API key"), "{error}");
+    }
 }

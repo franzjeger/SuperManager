@@ -265,13 +265,6 @@ impl EngineServer {
                 self.handle_unifi_controller_devices(id, req.params).await
             }
             "unifi_controller_devmgr" => self.handle_unifi_controller_devmgr(id, req.params).await,
-            "unifi_controller_mfa_send" => {
-                self.handle_unifi_controller_mfa_send(id, req.params).await
-            }
-            "unifi_controller_mfa_complete" => {
-                self.handle_unifi_controller_mfa_complete(id, req.params)
-                    .await
-            }
 
             // -- Device-type override store --
             "device_type_overrides_list" => self.handle_device_type_overrides_list(id).await,
