@@ -21,6 +21,16 @@ extension Notification.Name {
     static let superManagerOpenAddHost = Notification.Name("com.sybr.supermanager.openAddHost")
 }
 
+extension ProcessInfo {
+    /// True in the copy of the app XCTest launches to host the unit tests.
+    /// It exists so the test bundle has a process to load into, and it
+    /// shares everything with the installed copy — the daemon socket, the
+    /// data directory, the crash queue — so it must not act as the app.
+    var isUnitTestHost: Bool {
+        environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
 @main
 struct SuperManagerApp: App {
     @State private var appState: AppState
@@ -62,7 +72,14 @@ struct SuperManagerApp: App {
         // Drains any pending crash from the previous run into
         // `~/Library/Application Support/SuperManager/crashes/`
         // where the Support Bundle picks it up.
-        CrashReporting.start()
+        //
+        // Not in the unit-test host: the queue is keyed by bundle id, so
+        // a test that crashed it would surface in the installed app's
+        // crash folder, and the Mach handler would stand in front of
+        // xctest's own crash report.
+        if !ProcessInfo.processInfo.isUnitTestHost {
+            CrashReporting.start()
+        }
         _appState = State(initialValue: AppState())
     }
 
@@ -77,51 +94,59 @@ struct SuperManagerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            // Lock-aware root. When `LockState.isLocked` is true the
-            // window contains *only* `LockScreenView` — no
-            // `ContentView`, no toolbar, no search field. That's the
-            // only way to truly prevent locked-state UI bleed-through:
-            // an overlay can't fully hide content behind it because
-            // SwiftUI's materials are translucent by design, but if
-            // there's no content to bleed through there's nothing to
-            // hide.
-            //
-            // ContentView is rebuilt fresh when we unlock — selection
-            // state and search text reset to defaults. That's the
-            // expected behaviour for a re-entry from locked: users
-            // don't want to come back to a stale search filter from
-            // before they walked away.
-            RootView(appState: appState) {
-                Task {
-                    await startDaemon()
-                    await appState.connectToDaemon()
-                    startAutoLockTimer()
-                    // Register for sleep/wake notifications so VPN state
-                    // and the route guardian reset cleanly on lid-close/open.
-                    // Must run on the main actor (NSWorkspace requirement);
-                    // the startSleepWakeMonitor() call is @MainActor-safe.
-                    appState.startSleepWakeMonitor()
+            if ProcessInfo.processInfo.isUnitTestHost {
+                // XCTest launched this copy only to load the tests into.
+                // Showing the app would run it as well: the launch hook
+                // below kills the installed copy's daemon to start its
+                // own, and the views call whichever daemon answers.
+                EmptyView()
+            } else {
+                // Lock-aware root. When `LockState.isLocked` is true the
+                // window contains *only* `LockScreenView` — no
+                // `ContentView`, no toolbar, no search field. That's the
+                // only way to truly prevent locked-state UI bleed-through:
+                // an overlay can't fully hide content behind it because
+                // SwiftUI's materials are translucent by design, but if
+                // there's no content to bleed through there's nothing to
+                // hide.
+                //
+                // ContentView is rebuilt fresh when we unlock — selection
+                // state and search text reset to defaults. That's the
+                // expected behaviour for a re-entry from locked: users
+                // don't want to come back to a stale search filter from
+                // before they walked away.
+                RootView(appState: appState) {
+                    Task {
+                        await startDaemon()
+                        await appState.connectToDaemon()
+                        startAutoLockTimer()
+                        // Register for sleep/wake notifications so VPN state
+                        // and the route guardian reset cleanly on lid-close/open.
+                        // Must run on the main actor (NSWorkspace requirement);
+                        // the startSleepWakeMonitor() call is @MainActor-safe.
+                        appState.startSleepWakeMonitor()
+                    }
                 }
-            }
-            // Handle `supermgr://` URLs. The Info.plist
-            // CFBundleURLTypes entry routes any click on such a
-            // URL (typically a bookmarklet placed on a vendor
-            // admin page) to this handler. We parse it into a
-            // WebCapture and stash on AppState; ContentView's
-            // sheet binding handles the rest.
-            .onOpenURL { url in
-                if let cap = WebCapture.from(url: url) {
-                    appState.pendingWebCapture = cap
-                } else {
-                    // Unparseable URL — open an empty capture
-                    // sheet so the user can paste manually
-                    // rather than swallow the click silently.
-                    appState.pendingWebCapture = WebCapture(
-                        hostname: "",
-                        label: "",
-                        deviceType: .linux,
-                        username: "root"
-                    )
+                // Handle `supermgr://` URLs. The Info.plist
+                // CFBundleURLTypes entry routes any click on such a
+                // URL (typically a bookmarklet placed on a vendor
+                // admin page) to this handler. We parse it into a
+                // WebCapture and stash on AppState; ContentView's
+                // sheet binding handles the rest.
+                .onOpenURL { url in
+                    if let cap = WebCapture.from(url: url) {
+                        appState.pendingWebCapture = cap
+                    } else {
+                        // Unparseable URL — open an empty capture
+                        // sheet so the user can paste manually
+                        // rather than swallow the click silently.
+                        appState.pendingWebCapture = WebCapture(
+                            hostname: "",
+                            label: "",
+                            deviceType: .linux,
+                            username: "root"
+                        )
+                    }
                 }
             }
         }
@@ -311,7 +336,10 @@ struct SuperManagerApp: App {
         await Task.detached(priority: .userInitiated) {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            task.arguments = ["-f", "supermgrd-mac"]
+            // Our own processes named exactly that. `-f` matched the text
+            // anywhere in any process's arguments, so a shell command that
+            // merely mentioned the daemon was killed along with it.
+            task.arguments = ["-x", "-U", String(getuid()), "supermgrd-mac"]
             task.standardOutput = FileHandle.nullDevice
             task.standardError = FileHandle.nullDevice
             do {

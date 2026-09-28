@@ -5,6 +5,12 @@ import Foundation
 actor ServiceClient {
     private var fd: Int32 = -1
     private var requestId: UInt64 = 0
+    /// Where the daemon listens. Only tests point it anywhere else.
+    private let path: String
+
+    init(socketPath: String = ServiceClient.socketPath) {
+        path = socketPath
+    }
 
     static var socketPath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -16,10 +22,19 @@ actor ServiceClient {
         guard sock >= 0 else {
             throw ServiceError.connectionFailed("socket() failed: \(errno)")
         }
+        // A daemon that goes away between calls must cost one failed send,
+        // which `call` answers by reconnecting. Without this that send
+        // raises SIGPIPE, and nothing here ignores it: the app dies instead,
+        // every time a new launch replaces the daemon it was talking to.
+        var on: Int32 = 1
+        guard setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            let e = errno
+            close(sock)
+            throw ServiceError.connectionFailed("setsockopt(SO_NOSIGPIPE) failed: \(e)")
+        }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let path = Self.socketPath
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
             path.withCString { cstr in
                 _ = memcpy(ptr, cstr, min(path.utf8.count, 104))

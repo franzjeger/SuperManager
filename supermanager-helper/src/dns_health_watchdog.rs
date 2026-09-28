@@ -40,7 +40,8 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+// Every command here is bounded: see `proc::Bounded`.
+use crate::proc::Bounded as Command;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;

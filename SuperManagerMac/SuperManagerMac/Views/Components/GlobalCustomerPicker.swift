@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Compact toolbar control that scopes the entire app to a single
+/// Compact list-header control that scopes the entire app to a single
 /// customer. Persisted across launches via `@AppStorage`. When set,
 /// every section (SSH/Compliance/Provisioning/Security/Fleet) reads
 /// `appState.globalCustomerSlug` and filters their lists to records
@@ -9,8 +9,12 @@ import SwiftUI
 /// "All customers" (empty slug) is the default — keeps the previous
 /// global-view behaviour as a one-click escape hatch.
 struct GlobalCustomerPicker: View {
+    /// UserDefaults key of the persisted filter. AppState writes it too when
+    /// it drops a filter, or `.task` below would restore the old value.
+    static let storageKey = "globalCustomerSlug"
+
     @Environment(AppState.self) private var appState
-    @AppStorage("globalCustomerSlug") private var persistedSlug: String = ""
+    @AppStorage(Self.storageKey) private var persistedSlug: String = ""
 
     var body: some View {
         Menu {

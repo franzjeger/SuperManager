@@ -10,6 +10,53 @@ import XCTest
 /// customer only by IP in `Site.hostIds` must still resolve to that customer
 /// (the cause of "No compliance-capable hosts").
 final class HostIndexTests: XCTestCase {
+    @MainActor
+    func testCustomerFilterClearsDetailsOutsideItsScope() {
+        let state = AppState()
+        state.customers = [customer(slug: "acme", siteId: "a", hostIds: []),
+                           customer(slug: "beta", siteId: "b", hostIds: [])]
+        state.sshHosts = [host(id: "other", ip: "10.0.0.2", group: "beta")]
+        state.rebuildHostIndex()
+        state.selectedHostId = "other"
+        state.selectedCustomerSlug = "beta"
+        state.selectedSiteId = "b"
+
+        state.globalCustomerSlug = "acme"
+
+        XCTAssertNil(state.selectedHostId)
+        XCTAssertNil(state.selectedCustomerSlug)
+        XCTAssertNil(state.selectedSiteId)
+        XCTAssertEqual(state.customerScopedCustomers.map(\.slug), ["acme"])
+    }
+
+    @MainActor
+    func testCustomerFilterPreservesHostLinkedBySiteIP() {
+        let state = AppState()
+        state.customers = [customer(slug: "acme", siteId: "a", hostIds: ["10.0.0.2"])]
+        state.sshHosts = [host(id: "linked", ip: "10.0.0.2", group: "Discovered")]
+        state.rebuildHostIndex()
+        state.selectedHostId = "linked"
+        state.globalCustomerSlug = "acme"
+        XCTAssertEqual(state.selectedHostId, "linked")
+
+        state.globalCustomerSlug = ""
+        XCTAssertEqual(state.selectedHostId, "linked")
+        XCTAssertEqual(state.customerScopedCustomers.count, 1)
+    }
+
+    @MainActor
+    func testMovingHostOutOfCustomerClearsItsDetail() {
+        let state = AppState()
+        state.customers = [customer(slug: "acme", siteId: "a", hostIds: [])]
+        state.sshHosts = [host(id: "moved", ip: "10.0.0.2", group: "acme")]
+        state.rebuildHostIndex()
+        state.globalCustomerSlug = "acme"
+        state.selectedHostId = "moved"
+        state.sshHosts = [host(id: "moved", ip: "10.0.0.2", group: "")]
+        state.rebuildHostIndex()
+        XCTAssertNil(state.selectedHostId)
+    }
+
 
     /// Build a Customer from JSON so the fixture stays tolerant to model
     /// field additions (same approach as `SshHostSummary.previewFixture`).

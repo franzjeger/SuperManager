@@ -22,6 +22,14 @@ struct SshHostSummary: Codable, Identifiable, Hashable {
     let hasUnifiController: Bool
     let pinned: Bool
 
+    /// UI-only edits must not invalidate an in-flight connection test, but
+    /// an address/account/key change must not inherit its success either.
+    func hasSameConnection(as other: SshHostSummary) -> Bool {
+        id == other.id && hostname == other.hostname && port == other.port
+            && username == other.username && authMethod == other.authMethod
+            && authKeyId == other.authKeyId && hasCertificate == other.hasCertificate
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, label, hostname, port, username, group, pinned
         case deviceType = "device_type"

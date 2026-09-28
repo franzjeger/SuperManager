@@ -143,7 +143,12 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
         ("8000::/1", "-inet6"),
     ];
     for (i, (net, fam)) in NETS.into_iter().enumerate() {
-        let orphaned = match crate::strongswan::route_iface_family(net, fam) {
+        // Read the routing-table dump, not `route -n get`: RTM_GET blocks on a
+        // route whose utun is gone — precisely the orphan this exists to reap.
+        // Probing that way cost a 5 s timeout per net per cycle and then read
+        // the timeout as "no route", so the orphan was never reaped and
+        // escalation slowed from ~6 s to ~40 s.
+        let orphaned = match crate::strongswan::netstat_route_iface(net, fam) {
             // Only a utun-borne split-default can be a dead-tunnel orphan (a
             // physical iface or the lo0 IPv6 leak-block is handled elsewhere),
             // and only if no live VPN backend owns that utun.
@@ -175,7 +180,7 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
         }
         args.push("-net");
         args.push(net);
-        let _ = Command::new("/sbin/route").args(&args).output();
+        let _ = crate::proc::bounded(Command::new("/sbin/route").args(&args), crate::proc::MUTATE);
     }
 }
 
@@ -336,9 +341,16 @@ fn probe_internet() -> bool {
     } else {
         "1"
     };
-    let out = Command::new("/usr/bin/nc")
-        .args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"])
-        .output();
+    // nc's own -G/-w budget is the intended bound, but it applies to the
+    // connect and the transfer, not to nc getting stuck elsewhere. Wrap it
+    // anyway: this is the watchdog's own thread, and if the probe never
+    // returns the watchdog is gone — the single most expensive thread in the
+    // helper to lose, since it carries the no-brick route reaper.
+    let hard_cap = budget.parse::<u64>().unwrap_or(8) + 4;
+    let out = crate::proc::bounded(
+        Command::new("/usr/bin/nc").args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"]),
+        hard_cap,
+    );
     match out {
         Ok(o) => o.status.success(),
         Err(_) => false,

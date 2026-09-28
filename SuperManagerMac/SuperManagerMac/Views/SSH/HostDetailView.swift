@@ -109,7 +109,9 @@ struct HostDetailView: View {
                                     // The daemon's structured result maps
                                     // straight to the probe state — no string
                                     // round-trip. The card reads the state.
-                                    switch await appState.testConnection(hostId: hostId) {
+                                    let result = await appState.testConnection(hostId: hostId)
+                                    guard self.host?.hasSameConnection(as: host) == true else { return }
+                                    switch result {
                                     case .ok:
                                         probe = .reachable
                                     case .authFailed(let msg):
@@ -121,6 +123,7 @@ struct HostDetailView: View {
                                     }
                                 }
                             }
+                            .disabled(probe == .testing)
                         }
                     }
 
@@ -195,6 +198,12 @@ struct HostDetailView: View {
             }
             .sheet(isPresented: $showingEditSheet) {
                 EditHostSheet(host: host)
+            }
+            .onChange(of: host) { old, new in
+                if !old.hasSameConnection(as: new) {
+                    probe = .notTested
+                    commandOutput = ""
+                }
             }
             .task(id: host.id) {
                 // Lazy-load compliance history so the score pill

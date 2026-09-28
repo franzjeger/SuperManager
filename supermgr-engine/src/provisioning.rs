@@ -45,6 +45,8 @@ use serde::{Deserialize, Serialize};
 use tera::{Context as TeraContext, Tera};
 
 use crate::customer::{Customer, Site};
+use crate::ssh::connection::ShellInput;
+use supermgr_core::error::SshError;
 
 // ---------------------------------------------------------------------------
 // Template metadata
@@ -899,36 +901,52 @@ pub async fn deploy(
         }
     };
 
-    // Use shell_interact for the entire batch — pass all lines,
-    // 0ms inter-line delay, 120s timeout for the whole push.
-    // This is conservative; FortiOS ack on every line is
-    // typically <50ms.
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let result = session.shell_interact(&line_refs, 0, 120).await;
+    // One shell_interact for the whole batch, 120 s for the whole push.
+    // This is conservative; FortiOS acks each line in typically <50ms.
+    let inputs: Vec<ShellInput<'_>> = lines.iter().map(|l| ShellInput::Command(l)).collect();
+    let result = session.shell_interact(&inputs, 120).await;
     let _ = session.disconnect().await;
 
     match result {
         Ok(transcript) => {
-            // Detect FortiOS's common error markers in the
-            // transcript. Real FortiOS errors include
+            // Every line was acknowledged. Detect FortiOS's common error
+            // markers in the transcript. Real FortiOS errors include
             // "Command fail" or "Command parse error".
+            record.lines_pushed = lines.len() as u64;
             if transcript.contains("Command fail") || transcript.contains("Command parse error") {
                 record.status = DeploymentStatus::Failed;
                 record.error = Some(extract_first_error(&transcript));
-                record.lines_pushed = lines.len() as u64; // approx
             } else {
                 record.status = DeploymentStatus::Succeeded;
-                record.lines_pushed = lines.len() as u64;
             }
         }
-        Err(e) => {
-            record.status = DeploymentStatus::Failed;
-            record.error = Some(e.to_string());
-        }
+        Err(e) => record_failed_push(&mut record, &e),
     }
     record.finished_at = Some(chrono::Utc::now());
     save_deployment(&record)?;
     Ok(record)
+}
+
+/// Record a push that ended in an error. A device that stopped answering
+/// took the lines it acknowledged and nothing after them, so it now holds
+/// part of the configuration; the record says how much.
+fn record_failed_push(record: &mut Deployment, error: &SshError) {
+    record.status = DeploymentStatus::Failed;
+    if let SshError::ShellInterrupted {
+        acknowledged,
+        total,
+        reason,
+        ..
+    } = error
+    {
+        record.lines_pushed = *acknowledged as u64;
+        record.error = Some(format!(
+            "device stopped answering after {acknowledged} of {total} lines ({reason}); \
+             the configuration is partly applied"
+        ));
+    } else {
+        record.error = Some(error.to_string());
+    }
 }
 
 /// Pull the first `FortiOS` error line out of a shell transcript
@@ -974,14 +992,23 @@ pub async fn rollback(
     };
     save_deployment(&record)?;
 
-    let (_host, session) = open_session(state, secrets, host_id).await?;
+    let (_host, session) = match open_session(state, secrets, host_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            record.status = DeploymentStatus::Failed;
+            record.error = Some(format!("ssh connect failed: {e:#}"));
+            record.finished_at = Some(chrono::Utc::now());
+            save_deployment(&record)?;
+            return Err(e);
+        }
+    };
     let lines: Vec<String> = backup_text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(str::to_owned)
         .collect();
-    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-    let result = session.shell_interact(&line_refs, 0, 180).await;
+    let inputs: Vec<ShellInput<'_>> = lines.iter().map(|l| ShellInput::Command(l)).collect();
+    let result = session.shell_interact(&inputs, 180).await;
     let _ = session.disconnect().await;
     record.finished_at = Some(chrono::Utc::now());
     match result {
@@ -989,10 +1016,7 @@ pub async fn rollback(
             record.status = DeploymentStatus::RolledBack;
             record.lines_pushed = lines.len() as u64;
         }
-        Err(e) => {
-            record.status = DeploymentStatus::Failed;
-            record.error = Some(e.to_string());
-        }
+        Err(e) => record_failed_push(&mut record, &e),
     }
     save_deployment(&record)?;
     Ok(record)

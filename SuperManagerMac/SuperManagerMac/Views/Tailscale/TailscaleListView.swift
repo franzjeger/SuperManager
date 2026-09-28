@@ -48,7 +48,7 @@ struct TailscaleListView: View {
             // until the auth completes, which would flicker the UI
             // for ~30 seconds. Suppressing the error in that window
             // gives us a calmer flow.
-            if appState.tailscaleIsBundled
+            if appState.canInstallTailscaled
                 && (appState.tailscaledRunning == false
                     || appState.tailscaleError != nil)
                 && appState.pendingTailscaleAuthURL == nil {

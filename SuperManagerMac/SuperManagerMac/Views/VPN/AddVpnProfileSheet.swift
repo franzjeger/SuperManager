@@ -50,7 +50,7 @@ struct AddVpnProfileSheet: View {
                     TextField("Username", text: $username)
                     SecureField("Password (EAP)", text: $password)
                     SecureField("Shared Secret (PSK)", text: $sharedSecret)
-                    Text("Leave the shared secret blank for certificate-based servers.")
+                    Text("Required: the gateway authenticates to this Mac with the pre-shared key.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -78,7 +78,8 @@ struct AddVpnProfileSheet: View {
                     Task { await save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty || password.isEmpty)
+                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty
+                          || password.isEmpty || sharedSecret.isEmpty)
             }
             .padding(12)
         }
@@ -119,9 +120,7 @@ struct AddVpnProfileSheet: View {
                 if let pwData = password.data(using: .utf8) {
                     try VPNKeychain.set(pwData, account: cfg.password)
                 }
-                if !sharedSecret.isEmpty, let pskData = sharedSecret.data(using: .utf8) {
-                    try VPNKeychain.set(pskData, account: cfg.psk)
-                }
+                try VPNKeychain.set(Data(sharedSecret.utf8), account: cfg.psk)
             }
 
             // No system-level write here — the privileged helper handles the
@@ -158,6 +157,7 @@ struct EditVpnProfileSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let profile: VpnProfile
+    let missingCredentials: VPNKeychain.MissingIKEv2Credentials?
     /// Invoked after a successful save so the detail view can reload the
     /// daemon-stored profile (host / username / routing all live there).
     var onSaved: () -> Void
@@ -176,8 +176,11 @@ struct EditVpnProfileSheet: View {
     @State private var saving = false
     @State private var error: String?
 
-    init(profile: VpnProfile, onSaved: @escaping () -> Void) {
+    init(profile: VpnProfile,
+         missingCredentials: VPNKeychain.MissingIKEv2Credentials? = nil,
+         onSaved: @escaping () -> Void) {
         self.profile = profile
+        self.missingCredentials = missingCredentials
         self.onSaved = onSaved
         _name = State(initialValue: profile.name)
         _fullTunnel = State(initialValue: profile.fullTunnel)
@@ -206,7 +209,7 @@ struct EditVpnProfileSheet: View {
                 Image(systemName: "lock.shield.fill")
                     .foregroundStyle(.tint)
                     .font(.title2)
-                Text("Edit IKEv2 profile")
+                Text(missingCredentials == nil ? "Edit IKEv2 profile" : "Restore VPN credentials")
                     .font(.title2.weight(.semibold))
                 Spacer()
             }
@@ -225,10 +228,19 @@ struct EditVpnProfileSheet: View {
                 }
 
                 Section("Credentials") {
+                    if let missingCredentials {
+                        Text("This profile is missing credentials on this Mac. Re-enter them below, save, then connect again.")
+                            .font(.callout)
+                        if missingCredentials.sharedSecret {
+                            Text("The shared secret (PSK) is required: the gateway authenticates to this Mac with it.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     TextField("Username", text: $username)
                     SecureField("New password (EAP)", text: $password)
                     SecureField("New shared secret (PSK)", text: $sharedSecret)
-                    Text("Passwords change only if you type a new value. Blank leaves the stored secret untouched.")
+                    Text("Existing credentials are kept unless you enter a replacement.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -256,7 +268,9 @@ struct EditVpnProfileSheet: View {
                     Task { await save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty)
+                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty
+                          || (missingCredentials?.password == true && password.isEmpty)
+                          || (missingCredentials?.sharedSecret == true && sharedSecret.isEmpty))
             }
             .padding(12)
         }
@@ -300,8 +314,8 @@ struct EditVpnProfileSheet: View {
                 if !password.isEmpty, let pw = password.data(using: .utf8) {
                     try VPNKeychain.set(pw, account: cfg.password)
                 }
-                if !sharedSecret.isEmpty, let psk = sharedSecret.data(using: .utf8) {
-                    try VPNKeychain.set(psk, account: cfg.psk)
+                if !sharedSecret.isEmpty {
+                    try VPNKeychain.set(Data(sharedSecret.utf8), account: cfg.psk)
                 }
             }
 

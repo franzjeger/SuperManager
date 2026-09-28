@@ -473,8 +473,10 @@ pub fn match_with_cache(banner: &str, cache: &FeedCache) -> Vec<FeedEntry> {
                 let kw_lc = kw.to_lowercase();
                 lc.match_indices(&kw_lc).any(|(pos, _)| {
                     let end = pos + kw_lc.len();
-                    let window_end = (end + 50).min(lc.len());
-                    let window = &lc[end..window_end];
+                    // 50 bytes on, backed off to a character boundary:
+                    // the banner is the target's, and slicing inside a
+                    // multi-byte character panicked the scan.
+                    let window = &lc[end..lc.floor_char_boundary(end + 50)];
                     e.version_substrings
                         .iter()
                         .any(|v| version_token_in(window, &v.to_lowercase()))
@@ -531,6 +533,20 @@ mod tests {
             hits.is_empty(),
             "modern FreeBSD banner with SSH-2.0 must NOT match CVE-1999 with FreeBSD 2.0 versions"
         );
+    }
+
+    // A banner is whatever the target sends. The proximity window ends
+    // 50 bytes past the keyword, and that byte can fall inside a
+    // multi-byte character; slicing there panicked the whole scan.
+    #[test]
+    fn proximity_window_never_splits_a_character() {
+        let cache = cache_with(vec![entry("CVE-2099-0001", &["freebsd"], &["13.2"])]);
+        // "freebsd" ends at byte 7, so the window ends at byte 57: the
+        // middle of the "\u{e9}" that starts at byte 56.
+        let banner = format!("FreeBSD-13.2{}\u{e9}-RELEASE", "x".repeat(44));
+        assert!(!banner.is_char_boundary(57));
+        let hits = match_with_cache(&banner, &cache);
+        assert_eq!(hits.len(), 1, "the version before the cut still matches");
     }
 
     // Legitimate match: keyword + version are adjacent in the banner.

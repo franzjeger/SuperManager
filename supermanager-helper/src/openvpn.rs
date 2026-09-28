@@ -381,9 +381,13 @@ impl OpenVpn {
             );
             let mut cmd = Command::new(&openvpn);
             cmd.args(&argv);
-            cmd.output().await.with_context(|| {
-                format!("run {} --config {}", openvpn.display(), args.config_file)
-            })?
+            // `--daemon` forks and the parent exits right after option
+            // parsing, so this normally returns in well under a second.
+            crate::proc::bounded_async(&mut cmd, crate::proc::MUTATE)
+                .await
+                .with_context(|| {
+                    format!("run {} --config {}", openvpn.display(), args.config_file)
+                })?
         };
         tracing::info!(
             "ovpn_connect: child exited code={:?} stdout={} bytes stderr={} bytes",
@@ -831,10 +835,11 @@ fn event_detail(line: &str, marker: &str) -> Option<String> {
 /// columns can't be parsed — surfacing zero bytes here would
 /// lie to the GUI's bandwidth-rate calculation.
 async fn read_iface_byte_counts(iface: &str) -> (Option<u64>, Option<u64>) {
-    let output = match tokio::process::Command::new("/usr/sbin/netstat")
-        .args(["-ibn", "-I", iface])
-        .output()
-        .await
+    let output = match crate::proc::bounded_async(
+        tokio::process::Command::new("/usr/sbin/netstat").args(["-ibn", "-I", iface]),
+        crate::proc::PROBE,
+    )
+    .await
     {
         Ok(o) if o.status.success() => o,
         _ => return (None, None),
@@ -1254,10 +1259,11 @@ async fn collect_openvpn_pids_for(safe: &str) -> Vec<u32> {
     // bare-id match catches both backends.
     let needle = safe.to_string();
     let mut out: Vec<u32> = Vec::new();
-    let output = match tokio::process::Command::new("/bin/ps")
-        .args(["-Ao", "pid,command"])
-        .output()
-        .await
+    let output = match crate::proc::bounded_async(
+        tokio::process::Command::new("/bin/ps").args(["-Ao", "pid,command"]),
+        crate::proc::PROBE,
+    )
+    .await
     {
         Ok(o) if o.status.success() => o,
         _ => return out,
@@ -1293,11 +1299,12 @@ async fn find_openvpn_pid_for(safe: &str) -> Option<u32> {
     // the profile id (`/tmp/supermgr-azure-<id>.ovpn`), so a
     // bare-id match catches both backends.
     let needle = safe.to_string();
-    let output = tokio::process::Command::new("/bin/ps")
-        .args(["-Ao", "pid,command"])
-        .output()
-        .await
-        .ok()?;
+    let output = crate::proc::bounded_async(
+        tokio::process::Command::new("/bin/ps").args(["-Ao", "pid,command"]),
+        crate::proc::PROBE,
+    )
+    .await
+    .ok()?;
     if !output.status.success() {
         return None;
     }

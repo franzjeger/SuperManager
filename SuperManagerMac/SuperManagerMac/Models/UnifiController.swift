@@ -147,31 +147,3 @@ struct UnifiSysInfo: Codable, Hashable {
     let hostname: String?
     let name: String?
 }
-
-/// One authenticator offered by the controller during an MFA
-/// challenge. The GUI lists these so the operator can pick
-/// "email" (we support) vs "webauthn" (we don't yet).
-struct MfaAuthenticator: Codable, Hashable, Identifiable {
-    let id: String
-    /// `email`, `webauthn`, `sms`, `push`, `totp`, etc.
-    let kind: String
-    let name: String
-
-    enum CodingKeys: String, CodingKey {
-        case id, name
-        case kind = "type"
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        id = try c.decode(String.self, forKey: .id)
-        kind = (try? c.decode(String.self, forKey: .kind)) ?? ""
-        name = (try? c.decode(String.self, forKey: .name)) ?? ""
-    }
-
-    /// Whether the GUI can complete this authenticator path
-    /// without OS-level WebAuthn integration we don't yet have.
-    var isSupported: Bool {
-        kind.lowercased() == "email"
-    }
-}

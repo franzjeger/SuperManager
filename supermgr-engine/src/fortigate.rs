@@ -36,7 +36,7 @@ use supermgr_core::keyring::SecretStore;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::ssh::connection::SshSession;
+use crate::ssh::connection::{ShellInput, SshSession};
 use crate::state::DaemonState;
 
 /// Default HTTP client timeout for `FortiGate` REST calls. `FortiOS` itself
@@ -210,23 +210,18 @@ pub async fn generate_token(
         "end".into(),
         format!("execute api-user generate-key {api_user_owned}"),
     ];
-    let mut lines: Vec<String> = cmd_lines;
+    let mut inputs: Vec<ShellInput<'_>> =
+        cmd_lines.iter().map(|l| ShellInput::Command(l)).collect();
     if let Some(ref pw) = admin_password {
-        // The `generate-key` command asks "Password: " — append the
-        // password line so shell_interact's send-and-wait loop fires
-        // it once the prompt arrives.
-        lines.push(pw.clone());
+        // `generate-key` may ask "Password: ". As a secret, the password
+        // answers that prompt and is never typed at the shell prompt.
+        inputs.push(ShellInput::Secret(pw));
     }
 
-    let output = {
-        let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        session
-            .shell_interact(
-                &line_refs, /* delay_ms */ 0, /* timeout_secs */ 30,
-            )
-            .await
-            .context("FortiGate interactive shell failed")?
-    };
+    let output = session
+        .shell_interact(&inputs, /* timeout_secs */ 30)
+        .await
+        .context("FortiGate interactive shell failed")?;
     info!(
         "fortigate_generate_api_token: shell output ({} bytes)",
         output.len()

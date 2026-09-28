@@ -31,7 +31,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+// Every command here is bounded: see `proc::Bounded`.
+use crate::proc::Bounded as Command;
+use std::process::Output;
 
 const ANCHOR_NAME: &str = "com.sybr.supermanager.killswitch";
 const ANCHOR_FILE: &str = "/etc/pf.anchors/com.sybr.supermanager.killswitch";

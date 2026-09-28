@@ -66,7 +66,16 @@ struct ContentView: View {
                 NavigationSplitView {
                     sidebarColumn
                 } content: {
+                    // Identity per section on each column's content, not on
+                    // the split view: switching sections replaces the content
+                    // outright instead of diffing one section's views into
+                    // another's (macOS otherwise kept showing the previous
+                    // section's column), while the split view — the sidebar
+                    // list that was just clicked, its keyboard focus, collapse
+                    // state and column widths — keeps its own. Selections live
+                    // in AppState, so nothing is lost with the old content.
                     listColumn
+                        .id(appState.selectedSection)
                         // ideal == max on purpose: a fresh split-view build
                         // settles the column at max, a rebuild at ideal, so
                         // unequal values gave the list two different widths
@@ -75,6 +84,7 @@ struct ContentView: View {
                         .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
                 } detail: {
                     detailColumn
+                        .id(appState.selectedSection)
                         // Title on the DETAIL column, not the split view. Set
                         // globally, macOS floats it after the toolbar items
                         // with no relationship to the column edges, and with a
@@ -91,6 +101,7 @@ struct ContentView: View {
                     sidebarColumn
                 } detail: {
                     detailColumn
+                        .id(appState.selectedSection)
                         .navigationTitle("SuperManager")
                 }
             }
@@ -141,35 +152,11 @@ struct ContentView: View {
             ToolbarItem(placement: .navigation) {
                 ToolbarStatusPills()
             }
-            // Global customer-context picker — sits next to the
-            // connection pill so the operator always sees which
-            // customer they're acting on.
-            //
-            // Shown only where it actually scopes something.
-            //
-            //   Tailscale — the tailnet is a per-account concept with no
-            //     customer scope at all.
-            //   VPN — profiles carry a `customer` tag in the wire format, but
-            //     on macOS it is always empty: supermgr-engine (what this app
-            //     talks to via supermgrd-mac) has no customer setter, and each
-            //     of its profile-creating handlers hardcodes an empty one. The
-            //     setter exists only on the Linux D-Bus daemon. So the picker
-            //     sat here scoping nothing — and worse, wiring the filter up
-            //     anyway would have hidden EVERY profile the moment a customer
-            //     was picked, since none of them match. Hiding it is the honest
-            //     state until the engine can store the tag; see the note in
-            //     AppState+VPN.
-            ToolbarItem(placement: .navigation) {
-                if appState.selectedSection != .tailscale
-                    && appState.selectedSection != .vpn {
-                    GlobalCustomerPicker()
-                }
-            }
             // Flexible space. The toolbar title used to be what separated the
             // leading group from the trailing one; with it hidden (it floated
             // across the column divider), macOS packs every item leading. A
             // Spacer as a toolbar item maps to NSToolbar's flexible space and
-            // restores the split: pills and picker left, actions right.
+            // restores the split: status pills left, actions right.
             ToolbarItem(placement: .primaryAction) {
                 Spacer()
             }
@@ -504,6 +491,28 @@ struct ContentView: View {
 
     @ViewBuilder
     private var listColumn: some View {
+        VStack(spacing: 0) {
+            // Keep the filter inside the column it scopes. A window-level
+            // toolbar item can straddle NavigationSplitView's divider when
+            // the list is resized or a customer has a long display name.
+            // VPN has no customer mapping; Tailscale is scoped by tailnet.
+            if appState.selectedSection != .tailscale
+                && appState.selectedSection != .vpn
+                && !(appState.selectedSection == .ssh && sshTab == .keys) {
+                HStack {
+                    GlobalCustomerPicker()
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            sectionList
+        }
+    }
+
+    @ViewBuilder
+    private var sectionList: some View {
         switch appState.selectedSection {
         case .ssh:
             sshListColumn
@@ -548,8 +557,10 @@ struct ContentView: View {
         case .ssh:
             if let hostId = appState.selectedHostId, sshTab == .hosts {
                 HostDetailView(hostId: hostId)
+                    .id(hostId)
             } else if let keyId = appState.selectedKeyId, sshTab == .keys {
                 KeyDetailView(keyId: keyId)
+                    .id(keyId)
             } else if sshTab == .keys {
                 // Distinct copy per tab: the old shared "Select a host or key"
                 // described the UI rather than the job, and said the same thing
@@ -569,6 +580,7 @@ struct ContentView: View {
         case .vpn:
             if let profileId = appState.selectedProfileId {
                 VpnDetailView(profileId: profileId)
+                    .id(profileId)
             } else {
                 EmptyStateView(
                     systemImage: "lock.shield",
@@ -585,6 +597,7 @@ struct ContentView: View {
                let peer = (status.peers + [status.selfNode]).first(where: { $0.id == peerId }) {
                 TailscaleDetailView(peer: peer,
                                     magicSuffix: status.magicDNSSuffix ?? "")
+                    .id(peerId)
             } else {
                 EmptyStateView(
                     systemImage: "globe",
@@ -606,6 +619,7 @@ struct ContentView: View {
                    $0.id == hostId && $0.deviceType.complianceDispatch != .notApplicable
                }) {
                 ComplianceHostView(hostId: hostId)
+                    .id(hostId)
             } else {
                 // The old single line tried to carry both the instruction and
                 // the caveat ("compliance-capable") and did neither well. The
@@ -1135,6 +1149,7 @@ struct ContentView: View {
                                     HStack(spacing: 5) {
                                         Text(host.label)
                                             .fontWeight(host.pinned ? .semibold : .regular)
+                                            .lineLimit(1)
                                         // The density fix: two rows that both
                                         // read ubnt@192.168.2.x now differ at
                                         // a glance by what the box IS.
@@ -1143,6 +1158,7 @@ struct ContentView: View {
                                     Text("\(host.username)@\(host.hostname)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                        .lineLimit(1)
                                 }
                                 Spacer()
                                 // The shared vocabulary: unmeasured is blue
@@ -1150,6 +1166,11 @@ struct ContentView: View {
                                 // gray that claims a reading of down.
                                 StatusDot(status: hostHealthStatus(for: host.id))
                             }
+                            // A sidebar can propose a single-line row height
+                            // after a host moves between customer sections.
+                            // Preserve both text lines and a stable hit area.
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(minHeight: 40)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)

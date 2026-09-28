@@ -158,9 +158,7 @@ impl EngineServer {
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        use crate::unifi_controllers::{
-            password_login, test_connection, PasswordLoginOutcome, UnifiAuthMethod, UnifiController,
-        };
+        use crate::unifi_controllers::{test_connection, UnifiAuthMethod, UnifiController};
         use supermgr_core::vpn::profile::SecretRef;
 
         let label = match params.get("label").and_then(|v| v.as_str()) {
@@ -261,126 +259,16 @@ impl EngineServer {
             updated_at: now,
         };
 
-        // Branch on auth method. API-key path is one round-trip
-        // (sysinfo); password path may need to detour through
-        // an MFA challenge that the GUI completes asynchronously.
-        match auth_method {
-            UnifiAuthMethod::ApiKey => match test_connection(&self.secrets, &controller).await {
-                Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
-                Err(e) => Response::err(
-                    id,
-                    protocol::INTERNAL_ERROR,
-                    format!("controller test failed: {e:#}"),
-                ),
-            },
-            UnifiAuthMethod::Password => {
-                match password_login(&self.secrets, &controller).await {
-                    Ok(PasswordLoginOutcome::Ok(_)) => {
-                        // Login worked without MFA — proceed
-                        // straight to sysinfo + persist.
-                        match test_connection(&self.secrets, &controller).await {
-                            Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
-                            Err(e) => Response::err(
-                                id,
-                                protocol::INTERNAL_ERROR,
-                                format!("sysinfo after login: {e:#}"),
-                            ),
-                        }
-                    }
-                    Ok(PasswordLoginOutcome::MfaRequired {
-                        client,
-                        authenticators,
-                    }) => {
-                        // Park the in-flight challenge so the
-                        // GUI can complete it via send+complete.
-                        let challenge_id = crate::unifi_controllers::park_pending_save(
-                            controller,
-                            client,
-                            authenticators.clone(),
-                        )
-                        .await;
-                        Response::ok(
-                            id,
-                            serde_json::json!({
-                                "mfa_required": true,
-                                "challenge_id": challenge_id,
-                                "authenticators": authenticators,
-                            }),
-                        )
-                    }
-                    Err(e) => Response::err(
-                        id,
-                        protocol::INTERNAL_ERROR,
-                        format!("controller login failed: {e:#}"),
-                    ),
-                }
-            }
-        }
-    }
-
-    /// Trigger an email send for an in-flight MFA challenge.
-    /// Caller supplies the `challenge_id` returned by
-    /// `unifi_controller_save` + the `authenticator_id` of
-    /// whichever email authenticator the operator picked.
-    pub(crate) async fn handle_unifi_controller_mfa_send(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
-        let challenge_id = match params.get("challenge_id").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing challenge_id".to_owned(),
-                )
-            }
-        };
-        let auth_id = match params.get("authenticator_id").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing authenticator_id".to_owned(),
-                )
-            }
-        };
-        match crate::unifi_controllers::send_mfa_email_for_challenge(&challenge_id, &auth_id).await
-        {
-            Ok(()) => Response::ok(id, serde_json::json!({ "sent": true })),
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
-        }
-    }
-
-    /// Submit the email-MFA code to complete a pending
-    /// controller registration. On success the controller is
-    /// persisted + verified.
-    pub(crate) async fn handle_unifi_controller_mfa_complete(
-        &self,
-        id: u64,
-        params: serde_json::Value,
-    ) -> Response {
-        let challenge_id = match params.get("challenge_id").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing challenge_id".to_owned(),
-                )
-            }
-        };
-        let code = match params.get("code").and_then(|v| v.as_str()) {
-            Some(s) if !s.is_empty() => s.to_owned(),
-            _ => return Response::err(id, protocol::INVALID_PARAMS, "missing code".to_owned()),
-        };
-        match crate::unifi_controllers::complete_pending_save(&self.secrets, &challenge_id, &code)
-            .await
-        {
-            Ok((controller, sysinfo)) => self.persist_verified(id, controller, sysinfo).await,
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+        // One sysinfo round trip verifies either kind of credential. A
+        // password account with a second factor fails here, with
+        // directions to an API key.
+        match test_connection(&self.secrets, &controller).await {
+            Ok(sysinfo) => self.persist_verified(id, controller, sysinfo).await,
+            Err(e) => Response::err(
+                id,
+                protocol::INTERNAL_ERROR,
+                format!("controller test failed: {e:#}"),
+            ),
         }
     }
 
