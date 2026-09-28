@@ -26,17 +26,38 @@ struct VpnPollSample {
 
 extension AppState {
     /// Single sweep across all profiles. Each backend has its own
-    /// status RPC on the helper. Helper unreachable: leave
-    /// existing states alone — the helper might just be racing a
-    /// `launchctl bootout` / `bootstrap`, and trampling stable
-    /// states with "disconnected" causes user-visible flicker.
-    /// Public so connect/disconnect actions can force a refresh
-    /// without waiting for the timer.
+    /// status RPC on the helper. Helper absent: leave existing states
+    /// alone — the helper might just be racing a `launchctl bootout` /
+    /// `bootstrap`, and trampling stable states with "disconnected"
+    /// causes user-visible flicker. Helper present but not answering:
+    /// see below. Public so connect/disconnect actions can force a
+    /// refresh without waiting for the timer.
     func pollAllVpnStates() async {
-        let reachable = await HelperClient.shared.isReachable()
-        guard reachable else {
+        let health = await HelperClient.shared.health()
+        helperHealth = health
+        switch health {
+        case .absent:
             DebugLog.write("[AppState] pollAllVpnStates: helper not reachable, leaving states alone")
             return
+        case .unresponsive:
+            // A helper that accepts connections but doesn't answer can vouch
+            // for nothing. Feed "unknown" through the same debounce the status
+            // RPCs use, so a live dot turns to "problem" after the second
+            // silent poll instead of claiming "connected" for as long as the
+            // helper stays wedged.
+            for summary in vpnProfiles {
+                var streak = vpnStatusMissStreak[summary.id] ?? 0
+                vpnConnectionStates[summary.id] = Self.stabilizedVpnState(
+                    previous: vpnConnectionStates[summary.id] ?? "disconnected",
+                    sample: "unknown",
+                    missStreak: &streak
+                )
+                vpnStatusMissStreak[summary.id] = streak
+            }
+            DebugLog.write("[AppState] pollAllVpnStates: helper not answering, states unconfirmed")
+            return
+        case .healthy:
+            break
         }
         guard !vpnProfiles.isEmpty else {
             DebugLog.write("[AppState] pollAllVpnStates: vpnProfiles empty, nothing to poll")

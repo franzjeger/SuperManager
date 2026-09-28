@@ -8,8 +8,37 @@ import XCTest
 /// auth-rejected, customer grouping vs manual grouping — that reads as one
 /// small string on screen and would regress without a sound.
 final class CardModelTests: XCTestCase {
+    func testSSHTestResultBelongsToItsConnection() throws {
+        func host(_ changes: [String: Any] = [:]) throws -> SshHostSummary {
+            let base: [String: Any] = ["id": "h1", "label": "Host", "hostname": "10.0.0.1",
+                                       "port": 22, "username": "frank", "auth_method": "key",
+                                       "auth_key_id": "key1", "device_type": "linux", "pinned": false]
+            let json = try JSONSerialization.data(withJSONObject: base.merging(changes) { _, new in new })
+            return try JSONDecoder().decode(SshHostSummary.self, from: json)
+        }
+        let original = try host()
+        for change: [String: Any] in [["id": "h2"], ["hostname": "10.0.0.2"],
+                                      ["port": 2222], ["username": "root"],
+                                      ["auth_key_id": "key2"], ["auth_method": "password"]] {
+            XCTAssertFalse(original.hasSameConnection(as: try host(change)))
+        }
+        XCTAssertTrue(original.hasSameConnection(as: try host(["label": "Renamed", "group": "acme", "pinned": true])))
+    }
+
 
     // MARK: VPN connection card
+
+    /// A helper that exists but doesn't answer is its own state: nothing on
+    /// the card is confirmed, and the next action is not "install".
+    func testUnresponsiveHelperIsNotReportedAsMissingOrConnected() {
+        let card = VpnConnectionCardModel(
+            helperReachable: true, helperResponding: false, state: "connected",
+            fullTunnel: true, detail: "", lastConnectedAt: nil)
+        XCTAssertEqual(card.title, "Helper not responding")
+        XCTAssertFalse(card.meta.contains("install"))
+        XCTAssertEqual(card.status, .warn)
+    }
+
 
     private func vpn(
         helper: Bool = true, state: String, full: Bool = true,
@@ -62,6 +91,30 @@ final class CardModelTests: XCTestCase {
         XCTAssertEqual(vpn(state: "reconnecting").title, "Reconnecting…")
         XCTAssertEqual(vpn(state: "disconnecting").title, "Disconnecting…")
         XCTAssertEqual(vpn(state: "disconnected").title, "Disconnected")
+    }
+
+    // MARK: VPN shown state
+
+    /// The regression: the poller confirmed the connect while the action was
+    /// still busy. Once the action lets go, the poller's answer is on screen.
+    func testPolledStateReplacesTheActionsOnceItEnds() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: false, actionState: "connecting", polled: "connected"), "connected")
+    }
+
+    /// Mid-action samples are noise: a half-negotiated SA reads as down.
+    func testActionStateHoldsWhileBusy() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: "connecting", polled: "disconnected"), "connecting")
+    }
+
+    /// A view rebuilt mid-action (switched away and back) never had the
+    /// action's state, so it shows the poller's rather than inventing one.
+    func testViewRebuiltMidActionShowsThePolledState() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: nil, polled: "connected"), "connected")
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: nil, polled: nil), "disconnected")
     }
 
     // MARK: SSH host connection card

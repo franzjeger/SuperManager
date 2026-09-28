@@ -41,6 +41,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
+/// `wg-quick` is a bash script that resolves the endpoint, starts
+/// wireguard-go and edits routes and DNS; slow is possible, never finishing
+/// is not. Under the WireGuard mutex, an unbounded run held every later RPC.
+const WG_QUICK_BUDGET: u64 = 30;
+
 /// Brew prefixes to probe for `wg-quick`. Apple Silicon vs Intel.
 const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 
@@ -169,20 +174,23 @@ impl WireGuard {
         // says it's down. Tear it down silently rather than greet
         // the user with "already exists."
         if read_name_mapping(&name).is_some() {
-            let _ = Command::new(&wg_quick)
-                .arg("down")
-                .arg(&conf_path)
-                .env("PATH", path_for_wg_quick(&wg_quick))
-                .output()
-                .await;
+            let _ = crate::proc::bounded_async(
+                Command::new(&wg_quick)
+                    .arg("down")
+                    .arg(&conf_path)
+                    .env("PATH", path_for_wg_quick(&wg_quick)),
+                WG_QUICK_BUDGET,
+            )
+            .await;
             // Belt-and-braces: if there's a residual utunN, force-
             // destroy it. wg-quick down can leave the device when
             // its bash bits choke on missing utilities.
             if let Some(utun) = read_name_mapping(&name) {
-                let _ = Command::new("/sbin/ifconfig")
-                    .args([&utun, "destroy"])
-                    .output()
-                    .await;
+                let _ = crate::proc::bounded_async(
+                    Command::new("/sbin/ifconfig").args([&utun, "destroy"]),
+                    crate::proc::MUTATE,
+                )
+                .await;
                 let _ = std::fs::remove_file(format!("/var/run/wireguard/{name}.name"));
                 let _ = std::fs::remove_file(format!("/var/run/wireguard/{utun}.sock"));
             }
@@ -210,15 +218,17 @@ impl WireGuard {
         // `CONFIG_PATH=/opt/homebrew/etc/wireguard` baked in, so the
         // bare-name path resolves there, not in `/etc/wireguard`.
         // Passing the absolute path bypasses the search.
-        let output = Command::new(&wg_quick)
-            .arg("up")
-            .arg(&conf_path)
-            // wg-quick on Mac shells out to bash + bash needs a sane
-            // PATH to find `wireguard-go`, `route`, `networksetup`.
-            .env("PATH", path_for_wg_quick(&wg_quick))
-            .output()
-            .await
-            .with_context(|| format!("run {}", wg_quick.display()))?;
+        let output = crate::proc::bounded_async(
+            Command::new(&wg_quick)
+                .arg("up")
+                .arg(&conf_path)
+                // wg-quick on Mac shells out to bash + bash needs a sane
+                // PATH to find `wireguard-go`, `route`, `networksetup`.
+                .env("PATH", path_for_wg_quick(&wg_quick)),
+            WG_QUICK_BUDGET,
+        )
+        .await
+        .with_context(|| format!("run {}", wg_quick.display()))?;
 
         if !output.status.success() {
             // Best-effort cleanup so the next attempt isn't poisoned
@@ -272,13 +282,15 @@ impl WireGuard {
         //    same reason as in `connect` — bypass wg-quick's
         //    brew-baked-in CONFIG_PATH.
         let conf_path = conf_path_for(&name);
-        let output = Command::new(&wg_quick)
-            .arg("down")
-            .arg(&conf_path)
-            .env("PATH", path_for_wg_quick(&wg_quick))
-            .output()
-            .await
-            .with_context(|| format!("run {} down", wg_quick.display()))?;
+        let output = crate::proc::bounded_async(
+            Command::new(&wg_quick)
+                .arg("down")
+                .arg(&conf_path)
+                .env("PATH", path_for_wg_quick(&wg_quick)),
+            WG_QUICK_BUDGET,
+        )
+        .await
+        .with_context(|| format!("run {} down", wg_quick.display()))?;
 
         let mut messages: Vec<String> = Vec::new();
         let wg_quick_ok = output.status.success();
@@ -297,10 +309,11 @@ impl WireGuard {
         if let Some(ref utun) = utun_name_before {
             if interface_exists(utun) {
                 // Force-destroy via ifconfig — root, no shell.
-                match Command::new("/sbin/ifconfig")
-                    .args([utun, "destroy"])
-                    .output()
-                    .await
+                match crate::proc::bounded_async(
+                    Command::new("/sbin/ifconfig").args([utun, "destroy"]),
+                    crate::proc::MUTATE,
+                )
+                .await
                 {
                     Ok(out) if out.status.success() => {
                         messages.push(format!("force-destroyed {utun}"));
@@ -394,12 +407,14 @@ impl WireGuard {
         // one tab-separated line per peer with endpoint, allowed IPs,
         // last handshake (unix ts), rx/tx bytes, and keepalive.
         // The interface line precedes the peers.
-        let output = Command::new(&wg_bin)
-            .args(["show", &utun_name, "dump"])
-            .env("PATH", path_for_wg_quick(&wg_quick))
-            .output()
-            .await
-            .context("run wg show dump")?;
+        let output = crate::proc::bounded_async(
+            Command::new(&wg_bin)
+                .args(["show", &utun_name, "dump"])
+                .env("PATH", path_for_wg_quick(&wg_quick)),
+            crate::proc::PROBE,
+        )
+        .await
+        .context("run wg show dump")?;
 
         if !output.status.success() {
             // `wg show dump` failed despite the mapping existing.
@@ -562,14 +577,14 @@ fn read_name_mapping(name: &str) -> Option<String> {
 /// fallback path force-destroys it via `ifconfig`.
 fn interface_exists(name: &str) -> bool {
     // `ifconfig <name>` exits 0 if the interface exists, non-zero
-    // otherwise. We use the synchronous std::process::Command here
-    // because the helper's tokio context is fine with brief blocking
-    // shell-out, and not having to thread async into a single
-    // existence-check keeps this readable.
-    std::process::Command::new("/sbin/ifconfig")
+    // otherwise. Synchronous on purpose — threading async through a single
+    // existence check buys nothing — but BOUNDED, because "brief blocking
+    // shell-out" is exactly the assumption that wedged the helper: this runs on
+    // a tokio worker, and ifconfig on a half-torn-down interface does not
+    // always return.
+    crate::proc::Bounded::new("/sbin/ifconfig")
         .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .budget(crate::proc::PROBE)
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

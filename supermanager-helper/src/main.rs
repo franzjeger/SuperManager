@@ -40,6 +40,7 @@
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,6 +55,7 @@ mod dns;
 mod dns_health_watchdog;
 mod kill_switch;
 mod openvpn;
+mod proc;
 // `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
 // links IOKit + CoreFoundation, and a cargo linker-signed ad-hoc signature on
 // a framework-linking root daemon is rejected by AMFI (OS_REASON_CODESIGNING).
@@ -370,7 +372,11 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             Err(e) => {
+                // EMFILE and friends return at once with the listener still
+                // readable; without a pause this loop spins a core and floods
+                // the log until a descriptor frees up.
                 error!("accept error: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         }
     }
@@ -443,6 +449,15 @@ async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> 
         stream.read_exact(&mut buf).await?;
 
         let response = match serde_json::from_slice::<Request>(&buf) {
+            Ok(req) if is_read_only(&req.method) => {
+                tokio::select! {
+                    response = dispatch(req, &controllers) => response,
+                    () = client_gone(&stream) => {
+                        debug!("client hung up; dropping read-only request");
+                        return Ok(());
+                    }
+                }
+            }
             Ok(req) => dispatch(req, &controllers).await,
             Err(e) => Response::err(0, -32700, format!("parse error: {e}")),
         };
@@ -451,6 +466,74 @@ async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> 
         let len = (resp_bytes.len() as u32).to_be_bytes();
         stream.write_all(&len).await?;
         stream.write_all(&resp_bytes).await?;
+    }
+}
+
+/// Methods that only read state. The app gives up on an RPC at its deadline
+/// and polls again; a read that is still queued (typically behind a backend
+/// mutex held by a slow connect) then has nobody to answer, and it used to
+/// hold its connection and file descriptor until the mutex freed — without
+/// limit while charon was wedged, until `accept()` hit EMFILE. Anything that
+/// changes state runs to completion regardless.
+fn is_read_only(method: &str) -> bool {
+    matches!(
+        method,
+        "ping"
+            | "helper_version"
+            | "tail_log"
+            | "vpn_status"
+            | "wg_status"
+            | "ovpn_status"
+            | "tailscaled_status"
+            | "tailscale_get_dns_fallbacks"
+            | "auto_reconnect_list"
+    )
+}
+
+/// Resolves once the client has closed its end. HelperClient sends one
+/// request per connection and then only reads, so EOF means the caller is
+/// gone. Peeks, so a pipelined request stays in the socket for the next turn.
+async fn client_gone(stream: &UnixStream) {
+    let mut probe = [0u8; 1];
+    loop {
+        if stream.readable().await.is_err() {
+            return;
+        }
+        let peeked = stream.try_io(tokio::io::Interest::READABLE, || {
+            // SAFETY: `stream` owns a valid fd; the buffer is one byte long.
+            let n = unsafe {
+                libc::recv(
+                    stream.as_raw_fd(),
+                    probe.as_mut_ptr().cast(),
+                    1,
+                    libc::MSG_PEEK,
+                )
+            };
+            if n < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(n)
+            }
+        });
+        match peeked {
+            Ok(0) => return,
+            // More bytes: the client is still there. Nothing to watch for.
+            Ok(_) => std::future::pending::<()>().await,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Err(_) => return,
+        }
+    }
+}
+
+/// Run a synchronous handler on tokio's blocking pool. These handlers shell
+/// out — bounded, but for up to a minute (`launchctl bootstrap`, a DHCP
+/// renew) — and run inline they each pin an async worker. A few of them in
+/// flight and nothing is left to answer even `ping`, which the app then
+/// reads as a dead helper.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => value,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
     }
 }
 
@@ -566,12 +649,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // chmod 755 + chown root:wheel on the temp file BEFORE
             // the rename so the active binary always has correct
             // permissions.
-            let _ = std::process::Command::new("/bin/chmod")
-                .args(["755", &tmp_target])
-                .status();
-            let _ = std::process::Command::new("/usr/sbin/chown")
-                .args(["root:wheel", &tmp_target])
-                .status();
+            let _ = proc::bounded(
+                std::process::Command::new("/bin/chmod").args(["755", &tmp_target]),
+                proc::MUTATE,
+            );
+            let _ = proc::bounded(
+                std::process::Command::new("/usr/sbin/chown").args(["root:wheel", &tmp_target]),
+                proc::MUTATE,
+            );
             // Atomic rename. If this fails, the existing target is
             // untouched.
             if let Err(e) = std::fs::rename(&tmp_target, target) {
@@ -775,12 +860,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         // ----- Tailscale daemon management -----
-        // Synchronous (not async) because they shell out to launchctl
-        // + write small files; the Tokio runtime is overkill and the
-        // calls finish in <100 ms.
+        // Synchronous code (launchctl, route, scutil, small files), so it
+        // runs through `blocking` rather than on an async worker.
         "tailscaled_install" => {
             match serde_json::from_value::<tailscale::InstallArgs>(req.params) {
-                Ok(args) => match tailscale::install(args) {
+                Ok(args) => match blocking(move || tailscale::install(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("tailscaled_install failed: {e:#}"))
@@ -792,7 +876,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscaled_uninstall" => {
             match serde_json::from_value::<tailscale::UninstallArgs>(req.params) {
-                Ok(args) => match tailscale::uninstall(args) {
+                Ok(args) => match blocking(move || tailscale::uninstall(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("tailscaled_uninstall failed: {e:#}"))
@@ -804,7 +888,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscaled_status" => {
             match serde_json::from_value::<tailscale::DaemonStatusArgs>(req.params) {
-                Ok(args) => match tailscale::status(args) {
+                Ok(args) => match blocking(move || tailscale::status(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("tailscaled_status failed: {e:#}")),
                 },
@@ -819,7 +903,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // doesn't depend on tailscaled being responsive.
         "tailscale_panic_reset" => {
             match serde_json::from_value::<tailscale::PanicResetArgs>(req.params) {
-                Ok(args) => match tailscale::panic_reset(args) {
+                Ok(args) => match blocking(move || tailscale::panic_reset(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("tailscale_panic_reset failed: {e:#}"))
@@ -837,10 +921,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // `install_magicdns_resolver` for full reasoning.
         "tailscale_install_magicdns_resolver" => {
             match serde_json::from_value::<tailscale::MagicdnsResolverArgs>(req.params) {
-                Ok(args) => match tailscale::install_magicdns_resolver(args) {
-                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
-                    Err(e) => Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}")),
-                },
+                Ok(args) => {
+                    match blocking(move || tailscale::install_magicdns_resolver(args)).await {
+                        Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                        Err(e) => {
+                            Response::err(id, -32000, format!("magicdns_resolver failed: {e:#}"))
+                        }
+                    }
+                }
                 Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }
@@ -855,7 +943,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Ok(args) => {
                     // Read the caller's intent before `args` is consumed below.
                     let auto = args.auto_exit_node;
-                    match tailscale::install_exit_routes(args) {
+                    match blocking(move || tailscale::install_exit_routes(args)).await {
                         Ok(s) => {
                             // Routes are up — record the user's intent so the reconciler
                             // can re-establish them after sleep/wake or a blip.
@@ -865,7 +953,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                             // `auto:any` it is only an observation, so it gets recorded
                             // as such and the reconciler re-asserts `auto:any` rather
                             // than pinning this particular peer.
-                            let (node_id, node_ip) = tailscale::current_exit_node();
+                            let (node_id, node_ip) = blocking(tailscale::current_exit_node).await;
                             if auto {
                                 tailscale_state::set_desired_auto(&node_id, &node_ip);
                             } else {
@@ -884,7 +972,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "tailscale_remove_exit_routes" => {
             match serde_json::from_value::<tailscale::ExitRoutesArgs>(req.params) {
-                Ok(args) => match tailscale::remove_exit_routes(args) {
+                Ok(args) => match blocking(move || tailscale::remove_exit_routes(args)).await {
                     Ok(s) => {
                         // This RPC is the INTENTIONAL clear (user cleared the exit
                         // node) — stop self-heal. The watchdog's blip recovery goes
@@ -909,7 +997,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // committing to full split-default routes.
         "tailscale_test_exit_reachability" => {
             match serde_json::from_value::<tailscale::TestExitArgs>(req.params) {
-                Ok(args) => match tailscale::test_exit_reachability(args) {
+                Ok(args) => match blocking(move || tailscale::test_exit_reachability(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => {
                         Response::err(id, -32000, format!("test_exit_reachability failed: {e:#}"))
@@ -929,7 +1017,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // is a baseline capability.
         "tailscale_set_dns_servers" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-                Ok(args) => match tailscale::set_dns_servers(args) {
+                Ok(args) => match blocking(move || tailscale::set_dns_servers(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("set_dns_servers failed: {e:#}")),
                 },
@@ -944,7 +1032,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // nameserver shadowing the manual config).
         "tailscale_force_dns_state" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-                Ok(args) => match tailscale::force_dns_state(args) {
+                Ok(args) => match blocking(move || tailscale::force_dns_state(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("force_dns_state failed: {e:#}")),
                 },
@@ -957,15 +1045,19 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // so a helper restart keeps the user's preference.
         "tailscale_set_dns_fallbacks" => {
             match serde_json::from_value::<tailscale::SetDnsArgs>(req.params) {
-                Ok(args) => match dns_health_watchdog::set_fallbacks(args.servers) {
-                    Ok(_) => Response::ok(
-                        id,
-                        serde_json::json!({
-                            "fallbacks": dns_health_watchdog::current_fallbacks()
-                        }),
-                    ),
-                    Err(e) => Response::err(id, -32000, format!("set_dns_fallbacks failed: {e:#}")),
-                },
+                Ok(args) => {
+                    match blocking(move || dns_health_watchdog::set_fallbacks(args.servers)).await {
+                        Ok(_) => Response::ok(
+                            id,
+                            serde_json::json!({
+                                "fallbacks": dns_health_watchdog::current_fallbacks()
+                            }),
+                        ),
+                        Err(e) => {
+                            Response::err(id, -32000, format!("set_dns_fallbacks failed: {e:#}"))
+                        }
+                    }
+                }
                 Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }
@@ -1056,7 +1148,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // except via the named tunnel interface + LAN. Idempotent.
         "kill_switch_enable" => match serde_json::from_value::<kill_switch::EnableArgs>(req.params)
         {
-            Ok(args) => match kill_switch::enable(args) {
+            Ok(args) => match blocking(move || kill_switch::enable(args)).await {
                 Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                 Err(e) => Response::err(id, -32000, format!("kill_switch_enable: {e:#}")),
             },
@@ -1065,7 +1157,7 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
 
         "kill_switch_disable" => {
             match serde_json::from_value::<kill_switch::DisableArgs>(req.params) {
-                Ok(args) => match kill_switch::disable(args) {
+                Ok(args) => match blocking(move || kill_switch::disable(args)).await {
                     Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
                     Err(e) => Response::err(id, -32000, format!("kill_switch_disable: {e:#}")),
                 },
@@ -1074,10 +1166,12 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         }
 
         #[cfg(feature = "dev-rpc")]
-        "debug_strip_default_route" => match route_guardian::debug_strip_default_route() {
-            Ok(_) => Response::ok(id, serde_json::json!({"stripped": true})),
-            Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
-        },
+        "debug_strip_default_route" => {
+            match blocking(route_guardian::debug_strip_default_route).await {
+                Ok(_) => Response::ok(id, serde_json::json!({"stripped": true})),
+                Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
+            }
+        }
 
         // Passive traffic capture for cleartext-protocol audit.
         // Runs tcpdump as root (the helper's natural privilege)
@@ -1158,5 +1252,60 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         }
 
         other => Response::err(id, -32601, format!("unknown method: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn client_gone_resolves_on_hangup() {
+        let (server, client) = UnixStream::pair().expect("socketpair");
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), client_gone(&server))
+            .await
+            .expect("EOF from the client must resolve");
+    }
+
+    #[tokio::test]
+    async fn client_gone_leaves_a_live_client_and_its_bytes_alone() {
+        let (server, mut client) = UnixStream::pair().expect("socketpair");
+        client.write_all(b"x").await.expect("write");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), client_gone(&server))
+                .await
+                .is_err(),
+            "pending bytes mean the client is still there"
+        );
+        let mut byte = [0u8; 1];
+        let mut server = server;
+        server
+            .read_exact(&mut byte)
+            .await
+            .expect("peeked byte is still readable");
+        assert_eq!(&byte, b"x");
+    }
+
+    #[test]
+    fn only_reads_are_cancellable() {
+        for method in [
+            "vpn_status",
+            "wg_status",
+            "ovpn_status",
+            "ping",
+            "tailscaled_status",
+        ] {
+            assert!(is_read_only(method), "{method}");
+        }
+        for method in [
+            "vpn_connect",
+            "vpn_disconnect",
+            "tailscaled_install",
+            "system_sleep",
+        ] {
+            assert!(!is_read_only(method), "{method}");
+        }
     }
 }

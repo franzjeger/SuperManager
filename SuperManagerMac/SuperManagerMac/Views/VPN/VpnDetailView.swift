@@ -11,11 +11,25 @@ struct VpnDetailView: View {
     @State private var loading = true
     @State private var loadError: String?
     @State private var actionError: String?
-    @State private var busy = false
+    /// A user-initiated connect/disconnect for this profile is in flight.
+    /// Read from AppState: this view is recreated on every profile switch,
+    /// and view-local state would forget an operation that is still running.
+    private var busy: Bool { appState.vpnBusyProfiles.contains(profileId) }
 
-    /// Tunnel state as reported by the helper, refreshed on a 3 s poll.
-    /// "disconnected" / "connecting" / "connected" / "reconnecting".
-    @State private var vpnState: String = "disconnected"
+    /// What a connect or disconnect started here shows while it runs: the
+    /// state on screen when it began, then whatever it learns. Ignored once
+    /// the action ends — see `VpnConnectionCardModel.shownState`.
+    @State private var actionState: String?
+    /// "disconnected" / "connecting" / "connected" / "reconnecting" /
+    /// "problem": the action's state while one is in flight, the global
+    /// poller's otherwise.
+    private var vpnState: String {
+        VpnConnectionCardModel.shownState(
+            busy: busy,
+            actionState: actionState,
+            polled: appState.vpnConnectionStates[profileId]
+        )
+    }
     @State private var stateDetail: String = ""
     /// Last error surfaced from the VPN log when state is "reconnecting"
     /// or "disconnected" — e.g. "EVENT: TRANSPORT_ERROR NETWORK_EOF_ERROR".
@@ -52,7 +66,10 @@ struct VpnDetailView: View {
     }
 
     @State private var live = LiveTunnel()
-    @State private var helperReachable: Bool = false
+    /// The helper's socket is missing or refusing — the next action is
+    /// installing or approving it. Not yet probed (`nil`) is not missing,
+    /// and a helper that exists but doesn't answer needs no reinstall.
+    private var helperMissing: Bool { appState.helperHealth == .absent }
     @State private var pollTask: Task<Void, Never>?
 
     /// The two "helper isn't up yet" banners surfaced during a boot race
@@ -69,6 +86,9 @@ struct VpnDetailView: View {
         "Helper isn't running yet. Approve the " +
         "background daemon prompt in System Settings → " +
         "General → Login Items, then click Connect again."
+    static let helperUnresponsiveMessage =
+        "The helper is running but not answering. " +
+        "Wait a moment and try again."
 
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
@@ -87,6 +107,7 @@ struct VpnDetailView: View {
     /// routing). Sheet trigger in the kebab menu; saves via
     /// `vpn_update_ikev2_profile` (`EditVpnProfileSheet`).
     @State private var editingProfile = false
+    @State private var missingIKEv2Credentials: VPNKeychain.MissingIKEv2Credentials?
     @State private var showingAzureSignIn = false
     @State private var azureSummaryForSignIn: AzureVpnSummary?
     /// Inline-rename UI. Click the title in the header to enter
@@ -134,14 +155,6 @@ struct VpnDetailView: View {
             .padding()
         }
         .task(id: profileId) {
-            // Seed from the GLOBAL poller's last known state for this
-            // profile rather than hardcoding "disconnected". The global
-            // poller (AppState.startVpnStatusPolling) drives the sidebar
-            // dot and runs continuously; seeding from it means a profile
-            // that is actually connected shows "Connected" immediately on
-            // selection instead of flashing "disconnected" until the
-            // local poll catches up (or never, if its Task has died).
-            vpnState = appState.vpnConnectionStates[profileId] ?? "disconnected"
             // Everything below describes the profile we just navigated AWAY
             // from. None of it survives the switch — the poll for the new
             // profile refills what applies to it, and a backend that doesn't
@@ -149,6 +162,7 @@ struct VpnDetailView: View {
             // last profile's answer.
             stateDetail = ""
             actionError = nil
+            missingIKEv2Credentials = nil
             strongswanMissing = false
             reconnectReason = nil
             live = LiveTunnel()
@@ -156,20 +170,6 @@ struct VpnDetailView: View {
         }
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
-        // Single source of truth (for real): mirror the global poller
-        // into the detail pane. The detail pane used to rely solely on
-        // its own `startPolling` Task, whose lifecycle is tied to
-        // onAppear/onDisappear and could die (e.g. after a connect/
-        // disconnect cycle), leaving `vpnState` stuck on "disconnected"
-        // while the sidebar dot — driven by the always-on global poller
-        // — correctly showed green. Reading both from
-        // `vpnConnectionStates` makes that divergence structurally
-        // impossible. We skip the sync while a user action is in flight
-        // so the optimistic local "connecting" state isn't clobbered.
-        .onChange(of: appState.vpnConnectionStates[profileId]) { _, newValue in
-            guard !busy, let s = newValue else { return }
-            vpnState = s
-        }
         .sheet(isPresented: $showingLog) { logSheet }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
@@ -190,13 +190,19 @@ struct VpnDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $editingProfile) {
+        .sheet(isPresented: $editingProfile, onDismiss: {
+            // Recovery mode belongs to the connect attempt that found the
+            // gap. Cancelled or saved, a later "Edit profile…" is ordinary.
+            missingIKEv2Credentials = nil
+        }) {
             // Full IKEv2 editor. Same guard as the routing sheet: only
             // present with a loaded profile so the pre-fill has data.
             // A fresh `load()` after save picks up the new host /
             // username / routing from the daemon store.
             if let profile {
-                EditVpnProfileSheet(profile: profile) {
+                EditVpnProfileSheet(profile: profile, missingCredentials: missingIKEv2Credentials) {
+                    missingIKEv2Credentials = nil
+                    actionError = nil
                     Task { await load() }
                 }
             }
@@ -489,7 +495,7 @@ struct VpnDetailView: View {
             ) {
                 switch profile.config {
                 case .ikev2:
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -516,7 +522,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .wireguard:
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -537,7 +543,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .openvpn(let cfg):
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -560,7 +566,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .azure(let az):
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -620,9 +626,9 @@ struct VpnDetailView: View {
                     Button("Force Disconnect", role: .destructive) {
                         Task {
                             await appState.forceDisconnect(profileId: profileId)
-                            // Reset local view state so nothing
-                            // lingers from a stuck "connecting".
-                            vpnState = "disconnected"
+                            // The state follows the global map, which
+                            // forceDisconnect just reset; clear what
+                            // described the tunnel that's gone.
                             stateDetail = ""
                             actionError = nil
                         }
@@ -676,7 +682,7 @@ struct VpnDetailView: View {
                     // log lines a few KB above. Surface a one-click jump
                     // into them so users don't have to open Console.app
                     // and chase root permission.
-                    if helperReachable {
+                    if appState.helperHealth == .healthy {
                         HStack(spacing: 8) {
                             Button("View Helper Log…") {
                                 Task { await loadLog() }
@@ -1122,7 +1128,8 @@ struct VpnDetailView: View {
     /// tested seam); the view just supplies its `@State` and reads the outputs.
     private func cardModel(_ profile: VpnProfile) -> VpnConnectionCardModel {
         VpnConnectionCardModel(
-            helperReachable: helperReachable,
+            helperReachable: !helperMissing,
+            helperResponding: appState.helperHealth != .unresponsive,
             state: vpnState,
             fullTunnel: profile.fullTunnel,
             detail: stateDetail,
@@ -1247,14 +1254,12 @@ struct VpnDetailView: View {
     }
 
     private func refreshHelperState() async {
-        // Suspend background status polling while a user-initiated
-        // connect/disconnect is in flight. The connect Task already
-        // updates `vpnState` ("connecting" → "connected"); having a
-        // 3-second poll race against it overwrote that with
-        // "disconnected" between RPC call and tunnel-actually-up,
-        // making the UI flicker.
+        // Stand down while a user action on this profile is in flight: the
+        // action owns the card until it returns, and a status call now would
+        // queue behind the helper's backend lock only to describe a tunnel
+        // mid-change.
         if busy { return }
-        helperReachable = await HelperClient.shared.isReachable()
+        appState.helperHealth = await HelperClient.shared.health()
         // Boot-race recovery: the daemon's Unix socket appears a few
         // seconds after login, but the app may probe (and latch a scary
         // "helper isn't up" banner) before launchd finishes spawning it.
@@ -1263,20 +1268,21 @@ struct VpnDetailView: View {
         // Only the two helper-availability messages are cleared — a real
         // connect error, set while the helper was already reachable, is
         // never one of these and so is left untouched.
-        if helperReachable,
+        if appState.helperHealth == .healthy,
            actionError == Self.helperSocketPendingMessage
-            || actionError == Self.helperNotRunningMessage {
+            || actionError == Self.helperNotRunningMessage
+            || actionError == Self.helperUnresponsiveMessage {
             actionError = nil
         }
-        guard helperReachable, let profile = profile else {
+        guard appState.helperHealth == .healthy, let profile = profile else {
             // Helper briefly unreachable (mid bootout/bootstrap, or a socket
             // hiccup). HOLD the last state — do NOT flip to "disconnected", that
             // was a flicker source. The global poller owns the state and leaves
             // it alone too when the helper is unreachable.
             return
         }
-        // SINGLE SOURCE OF TRUTH: `vpnState` is driven ONLY by the global
-        // debounced poller via `onChange(of: vpnConnectionStates[profileId])`.
+        // SINGLE SOURCE OF TRUTH: `vpnState` is read from the global
+        // debounced poller's `vpnConnectionStates[profileId]`.
         // This local poll no longer writes `vpnState` or
         // `vpnConnectionStates` — it used to write a RAW, un-debounced per-poll
         // status straight into the shared map, which bypassed the debounce and
@@ -1363,29 +1369,38 @@ struct VpnDetailView: View {
 
     // MARK: - Actions
 
-    private func installHelper() async {
+    /// Start a user action on this profile: clear the last error, pin the
+    /// card to what it shows now, and mark the profile busy so a second
+    /// action can't start. Pair with
+    /// `defer { appState.vpnBusyProfiles.remove(profileId) }`.
+    private func beginAction() {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        // Read before `busy` flips: after that `vpnState` is `actionState`,
+        // still holding the previous action's last word.
+        actionState = vpnState
+        appState.vpnBusyProfiles.insert(profileId)
+    }
+
+    private func installHelper() async {
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         do {
             try await HelperInstaller.install()
             // launchd spawns the daemon and it binds its Unix socket a
             // beat later. Poll the socket DIRECTLY here — refreshHelperState()
             // is suppressed while `busy`, so calling it would no-op and
-            // leave `helperReachable` stale, latching the banner even when
+            // leave `helperHealth` stale, latching the banner even when
             // the socket came up fine. Give it a few seconds before giving
             // up so a normal cold start doesn't flash a "socket isn't up"
             // banner the instant the click lands.
-            var reachable = false
-            for _ in 0..<12 {                       // ~6 s: 12 × 500 ms
-                if await HelperClient.shared.isReachable() {
-                    reachable = true
-                    break
-                }
+            let giveUp = ContinuousClock.now + .seconds(6)
+            var health = await HelperClient.shared.health()
+            while health != .healthy, ContinuousClock.now < giveUp {
                 try? await Task.sleep(for: .milliseconds(500))
+                health = await HelperClient.shared.health()
             }
-            helperReachable = reachable
-            if !reachable {
+            appState.helperHealth = health
+            if health != .healthy {
                 actionError = Self.helperSocketPendingMessage
             }
         } catch {
@@ -1394,25 +1409,27 @@ struct VpnDetailView: View {
     }
 
     private func connect(_ profile: VpnProfile) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         guard case .ikev2(let cfg) = profile.config else {
             actionError = "Profile has no IKEv2 configuration"
             return
         }
         do {
+            // Resolve credentials before any helper installation or admin
+            // prompt. Restored profiles may only contain Keychain labels.
+            let credentials = try VPNKeychain.ikev2Credentials(
+                passwordAccount: cfg.password, pskAccount: cfg.psk)
+
             // Reachability alone can leave an old helper running after an
             // app update. install() verifies the bundled build and is a fast
             // no-op when it already matches; upgrades use the normal macOS
             // authorization path once.
             try await HelperInstaller.install()
-            helperReachable = true
+            appState.helperHealth = .healthy
 
-            let password = try VPNKeychain.getString(account: cfg.password)
-            let psk = cfg.psk.isEmpty ? "" : (try VPNKeychain.getString(account: cfg.psk))
-
-            vpnState = "connecting"
+            actionState = "connecting"
+            appState.bumpVpnFastPolling()
             // Pass split-tunnel routes through to the helper so it can
             // template `remote_ts` per the user's choice. Empty
             // routes + `full_tunnel = true` is the default and means
@@ -1427,35 +1444,46 @@ struct VpnDetailView: View {
                 name: profile.name,
                 host: cfg.host,
                 username: cfg.username,
-                password: password,
-                sharedSecret: psk,
+                password: credentials.password,
+                sharedSecret: credentials.sharedSecret,
                 fullTunnel: profile.fullTunnel,
                 routes: cfg.routes,
                 dnsServers: cfg.dnsServers,
                 localId: cfg.localId
             )
-            if let ok = result["ok"] as? Bool, !ok {
+            let ok = (result["ok"] as? Bool) == true
+            if !ok {
                 actionError = (result["message"] as? String) ?? "Connect failed"
-                vpnState = "disconnected"
+                actionState = "disconnected"
             }
-            // Refresh state after connect — gives the user immediate feedback
-            // rather than waiting for the next poll tick.
-            try? await Task.sleep(for: .milliseconds(500))
-            await refreshHelperState()
+            // `vpn_connect` answers once `swanctl --initiate` has, so `ok` is
+            // the helper's verdict on the SA, not a guess. Publish it before
+            // the card falls back to the global state, which otherwise still
+            // holds the state from before the connect: the poller's status
+            // call was queued behind the strongSwan lock the connect held.
+            // The fast poll verifies it.
+            appState.vpnConnectionStates[profileId] = ok ? "connected" : "disconnected"
+        } catch let missing as VPNKeychain.MissingIKEv2Credentials {
+            missingIKEv2Credentials = missing
+            actionError = missing.localizedDescription
+            actionState = "disconnected"
+            editingProfile = true
         } catch {
             actionError = error.localizedDescription
-            vpnState = "disconnected"
+            actionState = "disconnected"
         }
     }
 
     private func disconnect(_ profile: VpnProfile) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
+        appState.bumpVpnFastPolling()
         do {
             _ = try await HelperClient.shared.vpnDisconnect(profileId: profile.id)
-            try? await Task.sleep(for: .milliseconds(500))
-            await refreshHelperState()
+            // Down on the helper's word, published for the same reason as
+            // connect's verdict. Left to the poller, the debounce would also
+            // hold "connected" through the first sample that says otherwise.
+            appState.vpnConnectionStates[profileId] = "disconnected"
         } catch {
             actionError = error.localizedDescription
         }
@@ -1464,56 +1492,58 @@ struct VpnDetailView: View {
     // MARK: - WireGuard
 
     private func connectWireGuard(_ profile: VpnProfile) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
 
         // Re-probe helper, as in the IKEv2 path. Same race window
         // applies — user might toggle the SMAppService approval
         // between view appearance and clicking Connect.
-        if !helperReachable {
-            helperReachable = await HelperClient.shared.isReachable()
-            if !helperReachable {
-                actionError = "Helper isn't running yet. Approve the " +
-                    "background daemon prompt in System Settings → " +
-                    "General → Login Items, then click Connect again."
+        if appState.helperHealth != .healthy {
+            let health = await HelperClient.shared.health()
+            appState.helperHealth = health
+            switch health {
+            case .absent:
+                actionError = Self.helperNotRunningMessage
                 return
+            case .unresponsive:
+                actionError = Self.helperUnresponsiveMessage
+                return
+            case .healthy:
+                break
             }
         }
 
-        vpnState = "connecting"
+        actionState = "connecting"
         let (ok, message) = await appState.wireguardConnect(profileId: profile.id)
         if !ok {
             actionError = message
-            vpnState = "disconnected"
+            actionState = "disconnected"
         } else {
-            // Optimistic — reflect connected state immediately. The
-            // 5-second status poll below verifies and corrects.
-            vpnState = "connected"
+            // The helper's word, shown until the action returns; the global
+            // state the card then goes back to was published and verified
+            // by `wireguardConnect`.
+            actionState = "connected"
             stateDetail = message
         }
         try? await Task.sleep(for: .milliseconds(500))
-        await refreshWireGuardState(profile)
+        await refreshWireGuardDetail(profile)
     }
 
     private func disconnectWireGuard(_ profile: VpnProfile) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         let (_, message) = await appState.wireguardDisconnect(profileId: profile.id)
         stateDetail = message
         try? await Task.sleep(for: .milliseconds(500))
-        await refreshWireGuardState(profile)
+        await refreshWireGuardDetail(profile)
     }
 
-    /// Poll `wg_status` and reflect into `vpnState`. Helper returns
-    /// `connected` / `disconnected` plus byte counters; we only show
-    /// the state in the dot for now.
-    private func refreshWireGuardState(_ profile: VpnProfile) async {
+    /// Poll `wg_status` for the byte counters under the card. The state
+    /// itself is the global poller's, which `wireguardConnect` and
+    /// `wireguardDisconnect` bring up to date before they return.
+    private func refreshWireGuardDetail(_ profile: VpnProfile) async {
         do {
             let result = try await HelperClient.shared.wgStatus(profileId: profile.id)
-            let state = (result["state"] as? String) ?? "disconnected"
-            vpnState = state
             // Surface byte counters as a secondary line — same place
             // strongSwan's `local_ts` / `remote_ts` lands.
             if let rx = result["rx_bytes"] as? Int,
@@ -1530,17 +1560,21 @@ struct VpnDetailView: View {
     // MARK: - OpenVPN
 
     private func connectOpenVPN(_ profile: VpnProfile, configFile: String) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
 
-        if !helperReachable {
-            helperReachable = await HelperClient.shared.isReachable()
-            if !helperReachable {
-                actionError = "Helper isn't running yet. Approve the " +
-                    "background daemon prompt in System Settings → " +
-                    "General → Login Items, then click Connect again."
+        if appState.helperHealth != .healthy {
+            let health = await HelperClient.shared.health()
+            appState.helperHealth = health
+            switch health {
+            case .absent:
+                actionError = Self.helperNotRunningMessage
                 return
+            case .unresponsive:
+                actionError = Self.helperUnresponsiveMessage
+                return
+            case .healthy:
+                break
             }
         }
 
@@ -1548,37 +1582,35 @@ struct VpnDetailView: View {
         // they were stashed there at import time when the user filled
         // in the "Authentication" section of `ImportVpnSheet`.
         // Cert-only profiles store nothing and connect without creds.
-        vpnState = "connecting"
+        actionState = "connecting"
         let (ok, message) = await appState.openVPNConnect(
             profileId: profile.id,
             configFile: configFile
         )
         if !ok {
             actionError = message
-            vpnState = "disconnected"
+            actionState = "disconnected"
         } else {
-            vpnState = "connected"
+            actionState = "connected"
             stateDetail = message
         }
         try? await Task.sleep(for: .milliseconds(500))
-        await refreshOpenVPNState(profile)
+        await refreshOpenVPNDetail(profile)
     }
 
     private func disconnectOpenVPN(_ profile: VpnProfile) async {
-        actionError = nil
-        busy = true
-        defer { busy = false }
+        beginAction()
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         let (_, message) = await appState.openVPNDisconnect(profileId: profile.id)
         stateDetail = message
         try? await Task.sleep(for: .milliseconds(500))
-        await refreshOpenVPNState(profile)
+        await refreshOpenVPNDetail(profile)
     }
 
-    private func refreshOpenVPNState(_ profile: VpnProfile) async {
+    /// The OpenVPN counterpart of `refreshWireGuardDetail`.
+    private func refreshOpenVPNDetail(_ profile: VpnProfile) async {
         do {
             let result = try await HelperClient.shared.ovpnStatus(profileId: profile.id)
-            let state = (result["state"] as? String) ?? "disconnected"
-            vpnState = state
             if let pid = result["pid"] as? Int {
                 stateDetail = "openvpn pid \(pid)"
             }

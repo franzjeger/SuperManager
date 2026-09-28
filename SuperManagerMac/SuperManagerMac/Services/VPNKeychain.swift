@@ -107,6 +107,48 @@ enum VPNKeychain {
         throw KeychainError.osStatus(errSecInternalComponent, "self-test deletion verification")
     }
 
+    struct MissingIKEv2Credentials: Error, LocalizedError {
+        let password: Bool
+        let sharedSecret: Bool
+
+        var errorDescription: String? {
+            "VPN credentials are missing from this Mac's Keychain. " +
+            "A profile restored from another Mac may not include its passwords. " +
+            "Enter the missing credentials in Edit profile, then connect again."
+        }
+    }
+
+    /// A nonempty reference is only an account name, not proof that its
+    /// secret survived a backup restore. An absent or empty secret needs user
+    /// input. That includes the PSK: the helper's IKEv2 config authenticates
+    /// the gateway with it (`remote { auth = psk }`) and has no certificate
+    /// path, so a profile without one can never connect.
+    static func ikev2Credentials(
+        passwordAccount: String,
+        pskAccount: String,
+        read: (String) throws -> String = { try getString(account: $0) }
+    ) throws -> (password: String, sharedSecret: String) {
+        func stored(_ account: String) throws -> String? {
+            guard !account.isEmpty else { return nil }
+            do {
+                return try read(account)
+            } catch KeychainError.osStatus(let status, _) where status == errSecItemNotFound {
+                return nil
+            }
+        }
+
+        let password = try stored(passwordAccount) ?? ""
+        // No reference at all predates per-profile PSK labels. There is no
+        // item to restore into, so pass it through for the helper to reject.
+        let psk = pskAccount.isEmpty ? "" : try stored(pskAccount) ?? ""
+        let missingPassword = password.isEmpty
+        let missingPSK = !pskAccount.isEmpty && psk.isEmpty
+        guard !missingPassword, !missingPSK else {
+            throw MissingIKEv2Credentials(password: missingPassword, sharedSecret: missingPSK)
+        }
+        return (password, psk)
+    }
+
     /// Delete an item. Missing items are ignored.
     static func delete(account: String) {
         let query = baseQuery(account: account)

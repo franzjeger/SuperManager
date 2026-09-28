@@ -298,10 +298,11 @@ fn tick_one(af: Af, missing: &mut u32) {
 /// without filters returns the highest-priority default — which
 /// might be a utun. We post-filter to require non-utun iface.
 fn read_default_route(af: Af) -> Option<RouteSnapshot> {
-    let out = Command::new("/sbin/route")
-        .args(af.route_get_args())
-        .output()
-        .ok()?;
+    let out = crate::proc::bounded(
+        Command::new("/sbin/route").args(af.route_get_args()),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -337,10 +338,11 @@ fn read_default_route(af: Af) -> Option<RouteSnapshot> {
 /// "the user's gateway" (we'd restore a utun route that no
 /// longer exists after the tunnel tears down).
 fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
-    let out = Command::new("/sbin/route")
-        .args(af.route_get_args())
-        .output()
-        .ok()?;
+    let out = crate::proc::bounded(
+        Command::new("/sbin/route").args(af.route_get_args()),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -365,7 +367,7 @@ fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
 /// `-q` keeps stderr silent on the duplicate-add path.
 fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
     let args: Vec<String> = af.route_add_args(&snap.gateway);
-    let out = Command::new("/sbin/route").args(&args).output()?;
+    let out = crate::proc::bounded(Command::new("/sbin/route").args(&args), crate::proc::MUTATE)?;
     if out.status.success() {
         return Ok(());
     }
@@ -392,9 +394,10 @@ fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
 /// carry a "delete the default route" primitive it never uses.
 #[cfg(feature = "dev-rpc")]
 pub fn debug_strip_default_route() -> Result<()> {
-    let out = Command::new("/sbin/route")
-        .args(["-q", "delete", "default"])
-        .output()?;
+    let out = crate::proc::bounded(
+        Command::new("/sbin/route").args(["-q", "delete", "default"]),
+        crate::proc::MUTATE,
+    )?;
     if out.status.success() {
         Ok(())
     } else {
@@ -408,7 +411,10 @@ pub fn debug_strip_default_route() -> Result<()> {
 /// Returns true if the given interface (e.g. `en0`) is `UP`.
 /// Avoids restoring through an interface that lost its link.
 fn interface_is_up(iface: &str) -> bool {
-    let Ok(out) = Command::new("/sbin/ifconfig").arg(iface).output() else {
+    let Ok(out) = crate::proc::bounded(
+        Command::new("/sbin/ifconfig").arg(iface),
+        crate::proc::PROBE,
+    ) else {
         return false;
     };
     if !out.status.success() {

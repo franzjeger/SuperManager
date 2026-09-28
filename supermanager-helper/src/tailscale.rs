@@ -24,7 +24,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+// Every command here is bounded: see `proc::Bounded`.
+use crate::proc::Bounded as Command;
 
 /// Stable on-disk path for the daemon binary. The helper copies the
 /// bundled `tailscaled` here on install. We don't run it directly
@@ -144,8 +145,13 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 
     // 2. Bootout any prior incarnation of the daemon. Failures are
     // expected on first install (job doesn't exist) — ignored.
+    //
+    // `bootout` returns once launchd has stopped the job, and launchd gives
+    // a job 20 s (its default ExitTimeOut) before SIGKILL. Cut shorter, the
+    // bootstrap below races a daemon that is still going away.
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .budget(crate::proc::SLOW)
         .status();
 
     // 3. Copy the bundled binary to its stable location. We copy
@@ -181,6 +187,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     for attempt in 1..=5u32 {
         match Command::new("/bin/launchctl")
             .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .budget(crate::proc::SLOW)
             .output()
         {
             Ok(o) if o.status.success() => {
@@ -201,6 +208,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 
     let _ = Command::new("/bin/launchctl")
         .args(["kickstart", "-k", &format!("system/{}", LAUNCH_LABEL)])
+        .budget(crate::proc::SLOW)
         .status();
 
     Ok(InstallResult {
@@ -214,8 +222,10 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 /// the user's node key + tailnet identity is in there, and a future
 /// reinstall (whether ours or Tailscale.app's) will pick it up.
 pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
+    // SLOW: see the bootout in `install`.
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
+        .budget(crate::proc::SLOW)
         .status();
     if Path::new(LAUNCH_DAEMON_PLIST).exists() {
         let _ = fs::remove_file(LAUNCH_DAEMON_PLIST);
@@ -637,7 +647,8 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
         let mut stdin = child.stdin.take().context("stdin")?;
         stdin.write_all(script.as_bytes())?;
     }
-    let out = child.wait_with_output().context("waiting on scutil")?;
+    let out = crate::proc::wait_bounded(child, crate::proc::MUTATE, "scutil (set State DNS)")
+        .context("waiting on scutil")?;
     if !out.status.success() {
         bail!(
             "scutil failed: {}",
@@ -1106,6 +1117,7 @@ pub fn panic_reset(args: PanicResetArgs) -> Result<InstallResult> {
     // disruption beyond the 50-100 ms reconfig window.
     let renew = Command::new("/usr/sbin/ipconfig")
         .args(["set", &active_iface, "DHCP"])
+        .budget(crate::proc::SLOW)
         .output()
         .context("running ipconfig set DHCP")?;
 
@@ -1738,8 +1750,10 @@ fn daemon_is_loaded() -> bool {
 /// actually loaded rather than trusting a bootstrap that "succeeded"
 /// but left nothing behind.
 fn reload_daemon() {
+    // SLOW: see the bootout in `install`.
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", "system", LAUNCH_DAEMON_PLIST])
+        .budget(crate::proc::SLOW)
         .output();
 
     let mut last_err = String::new();
@@ -1747,6 +1761,7 @@ fn reload_daemon() {
     for attempt in 1..=5u32 {
         match Command::new("/bin/launchctl")
             .args(["bootstrap", "system", LAUNCH_DAEMON_PLIST])
+            .budget(crate::proc::SLOW)
             .output()
         {
             Ok(o) if o.status.success() => {

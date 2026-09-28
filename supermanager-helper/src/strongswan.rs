@@ -825,7 +825,13 @@ fn parse_child_remote_ts(block: &str) -> Vec<String> {
 ///         inet 192.168.250.1 --> 192.168.250.1 netmask 0xffffffff
 /// ```
 fn utun_for_address(addr: &str) -> Option<(String, String)> {
-    let out = std::process::Command::new("/sbin/ifconfig").output().ok()?;
+    // Bounded: this runs from `status` under the strongSwan mutex, right in
+    // the window where a peer reboot is tearing the utun down.
+    let out = crate::proc::bounded(
+        &mut std::process::Command::new("/sbin/ifconfig"),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     let body = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<&str> = None;
     for line in body.lines() {
@@ -893,7 +899,21 @@ async fn wait_for_charon(
     }
 }
 
+/// Ceiling for a swanctl call without a tighter budget of its own. swanctl
+/// waits on charon over vici; a charon that has stopped answering held
+/// `--terminate` / `--load-all` — and, under the strongSwan mutex, every
+/// later status and connect RPC — forever. `kill_on_drop` reaps the
+/// abandoned swanctl; charon finishes or abandons the operation itself.
+const SWANCTL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Budget for the reaper's synchronous `swanctl --list-sas` probe.
+const LIST_SAS_BUDGET: u64 = 3;
+
 async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
+    run_with_timeout(bin, args, SWANCTL_BUDGET).await
+}
+
+async fn exec(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let mut command = Command::new(bin);
     // Use the same Homebrew configuration as the supervised charon process.
     // Environment inherited from launchd must not select a different socket.
@@ -907,6 +927,10 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
                 .env("SWANCTL_DIR", etc.join("swanctl"));
         }
     }
+    // kill_on_drop: callers race this against a timeout (see `status`), and
+    // dropping the future without it leaves the swanctl child alive forever,
+    // still holding its vici connection to the charon that wedged in the first
+    // place. Every poll would add another one.
     let output = command.args(args).kill_on_drop(true).output().await?;
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -1050,7 +1074,7 @@ async fn run_with_timeout(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> anyhow::Result<String> {
-    match tokio::time::timeout(timeout, run(bin, args)).await {
+    match tokio::time::timeout(timeout, exec(bin, args)).await {
         Ok(r) => r,
         Err(_) => Err(anyhow!("{} {:?} timed out", bin.display(), args)),
     }
@@ -1229,6 +1253,14 @@ fn validate_connect_args(args: &ConnectArgs) -> anyhow::Result<()> {
     if !args.full_tunnel && args.routes.is_empty() {
         anyhow::bail!("split-tunnel mode requires at least one route");
     }
+    // `build_swanctl_conf` authenticates the gateway with PSK (`remote {
+    // auth = psk }`) and has no certificate path. Without a secret charon
+    // can only fail IKE_AUTH much later with "no shared key found".
+    if args.shared_secret.is_empty() {
+        anyhow::bail!(
+            "a pre-shared key is required: the gateway authenticates to this Mac with it"
+        );
+    }
     Ok(())
 }
 
@@ -1355,9 +1387,10 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
 /// Safe to call unconditionally — `route delete` is a no-op if the
 /// route doesn't exist.
 fn delete_server_host_route(host: &str) {
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-q", "delete", host])
-        .output();
+    let out = crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-q", "delete", host]),
+        crate::proc::MUTATE,
+    );
     match out {
         Ok(o) if o.status.success() => {
             tracing::info!("route_cleanup: deleted host route for {host}")
@@ -1482,16 +1515,14 @@ fn swanctl_list_sas_established() -> Option<bool> {
         .iter()
         .map(|p| std::path::Path::new(p).join("bin/swanctl"))
         .find(|p| p.exists())?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(
-            std::process::Command::new(&swanctl)
-                .arg("--list-sas")
-                .output(),
-        );
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-        Ok(Ok(o)) if o.status.success() => {
+    // Via proc::bounded rather than a bare worker thread: on timeout that
+    // SIGKILLs the wedged swanctl instead of abandoning it, so a 2s reaper
+    // cycle can't accumulate one stuck child (and one stuck thread) per tick.
+    match crate::proc::bounded(
+        std::process::Command::new(&swanctl).arg("--list-sas"),
+        LIST_SAS_BUDGET,
+    ) {
+        Ok(o) if o.status.success() => {
             Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
         }
         _ => None, // spawn error / non-zero exit / 3s timeout
@@ -1536,9 +1567,10 @@ fn delete_split_default(
             return;
         }
     }
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-q", "delete", family, "-net", del_spec])
-        .output();
+    let out = crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-q", "delete", family, "-net", del_spec]),
+        crate::proc::MUTATE,
+    );
     match out {
         Ok(o) if o.status.success() => {
             tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}")
@@ -1580,12 +1612,22 @@ fn install_ipv6_leak_block() {
                 }
             }
         }
-        let _ = std::process::Command::new("/sbin/route")
-            .args(["-q", "delete", "-inet6", "-net", net])
-            .output();
-        let out = std::process::Command::new("/sbin/route")
-            .args(["-q", "add", "-inet6", "-net", net, "::1", "-blackhole"])
-            .output();
+        let _ = crate::proc::bounded(
+            std::process::Command::new("/sbin/route").args(["-q", "delete", "-inet6", "-net", net]),
+            crate::proc::MUTATE,
+        );
+        let out = crate::proc::bounded(
+            std::process::Command::new("/sbin/route").args([
+                "-q",
+                "add",
+                "-inet6",
+                "-net",
+                net,
+                "::1",
+                "-blackhole",
+            ]),
+            crate::proc::MUTATE,
+        );
         match out {
             Ok(o) if o.status.success() => tracing::info!("ipv6_leak_block: blackholed {net}"),
             Ok(o) => tracing::warn!(
@@ -1601,11 +1643,33 @@ fn install_ipv6_leak_block() {
 /// `route -n get <family> <dest>` (family = `-inet` or `-inet6`). Returns
 /// `None` if the lookup fails or prints no `interface:` line. Used to identify
 /// which backend owns a full-tunnel split-default route before we delete it.
+///
+/// BOUNDED, and this is the one that matters most: `route -n get` blocks
+/// FOREVER when the destination's route points at a utun that no longer
+/// exists — precisely the kernel state left behind when a VPN peer (a
+/// customer firewall) reboots and the tunnel's utun is torn down mid-flight.
+/// This function is called every 2s from the connectivity watchdog's orphan
+/// reaper and on every status poll from a tokio worker, so an unbounded hang
+/// here retires those threads one by one until the helper answers nothing at
+/// all and the GUI freezes on stale state. A timeout resolves to `None`, i.e.
+/// "cannot determine the owner", which every caller already treats as the
+/// cautious answer.
 pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-n", "get", family, dest])
-        .output()
-        .ok()?;
+    let out = match crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-n", "get", family, dest]),
+        crate::proc::PROBE,
+    ) {
+        Ok(out) => out,
+        // A timeout is not "no such route" — it is the RTM_GET hang itself,
+        // i.e. most likely a route on a dead utun, the one answer callers
+        // must not lose. `route get <cidr>` is an exact-prefix lookup, so
+        // the routing-table dump answers the same question without
+        // blocking. Host lookups need longest-prefix matching; no fallback.
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut && dest.contains('/') => {
+            return netstat_route_iface(dest, family);
+        }
+        Err(_) => return None,
+    };
     if !out.status.success() {
         return None;
     }
@@ -1619,6 +1683,55 @@ pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The interface carrying the route for exactly `dest` (a CIDR), read from
+/// the kernel routing-table dump. `netstat -rn` gets that via sysctl, which
+/// never waits for a per-route reply — unlike `route -n get`, whose `RTM_GET`
+/// blocks when the route points at a torn-down utun. Same exact-prefix
+/// semantics as `route -n get <cidr>`.
+pub(crate) fn netstat_route_iface(dest: &str, family: &str) -> Option<String> {
+    let want: ipnet::IpNet = dest.parse().ok()?;
+    let af = if family == "-inet6" { "inet6" } else { "inet" };
+    let out = crate::proc::bounded(
+        std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", af]),
+        crate::proc::PROBE,
+    )
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    iface_for_net(&String::from_utf8_lossy(&out.stdout), want)
+}
+
+/// Find `want` in `netstat -rn` output (Destination Gateway Flags Netif …).
+fn iface_for_net(table: &str, want: ipnet::IpNet) -> Option<String> {
+    table.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            return None;
+        }
+        (parse_netstat_net(fields[0])? == want).then(|| fields[3].to_owned())
+    })
+}
+
+/// Parse a destination as `netstat -rn` prints it: IPv4 networks drop
+/// trailing zero octets (`0/1`, `128.0/1`, `10.8/16`), IPv6 may carry a
+/// `%scope`. Host routes and `default` have no prefix and yield `None`.
+fn parse_netstat_net(dest: &str) -> Option<ipnet::IpNet> {
+    let (addr, len) = dest.split_once('/')?;
+    let addr = addr.split('%').next()?;
+    let full = if addr.contains(':') {
+        addr.to_owned()
+    } else {
+        let mut octets: Vec<&str> = addr.split('.').collect();
+        if octets.is_empty() || octets.len() > 4 {
+            return None;
+        }
+        octets.resize(4, "0");
+        octets.join(".")
+    };
+    format!("{full}/{len}").parse().ok()
 }
 
 /// Set of kernel interfaces currently owned by a live non-strongSwan VPN
@@ -1644,10 +1757,10 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
         if !wg.exists() {
             continue;
         }
-        if let Ok(out) = std::process::Command::new(&wg)
-            .args(["show", "interfaces"])
-            .output()
-        {
+        if let Ok(out) = crate::proc::bounded(
+            std::process::Command::new(&wg).args(["show", "interfaces"]),
+            crate::proc::PROBE,
+        ) {
             if out.status.success() {
                 for name in String::from_utf8_lossy(&out.stdout).split_whitespace() {
                     set.insert(name.to_string());
@@ -1680,10 +1793,11 @@ pub(crate) fn tailscaled_alive() -> bool {
 }
 
 pub(crate) fn tailscale_tunnel_iface() -> Option<String> {
-    let out = std::process::Command::new("/usr/sbin/netstat")
-        .args(["-rn", "-f", "inet"])
-        .output()
-        .ok()?;
+    let out = crate::proc::bounded(
+        std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", "inet"]),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -1858,6 +1972,11 @@ mod tests {
         assert!(validate_connect_args(&a).is_err());
         a.username = "alice\0bob".to_owned();
         assert!(validate_connect_args(&a).is_err());
+        let a = args("vpn.example.com", "alice", "pw", "");
+        assert!(
+            validate_connect_args(&a).is_err(),
+            "empty PSK must be rejected up front"
+        );
     }
 
     #[test]
@@ -2369,6 +2488,59 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(
             s.contains(r#"\"b\\c"#),
             "PSK quote/backslash not escaped:\n{s}"
+        );
+    }
+
+    #[test]
+    fn netstat_destinations_match_their_cidrs() {
+        let table = "\
+Routing tables
+
+Internet:
+Destination        Gateway            Flags               Netif Expire
+default            192.168.200.1      UGScg                 en0
+0/1                10.8.0.1           UGSc                utun7
+10.8/16            utun7              USc                 utun7
+100.64/10          utun12             USc                utun12
+128.0/1            10.8.0.1           UGSc                utun7
+169.254            link#14            UCS                   en0      !
+";
+        let net = |s: &str| s.parse::<ipnet::IpNet>().unwrap();
+        assert_eq!(
+            iface_for_net(table, net("0.0.0.0/1")).as_deref(),
+            Some("utun7")
+        );
+        assert_eq!(
+            iface_for_net(table, net("128.0.0.0/1")).as_deref(),
+            Some("utun7")
+        );
+        assert_eq!(
+            iface_for_net(table, net("10.8.0.0/16")).as_deref(),
+            Some("utun7")
+        );
+        assert_eq!(
+            iface_for_net(table, net("100.64.0.0/10")).as_deref(),
+            Some("utun12")
+        );
+        // Exact prefix, like `route -n get <cidr>`: a covering route is not a match.
+        assert_eq!(iface_for_net(table, net("100.64.0.0/12")), None);
+
+        let table6 = "\
+Internet6:
+Destination                             Gateway                                 Flags               Netif Expire
+default                                 fe80::aa9c:6cff:fe8c:4bd%en0            UGScg                 en0
+::/1                                    ::1                                     UGRSc                 lo0
+8000::/1                                fe80::%utun4                            UGcIg               utun4
+fe80::%utun4/64                         fe80::1%utun4                           UcI                 utun4
+";
+        assert_eq!(iface_for_net(table6, net("::/1")).as_deref(), Some("lo0"));
+        assert_eq!(
+            iface_for_net(table6, net("8000::/1")).as_deref(),
+            Some("utun4")
+        );
+        assert_eq!(
+            iface_for_net(table6, net("fe80::/64")).as_deref(),
+            Some("utun4")
         );
     }
 

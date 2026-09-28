@@ -25,7 +25,7 @@ import Foundation
 /// `/usr/local/bin/tailscale` for Homebrew installs, or the App
 /// Store app's bundled binary at
 /// `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. We probe
-/// both, in that order, and report a clear "not installed" error
+/// both, preferring our managed service, and report a clear "not installed" error
 /// if neither exists. The user installs Tailscale through their
 /// own preferred channel; we don't try to install it.
 enum TailscaleClient {
@@ -46,64 +46,90 @@ enum TailscaleClient {
         }
     }
 
-    /// Probe candidate paths in priority order. Returns the first
-    /// path that's both executable on disk *and* actually runs (a
-    /// dead App Store shim at `/usr/local/bin/tailscale` is
-    /// executable but exec-ing it returns 126 — we want to skip
-    /// those).
-    ///
-    /// Priority:
-    ///   1. The bundled binary inside SuperManager.app — guarantees
-    ///      a working tailscale even if the user has uninstalled
-    ///      Tailscale.app or homebrew's formula.
-    ///   2. Homebrew on Apple Silicon.
-    ///   3. Homebrew on Intel + the legacy App Store shim path.
-    ///   4. App Store / DMG install location.
-    ///
-    /// Result is cached under a lock for the process lifetime — the
-    /// validate step does fork+exec which costs ~30 ms per call, and
-    /// the binary doesn't move while we're running.
-    private static func locateBinary() -> URL? {
-        binaryCache.resolve { cached in
-            if let cached { return cached }
-            var candidates: [String] = []
-            // 1. Our own bundled copy. Build phase
-            // `bundle_tailscale.sh` writes here.
-            if let bundled = Bundle.main.url(
-                forResource: "tailscale",
-                withExtension: nil,
-                subdirectory: "tailscale-bin"
-            ) {
-                candidates.append(bundled.path)
-            }
-            // 2-4. Common system locations as fallback. Order matters:
-            // /opt/homebrew first on arm64 because it's most likely the
-            // *real* binary; /usr/local/bin last because it's where the
-            // App Store leaves a dead shim.
-            candidates.append(contentsOf: [
-                "/opt/homebrew/bin/tailscale",
-                "/opt/homebrew/opt/tailscale/bin/tailscale",
-                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-                "/usr/local/bin/tailscale",
-            ])
+    static let nativeAppBinaryPath = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    static let managedSocketPath = "/var/run/tailscaled.socket"
 
-            for path in candidates {
-                guard FileManager.default.isExecutableFile(atPath: path) else { continue }
-                let url = URL(fileURLWithPath: path)
-                if validateBinary(at: url) {
-                    return url
-                }
-            }
-            return nil
+    /// Pick the `tailscale` CLI, in priority order:
+    ///   1. The copy bundled in SuperManager.app (`bundle_tailscale.sh`), so
+    ///      SuperManager's own service keeps its lifecycle and feature set.
+    ///   2. Homebrew (Apple Silicon path, then the opt path).
+    ///   3. Tailscale.app — a compatibility fallback for builds without a
+    ///      managed CLI.
+    ///   4. `/usr/local/bin`, last: the App Store leaves a dead shim there.
+    ///
+    /// The list is walked on every call so a CLI installed or removed while
+    /// we run is noticed — a cached fallback must never mask a managed CLI
+    /// that appeared later. `cached` only spares the current answer its
+    /// probe; `locateBinary` memoizes every other verdict per file, so a
+    /// walk costs a few stat(2) calls rather than a process per candidate.
+    static func resolveBinary(
+        bundledPath: String?, cached: URL?,
+        isExecutable: (String) -> Bool,
+        validate: (URL) -> Bool
+    ) -> URL? {
+        var candidates: [String] = []
+        if let bundledPath { candidates.append(bundledPath) }
+        candidates.append(contentsOf: [
+            "/opt/homebrew/bin/tailscale",
+            "/opt/homebrew/opt/tailscale/bin/tailscale",
+            nativeAppBinaryPath,
+            "/usr/local/bin/tailscale",
+        ])
+        for path in candidates {
+            guard isExecutable(path) else { continue }
+            let url = URL(fileURLWithPath: path)
+            if url == cached || validate(url) { return url }
+        }
+        return nil
+    }
+
+    private static func locateBinary() -> URL? {
+        let bundledPath = Bundle.main.url(forResource: "tailscale", withExtension: nil,
+                                          subdirectory: "tailscale-bin")?.path
+        return binaryCache.resolve { cached in
+            resolveBinary(
+                bundledPath: bundledPath, cached: cached,
+                isExecutable: { FileManager.default.isExecutableFile(atPath: $0) },
+                validate: { validationMemo.verdict(for: $0, probe: validateBinary) })
         }
     }
 
-    /// Probe whether a candidate `tailscale` binary actually
-    /// executes. Returns false for shell shims that point at a
-    /// missing target (the App Store leaves
-    /// `/usr/local/bin/tailscale` behind after uninstall, exec-ing
-    /// it returns 126 with "no such file or directory").
-    private static func validateBinary(at url: URL) -> Bool {
+    /// Native Tailscale manages routes, DNS and its service lifecycle.
+    /// SuperManager's open-source-daemon workarounds must not touch it.
+    static var usesNativeApp: Bool { locateBinary()?.path == nativeAppBinaryPath }
+
+    /// Do not rely on CLI auto-discovery: every managed command, including
+    /// login and preference changes, must address the helper's own daemon.
+    static func commandArguments(bin: URL, args: [String]) -> [String] {
+        bin.path == nativeAppBinaryPath ? args : ["--socket=\(managedSocketPath)"] + args
+    }
+
+    /// Whether Tailscale.app's own backend currently has a live connection.
+    ///
+    /// Only a definite answer counts. With the app quit, its CLI does not
+    /// fail — it waits for a backend that never comes (observed: still
+    /// silent after 90 s), so the probe is bounded, and "no answer" means
+    /// what it looks like: nothing is connected through Tailscale.app.
+    static func nativeAppIsConnected() async -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: nativeAppBinaryPath) else { return false }
+        // Only the state field: a decode that also demands the full peer
+        // model would turn any schema drift into "not connected".
+        struct Backend: Decodable { let BackendState: String }
+        guard let output = try? await runTask(bin: URL(fileURLWithPath: nativeAppBinaryPath),
+                                              args: ["status", "--json"],
+                                              timeout: .seconds(5)),
+              let backend = try? JSONDecoder().decode(Backend.self, from: Data(output.utf8))
+        else { return false }
+        // `Starting` is a connection in progress; treat it like `Running`.
+        return backend.BackendState == "Running" || backend.BackendState == "Starting"
+    }
+
+    /// Probe whether a candidate `tailscale` binary actually executes.
+    /// `false` for shims pointing at a missing target (the App Store leaves
+    /// `/usr/local/bin/tailscale` behind; exec-ing it returns 126). `nil`
+    /// when it didn't finish within 2 s — a slow first exec (a Gatekeeper
+    /// scan after an update) is not a verdict and must not be remembered.
+    private static func validateBinary(at url: URL) -> Bool? {
         let process = Process()
         process.executableURL = url
         process.arguments = ["version"]
@@ -114,11 +140,11 @@ enum TailscaleClient {
         process.terminationHandler = { _ in exited.signal() }
         do {
             try process.run()
-            // waitUntilExit pumps the caller's run loop and can reenter
-            // discovery from SwiftUI while the cache lock is held.
+            // waitUntilExit pumps the calling run loop. During SwiftUI layout
+            // that can reenter binary lookup while its cache lock is held.
             guard exited.wait(timeout: .now() + 2) == .success else {
                 process.terminate()
-                return false
+                return nil
             }
             return process.terminationStatus == 0
         } catch {
@@ -126,8 +152,51 @@ enum TailscaleClient {
         }
     }
 
-    /// Status, preferences and profile refreshes overlap. Protect the complete
-    /// read/resolve/write operation so no task retains a URL freed by another.
+    /// `validateBinary` verdicts, remembered per file identity (device,
+    /// inode, size, mtime — after following symlinks). A replaced or
+    /// upgraded binary gets a new identity and is probed again; an
+    /// inconclusive probe is never stored.
+    final class ValidationMemo: @unchecked Sendable {
+        private struct Identity: Equatable {
+            let device: Int32
+            let inode: UInt64
+            let size: Int64
+            let seconds: Int
+            let nanoseconds: Int
+
+            init?(path: String) {
+                var info = stat()
+                guard stat(path, &info) == 0 else { return nil }
+                device = info.st_dev
+                inode = info.st_ino
+                size = info.st_size
+                seconds = info.st_mtimespec.tv_sec
+                nanoseconds = info.st_mtimespec.tv_nsec
+            }
+        }
+
+        private let lock = NSLock()
+        private var verdicts: [String: (identity: Identity, valid: Bool)] = [:]
+
+        func verdict(for url: URL, probe: (URL) -> Bool?) -> Bool {
+            guard let identity = Identity(path: url.path) else { return false }
+            lock.lock()
+            let known = verdicts[url.path]
+            lock.unlock()
+            if let known, known.identity == identity { return known.valid }
+            guard let valid = probe(url) else { return false }
+            lock.lock()
+            verdicts[url.path] = (identity, valid)
+            lock.unlock()
+            return valid
+        }
+    }
+
+    private static let validationMemo = ValidationMemo()
+
+    /// Status, preferences and profiles refresh concurrently. Protect the
+    /// entire read/resolve/write operation: racing URL assignments can free
+    /// the cached URL while another task is retaining or replacing it.
     final class BinaryCache: @unchecked Sendable {
         private let lock = NSLock()
         private var cached: URL?
@@ -207,7 +276,8 @@ enum TailscaleClient {
     /// opens it in the browser.
     static func up() async throws {
         guard let bin = locateBinary() else { throw ClientError.notInstalled }
-        _ = try await runTask(bin: bin, args: ["up", "--reset"])
+        // Reconnecting to the coordination server takes real network time.
+        _ = try await runTask(bin: bin, args: ["up", "--reset"], timeout: .seconds(60))
     }
 
     /// Bring the Tailscale tunnel down. Useful for the "vår WG
@@ -292,7 +362,7 @@ enum TailscaleClient {
         try await Task.detached(priority: .userInitiated) {
             let process = Process()
             process.executableURL = bin
-            process.arguments = args
+            process.arguments = commandArguments(bin: bin, args: args)
             let stderr = Pipe()
             let stdout = Pipe()
             process.standardError = stderr
@@ -489,46 +559,108 @@ enum TailscaleClient {
     /// All `tailscale set` calls and prefs reads funnel through here
     /// — the args tuple is logged so we can post-mortem "the toggle
     /// didn't take effect" without instrumenting every call site.
-    private static func runTask(bin: URL, args: [String]) async throws -> String {
-        try await Task.detached(priority: .userInitiated) {
-            // Log every invocation. Args list is small (<10 elements),
-            // and the cost is dominated by the fork+exec anyway.
-            DebugLog.write("[ts/cli] $ \(bin.lastPathComponent) \(args.joined(separator: " "))")
-            let process = Process()
-            process.executableURL = bin
-            process.arguments = args
-            let stdout = Pipe()
-            let stderr = Pipe()
-            process.standardOutput = stdout
-            process.standardError = stderr
-            try process.run()
-            // Read both pipes concurrently to avoid blocking on a
-            // full stderr buffer when stdout is the big one.
-            let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-            let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            let outString = String(data: outData, encoding: .utf8) ?? ""
-            let errString = String(data: errData, encoding: .utf8) ?? ""
-            if process.terminationStatus != 0 {
-                DebugLog.write("[ts/cli] FAILED exit=\(process.terminationStatus) "
-                    + "stderr=\(errString.trimmingCharacters(in: .whitespacesAndNewlines)) "
-                    + "stdout=\(outString.trimmingCharacters(in: .whitespacesAndNewlines))")
-                throw ClientError.daemonNotRunning(
-                    "exit \(process.terminationStatus): \(errString.trimmingCharacters(in: .whitespacesAndNewlines))"
-                )
+    ///
+    /// Bounded by `timeout`: a CLI waiting for a backend that never answers
+    /// (a wedged tailscaled, or Tailscale.app's CLI with the app quit) is
+    /// stopped instead of holding its caller, and a thread, forever. Runs on
+    /// a GCD queue, not the Swift cooperative pool, for the same reason.
+    private static func runTask(
+        bin: URL, args: [String], timeout: Duration = .seconds(30)
+    ) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result {
+                    try runBlocking(bin: bin, args: args, timeout: timeout)
+                })
             }
-            // Suppress logging the full status JSON (10s of KB) to
-            // keep the log readable. For `set` and other terse
-            // commands, output is normally empty on success.
-            if !args.contains("status") && !args.contains("prefs") {
-                let preview = outString.prefix(200).trimmingCharacters(in: .whitespacesAndNewlines)
-                if !preview.isEmpty {
-                    DebugLog.write("[ts/cli] ok stdout=\(preview)")
-                } else {
-                    DebugLog.write("[ts/cli] ok (silent)")
-                }
+        }
+    }
+
+    private static func runBlocking(bin: URL, args: [String], timeout: Duration) throws -> String {
+        // Log every invocation. Args list is small (<10 elements),
+        // and the cost is dominated by the fork+exec anyway.
+        DebugLog.write("[ts/cli] $ \(bin.lastPathComponent) \(args.joined(separator: " "))")
+        let process = Process()
+        process.executableURL = bin
+        process.arguments = commandArguments(bin: bin, args: args)
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+
+        // At the deadline: SIGTERM, then SIGKILL if that is ignored. The
+        // pipes close with the process, so the reads below return.
+        let expiry = Expiry()
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout / .seconds(1)) {
+            guard process.isRunning else { return }
+            expiry.fire()
+            process.terminate()
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             }
-            return outString
-        }.value
+        }
+
+        // Drain stderr concurrently: reading one pipe to EOF while the child
+        // blocks on a full buffer of the other would deadlock both.
+        let stderrData = DataBox()
+        let stderrDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            stderrData.value = stderr.fileHandleForReading.readDataToEndOfFile()
+            stderrDone.signal()
+        }
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        stderrDone.wait()
+        process.waitUntilExit()
+        let outString = String(data: outData, encoding: .utf8) ?? ""
+        let errString = String(data: stderrData.value, encoding: .utf8) ?? ""
+        if expiry.fired && process.terminationReason == .uncaughtSignal {
+            DebugLog.write("[ts/cli] TIMEOUT after \(timeout): \(args.joined(separator: " "))")
+            throw ClientError.daemonNotRunning(
+                "`tailscale \(args.joined(separator: " "))` got no answer within \(timeout)")
+        }
+        if process.terminationStatus != 0 {
+            DebugLog.write("[ts/cli] FAILED exit=\(process.terminationStatus) "
+                + "stderr=\(errString.trimmingCharacters(in: .whitespacesAndNewlines)) "
+                + "stdout=\(outString.trimmingCharacters(in: .whitespacesAndNewlines))")
+            throw ClientError.daemonNotRunning(
+                "exit \(process.terminationStatus): \(errString.trimmingCharacters(in: .whitespacesAndNewlines))"
+            )
+        }
+        // Suppress logging the full status JSON (10s of KB) to
+        // keep the log readable. For `set` and other terse
+        // commands, output is normally empty on success.
+        if !args.contains("status") && !args.contains("prefs") {
+            let preview = outString.prefix(200).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !preview.isEmpty {
+                DebugLog.write("[ts/cli] ok stdout=\(preview)")
+            } else {
+                DebugLog.write("[ts/cli] ok (silent)")
+            }
+        }
+        return outString
+    }
+
+    /// Set by the deadline timer, read once the process has exited.
+    private final class Expiry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func fire() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        var fired: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    /// Written by the stderr reader before it signals, read after the wait.
+    private final class DataBox: @unchecked Sendable {
+        var value = Data()
     }
 }

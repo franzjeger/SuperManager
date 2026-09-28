@@ -121,7 +121,7 @@ extension AppState {
         let running = tailscaleStatus?.backendState == "Running"
         let corpDNS = tailscalePrefs?.corpDNS ?? false
         let suffix = tailscaleStatus?.magicDNSSuffix ?? ""
-        let shouldInstall = running && corpDNS && !suffix.isEmpty
+        let shouldInstall = !TailscaleClient.usesNativeApp && running && corpDNS && !suffix.isEmpty
         let target: String? = shouldInstall ? suffix : nil
         if target == lastInstalledMagicDNSDomain { return }
         if let suf = target {
@@ -263,7 +263,9 @@ extension AppState {
     /// this app has hit before. Best-effort; the switch proceeds anyway.
     func switchTailscaleProfile(_ id: String) async {
         tailscaleActionError = nil
-        _ = try? await HelperClient.shared.tailscaleRemoveExitRoutes()
+        if !TailscaleClient.usesNativeApp {
+            _ = try? await HelperClient.shared.tailscaleRemoveExitRoutes()
+        }
         _ = try? await TailscaleClient.setExitNode("")
         do {
             try await TailscaleClient.switchProfile(id)
@@ -310,6 +312,10 @@ extension AppState {
     /// them visible without a modal alert.
     func installTailscaled() async {
         tailscaleActionError = nil
+        guard !TailscaleClient.usesNativeApp else {
+            tailscaleActionError = "Tailscale.app already manages this Mac's connection. A second daemon is not needed."
+            return
+        }
         guard let daemonPath = TailscaleClient.bundledDaemonPath else {
             tailscaleActionError = "Tailscale daemon binary isn't bundled in this build."
             DebugLog.write("[ts] installTailscaled: bundled daemon path missing")
@@ -317,6 +323,10 @@ extension AppState {
         }
         DebugLog.write("[ts] installTailscaled: starting, daemon=\(daemonPath)")
         do {
+            guard await !TailscaleClient.nativeAppIsConnected() else {
+                tailscaleActionError = "Disconnect Tailscale.app before starting SuperManager's Tailscale service. Running both creates two identities and conflicting routes."
+                return
+            }
             try await HelperInstaller.install()
             
             let result = try await HelperClient.shared.tailscaledInstall(
@@ -388,15 +398,28 @@ extension AppState {
         // We do this before the helper call because the daemon
         // sometimes responds even when the routing table is
         // half-dead (it talks over a Unix socket, not the network).
+        var cliError: String?
         do {
             try await TailscaleClient.setExitNode("")
             try await TailscaleClient.setAcceptRoutes(false)
             DebugLog.write("[ts/panic] CLI clear succeeded")
         } catch {
-            DebugLog.write("[ts/panic] CLI clear failed: \(error.localizedDescription) — continuing to helper")
+            cliError = error.localizedDescription
+            DebugLog.write("[ts/panic] CLI clear failed: \(error.localizedDescription)")
+        }
+        // Native Tailscale applies routing changes through its extension.
+        // The legacy helper reset would change a different daemon and DHCP,
+        // so the CLI step is the whole reset and its failure is the result.
+        if TailscaleClient.usesNativeApp {
+            tailscaleActionError = cliError
+            await refreshTailscale()
+            return
         }
         // 2. Helper-side: clear again from root context AND renew
-        // DHCP. The DHCP renew is the part that requires root.
+        // DHCP. The DHCP renew is the part that requires root. Its
+        // result is the reset's result: the CLI step above was only
+        // best-effort, and failing is expected when tailscaled is the
+        // thing that's wedged.
         do {
             let result = try await HelperClient.shared.tailscalePanicReset()
             let success = (result["success"] as? Bool) ?? false
@@ -440,6 +463,16 @@ extension AppState {
     static let autoAnyExitNode = "auto:any"
 
     func setExitNodeWithSafety(_ ipOrAuto: String) async {
+        if TailscaleClient.usesNativeApp {
+            await applyTailscalePref(
+                optimistic: { p in
+                    p.exitNodeIP = ipOrAuto == Self.autoAnyExitNode ? "" : ipOrAuto
+                    p.exitNodeID = ""
+                },
+                cli: { try await TailscaleClient.setExitNode(ipOrAuto) }
+            )
+            return
+        }
         DebugLog.write("[ts/exit] === setExitNodeWithSafety START target=\(ipOrAuto.isEmpty ? "<NONE>" : ipOrAuto) ===")
         // Suspend connectivity watchdog for 30 seconds so the
         // disruptive transition (DNS reconfig, TCP resets, brief

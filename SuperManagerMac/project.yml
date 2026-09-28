@@ -232,14 +232,25 @@ targets:
         script: |
           set -euo pipefail
           cd "${SRCROOT}/.."
-          # Use the same toolchain as a manual `cargo build` would.
-          # Honour PATH so /opt/homebrew/bin and ~/.cargo/bin are visible.
-          export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin"
+          # Build with the toolchain a manual `cargo build` in the developer's
+          # terminal uses: take PATH from their login shell. A fixed PATH put
+          # rustup's ~/.cargo/bin ahead of Homebrew and compiled with another
+          # rustc than the terminal and release.sh — two artifact sets in one
+          # target/, and Xcode shipping binaries neither of them would build.
+          LOGIN_SHELL="$(dscl . -read "/Users/${USER}" UserShell 2>/dev/null | awk '{print $2}' || true)"
+          LOGIN_PATH="$("${LOGIN_SHELL:-/bin/zsh}" -lc 'printf "%s" "$PATH"' 2>/dev/null | tail -n 1 || true)"
+          export PATH="${LOGIN_PATH:+${LOGIN_PATH}:}$HOME/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin"
           # `-p` is required: the workspace's `default-members`
           # excludes the Mac crates so Linux CI can build cleanly,
           # which means a bare `--bin <name>` lookup doesn't see
           # them. `-p <crate>` builds the package's only bin.
-          cargo build --release -p supermgrd-mac -p supermanager-helper
+          if ! cargo build --release -p supermgrd-mac -p supermanager-helper; then
+              echo "error: cargo build failed ($(command -v cargo))." >&2
+              echo "error: if rustc cannot load proc-macro crates (\"can't find crate\"," \
+                   "\"mis-aligned LINKEDIT\") after an OS or Xcode update, the cached" \
+                   "artifacts predate the new linker: run cargo clean --release." >&2
+              exit 1
+          fi
 
     postBuildScripts:
       - name: Bundle Tailscale CLI + daemon
@@ -266,6 +277,28 @@ targets:
           set -euo pipefail
           APP="${TARGET_BUILD_DIR}/${PRODUCT_NAME}.app"
           mkdir -p "${APP}/Contents/Library/LaunchDaemons"
+
+          # Refuse to embed a binary older than its sources. The cargo phase
+          # guarantees freshness; if it is ever skipped again, embedding
+          # target/release as-is ships a helper without the latest Rust
+          # changes, and nothing downstream notices.
+          ROOT="${SRCROOT}/.."
+          require_fresh() {
+              local bin="$1"; shift
+              [ -x "${bin}" ] || { echo "error: ${bin} is missing; run cargo build --release" >&2; exit 1; }
+              local newer
+              newer="$(find "$@" -newer "${bin}" \( -name '*.rs' -o -name Cargo.toml \) -print -quit)"
+              if [ -n "${newer}" ]; then
+                  echo "error: ${bin} is older than ${newer}; run cargo build --release" >&2
+                  exit 1
+              fi
+          }
+          require_fresh "${ROOT}/target/release/supermanager-helper" \
+              "${ROOT}/supermanager-helper/src" "${ROOT}/supermanager-helper/Cargo.toml"
+          require_fresh "${ROOT}/target/release/supermgrd-mac" \
+              "${ROOT}/supermgrd-mac/src" "${ROOT}/supermgrd-mac/Cargo.toml" \
+              "${ROOT}/supermgr-engine/src" "${ROOT}/supermgr-engine/Cargo.toml" \
+              "${ROOT}/supermgr-core/src" "${ROOT}/supermgr-core/Cargo.toml"
 
           cp "${SRCROOT}/../target/release/supermgrd-mac"          \
              "${APP}/Contents/MacOS/supermgrd-mac"
