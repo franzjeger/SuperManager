@@ -55,13 +55,6 @@ struct ContentView: View {
     }
 
     var body: some View {
-        // Read observable navigation and loaded-data state while evaluating
-        // this view's body. NavigationSplitView retains its column builders;
-        // resolving these properties only inside those escaping closures can
-        // leave the columns at their initial contents while the sidebar and
-        // toolbar update (including a welcome screen after loading profiles).
-        let currentList = listColumn
-        let currentDetail = detailColumn
         // NavigationSplitView gives us native macOS sidebar styling — items
         // pack at the top, the divider drag is correct, and the system
         // handles the empty-detail state without us showing two parallel
@@ -73,7 +66,16 @@ struct ContentView: View {
                 NavigationSplitView {
                     sidebarColumn
                 } content: {
-                    currentList
+                    // Identity per section on each column's content, not on
+                    // the split view: switching sections replaces the content
+                    // outright instead of diffing one section's views into
+                    // another's (macOS otherwise kept showing the previous
+                    // section's column), while the split view — the sidebar
+                    // list that was just clicked, its keyboard focus, collapse
+                    // state and column widths — keeps its own. Selections live
+                    // in AppState, so nothing is lost with the old content.
+                    listColumn
+                        .id(appState.selectedSection)
                         // ideal == max on purpose: a fresh split-view build
                         // settles the column at max, a rebuild at ideal, so
                         // unequal values gave the list two different widths
@@ -81,7 +83,8 @@ struct ContentView: View {
                         // divider draggable.
                         .navigationSplitViewColumnWidth(min: 240, ideal: 380, max: 380)
                 } detail: {
-                    currentDetail
+                    detailColumn
+                        .id(appState.selectedSection)
                         // Title on the DETAIL column, not the split view. Set
                         // globally, macOS floats it after the toolbar items
                         // with no relationship to the column edges, and with a
@@ -97,15 +100,12 @@ struct ContentView: View {
                 NavigationSplitView {
                     sidebarColumn
                 } detail: {
-                    currentDetail
+                    detailColumn
+                        .id(appState.selectedSection)
                         .navigationTitle("SuperManager")
                 }
             }
         }
-        // A section has its own navigation hierarchy. Recreate the column
-        // hosts when switching sections so macOS cannot retain the previous
-        // section's opaque builder output. Selections live in AppState.
-        .id(appState.selectedSection)
         // nil = follow macOS. The override applies to this window and every
         // sheet and popover presented from it.
         .preferredColorScheme(
