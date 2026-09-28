@@ -63,9 +63,9 @@ final class HelperClient {
         do {
             _ = try await roundTrip(method: "ping", params: [:])
             return .healthy
-        } catch let failure as TransportFailure {
-            if failure.helperMissing { return .absent }
-            DebugLog.write("[helper] ping unanswered: \(failure.error.localizedDescription)")
+        } catch let failure as UnixSocketRPC.Failure {
+            if failure.kind == .unreachable { return .absent }
+            DebugLog.write("[helper] ping unanswered: \(failure)")
             return .unresponsive
         } catch {
             // An RPC or decode error is still an answer.
@@ -461,12 +461,6 @@ final class HelperClient {
 
     private static var nextId: UInt64 = 0
 
-    /// Blocking socket I/O runs here, never on the Swift cooperative pool: a
-    /// wedged helper would otherwise park one pool thread per in-flight RPC,
-    /// and with a handful of pollers that starves every other task in the app.
-    private static let ioQueue = DispatchQueue(
-        label: "com.sybr.supermanager.helper-rpc", qos: .userInitiated, attributes: .concurrent)
-
     /// End-to-end budget for one RPC. These are ceilings derived from the
     /// helper's own per-command budgets (`proc.rs`), not guesses: an IKEv2
     /// connect may legitimately spend 30 s in `swanctl --initiate`, and
@@ -498,48 +492,28 @@ final class HelperClient {
         }
     }
 
-    /// A round trip that failed in transport, tagged with whether the request
-    /// frame was completely written. The helper parses nothing until it has
-    /// the whole frame, so an unsent request cannot have run.
-    private struct TransportFailure: Error {
-        let error: HelperError
-        let requestSent: Bool
-
-        var helperMissing: Bool {
-            if case .notInstalled = error { return true }
-            return false
-        }
-    }
-
-    /// Where a round trip must be finished by, and what to call it if not.
-    private struct Deadline: Sendable {
-        let method: String
-        let budget: Duration
-        let instant: ContinuousClock.Instant
-    }
-
     private func call(_ method: String, params: [String: Any]) async throws -> [String: Any] {
         do {
             return try await roundTrip(method: method, params: params)
-        } catch let failure as TransportFailure {
+        } catch let failure as UnixSocketRPC.Failure {
             // Retry only what provably never reached the helper (it was
             // restarting between accept and read). Once the frame is written
             // the helper may be executing it — most of these RPCs change
             // system state, and a second `vpn_connect` kills the charon the
             // first one just brought up — so any later failure is final.
-            guard !failure.requestSent, !failure.helperMissing else { throw failure.error }
-            DebugLog.write("[helper] retry \(method) after I/O failure before send: \(failure.error.localizedDescription)")
+            guard !failure.requestSent, failure.kind != .unreachable else { throw Self.helperError(failure) }
+            DebugLog.write("[helper] retry \(method) after I/O failure before send: \(failure)")
             try? await Task.sleep(for: .milliseconds(400))
             do {
                 return try await roundTrip(method: method, params: params)
-            } catch let again as TransportFailure {
-                throw again.error
+            } catch let again as UnixSocketRPC.Failure {
+                throw Self.helperError(again)
             }
         }
     }
 
     /// One request/response exchange on a fresh connection. Throws
-    /// `TransportFailure` for socket-level failures, `HelperError` for
+    /// `UnixSocketRPC.Failure` for socket-level failures, `HelperError` for
     /// everything the helper actually said.
     private func roundTrip(method: String, params: [String: Any]) async throws -> [String: Any] {
         Self.nextId &+= 1
@@ -549,17 +523,12 @@ final class HelperClient {
             "params": params,
             "id": Self.nextId,
         ] as [String: Any])
-        var frame = Data(capacity: 4 + body.count)
-        withUnsafeBytes(of: UInt32(body.count).bigEndian) { frame.append(contentsOf: $0) }
-        frame.append(body)
-
-        let budget = Self.budget(for: method)
-        let deadline = Deadline(method: method, budget: budget, instant: .now + budget)
-        let reply: Data = try await withCheckedThrowingContinuation { continuation in
-            Self.ioQueue.async {
-                continuation.resume(with: Result { try Self.exchange(frame, deadline: deadline) })
-            }
-        }
+        let reply = try await UnixSocketRPC.roundTrip(
+            path: Self.socketPath,
+            body: body,
+            deadline: .init(method: method, budget: Self.budget(for: method)),
+            maxReply: 10 * 1024 * 1024
+        )
 
         guard let json = try? JSONSerialization.jsonObject(with: reply) as? [String: Any] else {
             throw HelperError.decodeFailure("not a JSON object")
@@ -572,156 +541,11 @@ final class HelperClient {
         return json["result"] as? [String: Any] ?? [:]
     }
 
-    /// Connect, send `frame`, read one reply frame — all against a single
-    /// absolute deadline. The socket is non-blocking and every wait is a
-    /// `poll()` bounded by the time left, so no syscall can outlive the
-    /// budget, however the helper misbehaves (accepts and goes silent, or
-    /// trickles bytes).
-    nonisolated private static func exchange(_ frame: Data, deadline: Deadline) throws -> Data {
-        let fd: Int32
-        do {
-            fd = try connectSocket()
-        } catch let error as HelperError {
-            throw TransportFailure(error: error, requestSent: false)
-        }
-        defer { close(fd) }
-        do {
-            try writeAll(fd: fd, data: frame, deadline: deadline)
-        } catch let error as HelperError {
-            throw TransportFailure(error: error, requestSent: false)
-        }
-        do {
-            let header = try readExact(fd: fd, count: 4, deadline: deadline)
-            let length = header.withUnsafeBytes { UInt32(bigEndian: $0.loadUnaligned(as: UInt32.self)) }
-            guard length <= 10 * 1024 * 1024 else {
-                throw HelperError.ioFailure("frame too large (\(length) bytes)")
-            }
-            return try readExact(fd: fd, count: Int(length), deadline: deadline)
-        } catch let error as HelperError {
-            throw TransportFailure(error: error, requestSent: true)
-        }
-    }
-
-    nonisolated private static func connectSocket() throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw HelperError.ioFailure("socket(): errno=\(errno)")
-        }
-        // A helper that exits mid-exchange must come back as EPIPE, not as a
-        // SIGPIPE that terminates the whole app — nothing here ignores it.
-        var on: Int32 = 1
-        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            let e = errno
-            close(fd)
-            throw HelperError.ioFailure("setsockopt(SO_NOSIGPIPE): errno=\(e)")
-        }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let pathBytes = Array(Self.socketPath.utf8)
-        let sunPathCap = MemoryLayout.size(ofValue: addr.sun_path)
-        guard pathBytes.count < sunPathCap else {
-            close(fd)
-            throw HelperError.ioFailure("socket path too long")
-        }
-        // Copy into the fixed-size sun_path C-array. Locking in `sunPathCap`
-        // up front avoids the exclusivity violation Swift would otherwise
-        // flag for reading `addr.sun_path` while we hold a mutable pointer
-        // to it.
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            ptr.withMemoryRebound(to: CChar.self, capacity: sunPathCap) { dst in
-                for (i, b) in pathBytes.enumerated() {
-                    dst[i] = CChar(bitPattern: b)
-                }
-                dst[pathBytes.count] = 0
-            }
-        }
-        // AF_UNIX connect() never blocks on macOS: it either lands in the
-        // listen backlog or fails at once (ECONNREFUSED when the backlog is
-        // full or nobody listens).
-        let rc = withUnsafePointer(to: &addr) { p in
-            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
-                connect(fd, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        if rc != 0 {
-            let e = errno
-            close(fd)
-            if e == ENOENT || e == ECONNREFUSED {
-                throw HelperError.notInstalled
-            }
-            throw HelperError.ioFailure("connect(): errno=\(e)")
-        }
-        let flags = fcntl(fd, F_GETFL)
-        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else {
-            let e = errno
-            close(fd)
-            throw HelperError.ioFailure("fcntl(O_NONBLOCK): errno=\(e)")
-        }
-        return fd
-    }
-
-    nonisolated private static func writeAll(fd: Int32, data: Data, deadline: Deadline) throws {
-        try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Void in
-            var written = 0
-            while written < data.count {
-                let n = write(fd, buf.baseAddress! + written, data.count - written)
-                if n > 0 {
-                    written += n
-                    continue
-                }
-                let e = errno
-                if n < 0 && e == EINTR { continue }
-                guard n < 0 && (e == EAGAIN || e == EWOULDBLOCK) else {
-                    throw HelperError.ioFailure("write(): errno=\(e)")
-                }
-                try waitUntilReady(fd: fd, events: Int16(POLLOUT), deadline: deadline)
-            }
-        }
-    }
-
-    nonisolated private static func readExact(fd: Int32, count: Int, deadline: Deadline) throws -> Data {
-        var data = Data(count: count)
-        guard count > 0 else { return data }
-        try data.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) -> Void in
-            var got = 0
-            while got < count {
-                let n = read(fd, buf.baseAddress! + got, count - got)
-                if n > 0 {
-                    got += n
-                    continue
-                }
-                if n == 0 {
-                    throw HelperError.ioFailure("helper closed the connection mid-reply")
-                }
-                let e = errno
-                if e == EINTR { continue }
-                guard e == EAGAIN || e == EWOULDBLOCK else {
-                    throw HelperError.ioFailure("read(): errno=\(e)")
-                }
-                try waitUntilReady(fd: fd, events: Int16(POLLIN), deadline: deadline)
-            }
-        }
-        return data
-    }
-
-    /// Wait for `events` on `fd` until the call's deadline. Readiness includes
-    /// hang-up and error; the read or write that follows reports which.
-    nonisolated private static func waitUntilReady(fd: Int32, events: Int16, deadline: Deadline) throws {
-        while true {
-            let left = ContinuousClock.now.duration(to: deadline.instant)
-            guard left > .zero else {
-                throw HelperError.ioFailure(
-                    "\(deadline.method) got no answer within \(deadline.budget) (helper not responding)")
-            }
-            let (seconds, attoseconds) = left.components
-            let milliseconds = Int32(clamping: seconds * 1000 + attoseconds / 1_000_000_000_000_000 + 1)
-            var pfd = pollfd(fd: fd, events: events, revents: 0)
-            let rc = poll(&pfd, 1, milliseconds)
-            if rc > 0 { return }
-            if rc < 0 && errno != EINTR {
-                throw HelperError.ioFailure("poll(): errno=\(errno)")
-            }
-            // Timed out or interrupted: the loop re-checks the deadline.
+    private static func helperError(_ failure: UnixSocketRPC.Failure) -> HelperError {
+        switch failure.kind {
+        case .unreachable: return .notInstalled
+        case .timedOut: return .ioFailure("\(failure) (helper not responding)")
+        case .replyTooLarge, .io: return .ioFailure(failure.description)
         }
     }
 }
