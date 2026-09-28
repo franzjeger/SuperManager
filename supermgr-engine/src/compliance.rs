@@ -64,6 +64,15 @@ async fn extract_cli(
     Ok(value)
 }
 
+/// Whether a run reads anything over SSH. Only CLI checks do, and the
+/// `FortiGate` library has none today.
+#[must_use]
+pub fn needs_ssh() -> bool {
+    fortigate_default_checks()
+        .iter()
+        .any(|def| matches!(def.channel, Channel::Cli))
+}
+
 pub async fn run(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
