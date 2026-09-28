@@ -40,6 +40,12 @@ class AppState {
     /// from "helper not running".
     var helperHealth: HelperClient.Health?
 
+    /// Profiles with a user-initiated connect/disconnect in flight. Kept here,
+    /// not in the detail view's `@State`: that view is recreated on every
+    /// profile switch, and a fresh `busy = false` re-enabled Connect while the
+    /// first connect still held the helper's strongSwan lock — the second
+    /// click then killed the charon the first had just brought up.
+    var vpnBusyProfiles: Set<String> = []
     /// Per-profile connection state, keyed by profile id. Populated
     /// by the global VPN poller (`startVpnStatusPolling`). Drives
     /// the green-dot indicators in the VPN list — without this, you

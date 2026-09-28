@@ -11,7 +11,10 @@ struct VpnDetailView: View {
     @State private var loading = true
     @State private var loadError: String?
     @State private var actionError: String?
-    @State private var busy = false
+    /// A user-initiated connect/disconnect for this profile is in flight.
+    /// Read from AppState: this view is recreated on every profile switch,
+    /// and view-local state would forget an operation that is still running.
+    private var busy: Bool { appState.vpnBusyProfiles.contains(profileId) }
 
     /// Tunnel state as reported by the helper, refreshed on a 3 s poll.
     /// "disconnected" / "connecting" / "connected" / "reconnecting".
@@ -1377,8 +1380,8 @@ struct VpnDetailView: View {
 
     private func installHelper() async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         do {
             try await HelperInstaller.install()
             // launchd spawns the daemon and it binds its Unix socket a
@@ -1405,8 +1408,8 @@ struct VpnDetailView: View {
 
     private func connect(_ profile: VpnProfile) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         guard case .ikev2(let cfg) = profile.config else {
             actionError = "Profile has no IKEv2 configuration"
             return
@@ -1467,8 +1470,8 @@ struct VpnDetailView: View {
 
     private func disconnect(_ profile: VpnProfile) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         do {
             _ = try await HelperClient.shared.vpnDisconnect(profileId: profile.id)
             try? await Task.sleep(for: .milliseconds(500))
@@ -1482,8 +1485,8 @@ struct VpnDetailView: View {
 
     private func connectWireGuard(_ profile: VpnProfile) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
 
         // Re-probe helper, as in the IKEv2 path. Same race window
         // applies — user might toggle the SMAppService approval
@@ -1520,8 +1523,8 @@ struct VpnDetailView: View {
 
     private func disconnectWireGuard(_ profile: VpnProfile) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         let (_, message) = await appState.wireguardDisconnect(profileId: profile.id)
         stateDetail = message
         try? await Task.sleep(for: .milliseconds(500))
@@ -1553,8 +1556,8 @@ struct VpnDetailView: View {
 
     private func connectOpenVPN(_ profile: VpnProfile, configFile: String) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
 
         if appState.helperHealth != .healthy {
             let health = await HelperClient.shared.health()
@@ -1593,8 +1596,8 @@ struct VpnDetailView: View {
 
     private func disconnectOpenVPN(_ profile: VpnProfile) async {
         actionError = nil
-        busy = true
-        defer { busy = false }
+        appState.vpnBusyProfiles.insert(profileId)
+        defer { appState.vpnBusyProfiles.remove(profileId) }
         let (_, message) = await appState.openVPNDisconnect(profileId: profile.id)
         stateDetail = message
         try? await Task.sleep(for: .milliseconds(500))
