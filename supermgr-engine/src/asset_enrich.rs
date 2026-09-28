@@ -105,41 +105,37 @@ fn classify_v4(addr: Ipv4Addr) -> Zone {
 }
 
 /// Reverse-DNS lookup using the OS resolver. Bounded timeout so a
-/// stalled DNS server doesn't block the whole enrichment pass.
+/// stalled DNS server doesn't block the whole enrichment pass; the
+/// `host` process is killed with it rather than left to finish alone.
 pub async fn reverse_dns(ip: &str) -> Option<String> {
-    let ip_owned = ip.to_owned();
-    let res = tokio::time::timeout(
+    let parsed: IpAddr = ip.parse().ok()?;
+    // std::net has no reverse DNS — shell out to `host` (BSD/macOS).
+    // Falls back to None on any failure; not worth a hard error.
+    let out = tokio::time::timeout(
         Duration::from_secs(2),
-        tokio::task::spawn_blocking(move || {
-            let parsed: IpAddr = ip_owned.parse().ok()?;
-            // std::net has no reverse DNS — shell out to `host` (BSD/macOS).
-            // Falls back to None on any failure; not worth a hard error.
-            let out = std::process::Command::new("host")
-                .arg(parsed.to_string())
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            let s = String::from_utf8_lossy(&out.stdout);
-            // Output: "1.0.168.192.in-addr.arpa domain name pointer foo.local."
-            for line in s.lines() {
-                if let Some(idx) = line.find(" domain name pointer ") {
-                    let rest = &line[idx + " domain name pointer ".len()..];
-                    let name = rest.trim().trim_end_matches('.').to_owned();
-                    if !name.is_empty() {
-                        return Some(name);
-                    }
-                }
-            }
-            None
-        }),
+        tokio::process::Command::new("host")
+            .kill_on_drop(true)
+            .arg(parsed.to_string())
+            .output(),
     )
-    .await;
-    match res {
-        Ok(Ok(opt)) => opt,
-        _ => None,
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
     }
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Output: "1.0.168.192.in-addr.arpa domain name pointer foo.local."
+    for line in s.lines() {
+        if let Some(idx) = line.find(" domain name pointer ") {
+            let rest = &line[idx + " domain name pointer ".len()..];
+            let name = rest.trim().trim_end_matches('.').to_owned();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }
 
 /// Enrich a list of IPs in parallel — bounded to 16 concurrent

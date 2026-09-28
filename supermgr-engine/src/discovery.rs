@@ -228,11 +228,16 @@ pub async fn passive_scan(
 // ---------------------------------------------------------------------------
 
 async fn scan_arp_cache() -> Result<Vec<DiscoveredHost>> {
-    let output = tokio::process::Command::new("arp")
-        .args(["-an"])
-        .output()
-        .await
-        .context("run arp -an")?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new("arp")
+            .kill_on_drop(true)
+            .args(["-an"])
+            .output(),
+    )
+    .await
+    .context("arp -an timed out")?
+    .context("run arp -an")?;
     if !output.status.success() {
         return Err(anyhow::anyhow!(
             "arp -an exited {}: {}",
@@ -417,6 +422,7 @@ struct MdnsEntry {
 async fn run_dns_sd_browse(service_type: &str) -> Result<Vec<MdnsEntry>> {
     let domain = format!("{service_type}.local");
     let mut child = tokio::process::Command::new("dns-sd")
+        .kill_on_drop(true)
         .args(["-B", service_type, "local."])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -464,6 +470,7 @@ async fn run_dns_sd_browse(service_type: &str) -> Result<Vec<MdnsEntry>> {
 
 async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<MdnsEntry> {
     let mut child = tokio::process::Command::new("dns-sd")
+        .kill_on_drop(true)
         .args(["-L", instance, service_type, "local."])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -526,10 +533,15 @@ async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<Mdn
 // ---------------------------------------------------------------------------
 
 async fn list_local_interfaces() -> Result<Vec<LocalInterface>> {
-    let output = tokio::process::Command::new("ifconfig")
-        .output()
-        .await
-        .context("run ifconfig")?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::process::Command::new("ifconfig")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("ifconfig timed out")?
+    .context("run ifconfig")?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(parse_ifconfig(&stdout))
 }

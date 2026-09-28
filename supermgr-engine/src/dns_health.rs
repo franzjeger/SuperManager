@@ -379,6 +379,7 @@ async fn dig(name: &str, rrtype: &str) -> Vec<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new("dig")
+            .kill_on_drop(true)
             .args(["+short", "+timeout=2", "+tries=1", rrtype, name])
             .output(),
     )

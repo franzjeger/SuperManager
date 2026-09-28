@@ -115,6 +115,7 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     drop(out_file);
 
     let mut cmd = tokio::process::Command::new("pandoc");
+    cmd.kill_on_drop(true);
     cmd.args([
         "--from=gfm",
         "--standalone",
@@ -214,6 +215,7 @@ pub async fn render_html(input: &ReportInput<'_>) -> Result<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("pandoc")
+            .kill_on_drop(true)
             .args([
                 "--from=gfm",
                 "--to=html5",
