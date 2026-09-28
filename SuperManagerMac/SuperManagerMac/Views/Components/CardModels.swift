@@ -24,7 +24,7 @@ struct VpnConnectionCardModel {
     /// False when the helper exists but did not answer its last ping. Nothing
     /// the card shows can be confirmed then, and the fix is not reinstalling.
     var helperResponding: Bool = true
-    /// The debounced per-profile state string (`stabilizedVpnState`'s output).
+    /// The state on screen — `shownState(busy:actionState:polled:)`'s answer.
     let state: String
     /// Full vs split tunnel, for the meta line.
     let fullTunnel: Bool
@@ -75,6 +75,23 @@ struct VpnConnectionCardModel {
             // we have (e.g. "status query timed out (charon busy)").
             return detail
         }
+    }
+
+    /// Which state the card, and the connect/disconnect button with it, shows.
+    ///
+    /// A user action on the profile owns the answer while it runs: it starts
+    /// from what was on screen and moves it as it learns, because the poller's
+    /// samples in that window are noise — a half-negotiated SA reads as
+    /// "disconnected". The moment the action ends, the global poller's
+    /// debounced state is the answer again.
+    ///
+    /// Worked out on every render, never mirrored into view state: a mirror
+    /// that skips updates while an action runs loses the one that lands in
+    /// that window, and "connected" always does — it is ready the instant
+    /// `vpn_connect` releases the helper's strongSwan lock.
+    static func shownState(busy: Bool, actionState: String?, polled: String?) -> String {
+        if busy, let actionState { return actionState }
+        return polled ?? "disconnected"
     }
 }
 

@@ -93,6 +93,30 @@ final class CardModelTests: XCTestCase {
         XCTAssertEqual(vpn(state: "disconnected").title, "Disconnected")
     }
 
+    // MARK: VPN shown state
+
+    /// The regression: the poller confirmed the connect while the action was
+    /// still busy. Once the action lets go, the poller's answer is on screen.
+    func testPolledStateReplacesTheActionsOnceItEnds() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: false, actionState: "connecting", polled: "connected"), "connected")
+    }
+
+    /// Mid-action samples are noise: a half-negotiated SA reads as down.
+    func testActionStateHoldsWhileBusy() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: "connecting", polled: "disconnected"), "connecting")
+    }
+
+    /// A view rebuilt mid-action (switched away and back) never had the
+    /// action's state, so it shows the poller's rather than inventing one.
+    func testViewRebuiltMidActionShowsThePolledState() {
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: nil, polled: "connected"), "connected")
+        XCTAssertEqual(VpnConnectionCardModel.shownState(
+            busy: true, actionState: nil, polled: nil), "disconnected")
+    }
+
     // MARK: SSH host connection card
 
     func testNotTestedIsUnknownWithAnInvitation() {
