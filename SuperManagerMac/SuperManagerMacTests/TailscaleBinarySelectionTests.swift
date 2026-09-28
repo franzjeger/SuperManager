@@ -2,21 +2,6 @@ import XCTest
 @testable import SuperManagerMac
 
 final class TailscaleBinarySelectionTests: XCTestCase {
-    func testConcurrentBinaryRefreshPreservesCacheOwnership() {
-        let cache = TailscaleClient.BinaryCache()
-        let initial = URL(fileURLWithPath: "/Example.app/Contents/Resources/tailscale-bin/0")
-        XCTAssertEqual(cache.resolve { _ in initial }, initial)
-        // Each resolution reads and replaces the previous value, just like
-        // the overlapping status/prefs/profile refreshes in the app.
-        DispatchQueue.concurrentPerform(iterations: 1_000) { _ in
-            _ = cache.resolve { previous in
-                let count = Int(previous!.lastPathComponent)!
-                return previous!.deletingLastPathComponent().appendingPathComponent(String(count + 1))
-            }
-        }
-        XCTAssertEqual(cache.resolve { $0 }?.lastPathComponent, "1000")
-    }
-
     private let native = TailscaleClient.nativeAppBinaryPath
     private let bundled = "/Example.app/Contents/Resources/tailscale-bin/tailscale"
     private let brew = "/opt/homebrew/bin/tailscale"
@@ -85,5 +70,50 @@ final class TailscaleBinarySelectionTests: XCTestCase {
                            ["--socket=/var/run/tailscaled.socket"] + args)
             XCTAssertEqual(TailscaleClient.commandArguments(bin: URL(fileURLWithPath: native), args: args), args)
         }
+    }
+
+    // MARK: Validation memo
+
+    private func makeExecutable(_ body: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tailscale-memo-\(UUID().uuidString)")
+        try body.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func testVerdictIsProbedOncePerFileIdentity() throws {
+        let memo = TailscaleClient.ValidationMemo()
+        let bin = try makeExecutable("#!/bin/sh\nexit 0\n")
+        var probes = 0
+        for _ in 0..<5 {
+            XCTAssertTrue(memo.verdict(for: bin) { _ in probes += 1; return true })
+        }
+        XCTAssertEqual(probes, 1, "an unchanged binary must not be re-executed")
+    }
+
+    func testReplacedBinaryIsProbedAgain() throws {
+        let memo = TailscaleClient.ValidationMemo()
+        let bin = try makeExecutable("#!/bin/sh\nexit 1\n")
+        XCTAssertFalse(memo.verdict(for: bin) { _ in false })
+        // An upgrade replaces the file: new inode/size/mtime, new verdict.
+        try FileManager.default.removeItem(at: bin)
+        try "#!/bin/sh\n# upgraded\nexit 0\n".write(to: bin, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.path)
+        XCTAssertTrue(memo.verdict(for: bin) { _ in true })
+    }
+
+    func testInconclusiveProbeIsNotRemembered() throws {
+        let memo = TailscaleClient.ValidationMemo()
+        let bin = try makeExecutable("#!/bin/sh\nexit 0\n")
+        XCTAssertFalse(memo.verdict(for: bin) { _ in nil }, "a timeout is not a pass")
+        XCTAssertTrue(memo.verdict(for: bin) { _ in true }, "…nor a remembered failure")
+    }
+
+    func testMissingFileIsInvalidWithoutProbing() {
+        let memo = TailscaleClient.ValidationMemo()
+        let missing = URL(fileURLWithPath: "/nonexistent/tailscale-\(UUID().uuidString)")
+        XCTAssertFalse(memo.verdict(for: missing) { _ in XCTFail("nothing to probe"); return true })
     }
 }

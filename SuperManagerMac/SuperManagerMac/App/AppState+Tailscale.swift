@@ -323,7 +323,7 @@ extension AppState {
         }
         DebugLog.write("[ts] installTailscaled: starting, daemon=\(daemonPath)")
         do {
-            guard try await !TailscaleClient.nativeAppIsConnected() else {
+            guard await !TailscaleClient.nativeAppIsConnected() else {
                 tailscaleActionError = "Disconnect Tailscale.app before starting SuperManager's Tailscale service. Running both creates two identities and conflicting routes."
                 return
             }
