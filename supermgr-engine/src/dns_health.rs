@@ -1,7 +1,9 @@
 //! DNS health audit — SPF / DKIM / DMARC / MTA-STS / DNSSEC / DNS-RR sanity.
 //!
-//! Pulled together by shelling out to `dig +short`. Each check is
-//! one DNS lookup; the whole audit fits in <2 s for a domain.
+//! Pulled together by shelling out to `dig +short`. Each check is one
+//! DNS lookup (DKIM tries 14 common selectors), and they all run side by
+//! side, so the audit takes as long as its slowest lookup: at most the 4 s
+//! each `dig` is allowed.
 //!
 //! All findings are scoped to (domain, kind) — kept stable so
 //! `findings_store::reconcile` can track "SPF missing for domain.no"
@@ -207,15 +209,25 @@ async fn find_dkim_selectors(domain: &str) -> Vec<String> {
         "pf2014",  // Pardot
         "ml",      // MailerLite
     ];
-    let mut found: Vec<String> = Vec::new();
-    for sel in SELECTORS {
+    // Side by side: one after another, a resolver that answers nothing
+    // made this 14 × `dig`'s 4 s budget.
+    let mut lookups = tokio::task::JoinSet::new();
+    for (i, sel) in SELECTORS.iter().enumerate() {
         let target = format!("{sel}._domainkey.{domain}");
-        let txt = dig_txt(&target).await;
-        if txt.iter().any(|r| r.to_lowercase().contains("v=dkim1")) {
-            found.push((*sel).to_owned());
+        lookups.spawn(async move { (i, dig_txt(&target).await) });
+    }
+    let mut published = vec![false; SELECTORS.len()];
+    while let Some(joined) = lookups.join_next().await {
+        if let Ok((i, txt)) = joined {
+            published[i] = txt.iter().any(|r| r.to_lowercase().contains("v=dkim1"));
         }
     }
-    found
+    SELECTORS
+        .iter()
+        .zip(published)
+        .filter(|(_, published)| *published)
+        .map(|(sel, _)| (*sel).to_owned())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
