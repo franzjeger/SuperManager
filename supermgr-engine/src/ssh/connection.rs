@@ -357,15 +357,18 @@ impl SshSession {
         Ok((exit_status, stdout_str, stderr_str))
     }
 
-    /// Run an interactive shell session, sending lines sequentially.
+    /// Type `inputs` into an interactive shell, each only once the device
+    /// has answered the one before it with a prompt.
     ///
-    /// Waits for a prompt (`# ` or `$ ` or `password:`) before sending each
-    /// line.  Used for commands that prompt for input (e.g. `FortiGate`
-    /// `generate-key` which asks for the admin password).
+    /// The whole session gets `timeout_secs`. If the device stops answering
+    /// (the time runs out, the channel closes, or it asks something this
+    /// doesn't recognise, like a y/n question), the session ends with
+    /// `SshError::ShellInterrupted`, saying how many inputs it acknowledged.
+    /// Nothing after that point is sent: a config push that went on typing
+    /// into a silent device used to be reported as a success.
     pub async fn shell_interact(
         &self,
-        lines: &[&str],
-        _delay_ms: u64,
+        inputs: &[ShellInput<'_>],
         timeout_secs: u64,
     ) -> Result<String, SshError> {
         let mut channel =
@@ -395,79 +398,9 @@ impl SshSession {
             })?;
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        let mut output = Vec::new();
-
-        // Macro-like helper: drain channel data until a keyword appears
-        // or a shell prompt is detected.
-        macro_rules! wait_for {
-            ($keywords:expr) => {
-                loop {
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if remaining.is_zero() { break; }
-                    match tokio::time::timeout(remaining, channel.wait()).await {
-                        Ok(Some(russh::ChannelMsg::Data { data })) => {
-                            output.extend_from_slice(&data);
-                            let text = String::from_utf8_lossy(&output);
-                            let found = $keywords.iter().any(|kw: &&str| text.contains(kw));
-                            let trimmed = text.trim_end();
-                            if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
-                                break;
-                            }
-                        }
-                        Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                        Ok(None) => break,
-                        Ok(_) => {}
-                        Err(_) => break,
-                    }
-                }
-            };
-        }
-
-        // Wait for initial shell prompt.
-        wait_for!(&["#", "$"]);
-
-        // Send each line and wait for the next prompt or password request.
-        // Clear the output buffer before each send so we only match NEW output.
-        for line in lines {
-            let prev_len = output.len();
-            let data = format!("{line}\n");
-            let _ = channel.data(data.as_bytes()).await;
-
-            // Wait until new data arrives that contains a prompt or keyword.
-            loop {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    break;
-                }
-                match tokio::time::timeout(remaining, channel.wait()).await {
-                    Ok(Some(russh::ChannelMsg::Data { data })) => {
-                        output.extend_from_slice(&data);
-                        // Only check NEW data (after prev_len).
-                        let new_text = String::from_utf8_lossy(&output[prev_len..]);
-                        let keywords = [
-                            "# ",
-                            "$ ",
-                            "password:",
-                            "Password:",
-                            "New API key:",
-                            "API key:",
-                        ];
-                        let found = keywords.iter().any(|kw| new_text.contains(kw));
-                        let trimmed = new_text.trim_end();
-                        if found || trimmed.ends_with('#') || trimmed.ends_with('$') {
-                            break;
-                        }
-                    }
-                    Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) => break,
-                    Ok(None) => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-            }
-        }
-
+        let result = interact(&mut channel, inputs, deadline, timeout_secs).await;
         let _ = channel.close().await;
-        Ok(String::from_utf8_lossy(&output).into_owned())
+        result
     }
 
     // -- SFTP ---------------------------------------------------------------
@@ -572,5 +505,378 @@ impl RemoteShell for SshSession {
 
     async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
         Ok(Box::new(SftpFiles(self.sftp().await?)))
+    }
+}
+
+// -- Interactive shell --------------------------------------------------------
+
+/// One line to type into an interactive shell.
+#[derive(Debug, Clone, Copy)]
+pub enum ShellInput<'a> {
+    /// A command, typed at the shell prompt.
+    Command(&'a str),
+    /// The answer to a password prompt, typed only if the command before it
+    /// asked for one. At a shell prompt it would run as a command and land
+    /// in the device's history, so there it is skipped.
+    Secret(&'a str),
+}
+
+/// The prompt a device is waiting at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prompt {
+    Shell,
+    Password,
+}
+
+/// The prompt `output` ends in, if any. With `after_echo`, only what follows
+/// the first line break counts: the device echoes the typed line first, and
+/// a line that ends in `#` or `$` must not pass for the prompt after it.
+fn trailing_prompt(output: &str, after_echo: bool) -> Option<Prompt> {
+    let text = if after_echo {
+        &output[output.find('\n')? + 1..]
+    } else {
+        output
+    };
+    let tail = text.trim_end();
+    let ends_in_password = tail
+        .get(tail.len().saturating_sub("password:".len())..)
+        .is_some_and(|end| end.eq_ignore_ascii_case("password:"));
+    if ends_in_password {
+        Some(Prompt::Password)
+    } else if tail.ends_with('#') || tail.ends_with('$') {
+        Some(Prompt::Shell)
+    } else {
+        None
+    }
+}
+
+/// What `interact` needs from a channel: send bytes, and wait until a
+/// deadline for more output. The daemon passes a russh channel; the tests
+/// pass a scripted device.
+trait ShellChannel {
+    async fn send(&mut self, data: &[u8]) -> Result<(), String>;
+    async fn next_output(&mut self, deadline: tokio::time::Instant) -> ShellOutput;
+}
+
+enum ShellOutput {
+    Data(Vec<u8>),
+    Closed,
+    TimedOut,
+}
+
+impl ShellChannel for russh::Channel<client::Msg> {
+    async fn send(&mut self, data: &[u8]) -> Result<(), String> {
+        self.data(data).await.map_err(|e| e.to_string())
+    }
+
+    async fn next_output(&mut self, deadline: tokio::time::Instant) -> ShellOutput {
+        loop {
+            match tokio::time::timeout_at(deadline, self.wait()).await {
+                Err(_) => return ShellOutput::TimedOut,
+                Ok(Some(russh::ChannelMsg::Data { data })) => {
+                    return ShellOutput::Data(data.to_vec())
+                }
+                Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close) | None) => {
+                    return ShellOutput::Closed;
+                }
+                Ok(Some(_)) => {}
+            }
+        }
+    }
+}
+
+/// `shell_interact`'s input loop, over any `ShellChannel`.
+async fn interact<C: ShellChannel>(
+    channel: &mut C,
+    inputs: &[ShellInput<'_>],
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+) -> Result<String, SshError> {
+    let total = inputs.len();
+    let stop = |acknowledged: usize, reason: String, output: &[u8]| SshError::ShellInterrupted {
+        acknowledged,
+        total,
+        reason,
+        transcript: String::from_utf8_lossy(output).into_owned(),
+    };
+    let mut output = Vec::new();
+    let mut acknowledged = 0;
+
+    // The banner may say anything and echoes nothing, so its prompt is
+    // simply whatever it ends in.
+    let mut at = match wait_for_prompt(channel, &mut output, 0, false, deadline, timeout_secs).await
+    {
+        Ok(prompt) => prompt,
+        Err(reason) => return Err(stop(0, format!("no shell prompt: {reason}"), &output)),
+    };
+    for input in inputs {
+        let (text, secret) = match *input {
+            ShellInput::Command(text) => (text, false),
+            ShellInput::Secret(text) => (text, true),
+        };
+        match (at, secret) {
+            (Prompt::Shell, true) => {
+                // Nothing asked for it: typed now, it would run as a command.
+                acknowledged += 1;
+                continue;
+            }
+            (Prompt::Password, false) => {
+                let reason = "the device asked for a password".to_owned();
+                return Err(stop(acknowledged, reason, &output));
+            }
+            _ => {}
+        }
+        let start = output.len();
+        if let Err(e) = channel.send(format!("{text}\n").as_bytes()).await {
+            return Err(stop(acknowledged, format!("send failed: {e}"), &output));
+        }
+        at = match wait_for_prompt(channel, &mut output, start, true, deadline, timeout_secs).await
+        {
+            Ok(prompt) => prompt,
+            Err(reason) => return Err(stop(acknowledged, reason, &output)),
+        };
+        acknowledged += 1;
+    }
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// Read until the output since `start` ends in a prompt, and say which. The
+/// error says why none came.
+async fn wait_for_prompt<C: ShellChannel>(
+    channel: &mut C,
+    output: &mut Vec<u8>,
+    start: usize,
+    after_echo: bool,
+    deadline: tokio::time::Instant,
+    timeout_secs: u64,
+) -> Result<Prompt, String> {
+    loop {
+        match channel.next_output(deadline).await {
+            ShellOutput::Data(data) => {
+                output.extend_from_slice(&data);
+                let new = String::from_utf8_lossy(&output[start..]);
+                if let Some(prompt) = trailing_prompt(&new, after_echo) {
+                    return Ok(prompt);
+                }
+            }
+            ShellOutput::Closed => return Err("the device closed the session".to_owned()),
+            ShellOutput::TimedOut => {
+                return Err(format!("no prompt within the session's {timeout_secs} s"))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// A device that prints `outputs` in order, one per wait, and remembers
+    /// what was typed into it.
+    struct Device {
+        outputs: VecDeque<ShellOutput>,
+        typed: Vec<String>,
+    }
+
+    // The script answers at once, so its futures are ready ones.
+    impl ShellChannel for Device {
+        fn send(&mut self, data: &[u8]) -> impl std::future::Future<Output = Result<(), String>> {
+            self.typed
+                .push(String::from_utf8_lossy(data).trim_end().to_owned());
+            std::future::ready(Ok(()))
+        }
+
+        fn next_output(
+            &mut self,
+            _deadline: tokio::time::Instant,
+        ) -> impl std::future::Future<Output = ShellOutput> {
+            std::future::ready(self.outputs.pop_front().unwrap_or(ShellOutput::TimedOut))
+        }
+    }
+
+    fn says(text: &str) -> ShellOutput {
+        ShellOutput::Data(text.as_bytes().to_vec())
+    }
+
+    async fn run(
+        outputs: Vec<ShellOutput>,
+        inputs: &[ShellInput<'_>],
+    ) -> (Result<String, SshError>, Vec<String>) {
+        let mut device = Device {
+            outputs: outputs.into(),
+            typed: Vec::new(),
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let result = interact(&mut device, inputs, deadline, 5).await;
+        (result, device.typed)
+    }
+
+    fn interrupted_after(result: &Result<String, SshError>) -> Option<usize> {
+        match result {
+            Err(SshError::ShellInterrupted { acknowledged, .. }) => Some(*acknowledged),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_that_answers_every_line_takes_them_all() {
+        let (result, typed) = run(
+            vec![
+                says("FGT60F # "),
+                says("config system global\r\nFGT60F (global) # "),
+                says("end\r\nFGT60F # "),
+            ],
+            &[
+                ShellInput::Command("config system global"),
+                ShellInput::Command("end"),
+            ],
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(typed, ["config system global", "end"]);
+    }
+
+    /// The bug: a device that went silent mid-push used to get the rest of
+    /// the lines anyway, and the push was reported as a success.
+    #[tokio::test]
+    async fn a_device_that_goes_silent_gets_nothing_more() {
+        let (result, typed) = run(
+            vec![
+                says("FGT60F # "),
+                says("config system global\r\nFGT60F (global) # "),
+            ],
+            &[
+                ShellInput::Command("config system global"),
+                ShellInput::Command("set hostname edge"),
+                ShellInput::Command("end"),
+            ],
+        )
+        .await;
+        assert_eq!(interrupted_after(&result), Some(1), "{result:?}");
+        assert_eq!(typed, ["config system global", "set hostname edge"]);
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_ends_the_push() {
+        let (result, typed) = run(
+            vec![says("FGT60F # "), ShellOutput::Closed],
+            &[
+                ShellInput::Command("config system global"),
+                ShellInput::Command("end"),
+            ],
+        )
+        .await;
+        assert_eq!(interrupted_after(&result), Some(0), "{result:?}");
+        assert_eq!(typed, ["config system global"]);
+    }
+
+    #[tokio::test]
+    async fn no_first_prompt_means_nothing_is_typed() {
+        let (result, typed) = run(vec![says("Welcome")], &[ShellInput::Command("end")]).await;
+        assert_eq!(interrupted_after(&result), Some(0), "{result:?}");
+        assert!(typed.is_empty());
+    }
+
+    /// The device echoes what was typed; a line ending in `#` must not pass
+    /// for the prompt that follows it.
+    #[tokio::test]
+    async fn the_echo_of_a_line_is_not_its_acknowledgement() {
+        let (result, typed) = run(
+            vec![says("FGT60F # "), says("set comments cost-center#")],
+            &[
+                ShellInput::Command("set comments cost-center#"),
+                ShellInput::Command("end"),
+            ],
+        )
+        .await;
+        assert_eq!(interrupted_after(&result), Some(0), "{result:?}");
+        assert_eq!(typed, ["set comments cost-center#"]);
+    }
+
+    #[tokio::test]
+    async fn a_secret_answers_a_password_prompt() {
+        let (result, typed) = run(
+            vec![
+                says("FGT60F # "),
+                says("execute api-user generate-key ops\r\nPassword: "),
+                says("\r\nNew API key: 0123abcd\r\nFGT60F # "),
+            ],
+            &[
+                ShellInput::Command("execute api-user generate-key ops"),
+                ShellInput::Secret("hunter2"),
+            ],
+        )
+        .await;
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|t| t.contains("New API key: 0123abcd")),
+            "{result:?}"
+        );
+        assert_eq!(typed, ["execute api-user generate-key ops", "hunter2"]);
+    }
+
+    /// Unasked, a password typed at the shell prompt would run as a command
+    /// and land in the device's history.
+    #[tokio::test]
+    async fn a_secret_is_never_typed_at_a_shell_prompt() {
+        let (result, typed) = run(
+            vec![
+                says("FGT60F # "),
+                says("execute api-user generate-key ops\r\nNew API key: 0123abcd\r\nFGT60F # "),
+            ],
+            &[
+                ShellInput::Command("execute api-user generate-key ops"),
+                ShellInput::Secret("hunter2"),
+            ],
+        )
+        .await;
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(typed, ["execute api-user generate-key ops"]);
+    }
+
+    #[tokio::test]
+    async fn a_command_is_never_typed_at_a_password_prompt() {
+        let (result, typed) = run(
+            vec![
+                says("FGT60F # "),
+                says("execute backup config\r\nPassword: "),
+            ],
+            &[
+                ShellInput::Command("execute backup config"),
+                ShellInput::Command("end"),
+            ],
+        )
+        .await;
+        assert_eq!(interrupted_after(&result), Some(1), "{result:?}");
+        assert_eq!(typed, ["execute backup config"]);
+    }
+
+    #[test]
+    fn prompts_are_recognised_by_how_the_output_ends() {
+        assert_eq!(
+            trailing_prompt("FGT60F (api-user) # ", false),
+            Some(Prompt::Shell)
+        );
+        assert_eq!(
+            trailing_prompt("admin@host:~$ ", false),
+            Some(Prompt::Shell)
+        );
+        assert_eq!(
+            trailing_prompt("Please enter admin PASSWORD: ", false),
+            Some(Prompt::Password)
+        );
+        assert_eq!(
+            trailing_prompt("Do you want to continue? (y/n)", false),
+            None
+        );
+        assert_eq!(trailing_prompt("# comment\r\nstill running", false), None);
+        // Past the echo, not in it.
+        assert_eq!(trailing_prompt("echo a#", true), None);
+        assert_eq!(
+            trailing_prompt("echo a#\r\nFGT60F # ", true),
+            Some(Prompt::Shell)
+        );
     }
 }
