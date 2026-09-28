@@ -25,6 +25,11 @@ struct ProvisioningListColumn: View {
         return VStack(spacing: 0) {
             if appState.customers.isEmpty {
                 emptyState
+            } else if appState.customerScopedCustomers.isEmpty {
+                // Customers exist, but the filter matches none of them (it
+                // outlived its customer, e.g. deleted elsewhere). A blank list
+                // here gave no clue why, and no way back.
+                filteredOutState
             } else {
                 customerList
             }
@@ -70,6 +75,20 @@ struct ProvisioningListColumn: View {
                 appState.showingAddCustomer = true
             } label: {
                 Label("Add customer…", systemImage: "plus")
+            }
+            .controlSize(.large)
+            .buttonStyle(.borderedProminent)
+        }
+    }
+
+    private var filteredOutState: some View {
+        ContentUnavailableView {
+            Label("No customer matches the filter", systemImage: "line.3.horizontal.decrease.circle")
+        } description: {
+            Text("The customer filter is set to \u{201C}\(appState.globalCustomerSlug)\u{201D}, which isn't one of your customers.")
+        } actions: {
+            Button("Show all customers") {
+                appState.clearCustomerFilter()
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)

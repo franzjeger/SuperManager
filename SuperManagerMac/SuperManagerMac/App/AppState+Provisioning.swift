@@ -61,6 +61,11 @@ extension AppState {
                 selectedCustomerSlug = nil
                 selectedSiteId = nil
             }
+            // A filter naming a customer that no longer exists hides every
+            // row in every scoped list.
+            if globalCustomerSlug == slug {
+                clearCustomerFilter()
+            }
             return true
         } catch {
             handleError(error)

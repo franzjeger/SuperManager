@@ -1150,6 +1150,13 @@ class AppState {
         globalCustomerSlug.isEmpty ? customers : customers.filter { $0.slug == globalCustomerSlug }
     }
 
+    /// Drop the customer filter, persisted value included: the picker
+    /// rehydrates AppState from `@AppStorage` whenever it appears.
+    func clearCustomerFilter() {
+        globalCustomerSlug = ""
+        UserDefaults.standard.set("", forKey: GlobalCustomerPicker.storageKey)
+    }
+
     /// A detail pane must never retain actions for a record hidden by the
     /// customer filter. Recheck after membership changes as well as selection.
     func reconcileCustomerSelection() {
