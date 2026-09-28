@@ -91,7 +91,7 @@ final class SparkleUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
         // a network-isolated CI runner (macos-latest images).
         // Don't start the auto-check timer under tests — manual
         // `checkForUpdates()` is still available from the menu.
-        let underXCTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        let underXCTest = ProcessInfo.processInfo.isUnitTestHost
 
         // Fail-soft on the placeholder public key. Sparkle 2's init
         // refuses to start with an unparseable EdDSA key (correct
