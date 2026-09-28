@@ -24,19 +24,21 @@
 //! kills through their handles (charon, ovpncli, tcpdump). `bounded()`
 //! replaces `.output()` and keeps the same `io::Result<Output>` shape, so a
 //! call site changes by one wrapper and all of its existing Ok/Err handling
-//! still applies. A command that overruns its budget is SIGKILLed rather than
-//! abandoned, which reaps the child *and* lets the waiter thread finish — the
-//! previous "spawn a thread and walk away on timeout" pattern leaked both.
+//! still applies. A command that overruns its budget is killed together with
+//! its process group — nothing it started can keep its pipes, and the call,
+//! alive — and then reaped. Everything runs on the calling thread, and the
+//! child is reaped last, so a kill can never land on a recycled pid.
 //!
 //! Budgets are per call site and deliberately tight for probes (a route or
 //! status lookup that needs more than a few seconds has already failed) and
 //! generous for genuine work (bringing a tunnel up, bootstrapping a daemon).
 
-use std::io;
-use std::process::{Command, Output, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 /// A read-only probe of local state: routing table, interface list, DNS
 /// config, process list. These answer from kernel state or not at all, so a
@@ -52,50 +54,24 @@ pub const MUTATE: u64 = 10;
 /// returning is not.
 pub const SLOW: u64 = 60;
 
-/// Run `cmd` to completion, or SIGKILL it after `secs` seconds.
+/// Run `cmd` to completion, or kill it after `secs` seconds.
 ///
 /// Drop-in for `Command::output()`: same return type, and a timeout surfaces
 /// as `io::ErrorKind::TimedOut` so call sites that already treat an `Err` as
-/// "couldn't determine" keep working unchanged. stdin is closed so a command
-/// that unexpectedly prompts fails instead of waiting for input that will
-/// never come.
+/// "couldn't determine" keep working unchanged.
 pub fn bounded(cmd: &mut Command, secs: u64) -> io::Result<Output> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    run(cmd, secs)
+}
+
+/// Spawn `cmd` as the leader of a new process group and [`finish`] it.
+/// stdin is closed, so a command that unexpectedly prompts fails instead of
+/// waiting for input that will never come.
+fn run(cmd: &mut Command, secs: u64) -> io::Result<Output> {
     let label = describe(cmd);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::null()).process_group(0);
     let child = cmd.spawn()?;
-    // Capture the pid before the Child moves into the waiter thread — after
-    // the move we have no handle to kill through.
-    let pid = child.id() as libc::pid_t;
-
-    let (tx, rx) = mpsc::channel();
-    thread::Builder::new()
-        .name("bounded-cmd".into())
-        .spawn(move || {
-            // wait_with_output drains both pipes while waiting, so a chatty
-            // child can't deadlock on a full pipe buffer. After a SIGKILL it
-            // returns promptly and this thread exits — no leak, no zombie.
-            let _ = tx.send(child.wait_with_output());
-        })?;
-
-    match rx.recv_timeout(Duration::from_secs(secs)) {
-        Ok(result) => result,
-        Err(_) => {
-            // SIGKILL, not SIGTERM: the commands that hang here are stuck in
-            // a kernel read that ignores polite signals.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            tracing::warn!(
-                command = %label,
-                budget_secs = secs,
-                "external command exceeded its budget — SIGKILLed"
-            );
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("`{label}` timed out after {secs}s"),
-            ))
-        }
-    }
+    finish(child, Scope::Group, secs, &label)
 }
 
 /// Default budget for the drop-in [`Bounded`] wrapper. Generous enough that a
@@ -149,17 +125,17 @@ impl Bounded {
         self
     }
 
-    /// Bounded. Note that stdout/stderr are captured (as `Command::output`
-    /// does) even when the caller only wanted the exit code.
+    /// Bounded `Command::output`.
     pub fn output(&mut self) -> io::Result<Output> {
         bounded(&mut self.inner, self.budget)
     }
 
-    /// Bounded, via `output()`. Unlike `Command::status` the child's output is
-    /// captured rather than inherited — worth knowing, but every caller here
-    /// discards it anyway.
+    /// Bounded `Command::status`. The child's stdout and stderr go where the
+    /// helper's own do — its log — so a failing launchctl or pfctl still says
+    /// why, as it did before this wrapper existed.
     pub fn status(&mut self) -> io::Result<std::process::ExitStatus> {
-        self.output().map(|o| o.status)
+        self.inner.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        run(&mut self.inner, self.budget).map(|o| o.status)
     }
 }
 
@@ -169,28 +145,254 @@ impl Bounded {
 /// as a script on stdin, so it can't go through [`bounded`] — the spawn is the
 /// caller's but the waiting is still a hang risk: a wedged `configd` leaves
 /// `scutil` alive and silent, and `child.wait()` then never returns. Same
-/// contract as [`bounded`]: SIGKILL on overrun, `TimedOut` to the caller.
-pub fn wait_bounded(child: std::process::Child, secs: u64, label: &str) -> io::Result<Output> {
-    let pid = child.id() as libc::pid_t;
-    let (tx, rx) = mpsc::channel();
-    thread::Builder::new()
-        .name("bounded-wait".into())
-        .spawn(move || {
-            let _ = tx.send(child.wait_with_output());
-        })?;
-    match rx.recv_timeout(Duration::from_secs(secs)) {
-        Ok(result) => result,
-        Err(_) => {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+/// contract as [`bounded`], except that only the child itself is killed: the
+/// caller spawned it into the helper's own process group.
+pub fn wait_bounded(child: Child, secs: u64, label: &str) -> io::Result<Output> {
+    finish(child, Scope::Child, secs, label)
+}
+
+/// What an overrun kills.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// The child leads its own process group (`run` spawned it that way).
+    Group,
+    /// The child shares the helper's process group.
+    Child,
+}
+
+/// Collect `child`'s output and exit status within `secs`, or kill it.
+///
+/// Nothing is reaped until the end, so the pid — and the process group a
+/// [`Scope::Group`] child leads — stay reserved for as long as we might
+/// signal them. Killing the group on overrun also takes out anything the
+/// command started that inherited its pipes, which would otherwise keep them
+/// open, and this call waiting, for as long as it lives.
+fn finish(mut child: Child, scope: Scope, secs: u64, label: &str) -> io::Result<Output> {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let outcome = match read_to_eof(&mut child, deadline) {
+        Ok(Some(output)) => wait_for_exit(&child, deadline).map(|exited| exited.then_some(output)),
+        other => other,
+    };
+    match outcome {
+        Ok(Some((stdout, stderr))) => Ok(Output {
+            status: child.wait()?,
+            stdout,
+            stderr,
+        }),
+        Ok(None) => {
+            kill(&mut child, scope);
+            let _ = child.wait();
             tracing::warn!(
                 command = %label,
                 budget_secs = secs,
-                "external command exceeded its budget while being waited on — SIGKILLed"
+                "external command exceeded its budget — killed"
             );
             Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!("`{label}` timed out after {secs}s"),
             ))
+        }
+        Err(e) => {
+            kill(&mut child, scope);
+            let _ = child.wait();
+            Err(e)
+        }
+    }
+}
+
+/// Read the child's stdout and stderr to EOF by `deadline`, on this thread.
+/// Both pipes are non-blocking and waited on together with poll(2), so a
+/// child blocked on one full pipe cannot deadlock against a read of the
+/// other. `Ok(None)` if a pipe is still open at the deadline.
+fn read_to_eof(child: &mut Child, deadline: Instant) -> io::Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let mut pipes = [
+        child.stdout.take().map(|p| File::from(OwnedFd::from(p))),
+        child.stderr.take().map(|p| File::from(OwnedFd::from(p))),
+    ];
+    for pipe in pipes.iter().flatten() {
+        set_nonblocking(pipe)?;
+    }
+    let mut bufs = [Vec::new(), Vec::new()];
+    loop {
+        for (pipe, buf) in pipes.iter_mut().zip(bufs.iter_mut()) {
+            if let Some(file) = pipe {
+                if read_available(file, buf)? {
+                    *pipe = None;
+                }
+            }
+        }
+        let mut open: Vec<libc::pollfd> = pipes
+            .iter()
+            .flatten()
+            .map(|file| libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        if open.is_empty() {
+            let [stdout, stderr] = bufs;
+            return Ok(Some((stdout, stderr)));
+        }
+        if !poll_until(&mut open, deadline)? {
+            return Ok(None);
+        }
+    }
+}
+
+/// Read what `file` has right now. Returns whether it reached EOF.
+fn read_available(file: &mut File, buf: &mut Vec<u8>) -> io::Result<bool> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => return Ok(true),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// poll(2) until one of `fds` is ready (`true`) or `deadline` passes.
+fn poll_until(fds: &mut [libc::pollfd], deadline: Instant) -> io::Result<bool> {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX);
+        // SAFETY: `fds` is a valid, exclusively borrowed pollfd array.
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, ms.max(1)) };
+        if n > 0 {
+            return Ok(true);
+        }
+        if n < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        }
+    }
+}
+
+fn set_nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
+    // SAFETY: fcntl on a descriptor we own.
+    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
+    // SAFETY: as above.
+    if flags < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Wait until `child` exits or `deadline` passes, without reaping it.
+fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: kqueue() returns a new descriptor, owned from here on.
+    let kq = unsafe { libc::kqueue() };
+    if kq < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `kq` is a valid descriptor that nothing else owns.
+    let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+    let watch = libc::kevent {
+        ident: pid as libc::uintptr_t,
+        filter: libc::EVFILT_PROC,
+        flags: libc::EV_ADD | libc::EV_ONESHOT,
+        fflags: libc::NOTE_EXIT,
+        data: 0,
+        udata: std::ptr::null_mut(),
+    };
+    // SAFETY: one change, no events; all pointers are to live locals.
+    if unsafe {
+        libc::kevent(
+            kq.as_raw_fd(),
+            &raw const watch,
+            1,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        let err = io::Error::last_os_error();
+        // A process that has already exited can no longer be watched.
+        return if err.raw_os_error() == Some(libc::ESRCH) {
+            Ok(true)
+        } else {
+            Err(err)
+        };
+    }
+    // From here on an exit is an event; one just before the registration
+    // shows up as a waitable child instead.
+    if exited_unreaped(pid)? {
+        return Ok(true);
+    }
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let timeout = libc::timespec {
+            tv_sec: left.as_secs() as libc::time_t,
+            tv_nsec: libc::c_long::from(left.subsec_nanos()),
+        };
+        // SAFETY: an all-zero kevent is a valid value to be overwritten.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        // SAFETY: no changes, one event slot, all pointers to live locals.
+        let n = unsafe {
+            libc::kevent(
+                kq.as_raw_fd(),
+                std::ptr::null(),
+                0,
+                &raw mut event,
+                1,
+                &raw const timeout,
+            )
+        };
+        if n > 0 {
+            return Ok(true);
+        }
+        if n == 0 {
+            return Ok(false);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// Whether our child `pid` has exited, leaving it waitable (WNOWAIT).
+fn exited_unreaped(pid: libc::pid_t) -> io::Result<bool> {
+    // SAFETY: an all-zero siginfo_t is a valid value to be overwritten.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live local; WNOHANG | WNOWAIT neither block nor reap.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.si_pid != 0)
+}
+
+/// SIGKILL, not SIGTERM: the commands that overrun are stuck in a kernel
+/// wait that ignores polite signals. Only called while `child` is unreaped,
+/// so its pid, and the group it leads, are still its own.
+fn kill(child: &mut Child, scope: Scope) {
+    match scope {
+        // SAFETY: plain syscall on a process group the unreaped leader reserves.
+        Scope::Group => unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        },
+        Scope::Child => {
+            let _ = child.kill();
         }
     }
 }
@@ -267,6 +469,75 @@ mod tests {
             .await
             .expect("echo ran");
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipes_dies_with_the_command() {
+        let marker = std::env::temp_dir().join(format!("proc-grandchild-{}", std::process::id()));
+        let script = format!("sleep 30 & echo $! > '{}'; exit 0", marker.display());
+        let started = std::time::Instant::now();
+        let err = bounded(Command::new("/bin/sh").args(["-c", &script]), 1)
+            .expect_err("the grandchild keeps stdout open, so output never completes");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid: libc::pid_t = std::fs::read_to_string(&marker)
+            .expect("marker written")
+            .trim()
+            .parse()
+            .expect("pid");
+        let _ = std::fs::remove_file(&marker);
+        // Killed with its process group rather than left holding the pipes
+        // (and a waiter) for its full 30 s. Give launchd a moment to reap it.
+        std::thread::sleep(Duration::from_millis(200));
+        // SAFETY: signal 0 only checks for existence.
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "grandchild {pid} survived"
+        );
+    }
+
+    #[test]
+    fn a_chatty_command_cannot_deadlock_on_a_full_pipe() {
+        // Far more than a pipe buffer on both streams at once.
+        let out = bounded(
+            Command::new("/bin/sh").args([
+                "-c",
+                "head -c 3000000 /dev/zero; head -c 2000000 /dev/zero >&2",
+            ]),
+            PROBE,
+        )
+        .expect("ran");
+        assert_eq!(out.stdout.len(), 3_000_000);
+        assert_eq!(out.stderr.len(), 2_000_000);
+    }
+
+    #[test]
+    fn waits_for_a_caller_spawned_child() {
+        use std::io::Write as _;
+        let mut child = Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("cat");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(b"hi")
+            .expect("write");
+        let out = wait_bounded(child, PROBE, "cat").expect("cat ran");
+        assert_eq!(out.stdout, b"hi");
+    }
+
+    #[test]
+    fn status_reports_the_exit_code() {
+        let status = Bounded::new("/bin/sh")
+            .args(["-c", "exit 4"])
+            .status()
+            .expect("ran");
+        assert_eq!(status.code(), Some(4));
     }
 
     #[test]
