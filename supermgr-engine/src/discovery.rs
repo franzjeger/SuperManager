@@ -167,9 +167,9 @@ pub async fn passive_scan(
     hosts.sort_by(|a, b| a.ip.cmp(&b.ip));
 
     // Asset enrichment pass — reverse-DNS + zone classification
-    // for every IP. Bounded to ~8s total via internal semaphores
-    // (16 in-flight × 2s timeout each), so a slow resolver can't
-    // wedge the scan.
+    // for every IP. Each lookup gets 2 s and 16 run at once, so a
+    // slow resolver can't wedge the scan: N hosts take at most
+    // ⌈N/16⌉ × 2 s.
     {
         let ips: Vec<String> = hosts.iter().map(|h| h.ip.clone()).collect();
         let enrichment = crate::asset_enrich::enrich_many(&ips).await;
@@ -318,18 +318,15 @@ fn normalize_mac(raw: &str) -> String {
 // mDNS browser
 // ---------------------------------------------------------------------------
 
-/// Enumerate mDNS services in two passes:
-///   1. `dns-sd -B _services._dns-sd._udp local.` lists service
-///      types being advertised on the local network.
-///   2. For each service type, `dns-sd -B <type>` enumerates
-///      instances; we then `dns-sd -L` to resolve each to a
-///      (host, port).
+/// Enumerate mDNS services: for each service type in a fixed list,
+/// `dns-sd -B <type>` enumerates instances, and `dns-sd -L` resolves
+/// each one to a (host, port).
 ///
-/// Ten-second time budget total — mDNS responses arrive fast
-/// in <1 second, longer waits don't help.
+/// The browses run side by side: each one listens for a fixed 700 ms,
+/// so together they take 700 ms rather than 22 × 700, and the resolves
+/// that follow add a few hundred more. `MDNS_BUDGET` caps the whole pass.
 async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
-    let timeout = Duration::from_secs(8);
-    let interesting_types = [
+    let interesting_types: [&'static str; 22] = [
         "_http._tcp",
         "_https._tcp",
         "_ssh._tcp",
@@ -354,18 +351,26 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
         "_telnet._tcp",
     ];
 
-    // For each type, run `dns-sd -B <type>` for ~1 second, parse
-    // discovered instance names. We can't do `dns-sd -L` inline
-    // safely (it never exits) — for v1 we just record presence.
+    let resolve_limit = Arc::new(tokio::sync::Semaphore::new(MDNS_RESOLVES_AT_ONCE));
+    let mut browses = tokio::task::JoinSet::new();
+    for service_type in interesting_types {
+        let resolve_limit = Arc::clone(&resolve_limit);
+        browses.spawn(async move {
+            (
+                service_type,
+                run_dns_sd_browse(service_type, resolve_limit).await,
+            )
+        });
+    }
+
     let mut hosts: HashMap<String, DiscoveredHost> = HashMap::new();
     let now = chrono::Utc::now();
-
-    for service_type in &interesting_types {
-        let result =
-            tokio::time::timeout(Duration::from_millis(800), run_dns_sd_browse(service_type)).await;
-        let entries = match result {
-            Ok(Ok(v)) => v,
-            _ => continue,
+    let deadline = tokio::time::Instant::now() + MDNS_BUDGET;
+    // Whatever is still browsing at the deadline is dropped with the set,
+    // and `kill_on_drop` takes its `dns-sd` along.
+    while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, browses.join_next()).await {
+        let Ok((service_type, Ok(entries))) = joined else {
+            continue;
         };
         for entry in entries {
             // entry: (instance_name, hostname-ish, ip, port)
@@ -385,7 +390,7 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
             host.services.push(DiscoveredService {
                 port: entry.port.unwrap_or(0),
                 protocol: "tcp".into(),
-                service_type: (*service_type).to_owned(),
+                service_type: service_type.to_owned(),
                 instance_name: Some(entry.instance.clone()),
                 txt_records: entry.txt_records,
             });
@@ -393,14 +398,15 @@ async fn scan_mdns() -> Result<Vec<DiscoveredHost>> {
                 host.hostname = entry.host.clone();
             }
         }
-        // Tiny cooperative yield so we don't monopolise the
-        // executor when many service types are queried in a row.
-        tokio::task::yield_now().await;
-        let _ = timeout;
     }
 
     Ok(hosts.into_values().collect())
 }
+
+/// The whole mDNS pass, browses and resolves together.
+const MDNS_BUDGET: Duration = Duration::from_secs(8);
+/// `dns-sd -L` processes alive at once across every service type.
+const MDNS_RESOLVES_AT_ONCE: usize = 16;
 
 #[derive(Debug, Default, Clone)]
 struct MdnsEntry {
@@ -419,8 +425,10 @@ struct MdnsEntry {
 ///
 /// We collect instance names + their resolved (host, ip, port)
 /// in a follow-up `dns-sd -L`.
-async fn run_dns_sd_browse(service_type: &str) -> Result<Vec<MdnsEntry>> {
-    let domain = format!("{service_type}.local");
+async fn run_dns_sd_browse(
+    service_type: &'static str,
+    resolve_limit: Arc<tokio::sync::Semaphore>,
+) -> Result<Vec<MdnsEntry>> {
     let mut child = tokio::process::Command::new("dns-sd")
         .kill_on_drop(true)
         .args(["-B", service_type, "local."])
@@ -435,37 +443,59 @@ async fn run_dns_sd_browse(service_type: &str) -> Result<Vec<MdnsEntry>> {
     let output = child.wait_with_output().await.context("dns-sd output")?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
 
-    let mut instances: Vec<MdnsEntry> = Vec::new();
-    for line in stdout.lines() {
-        // Skip header lines.
-        if line.starts_with("Browsing for") || line.contains("DATE") || line.trim().is_empty() {
-            continue;
-        }
-        // Format: "<timestamp> <flags> <iface> <domain> <type> <instance>"
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 6 {
-            continue;
-        }
-        let instance_name = parts[5..].join(" ");
-        instances.push(MdnsEntry {
-            instance: instance_name,
-            host: None,
-            ip: None,
-            port: None,
-            txt_records: Vec::new(),
+    let instances: Vec<MdnsEntry> = browsed_instances(&stdout)
+        .into_iter()
+        .map(|instance| MdnsEntry {
+            instance,
+            ..MdnsEntry::default()
+        })
+        .collect();
+
+    // Resolve each instance to (host, port, IP) via `dns-sd -L`, all at
+    // once within the scan's limit: one after another, a type with many
+    // instances took 400 ms apiece.
+    let mut lookups = tokio::task::JoinSet::new();
+    for inst in instances {
+        let resolve_limit = Arc::clone(&resolve_limit);
+        lookups.spawn(async move {
+            let _permit = resolve_limit.acquire_owned().await;
+            resolve_mdns_instance(&inst.instance, service_type)
+                .await
+                .unwrap_or(inst)
         });
     }
-
-    // For each instance, resolve hostname + IP via dns-sd -L.
-    let mut resolved = Vec::with_capacity(instances.len());
-    for inst in instances {
-        match resolve_mdns_instance(&inst.instance, service_type).await {
-            Ok(r) => resolved.push(r),
-            Err(_) => resolved.push(inst),
+    let mut entries = Vec::with_capacity(lookups.len());
+    while let Some(joined) = lookups.join_next().await {
+        if let Ok(entry) = joined {
+            entries.push(entry);
         }
     }
-    let _ = domain;
-    Ok(resolved)
+    Ok(entries)
+}
+
+/// The instances a `dns-sd -B` run announced, once each. Its lines are
+///
+/// ```text
+/// Timestamp     A/R    Flags  if Domain               Service Type         Instance Name
+/// 15:26:35.251  Add        3  14 local.               _companion-link._tcp. Living Room
+/// ```
+///
+/// after a banner, a `DATE:` line and a `...STARTING...` line. Only `Add`
+/// lines name an instance: the header used to be read as one called
+/// "Service Type Instance Name". The name is everything from the seventh
+/// column on; it used to start at the sixth and carry the service type
+/// with it, so no instance ever resolved. An instance seen on two
+/// interfaces is listed once.
+fn browsed_instances(stdout: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            (parts.get(1) == Some(&"Add") && parts.len() > 6).then(|| parts[6..].join(" "))
+        })
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
 }
 
 async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<MdnsEntry> {
@@ -515,7 +545,8 @@ async fn resolve_mdns_instance(instance: &str, service_type: &str) -> Result<Mdn
     // resolve of the .local hostname to get the IP — macOS's
     // mDNSResponder serves these.
     if let Some(ref host) = entry.host {
-        if let Ok(addrs) = tokio::net::lookup_host(format!("{host}:1")).await {
+        let lookup = tokio::net::lookup_host(format!("{host}:1"));
+        if let Ok(Ok(addrs)) = tokio::time::timeout(Duration::from_secs(1), lookup).await {
             for addr in addrs {
                 let ip = addr.ip().to_string();
                 if !ip.starts_with("fe80") && !ip.starts_with("::") {
@@ -1505,4 +1536,28 @@ fn expand_cidr(cidr: &str, cap: usize) -> Option<Vec<String>> {
         ));
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod mdns_tests {
+    /// `dns-sd -B _companion-link._tcp local.` on macOS 27, verbatim but
+    /// for the added `Rmv` line.
+    const BROWSE: &str = "Browsing for _companion-link._tcp.local.
+DATE: ---Mon 28 Sep 2026---
+15:26:35.251  ...STARTING...
+Timestamp     A/R    Flags  if Domain               Service Type         Instance Name
+15:26:35.251  Add        3   1 local.               _companion-link._tcp. Frank\u{2019}s MacBook Pro
+15:26:35.251  Add        3  14 local.               _companion-link._tcp. Frank\u{2019}s MacBook Pro
+15:26:35.251  Add        3  14 local.               _companion-link._tcp. Bedroom
+15:26:35.251  Add        2  14 local.               _companion-link._tcp. Living Room
+15:26:40.002  Rmv        0  14 local.               _companion-link._tcp. Bedroom
+";
+
+    #[test]
+    fn browsing_yields_each_announced_instance_once() {
+        assert_eq!(
+            super::browsed_instances(BROWSE),
+            ["Frank\u{2019}s MacBook Pro", "Bedroom", "Living Room"]
+        );
+    }
 }
