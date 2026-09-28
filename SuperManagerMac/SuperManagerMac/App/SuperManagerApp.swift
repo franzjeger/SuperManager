@@ -336,7 +336,10 @@ struct SuperManagerApp: App {
         await Task.detached(priority: .userInitiated) {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            task.arguments = ["-f", "supermgrd-mac"]
+            // Our own processes named exactly that. `-f` matched the text
+            // anywhere in any process's arguments, so a shell command that
+            // merely mentioned the daemon was killed along with it.
+            task.arguments = ["-x", "-U", String(getuid()), "supermgrd-mac"]
             task.standardOutput = FileHandle.nullDevice
             task.standardError = FileHandle.nullDevice
             do {
