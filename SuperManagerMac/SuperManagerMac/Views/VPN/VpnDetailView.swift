@@ -52,7 +52,10 @@ struct VpnDetailView: View {
     }
 
     @State private var live = LiveTunnel()
-    @State private var helperReachable: Bool = false
+    /// The helper's socket is missing or refusing — the next action is
+    /// installing or approving it. Not yet probed (`nil`) is not missing,
+    /// and a helper that exists but doesn't answer needs no reinstall.
+    private var helperMissing: Bool { appState.helperHealth == .absent }
     @State private var pollTask: Task<Void, Never>?
 
     /// The two "helper isn't up yet" banners surfaced during a boot race
@@ -69,6 +72,9 @@ struct VpnDetailView: View {
         "Helper isn't running yet. Approve the " +
         "background daemon prompt in System Settings → " +
         "General → Login Items, then click Connect again."
+    static let helperUnresponsiveMessage =
+        "The helper is running but not answering. " +
+        "Wait a moment and try again."
 
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
@@ -493,7 +499,7 @@ struct VpnDetailView: View {
             ) {
                 switch profile.config {
                 case .ikev2:
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -520,7 +526,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .wireguard:
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -541,7 +547,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .openvpn(let cfg):
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -564,7 +570,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     }
                 case .azure(let az):
-                    if !helperReachable {
+                    if helperMissing {
                         Button("Install Helper…") {
                             Task { await installHelper() }
                         }
@@ -680,7 +686,7 @@ struct VpnDetailView: View {
                     // log lines a few KB above. Surface a one-click jump
                     // into them so users don't have to open Console.app
                     // and chase root permission.
-                    if helperReachable {
+                    if appState.helperHealth == .healthy {
                         HStack(spacing: 8) {
                             Button("View Helper Log…") {
                                 Task { await loadLog() }
@@ -1126,7 +1132,8 @@ struct VpnDetailView: View {
     /// tested seam); the view just supplies its `@State` and reads the outputs.
     private func cardModel(_ profile: VpnProfile) -> VpnConnectionCardModel {
         VpnConnectionCardModel(
-            helperReachable: helperReachable,
+            helperReachable: !helperMissing,
+            helperResponding: appState.helperHealth != .unresponsive,
             state: vpnState,
             fullTunnel: profile.fullTunnel,
             detail: stateDetail,
@@ -1258,7 +1265,7 @@ struct VpnDetailView: View {
         // "disconnected" between RPC call and tunnel-actually-up,
         // making the UI flicker.
         if busy { return }
-        helperReachable = await HelperClient.shared.isReachable()
+        appState.helperHealth = await HelperClient.shared.health()
         // Boot-race recovery: the daemon's Unix socket appears a few
         // seconds after login, but the app may probe (and latch a scary
         // "helper isn't up" banner) before launchd finishes spawning it.
@@ -1267,12 +1274,13 @@ struct VpnDetailView: View {
         // Only the two helper-availability messages are cleared — a real
         // connect error, set while the helper was already reachable, is
         // never one of these and so is left untouched.
-        if helperReachable,
+        if appState.helperHealth == .healthy,
            actionError == Self.helperSocketPendingMessage
-            || actionError == Self.helperNotRunningMessage {
+            || actionError == Self.helperNotRunningMessage
+            || actionError == Self.helperUnresponsiveMessage {
             actionError = nil
         }
-        guard helperReachable, let profile = profile else {
+        guard appState.helperHealth == .healthy, let profile = profile else {
             // Helper briefly unreachable (mid bootout/bootstrap, or a socket
             // hiccup). HOLD the last state — do NOT flip to "disconnected", that
             // was a flicker source. The global poller owns the state and leaves
@@ -1376,20 +1384,18 @@ struct VpnDetailView: View {
             // launchd spawns the daemon and it binds its Unix socket a
             // beat later. Poll the socket DIRECTLY here — refreshHelperState()
             // is suppressed while `busy`, so calling it would no-op and
-            // leave `helperReachable` stale, latching the banner even when
+            // leave `helperHealth` stale, latching the banner even when
             // the socket came up fine. Give it a few seconds before giving
             // up so a normal cold start doesn't flash a "socket isn't up"
             // banner the instant the click lands.
-            var reachable = false
-            for _ in 0..<12 {                       // ~6 s: 12 × 500 ms
-                if await HelperClient.shared.isReachable() {
-                    reachable = true
-                    break
-                }
+            let giveUp = ContinuousClock.now + .seconds(6)
+            var health = await HelperClient.shared.health()
+            while health != .healthy, ContinuousClock.now < giveUp {
                 try? await Task.sleep(for: .milliseconds(500))
+                health = await HelperClient.shared.health()
             }
-            helperReachable = reachable
-            if !reachable {
+            appState.helperHealth = health
+            if health != .healthy {
                 actionError = Self.helperSocketPendingMessage
             }
         } catch {
@@ -1416,7 +1422,7 @@ struct VpnDetailView: View {
             // no-op when it already matches; upgrades use the normal macOS
             // authorization path once.
             try await HelperInstaller.install()
-            helperReachable = true
+            appState.helperHealth = .healthy
 
             vpnState = "connecting"
             // Pass split-tunnel routes through to the helper so it can
@@ -1482,13 +1488,18 @@ struct VpnDetailView: View {
         // Re-probe helper, as in the IKEv2 path. Same race window
         // applies — user might toggle the SMAppService approval
         // between view appearance and clicking Connect.
-        if !helperReachable {
-            helperReachable = await HelperClient.shared.isReachable()
-            if !helperReachable {
-                actionError = "Helper isn't running yet. Approve the " +
-                    "background daemon prompt in System Settings → " +
-                    "General → Login Items, then click Connect again."
+        if appState.helperHealth != .healthy {
+            let health = await HelperClient.shared.health()
+            appState.helperHealth = health
+            switch health {
+            case .absent:
+                actionError = Self.helperNotRunningMessage
                 return
+            case .unresponsive:
+                actionError = Self.helperUnresponsiveMessage
+                return
+            case .healthy:
+                break
             }
         }
 
@@ -1545,13 +1556,18 @@ struct VpnDetailView: View {
         busy = true
         defer { busy = false }
 
-        if !helperReachable {
-            helperReachable = await HelperClient.shared.isReachable()
-            if !helperReachable {
-                actionError = "Helper isn't running yet. Approve the " +
-                    "background daemon prompt in System Settings → " +
-                    "General → Login Items, then click Connect again."
+        if appState.helperHealth != .healthy {
+            let health = await HelperClient.shared.health()
+            appState.helperHealth = health
+            switch health {
+            case .absent:
+                actionError = Self.helperNotRunningMessage
                 return
+            case .unresponsive:
+                actionError = Self.helperUnresponsiveMessage
+                return
+            case .healthy:
+                break
             }
         }
 

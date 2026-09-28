@@ -21,6 +21,9 @@ struct VpnConnectionCardModel {
     /// state from any tunnel state, because the next action is "install/approve
     /// the daemon", not "connect".
     let helperReachable: Bool
+    /// False when the helper exists but did not answer its last ping. Nothing
+    /// the card shows can be confirmed then, and the fix is not reinstalling.
+    var helperResponding: Bool = true
     /// The debounced per-profile state string (`stabilizedVpnState`'s output).
     let state: String
     /// Full vs split tunnel, for the meta line.
@@ -34,12 +37,13 @@ struct VpnConnectionCardModel {
     let lastConnectedAt: Date?
 
     var status: StatusStyle {
-        if !helperReachable { return .warn }
+        if !helperReachable || !helperResponding { return .warn }
         return .vpn(state)
     }
 
     var title: String {
         if !helperReachable { return "Helper not running" }
+        if !helperResponding { return "Helper not responding" }
         switch state {
         case "connected":     return "Connected"
         case "connecting":    return "Connecting…"
@@ -53,6 +57,9 @@ struct VpnConnectionCardModel {
     var meta: String {
         if !helperReachable {
             return "Approve or install the background daemon to control this tunnel."
+        }
+        if !helperResponding {
+            return "The background daemon is running but not answering, so this tunnel's state can't be confirmed."
         }
         let mode = fullTunnel ? "Full tunnel" : "Split tunnel"
         switch state {

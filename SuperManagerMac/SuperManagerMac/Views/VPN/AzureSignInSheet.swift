@@ -210,14 +210,24 @@ struct AzureSignInSheet: View {
             return
         }
 
-        let reachable = await HelperClient.shared.isReachable()
-        guard reachable else {
+        switch await HelperClient.shared.health() {
+        case .healthy:
+            break
+        case .absent:
             ActivityLog.shared.record(
                 profileId: profileId,
                 kind: .connectFailed,
                 message: "Azure VPN: privileged helper unreachable"
             )
             phase = .error("The privileged helper isn't reachable. Approve it in System Settings → General → Login Items, then try again.")
+            return
+        case .unresponsive:
+            ActivityLog.shared.record(
+                profileId: profileId,
+                kind: .connectFailed,
+                message: "Azure VPN: privileged helper not answering"
+            )
+            phase = .error("The privileged helper is running but not answering. Wait a moment, then try again.")
             return
         }
 

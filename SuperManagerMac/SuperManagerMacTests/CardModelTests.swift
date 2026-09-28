@@ -28,6 +28,18 @@ final class CardModelTests: XCTestCase {
 
     // MARK: VPN connection card
 
+    /// A helper that exists but doesn't answer is its own state: nothing on
+    /// the card is confirmed, and the next action is not "install".
+    func testUnresponsiveHelperIsNotReportedAsMissingOrConnected() {
+        let card = VpnConnectionCardModel(
+            helperReachable: true, helperResponding: false, state: "connected",
+            fullTunnel: true, detail: "", lastConnectedAt: nil)
+        XCTAssertEqual(card.title, "Helper not responding")
+        XCTAssertFalse(card.meta.contains("install"))
+        XCTAssertEqual(card.status, .warn)
+    }
+
+
     private func vpn(
         helper: Bool = true, state: String, full: Bool = true,
         detail: String = "", last: Date? = nil

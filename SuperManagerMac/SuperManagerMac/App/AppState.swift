@@ -33,6 +33,13 @@ class AppState {
 
     // VPN
     var vpnProfiles: [VpnProfileSummary] = []
+
+    /// Last result of `HelperClient.health()`, from whichever poller probed
+    /// last. `nil` until the first probe. Global rather than per-view so a
+    /// freshly created detail pane shows what is known instead of starting
+    /// from "helper not running".
+    var helperHealth: HelperClient.Health?
+
     /// Per-profile connection state, keyed by profile id. Populated
     /// by the global VPN poller (`startVpnStatusPolling`). Drives
     /// the green-dot indicators in the VPN list — without this, you
@@ -409,11 +416,14 @@ class AppState {
             return
         }
         // Wait up to ~3s for launchd to respawn from the new binary.
-        // First poll: socket goes away briefly during exec.
-        for attempt in 1...12 {
+        // First poll: socket goes away briefly during exec. Bounded by the
+        // clock, not a count: one probe of a helper that accepts but
+        // doesn't answer takes its full ping budget.
+        let started = ContinuousClock.now
+        while started.duration(to: .now) < .seconds(3) {
             try? await Task.sleep(for: .milliseconds(250))
             if await HelperClient.shared.isReachable() {
-                DebugLog.write("[helper] respawned after \(attempt * 250)ms")
+                DebugLog.write("[helper] respawned after \(started.duration(to: .now))")
                 return
             }
         }
