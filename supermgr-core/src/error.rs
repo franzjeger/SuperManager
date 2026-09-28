@@ -214,6 +214,21 @@ pub enum SshError {
     /// Passthrough for OS / file-system errors.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+
+    /// An interactive shell stopped answering partway through its inputs.
+    /// The device took the first `acknowledged` and may or may not have
+    /// seen the next one; nothing after that was sent.
+    #[error("device stopped answering after {acknowledged} of {total} lines: {reason}")]
+    ShellInterrupted {
+        /// Inputs the device answered with a prompt.
+        acknowledged: usize,
+        /// Inputs there were to send.
+        total: usize,
+        /// Why the session stopped.
+        reason: String,
+        /// Everything the device printed before it stopped.
+        transcript: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
