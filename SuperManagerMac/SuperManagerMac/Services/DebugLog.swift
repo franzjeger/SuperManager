@@ -6,8 +6,12 @@ import Foundation
 ///
 /// Path: `/tmp/supermanager-debug.log`. Cleared on every app start
 /// so stale logs from previous launches don't confuse readings.
+/// The unit-test host writes its own file: clearing this one on its
+/// first write wiped the log of the app that was running meanwhile.
 enum DebugLog {
-    private static let path = "/tmp/supermanager-debug.log"
+    private static let path = ProcessInfo.processInfo.isUnitTestHost
+        ? "/tmp/supermanager-debug-tests.log"
+        : "/tmp/supermanager-debug.log"
     private static var didTruncate = false
     private static let lock = NSLock()
 
