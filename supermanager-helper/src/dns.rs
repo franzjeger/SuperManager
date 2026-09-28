@@ -21,11 +21,7 @@
 //! the user's saved DNS nor configd's derived Global/DNS is overwritten.
 
 use std::io::Write as _;
-// Bounded external commands: `Command` here is `proc::Bounded`, whose
-// `output()` / `status()` cannot hang. The binaries this module drives all read
-// or write live network state, and every one of them can block indefinitely
-// when that state is broken (a route to a torn-down utun, a wedged configd) —
-// on threads where losing the caller means losing a watchdog or an RPC worker.
+// Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
 
 /// The one State-store key SuperManager ever writes DNS to.
