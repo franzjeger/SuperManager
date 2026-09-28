@@ -143,7 +143,12 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
         ("8000::/1", "-inet6"),
     ];
     for (i, (net, fam)) in NETS.into_iter().enumerate() {
-        let orphaned = match crate::strongswan::route_iface_family(net, fam) {
+        // Read the routing-table dump, not `route -n get`: RTM_GET blocks on a
+        // route whose utun is gone — precisely the orphan this exists to reap.
+        // Probing that way cost a 5 s timeout per net per cycle and then read
+        // the timeout as "no route", so the orphan was never reaped and
+        // escalation slowed from ~6 s to ~40 s.
+        let orphaned = match crate::strongswan::netstat_route_iface(net, fam) {
             // Only a utun-borne split-default can be a dead-tunnel orphan (a
             // physical iface or the lo0 IPv6 leak-block is handled elsewhere),
             // and only if no live VPN backend owns that utun.
