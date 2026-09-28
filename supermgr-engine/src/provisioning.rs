@@ -986,7 +986,16 @@ pub async fn rollback(
     };
     save_deployment(&record)?;
 
-    let (_host, session) = open_session(state, secrets, host_id).await?;
+    let (_host, session) = match open_session(state, secrets, host_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            record.status = DeploymentStatus::Failed;
+            record.error = Some(format!("ssh connect failed: {e:#}"));
+            record.finished_at = Some(chrono::Utc::now());
+            save_deployment(&record)?;
+            return Err(e);
+        }
+    };
     let lines: Vec<String> = backup_text
         .lines()
         .filter(|l| !l.trim().is_empty())
