@@ -1,9 +1,14 @@
 import Foundation
 
-/// JSON-RPC client over Unix domain socket using POSIX sockets.
-/// Much simpler and more reliable than NWConnection for sequential request/response.
+/// JSON-RPC client for the user daemon, `supermgrd-mac`.
+///
+/// Each call is one exchange on a fresh connection (`UnixSocketRPC`), so
+/// calls run side by side, a slow one holds up only its own caller, and a
+/// daemon replaced between two calls costs nothing. A call that failed before
+/// its request was completely written is sent once more, since the daemon
+/// cannot have run it. Once the request is out a failure is final: the daemon
+/// may have executed it, and most of these calls change state.
 actor ServiceClient {
-    private var fd: Int32 = -1
     private var requestId: UInt64 = 0
     /// Where the daemon listens. Only tests point it anywhere else.
     private let path: String
@@ -17,113 +22,117 @@ actor ServiceClient {
         return "\(home)/Library/Application Support/SuperManager/supermgrd.sock"
     }
 
-    func connect() async throws {
-        let sock = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard sock >= 0 else {
-            throw ServiceError.connectionFailed("socket() failed: \(errno)")
+    /// Throws unless the daemon's socket accepts connections: the launch-time
+    /// check that there is a daemon at all. Every call connects on its own.
+    func probe() throws {
+        do {
+            try UnixSocketRPC.probe(path: path)
+        } catch let failure as UnixSocketRPC.Failure {
+            throw ServiceError(failure)
         }
-        // A daemon that goes away between calls must cost one failed send,
-        // which `call` answers by reconnecting. Without this that send
-        // raises SIGPIPE, and nothing here ignores it: the app dies instead,
-        // every time a new launch replaces the daemon it was talking to.
-        var on: Int32 = 1
-        guard setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
-            let e = errno
-            close(sock)
-            throw ServiceError.connectionFailed("setsockopt(SO_NOSIGPIPE) failed: \(e)")
-        }
-
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            path.withCString { cstr in
-                _ = memcpy(ptr, cstr, min(path.utf8.count, 104))
-            }
-        }
-
-        let result = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-
-        guard result == 0 else {
-            close(sock)
-            throw ServiceError.connectionFailed("connect() failed: \(errno)")
-        }
-
-        self.fd = sock
     }
 
-    /// Run an RPC, transparently re-establishing the socket once if the
-    /// daemon dropped us between calls (e.g. it restarted, the user put
-    /// the laptop to sleep, the OS reaped the fd). Without this every
-    /// daemon respawn forces a full app restart.
-    ///
-    /// We retry exactly once. If the daemon is *truly* unreachable, the
-    /// second attempt fails and the caller surfaces the error normally.
     func call<T: Decodable>(_ method: String, params: [String: Any] = [:]) async throws -> T {
-        do {
-            return try await callOnce(method, params: params)
-        } catch ServiceError.notConnected, ServiceError.disconnected {
-            disconnect()
-            try await connect()
-            return try await callOnce(method, params: params)
+        guard let result = try await send(method, params: params)["result"] else {
+            throw ServiceError.noResult
         }
+        return try Self.decode(T.self, from: result)
     }
 
     func callVoid(_ method: String, params: [String: Any] = [:]) async throws {
+        _ = try await send(method, params: params)
+    }
+
+    /// One call, sent a second time only if the first never got out.
+    private func send(_ method: String, params: [String: Any]) async throws -> [String: Any] {
         do {
-            try await callVoidOnce(method, params: params)
-        } catch ServiceError.notConnected, ServiceError.disconnected {
-            disconnect()
-            try await connect()
-            try await callVoidOnce(method, params: params)
+            return try await exchange(method, params: params)
+        } catch let failure as UnixSocketRPC.Failure where !failure.requestSent {
+            // Not written, so not run. Usually the daemon is between
+            // processes: a new launch has just replaced it.
+            DebugLog.write("[daemon] retrying \(method) after a failure before sending: \(failure)")
+            try? await Task.sleep(for: .milliseconds(400))
+            do {
+                return try await exchange(method, params: params)
+            } catch let again as UnixSocketRPC.Failure {
+                DebugLog.write("[daemon] \(method) failed: \(again)")
+                throw ServiceError(again)
+            }
+        } catch let failure as UnixSocketRPC.Failure {
+            DebugLog.write("[daemon] \(method) failed: \(failure)")
+            throw ServiceError(failure)
         }
     }
 
-    private func callOnce<T: Decodable>(_ method: String, params: [String: Any]) async throws -> T {
-        guard fd >= 0 else { throw ServiceError.notConnected }
-
-        requestId += 1
-        let id = requestId
-
-        let request: [String: Any] = [
+    /// One request/response exchange. Throws `UnixSocketRPC.Failure` for the
+    /// socket and `ServiceError.rpcError` for an error the daemon returned.
+    private func exchange(_ method: String, params: [String: Any]) async throws -> [String: Any] {
+        requestId &+= 1
+        let body = try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0",
             "method": method,
             "params": params,
-            "id": id
-        ]
-
-        let jsonData = try JSONSerialization.data(withJSONObject: request)
-
-        // Send length-prefixed frame
-        var len = UInt32(jsonData.count).bigEndian
-        let lenData = Data(bytes: &len, count: 4)
-        try sendAll(lenData)
-        try sendAll(jsonData)
-
-        // Read 4-byte length
-        let respLenData = try recvExact(4)
-        let respLen = respLenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        guard respLen <= kMaxRpcResponseBytes else {
-            throw ServiceError.messageTooLarge(Int(respLen))
+            "id": requestId,
+        ] as [String: Any])
+        let reply = try await UnixSocketRPC.roundTrip(
+            path: path,
+            body: body,
+            deadline: .init(method: method, budget: Self.budget(for: method)),
+            maxReply: kMaxRpcResponseBytes
+        )
+        let json = try JSONSerialization.jsonObject(with: reply) as? [String: Any] ?? [:]
+        if let error = json["error"] as? [String: Any] {
+            throw ServiceError.rpcError(Self.parseRpcErrorPayload(error))
         }
+        return json
+    }
 
-        // Read response
-        let respData = try recvExact(Int(respLen))
-
-        // Parse
-        let jsonResp = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
-
-        if let error = jsonResp?["error"] as? [String: Any] {
-            throw ServiceError.rpcError(parseRpcErrorPayload(error))
+    /// End-to-end budget for one call, or nil to wait as long as the daemon
+    /// takes. Derived from the daemon's handlers, not guessed:
+    /// - What is local to the daemon (its state, secret store and files)
+    ///   answers in milliseconds and gets the default.
+    /// - A call bounded by the daemon's own network and subprocess timeouts
+    ///   gets twice that ceiling, so a slow success is never reported as a
+    ///   failure.
+    /// - A call whose run time grows with the hosts, devices or data it
+    ///   covers, or that waits on SSH authentication or a remote command
+    ///   with no timeout, gets none. No finite budget is guaranteed not to
+    ///   cut off real work, and the daemon goes on running a call its client
+    ///   has given up on: a deploy reported as timed out would still be
+    ///   pushing configuration.
+    /// A new method belongs in the class its handler does.
+    static func budget(for method: String) -> Duration? {
+        switch method {
+        case "ssh_test_connection", "ssh_execute_command", "ssh_push_key", "ssh_probe_hosts",
+             "compliance_run", "compliance_run_linux", "compliance_scan_all",
+             "discovery_passive_scan", "fortigate_generate_api_token",
+             "provisioning_diff_preview", "provisioning_deploy", "provisioning_rollback",
+             "unifi_set_inform", "unifi_controller_devices", "backup_import":
+            return nil
+        case "unifi_test":
+            // Two requests, each a 30 s login plus a 30 s call.
+            return .seconds(240)
+        case "dns_health_audit":
+            // 14 DKIM selectors, one 4 s `dig` after another.
+            return .seconds(112)
+        case "unifi_controller_save", "unifi_controller_mfa_complete":
+            // Three 15 s controller requests.
+            return .seconds(90)
+        case "cve_feed_refresh", "subdomain_enum", "fortigate_test_connection",
+             "fortigate_get_dashboard", "unifi_set_controller", "unifi_controller_test",
+             "unifi_controller_mfa_send", "unifi_controller_devmgr":
+            // One 30 s request, or two of 15 s.
+            return .seconds(60)
+        case "ssh_generate_key", "backup_export":
+            // Local, but CPU- or size-bound: an RSA-4096 prime search, or
+            // the whole store serialised.
+            return .seconds(60)
+        default:
+            return .seconds(30)
         }
+    }
 
-        guard let result = jsonResp?["result"] else {
-            throw ServiceError.noResult
-        }
-
+    private static func decode<T: Decodable>(_ type: T.Type, from result: Any) throws -> T {
         let resultData: Data
         if result is NSNull {
             resultData = "null".data(using: .utf8)!
@@ -147,37 +156,11 @@ actor ServiceClient {
         return try decoder.decode(T.self, from: resultData)
     }
 
-    private func callVoidOnce(_ method: String, params: [String: Any]) async throws {
-        guard fd >= 0 else { throw ServiceError.notConnected }
-
-        requestId += 1
-        let request: [String: Any] = [
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-            "id": requestId
-        ]
-
-        let jsonData = try JSONSerialization.data(withJSONObject: request)
-        var len = UInt32(jsonData.count).bigEndian
-        try sendAll(Data(bytes: &len, count: 4))
-        try sendAll(jsonData)
-
-        let respLenData = try recvExact(4)
-        let respLen = respLenData.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-        let respData = try recvExact(Int(respLen))
-
-        let jsonResp = try JSONSerialization.jsonObject(with: respData) as? [String: Any]
-        if let error = jsonResp?["error"] as? [String: Any] {
-            throw ServiceError.rpcError(parseRpcErrorPayload(error))
-        }
-    }
-
     /// Lift `error.data.{kind,actionable}` (when the daemon used
     /// `Response::err_engine`) into a structured `RpcErrorInfo`.
     /// Older handlers that still use plain `Response::err` produce
     /// `data == nil`, so `kind` falls back to `"other"`.
-    private func parseRpcErrorPayload(_ obj: [String: Any]) -> RpcErrorInfo {
+    private static func parseRpcErrorPayload(_ obj: [String: Any]) -> RpcErrorInfo {
         let message = obj["message"] as? String ?? "Unknown error"
         let code = obj["code"] as? Int ?? -32603
         let data = obj["data"] as? [String: Any]
@@ -189,43 +172,6 @@ actor ServiceClient {
             kind: kind,
             actionable: actionable
         )
-    }
-
-    func disconnect() {
-        if fd >= 0 {
-            close(fd)
-            fd = -1
-        }
-    }
-
-    // MARK: - Low-level I/O
-
-    private func sendAll(_ data: Data) throws {
-        try data.withUnsafeBytes { buffer in
-            var sent = 0
-            while sent < buffer.count {
-                let n = Darwin.send(fd, buffer.baseAddress! + sent, buffer.count - sent, 0)
-                guard n > 0 else {
-                    throw ServiceError.disconnected
-                }
-                sent += n
-            }
-        }
-    }
-
-    private func recvExact(_ count: Int) throws -> Data {
-        var buffer = Data(count: count)
-        var received = 0
-        try buffer.withUnsafeMutableBytes { ptr in
-            while received < count {
-                let n = Darwin.recv(fd, ptr.baseAddress! + received, count - received, 0)
-                guard n > 0 else {
-                    throw ServiceError.disconnected
-                }
-                received += n
-            }
-        }
-        return buffer
     }
 }
 
@@ -244,9 +190,11 @@ struct RpcErrorInfo: Hashable {
 }
 
 enum ServiceError: LocalizedError {
-    case notConnected
+    /// The daemon hung up, or the socket failed, after the request was sent.
     case disconnected
     case connectionFailed(String)
+    /// No reply within the call's budget.
+    case timedOut(String)
     /// RPC error from the daemon. The associated `RpcErrorInfo`
     /// carries the structured kind/actionable so callers can
     /// branch on category — see `RpcErrorInfo.kind` for the
@@ -257,9 +205,9 @@ enum ServiceError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notConnected: return "Not connected to daemon"
         case .disconnected: return "Connection to daemon lost"
         case .connectionFailed(let msg): return "Connection failed: \(msg)"
+        case .timedOut(let msg): return "\(msg) (daemon not responding)"
         case .rpcError(let info): return "Daemon error: \(info.message)"
         case .noResult: return "No result from daemon"
         case .messageTooLarge(let n):
@@ -274,6 +222,16 @@ enum ServiceError: LocalizedError {
     var rpcKind: String? {
         if case .rpcError(let info) = self { return info.kind }
         return nil
+    }
+
+    /// What a caller sees of a socket failure. The detail is in the debug log.
+    init(_ failure: UnixSocketRPC.Failure) {
+        switch failure.kind {
+        case .unreachable: self = .connectionFailed(failure.description)
+        case .timedOut: self = .timedOut(failure.description)
+        case .replyTooLarge(let length): self = .messageTooLarge(Int(length))
+        case .io: self = .disconnected
+        }
     }
 }
 

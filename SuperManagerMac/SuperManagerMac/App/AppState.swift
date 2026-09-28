@@ -179,7 +179,7 @@ class AppState {
         // individual call sites handle missing RPCs gracefully.
         await ensureHelperUpToDate()
         do {
-            try await client.connect()
+            try await client.probe()
             DebugLog.write("[AppState] connectToDaemon: socket connected")
             // Verify the daemon's wire-protocol version matches
             // what this app build expects. Mismatched majors mean
