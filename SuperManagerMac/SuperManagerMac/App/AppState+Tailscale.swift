@@ -398,22 +398,28 @@ extension AppState {
         // We do this before the helper call because the daemon
         // sometimes responds even when the routing table is
         // half-dead (it talks over a Unix socket, not the network).
+        var cliError: String?
         do {
             try await TailscaleClient.setExitNode("")
             try await TailscaleClient.setAcceptRoutes(false)
             DebugLog.write("[ts/panic] CLI clear succeeded")
         } catch {
-            tailscaleActionError = error.localizedDescription
+            cliError = error.localizedDescription
             DebugLog.write("[ts/panic] CLI clear failed: \(error.localizedDescription)")
         }
         // Native Tailscale applies routing changes through its extension.
-        // The legacy helper reset would change a different daemon and DHCP.
+        // The legacy helper reset would change a different daemon and DHCP,
+        // so the CLI step is the whole reset and its failure is the result.
         if TailscaleClient.usesNativeApp {
+            tailscaleActionError = cliError
             await refreshTailscale()
             return
         }
         // 2. Helper-side: clear again from root context AND renew
-        // DHCP. The DHCP renew is the part that requires root.
+        // DHCP. The DHCP renew is the part that requires root. Its
+        // result is the reset's result: the CLI step above was only
+        // best-effort, and failing is expected when tailscaled is the
+        // thing that's wedged.
         do {
             let result = try await HelperClient.shared.tailscalePanicReset()
             let success = (result["success"] as? Bool) ?? false
