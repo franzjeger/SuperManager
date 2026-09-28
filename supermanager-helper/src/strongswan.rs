@@ -1253,6 +1253,14 @@ fn validate_connect_args(args: &ConnectArgs) -> anyhow::Result<()> {
     if !args.full_tunnel && args.routes.is_empty() {
         anyhow::bail!("split-tunnel mode requires at least one route");
     }
+    // `build_swanctl_conf` authenticates the gateway with PSK (`remote {
+    // auth = psk }`) and has no certificate path. Without a secret charon
+    // can only fail IKE_AUTH much later with "no shared key found".
+    if args.shared_secret.is_empty() {
+        anyhow::bail!(
+            "a pre-shared key is required: the gateway authenticates to this Mac with it"
+        );
+    }
     Ok(())
 }
 
@@ -1964,6 +1972,11 @@ mod tests {
         assert!(validate_connect_args(&a).is_err());
         a.username = "alice\0bob".to_owned();
         assert!(validate_connect_args(&a).is_err());
+        let a = args("vpn.example.com", "alice", "pw", "");
+        assert!(
+            validate_connect_args(&a).is_err(),
+            "empty PSK must be rejected up front"
+        );
     }
 
     #[test]

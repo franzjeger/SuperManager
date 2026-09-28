@@ -28,12 +28,18 @@ final class VPNKeychainTests: XCTestCase {
         }
     }
 
-    func testExplicitlyEmptyPSKSupportsCertificateAuthentication() throws {
-        let credentials = try VPNKeychain.ikev2Credentials(
+    /// The helper authenticates the gateway with the PSK and has no
+    /// certificate path, so an empty stored PSK is as unusable as a missing
+    /// one and must bring back the recovery prompt.
+    func testEmptyStoredPSKCountsAsMissing() {
+        XCTAssertThrowsError(try VPNKeychain.ikev2Credentials(
             passwordAccount: "password", pskAccount: "psk",
-            read: { $0 == "password" ? "example-password" : "" })
-        XCTAssertEqual(credentials.password, "example-password")
-        XCTAssertEqual(credentials.sharedSecret, "")
+            read: { $0 == "password" ? "example-password" : "" }
+        )) { error in
+            let missing = error as? VPNKeychain.MissingIKEv2Credentials
+            XCTAssertEqual(missing?.password, false)
+            XCTAssertEqual(missing?.sharedSecret, true)
+        }
     }
 
     func testEmptyPSKReferenceDoesNotQueryKeychain() throws {

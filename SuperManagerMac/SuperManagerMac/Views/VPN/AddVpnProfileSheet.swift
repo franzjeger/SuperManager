@@ -50,7 +50,7 @@ struct AddVpnProfileSheet: View {
                     TextField("Username", text: $username)
                     SecureField("Password (EAP)", text: $password)
                     SecureField("Shared Secret (PSK)", text: $sharedSecret)
-                    Text("Leave the shared secret blank for certificate-based servers.")
+                    Text("Required: the gateway authenticates to this Mac with the pre-shared key.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -78,7 +78,8 @@ struct AddVpnProfileSheet: View {
                     Task { await save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty || password.isEmpty)
+                .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty
+                          || password.isEmpty || sharedSecret.isEmpty)
             }
             .padding(12)
         }
@@ -119,8 +120,6 @@ struct AddVpnProfileSheet: View {
                 if let pwData = password.data(using: .utf8) {
                     try VPNKeychain.set(pwData, account: cfg.password)
                 }
-                // Persist an empty value too: it records the user's choice
-                // of certificate authentication, distinct from a lost PSK.
                 try VPNKeychain.set(Data(sharedSecret.utf8), account: cfg.psk)
             }
 
@@ -233,7 +232,7 @@ struct EditVpnProfileSheet: View {
                         Text("This profile is missing credentials on this Mac. Re-enter them below, save, then connect again.")
                             .font(.callout)
                         if missingCredentials.sharedSecret {
-                            Text("Enter the shared secret if your VPN uses one. Leave it blank only if the server uses certificate authentication.")
+                            Text("The shared secret (PSK) is required: the gateway authenticates to this Mac with it.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -270,7 +269,8 @@ struct EditVpnProfileSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(saving || name.isEmpty || host.isEmpty || username.isEmpty
-                          || (missingCredentials?.password == true && password.isEmpty))
+                          || (missingCredentials?.password == true && password.isEmpty)
+                          || (missingCredentials?.sharedSecret == true && sharedSecret.isEmpty))
             }
             .padding(12)
         }
@@ -314,7 +314,7 @@ struct EditVpnProfileSheet: View {
                 if !password.isEmpty, let pw = password.data(using: .utf8) {
                     try VPNKeychain.set(pw, account: cfg.password)
                 }
-                if !sharedSecret.isEmpty || missingCredentials?.sharedSecret == true {
+                if !sharedSecret.isEmpty {
                     try VPNKeychain.set(Data(sharedSecret.utf8), account: cfg.psk)
                 }
             }

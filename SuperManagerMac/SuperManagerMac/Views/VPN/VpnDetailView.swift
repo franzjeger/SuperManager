@@ -201,7 +201,11 @@ struct VpnDetailView: View {
                 }
             }
         }
-        .sheet(isPresented: $editingProfile) {
+        .sheet(isPresented: $editingProfile, onDismiss: {
+            // Recovery mode belongs to the connect attempt that found the
+            // gap. Cancelled or saved, a later "Edit profile…" is ordinary.
+            missingIKEv2Credentials = nil
+        }) {
             // Full IKEv2 editor. Same guard as the routing sheet: only
             // present with a loaded profile so the pre-fill has data.
             // A fresh `load()` after save picks up the new host /
