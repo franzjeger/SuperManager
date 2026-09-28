@@ -102,6 +102,7 @@ async fn smbclient_list(host: &str) -> Option<Vec<SmbShare>> {
     let res = tokio::time::timeout(
         Duration::from_secs(6),
         tokio::process::Command::new("smbclient")
+            .kill_on_drop(true)
             .args(["-L", &target, "-N", "-t", "3", "-g"])
             .output(),
     )
@@ -154,6 +155,7 @@ async fn nmblookup(host: &str) -> (Option<String>, Option<String>, Option<String
     let res = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new("nmblookup")
+            .kill_on_drop(true)
             .args(["-A", host])
             .output(),
     )

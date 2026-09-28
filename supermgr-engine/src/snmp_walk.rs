@@ -71,6 +71,7 @@ async fn snmpget(host: &str, community: &str, oid: &str) -> Option<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::process::Command::new("snmpget")
+            .kill_on_drop(true)
             .args([
                 "-v", "2c", "-c", community, "-Ovq", "-t", "2", "-r", "0", host, oid,
             ])
@@ -97,6 +98,7 @@ async fn snmpwalk_iface(host: &str, community: &str) -> Vec<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new("snmpwalk")
+            .kill_on_drop(true)
             .args([
                 "-v",
                 "2c",

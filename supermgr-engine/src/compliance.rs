@@ -45,7 +45,11 @@ async fn extract_cli(
         .cli_grep
         .as_deref()
         .ok_or_else(|| anyhow!("cli check {} missing cli_grep", def.id))?;
-    let (_, stdout, _) = session.exec(command).await.context("ssh exec")?;
+    // A `show` read: seconds, even on a busy unit.
+    let (_, stdout, _) = session
+        .exec(command, Some(std::time::Duration::from_secs(60)))
+        .await
+        .context("ssh exec")?;
     // Find the first line containing the grep token, then return
     // the LAST whitespace-separated token from that line. FortiOS
     // `show` output looks like `    set admin-sport 8443`, so the
@@ -58,6 +62,15 @@ async fn extract_cli(
         .trim_matches('"')
         .to_owned();
     Ok(value)
+}
+
+/// Whether a run reads anything over SSH. Only CLI checks do, and the
+/// `FortiGate` library has none today.
+#[must_use]
+pub fn needs_ssh() -> bool {
+    fortigate_default_checks()
+        .iter()
+        .any(|def| matches!(def.channel, Channel::Cli))
 }
 
 pub async fn run(

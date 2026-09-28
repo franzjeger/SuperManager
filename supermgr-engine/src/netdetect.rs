@@ -102,7 +102,10 @@ pub async fn detect() -> NetworkDetect {
 async fn run(cmd: &str, args: &[&str]) -> Result<String> {
     let res = tokio::time::timeout(
         Duration::from_secs(3),
-        tokio::process::Command::new(cmd).args(args).output(),
+        tokio::process::Command::new(cmd)
+            .kill_on_drop(true)
+            .args(args)
+            .output(),
     )
     .await
     .with_context(|| format!("{cmd} timeout"))??;

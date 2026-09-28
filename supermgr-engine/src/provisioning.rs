@@ -752,8 +752,14 @@ async fn open_session(
 }
 
 async fn fetch_full_config(session: &crate::ssh::connection::SshSession) -> Result<String> {
+    // The whole config of a large unit can take a while to print; a
+    // backup that doesn't finish aborts the deploy, which is the safe way
+    // round.
     let (_, stdout, _) = session
-        .exec("show full-configuration")
+        .exec(
+            "show full-configuration",
+            Some(std::time::Duration::from_secs(300)),
+        )
         .await
         .map_err(|e| anyhow!("show full-configuration: {e}"))?;
     Ok(stdout)

@@ -155,7 +155,7 @@ pub async fn set_inform(
     );
     info!("unifi set_inform: {cmd}");
     let (exit, stdout, stderr) = session
-        .exec(&cmd)
+        .exec(&cmd, Some(std::time::Duration::from_secs(60)))
         .await
         .map_err(|e| anyhow!("ssh exec: {e}"))?;
     let _ = session.disconnect().await;

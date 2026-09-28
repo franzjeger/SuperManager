@@ -645,7 +645,8 @@ impl EngineServer {
             Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e),
         };
 
-        match session.exec(&command).await {
+        // The operator's own command runs for as long as it runs.
+        match session.exec(&command, None).await {
             Ok((exit_code, stdout, stderr)) => {
                 let _ = session.disconnect().await;
                 Response::ok(

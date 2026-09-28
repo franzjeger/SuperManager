@@ -30,20 +30,24 @@ impl EngineServer {
             _ => crate::compliance::TriggerKind::Manual,
         };
 
-        // Open an SSH session up-front so any CLI checks in the
-        // run can reuse it without each opening their own. For
-        // the v1 check set everything is API-driven and SSH is
-        // unused; this is forward-looking for L2 / custom checks
-        // that need to grep `show` output.
-        let ssh_session = match self.connect_to_host(host_id).await {
-            Ok((_, sess)) => Some(sess),
-            Err(e) => {
-                // Don't bail — most checks are API-only. Log so
-                // the user knows why CLI checks (when present)
-                // would all error.
-                tracing::info!("compliance: SSH unavailable for run ({e}); CLI checks will error");
-                None
+        // One SSH session for the run's CLI checks to share, opened only
+        // if there are any. Every check in the library reads the API, and
+        // logging in anyway cost each run an SSH login it never used (with
+        // its own ways to fail and to wait).
+        let ssh_session = if crate::compliance::needs_ssh() {
+            match self.connect_to_host(host_id).await {
+                Ok((_, sess)) => Some(sess),
+                Err(e) => {
+                    // Don't bail — most checks are API-only. Log so
+                    // the user knows why the CLI checks would all error.
+                    tracing::info!(
+                        "compliance: SSH unavailable for run ({e}); CLI checks will error"
+                    );
+                    None
+                }
             }
+        } else {
+            None
         };
 
         let result = crate::compliance::run(
@@ -255,10 +259,12 @@ impl EngineServer {
             |cmd| {
                 let session = &session;
                 async move {
+                    // Each check reads a config file or a setting.
                     let (status, stdout, stderr) = session
-                        .exec(&cmd)
+                        .exec(&cmd, Some(std::time::Duration::from_secs(60)))
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    // Each check reads a config file or a setting.
                     // Combine — checks read stdout but error messages tend to
                     // land on stderr. The exit status goes through too: it is
                     // how the runner tells "the setting is wrong" from "the

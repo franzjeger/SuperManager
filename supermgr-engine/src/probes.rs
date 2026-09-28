@@ -707,6 +707,7 @@ fn extract_title(body: &str) -> Option<String> {
 pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
     let target = format!("{host}:{port}");
     let mut child = tokio::process::Command::new("openssl")
+        .kill_on_drop(true)
         .args([
             "s_client",
             "-connect",
@@ -809,6 +810,7 @@ pub async fn tls_audit(host: &str, port: u16) -> Result<TlsInfo> {
 async fn cipher_supported(host: &str, port: u16, family: &str) -> Result<bool> {
     let target = format!("{host}:{port}");
     let mut child = tokio::process::Command::new("openssl")
+        .kill_on_drop(true)
         .args([
             "s_client",
             "-connect",
@@ -926,6 +928,7 @@ fn cipher_matches_family(cipher_name: &str, family: &str) -> bool {
 async fn protocol_supported(host: &str, port: u16, proto_flag: &str) -> Result<bool> {
     let target = format!("{host}:{port}");
     let mut child = tokio::process::Command::new("openssl")
+        .kill_on_drop(true)
         .args([
             "s_client",
             "-connect",
@@ -1036,6 +1039,7 @@ fn parse_tls_output(text: &str, _host: &str) -> Result<TlsInfo> {
 pub async fn snmp_sysdescr(host: &str) -> Result<String> {
     for community in &["public", "private"] {
         let res = tokio::process::Command::new("snmpget")
+            .kill_on_drop(true)
             .args([
                 "-v",
                 "2c",

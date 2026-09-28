@@ -122,6 +122,7 @@ pub async fn analyse_pcap(pcap_path: &Path, evidence_dir: &Path) -> Result<Traff
     let output = tokio::time::timeout(
         Duration::from_mins(1),
         tokio::process::Command::new("tcpdump")
+            .kill_on_drop(true)
             .args([
                 "-r",
                 &pcap_path.to_string_lossy(),

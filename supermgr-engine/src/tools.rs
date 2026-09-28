@@ -161,6 +161,7 @@ async fn probe_one(spec: &'static Spec) -> ToolInfo {
     let path_result = tokio::time::timeout(
         Duration::from_secs(2),
         tokio::process::Command::new("which")
+            .kill_on_drop(true)
             .arg(spec.name)
             .output(),
     )
@@ -203,7 +204,10 @@ async fn probe_one(spec: &'static Spec) -> ToolInfo {
     let version = if let Some(ref p) = path {
         let res = tokio::time::timeout(
             Duration::from_secs(2),
-            tokio::process::Command::new(p).args(spec.args).output(),
+            tokio::process::Command::new(p)
+                .kill_on_drop(true)
+                .args(spec.args)
+                .output(),
         )
         .await;
         match res {
