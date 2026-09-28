@@ -17,7 +17,11 @@
 //! `force_restore_now failed: no snapshots available`), two more took out the
 //! connectivity watchdog and the RPC workers, and the app froze.
 //!
-//! So: no unbounded external command anywhere in the helper. `bounded()`
+//! So: every external command the helper runs to completion is bounded —
+//! synchronous ones through `bounded()` / [`Bounded`], async ones through
+//! [`bounded_async`]; strongSwan's `run` applies its own deadline. The only
+//! unbounded children are the long-lived processes the helper supervises and
+//! kills through their handles (charon, ovpncli, tcpdump). `bounded()`
 //! replaces `.output()` and keeps the same `io::Result<Output>` shape, so a
 //! call site changes by one wrapper and all of its existing Ok/Err handling
 //! still applies. A command that overruns its budget is SIGKILLed rather than
@@ -191,6 +195,28 @@ pub fn wait_bounded(child: std::process::Child, secs: u64, label: &str) -> io::R
     }
 }
 
+/// [`bounded`] for tokio commands on the async RPC paths. The child is
+/// `SIGKILLed` through `kill_on_drop` when the budget runs out, and the timeout
+/// surfaces as `io::ErrorKind::TimedOut`, like the sync version.
+pub async fn bounded_async(cmd: &mut tokio::process::Command, secs: u64) -> io::Result<Output> {
+    let label = describe(cmd.as_std());
+    cmd.kill_on_drop(true);
+    match tokio::time::timeout(Duration::from_secs(secs), cmd.output()).await {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::warn!(
+                command = %label,
+                budget_secs = secs,
+                "external command exceeded its budget — killed"
+            );
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("`{label}` timed out after {secs}s"),
+            ))
+        }
+    }
+}
+
 /// Program + args, for the timeout log line. `Command`'s own `Debug` includes
 /// the env deltas and quoting noise; this stays readable in a log.
 fn describe(cmd: &Command) -> String {
@@ -227,6 +253,20 @@ mod tests {
         let err =
             bounded(&mut Command::new("/nonexistent/binary"), PROBE).expect_err("no such binary");
         assert_ne!(err.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn async_variant_kills_and_reports_timeout() {
+        let started = std::time::Instant::now();
+        let err = bounded_async(tokio::process::Command::new("/bin/sleep").arg("30"), 1)
+            .await
+            .expect_err("must time out");
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "got {err:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let out = bounded_async(tokio::process::Command::new("/bin/echo").arg("hi"), PROBE)
+            .await
+            .expect("echo ran");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "hi");
     }
 
     #[test]

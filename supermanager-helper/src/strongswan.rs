@@ -825,7 +825,13 @@ fn parse_child_remote_ts(block: &str) -> Vec<String> {
 ///         inet 192.168.250.1 --> 192.168.250.1 netmask 0xffffffff
 /// ```
 fn utun_for_address(addr: &str) -> Option<(String, String)> {
-    let out = std::process::Command::new("/sbin/ifconfig").output().ok()?;
+    // Bounded: this runs from `status` under the strongSwan mutex, right in
+    // the window where a peer reboot is tearing the utun down.
+    let out = crate::proc::bounded(
+        &mut std::process::Command::new("/sbin/ifconfig"),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     let body = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<&str> = None;
     for line in body.lines() {
@@ -893,7 +899,21 @@ async fn wait_for_charon(
     }
 }
 
+/// Ceiling for a swanctl call without a tighter budget of its own. swanctl
+/// waits on charon over vici; a charon that has stopped answering held
+/// `--terminate` / `--load-all` — and, under the strongSwan mutex, every
+/// later status and connect RPC — forever. `kill_on_drop` reaps the
+/// abandoned swanctl; charon finishes or abandons the operation itself.
+const SWANCTL_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Budget for the reaper's synchronous `swanctl --list-sas` probe.
+const LIST_SAS_BUDGET: u64 = 3;
+
 async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
+    run_with_timeout(bin, args, SWANCTL_BUDGET).await
+}
+
+async fn exec(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let mut command = Command::new(bin);
     // Use the same Homebrew configuration as the supervised charon process.
     // Environment inherited from launchd must not select a different socket.
@@ -1054,7 +1074,7 @@ async fn run_with_timeout(
     args: &[&str],
     timeout: std::time::Duration,
 ) -> anyhow::Result<String> {
-    match tokio::time::timeout(timeout, run(bin, args)).await {
+    match tokio::time::timeout(timeout, exec(bin, args)).await {
         Ok(r) => r,
         Err(_) => Err(anyhow!("{} {:?} timed out", bin.display(), args)),
     }
@@ -1359,9 +1379,10 @@ fn build_swanctl_secrets(args: &ConnectArgs) -> String {
 /// Safe to call unconditionally — `route delete` is a no-op if the
 /// route doesn't exist.
 fn delete_server_host_route(host: &str) {
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-q", "delete", host])
-        .output();
+    let out = crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-q", "delete", host]),
+        crate::proc::MUTATE,
+    );
     match out {
         Ok(o) if o.status.success() => {
             tracing::info!("route_cleanup: deleted host route for {host}")
@@ -1489,7 +1510,10 @@ fn swanctl_list_sas_established() -> Option<bool> {
     // Via proc::bounded rather than a bare worker thread: on timeout that
     // SIGKILLs the wedged swanctl instead of abandoning it, so a 2s reaper
     // cycle can't accumulate one stuck child (and one stuck thread) per tick.
-    match crate::proc::bounded(std::process::Command::new(&swanctl).arg("--list-sas"), 3) {
+    match crate::proc::bounded(
+        std::process::Command::new(&swanctl).arg("--list-sas"),
+        LIST_SAS_BUDGET,
+    ) {
         Ok(o) if o.status.success() => {
             Some(String::from_utf8_lossy(&o.stdout).contains("ESTABLISHED"))
         }
@@ -1535,9 +1559,10 @@ fn delete_split_default(
             return;
         }
     }
-    let out = std::process::Command::new("/sbin/route")
-        .args(["-q", "delete", family, "-net", del_spec])
-        .output();
+    let out = crate::proc::bounded(
+        std::process::Command::new("/sbin/route").args(["-q", "delete", family, "-net", del_spec]),
+        crate::proc::MUTATE,
+    );
     match out {
         Ok(o) if o.status.success() => {
             tracing::info!("route_cleanup: deleted full-tunnel route {del_spec}")
@@ -1579,12 +1604,22 @@ fn install_ipv6_leak_block() {
                 }
             }
         }
-        let _ = std::process::Command::new("/sbin/route")
-            .args(["-q", "delete", "-inet6", "-net", net])
-            .output();
-        let out = std::process::Command::new("/sbin/route")
-            .args(["-q", "add", "-inet6", "-net", net, "::1", "-blackhole"])
-            .output();
+        let _ = crate::proc::bounded(
+            std::process::Command::new("/sbin/route").args(["-q", "delete", "-inet6", "-net", net]),
+            crate::proc::MUTATE,
+        );
+        let out = crate::proc::bounded(
+            std::process::Command::new("/sbin/route").args([
+                "-q",
+                "add",
+                "-inet6",
+                "-net",
+                net,
+                "::1",
+                "-blackhole",
+            ]),
+            crate::proc::MUTATE,
+        );
         match out {
             Ok(o) if o.status.success() => tracing::info!("ipv6_leak_block: blackholed {net}"),
             Ok(o) => tracing::warn!(
@@ -1655,10 +1690,10 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
         if !wg.exists() {
             continue;
         }
-        if let Ok(out) = std::process::Command::new(&wg)
-            .args(["show", "interfaces"])
-            .output()
-        {
+        if let Ok(out) = crate::proc::bounded(
+            std::process::Command::new(&wg).args(["show", "interfaces"]),
+            crate::proc::PROBE,
+        ) {
             if out.status.success() {
                 for name in String::from_utf8_lossy(&out.stdout).split_whitespace() {
                     set.insert(name.to_string());
@@ -1691,10 +1726,11 @@ pub(crate) fn tailscaled_alive() -> bool {
 }
 
 pub(crate) fn tailscale_tunnel_iface() -> Option<String> {
-    let out = std::process::Command::new("/usr/sbin/netstat")
-        .args(["-rn", "-f", "inet"])
-        .output()
-        .ok()?;
+    let out = crate::proc::bounded(
+        std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", "inet"]),
+        crate::proc::PROBE,
+    )
+    .ok()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     for line in stdout.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();

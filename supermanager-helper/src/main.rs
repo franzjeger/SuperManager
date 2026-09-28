@@ -567,12 +567,14 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             // chmod 755 + chown root:wheel on the temp file BEFORE
             // the rename so the active binary always has correct
             // permissions.
-            let _ = std::process::Command::new("/bin/chmod")
-                .args(["755", &tmp_target])
-                .status();
-            let _ = std::process::Command::new("/usr/sbin/chown")
-                .args(["root:wheel", &tmp_target])
-                .status();
+            let _ = proc::bounded(
+                std::process::Command::new("/bin/chmod").args(["755", &tmp_target]),
+                proc::MUTATE,
+            );
+            let _ = proc::bounded(
+                std::process::Command::new("/usr/sbin/chown").args(["root:wheel", &tmp_target]),
+                proc::MUTATE,
+            );
             // Atomic rename. If this fails, the existing target is
             // untouched.
             if let Err(e) = std::fs::rename(&tmp_target, target) {
