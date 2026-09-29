@@ -101,6 +101,19 @@ fn host_key_fingerprint(key: &PublicKey) -> Result<String, russh::keys::ssh_key:
     Ok(KnownHostsStore::fingerprint(&key.to_bytes()?))
 }
 
+/// Parse a stored OpenSSH certificate, as russh's own `Certificate`: russh
+/// uses a newer ssh-key than the rest of the workspace.
+///
+/// Trimmed first. The GUI stores whatever was pasted, surrounding whitespace
+/// included, and `from_openssh` only trims the end: a leading space or
+/// newline failed the parse, and login went ahead with the bare key, saying
+/// so only in the daemon log.
+fn parse_certificate(
+    stored: &str,
+) -> Result<russh::keys::Certificate, russh::keys::ssh_key::Error> {
+    russh::keys::Certificate::from_openssh(stored.trim())
+}
+
 /// The signature hash for public-key authentication with `key`. For RSA it is
 /// what the server says it accepts (RFC 8308 `server-sig-algs`), and
 /// rsa-sha2-512 when it says nothing, which is what russh 0.46 always used
@@ -300,9 +313,7 @@ impl SshSession {
 
         // Try certificate auth first if a certificate is provided.
         if let Some(cert_data) = cert_pem {
-            // russh's own `Certificate`: russh uses a newer ssh-key than the
-            // rest of the workspace.
-            match russh::keys::Certificate::from_openssh(cert_data) {
+            match parse_certificate(cert_data) {
                 Ok(cert) => {
                     match handle
                         .authenticate_openssh_cert(username, key_pair.clone(), cert)
@@ -774,5 +785,26 @@ mod host_key_tests {
             let key = russh::keys::parse_public_key_base64(blob).unwrap();
             assert_eq!(host_key_fingerprint(&key).unwrap(), expected, "{blob}");
         }
+    }
+}
+
+#[cfg(test)]
+mod certificate_tests {
+    use super::*;
+
+    /// The engine's test certificate, from `ssh-keygen -s ca -I testid -n
+    /// root`. Only parsed, so its expiry can't rot the test.
+    const CERT: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIJ9a/RUT34M6KpfmIHf+OOJMzRUEfVeqUOI02LzMhfNtAAAAIOUk18Uqim7mDZikSU6bmR7b9zjAFqL88V8dFZXWCen/AAAAAAAAAAAAAAABAAAABnRlc3RpZAAAAAgAAAAEcm9vdAAAAABqd03QAAAAAGxXMCUAAAAAAAAAggAAABVwZXJtaXQtWDExLWZvcndhcmRpbmcAAAAAAAAAF3Blcm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAAABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5nAAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5wZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACDzWHnfe5a0E+lvGZ9ye+4ItyAp57rjW9E01WbNw7fkoAAAAFMAAAALc3NoLWVkMjU1MTkAAABATEJm0QvR/7+XQ0ya/o9gNs+Ew6HvmNhR3hbiW0jwuVL2Fbpc/cMxapnKqUzZAzNkMvxPQGtpUWcXxx5Q4siCDg== testkey";
+
+    #[test]
+    fn a_stored_certificate_parses_despite_surrounding_whitespace() {
+        let pasted = format!("\n  {CERT}\n\n");
+        assert!(
+            russh::keys::Certificate::from_openssh(&pasted).is_err(),
+            "from_openssh now tolerates leading whitespace; the trim may be unnecessary"
+        );
+        let cert = parse_certificate(&pasted).unwrap();
+        assert_eq!(cert.key_id(), "testid");
+        assert_eq!(cert.valid_principals(), ["root"]);
     }
 }
