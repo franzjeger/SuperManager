@@ -23,7 +23,7 @@
 # Outputs:
 #   - $APP/Contents/Resources/tailscale-bin/tailscale
 #   - $APP/Contents/Resources/tailscale-bin/tailscaled
-#   - $APP/Contents/Resources/tailscale-bin/.version  (cached version stamp)
+#   - $APP/Contents/Resources/tailscale-bin/.version  (hash of the bundled sources)
 
 set -euo pipefail
 
@@ -73,16 +73,20 @@ if [[ ! -x "${SRC_TS}" || ! -x "${SRC_TSD}" ]]; then
     exit 0
 fi
 
-# 2. Skip the copy if the cached version stamp matches — keeps clean
-# builds fast and avoids unnecessary code-sign churn on the Resources
-# directory.
-TS_VERSION="$("${SRC_TS}" version --short 2>/dev/null || echo unknown)"
+# 2. Skip the copy if the stamp says these exact binaries are bundled —
+# keeps clean builds fast and avoids unnecessary code-sign churn on the
+# Resources directory. The stamp is a hash of Homebrew's binaries. It
+# used to be `tailscale version --short`, a flag the CLI no longer has,
+# so every stamp read "unknown", matched, and a `brew upgrade tailscale`
+# never reached the bundle.
+TS_VERSION="$("${SRC_TS}" version 2>/dev/null | head -n 1 || true)"
+SOURCE_HASH="$(shasum -a 256 "${SRC_TS}" "${SRC_TSD}" | awk '{print $1}' | tr -d '\n')"
 STAMP_FILE="${DEST_DIR}/.version"
 if [[ -f "${STAMP_FILE}" ]] \
-   && [[ "$(cat "${STAMP_FILE}")" == "${TS_VERSION}" ]] \
+   && [[ "$(cat "${STAMP_FILE}")" == "${SOURCE_HASH}" ]] \
    && [[ -x "${DEST_DIR}/tailscale" ]] \
    && [[ -x "${DEST_DIR}/tailscaled" ]]; then
-    echo "Tailscale ${TS_VERSION} already bundled, skipping."
+    echo "Tailscale ${TS_VERSION:-(unknown version)} already bundled, skipping."
     exit 0
 fi
 
@@ -134,5 +138,5 @@ codesign --force \
     --identifier "com.sybr.supermanager.tailscaled" \
     "${DEST_DIR}/tailscaled"
 
-echo "${TS_VERSION}" > "${STAMP_FILE}"
-echo "Bundled Tailscale ${TS_VERSION} into $(basename "${APP}")."
+echo "${SOURCE_HASH}" > "${STAMP_FILE}"
+echo "Bundled Tailscale ${TS_VERSION:-(unknown version)} into $(basename "${APP}")."
