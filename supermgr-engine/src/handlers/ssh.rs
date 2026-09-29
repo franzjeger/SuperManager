@@ -1172,14 +1172,17 @@ mod tests {
     /// must trim before parsing or cert auth silently downgrades to plain
     /// pubkey. If a future ssh-key release starts tolerating leading
     /// whitespace this test flags that the connect-side trim is redundant.
+    ///
+    /// Connect parses with russh's own `Certificate`, a newer ssh-key than
+    /// the one validate uses, so that is the parser checked here.
     #[test]
     fn from_openssh_requires_leading_whitespace_trimmed() {
         let leading = format!("  {CERT}");
         assert!(
-            ssh_key::Certificate::from_openssh(&leading).is_err(),
+            russh::keys::Certificate::from_openssh(&leading).is_err(),
             "from_openssh tolerated leading whitespace — the connect-side trim may be unnecessary"
         );
-        assert!(ssh_key::Certificate::from_openssh(leading.trim()).is_ok());
+        assert!(russh::keys::Certificate::from_openssh(leading.trim()).is_ok());
     }
 
     #[test]
