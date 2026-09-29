@@ -9,7 +9,8 @@
 //! launchd plist, and bootstrap the daemon.
 //!
 //! Lifecycle:
-//!   • install: copy `tailscaled` to /usr/local/sbin/, write
+//!   • install: copy `tailscaled` next to the helper, check that the
+//!     copy is SuperManager's signed build, write
 //!     /Library/LaunchDaemons/com.sybr.tailscaled.plist, bootstrap.
 //!   • status:  read-only check that the launchd job is bootstrapped
 //!     and reports a process running.
@@ -23,16 +24,25 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
 
-/// Stable on-disk path for the daemon binary. The helper copies the
-/// bundled `tailscaled` here on install. We don't run it directly
-/// from inside the .app bundle because that location moves whenever
-/// the user moves SuperManager.app, drags it into Trash, etc., and
-/// the LaunchDaemon plist would then point at a missing binary.
-const DAEMON_INSTALL_PATH: &str = "/usr/local/sbin/supermanager-tailscaled";
+/// Stable on-disk path for the daemon binary: next to the helper, in a
+/// directory only root can write, so nothing but the helper replaces
+/// the program launchd runs as root. The helper copies the bundled
+/// `tailscaled` here on install. We don't run it directly from inside
+/// the .app bundle because that location moves whenever the user moves
+/// SuperManager.app, drags it into Trash, etc., and the LaunchDaemon
+/// plist would then point at a missing binary.
+const DAEMON_INSTALL_PATH: &str = "/Library/PrivilegedHelperTools/com.sybr.supermanager.tailscaled";
+
+/// Where helpers up to 1.8.14 installed it.
+const LEGACY_INSTALL_PATH: &str = "/usr/local/sbin/supermanager-tailscaled";
+
+/// The identifier `bundle_tailscale.sh` and `release.sh` sign the bundled
+/// daemon with. An installed binary carries it, and SuperManager's team.
+const DAEMON_IDENTIFIER: &str = "com.sybr.supermanager.tailscaled";
 
 /// Where launchd looks for system daemons. Anything in this directory
 /// owned by root with the right permissions is auto-bootstrapped at
@@ -86,8 +96,8 @@ pub struct InstallResult {
 ///     Could be a transient crash; UI shows "Start" button.
 ///   • `!installed` — plist not present. UI shows "Install" button.
 pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
-    let installed =
-        Path::new(LAUNCH_DAEMON_PLIST).exists() && Path::new(DAEMON_INSTALL_PATH).exists();
+    let installed = Path::new(LAUNCH_DAEMON_PLIST).exists()
+        && (Path::new(DAEMON_INSTALL_PATH).exists() || Path::new(LEGACY_INSTALL_PATH).exists());
 
     if !installed {
         return Ok(DaemonStatus {
@@ -123,17 +133,17 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
 /// daemon re-copies the binary (in case the version bundled with
 /// SuperManager has changed) and re-bootstraps.
 pub fn install(args: InstallArgs) -> Result<InstallResult> {
-    let src = Path::new(&args.bundled_daemon_path);
-    if !src.exists() {
-        bail!("bundled daemon not found at {}", args.bundled_daemon_path);
-    }
-    if !src.is_file() {
-        bail!("bundled daemon path is not a regular file");
-    }
+    // 1. Copy the bundled binary to its stable location and check the
+    // copy, before touching the running daemon: a binary that is not
+    // SuperManager's leaves the current install as it is. We copy (not
+    // symlink) so the daemon keeps working after the user moves
+    // SuperManager.app or trashes it temporarily.
+    install_binary(
+        Path::new(&args.bundled_daemon_path),
+        Path::new(DAEMON_INSTALL_PATH),
+    )?;
 
-    // 1. Make sure the install directory + state directory exist.
-    fs::create_dir_all(Path::new(DAEMON_INSTALL_PATH).parent().unwrap())
-        .context("creating /usr/local/sbin")?;
+    // Make sure the state directory exists.
     fs::create_dir_all(STATE_DIR).context("creating tailscale state dir")?;
     // tailscaled writes secrets to its state dir; lock it down to root.
     let _ = Command::new("/bin/chmod")
@@ -146,27 +156,24 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // 2. Bootout any prior incarnation of the daemon. Failures are
     // expected on first install (job doesn't exist) — ignored.
     //
+    // Its utun goes with it, so drop exit-node routes through it first:
+    // left behind, they would take every connection into a dead
+    // interface until the new daemon's exit node is back. Removing them
+    // fails open, to the local uplink, like every other exit-route
+    // removal here.
+    //
     // `bootout` returns once launchd has stopped the job, and launchd gives
     // a job 20 s (its default ExitTimeOut) before SIGKILL. Cut shorter, the
     // bootstrap below races a daemon that is still going away.
+    let _ = remove_exit_routes(ExitRoutesArgs::default());
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
         .budget(crate::proc::SLOW)
         .status();
+    // An install by an older helper leaves its copy behind.
+    let _ = fs::remove_file(LEGACY_INSTALL_PATH);
 
-    // 3. Copy the bundled binary to its stable location. We copy
-    // (not symlink) so the daemon keeps working after the user
-    // moves SuperManager.app or trashes it temporarily.
-    fs::copy(src, DAEMON_INSTALL_PATH)
-        .with_context(|| format!("copying daemon to {DAEMON_INSTALL_PATH}"))?;
-    let _ = Command::new("/bin/chmod")
-        .args(["0755", DAEMON_INSTALL_PATH])
-        .status();
-    let _ = Command::new("/usr/sbin/chown")
-        .args(["root:wheel", DAEMON_INSTALL_PATH])
-        .status();
-
-    // 4. Write the LaunchDaemon plist. Pinning state-dir + socket
+    // 3. Write the LaunchDaemon plist. Pinning state-dir + socket
     // path matches Tailscale.app's defaults so the CLI we bundle
     // (which probes the standard socket location) talks to our
     // daemon without any --socket override.
@@ -180,7 +187,7 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
         .args(["root:wheel", LAUNCH_DAEMON_PLIST])
         .status();
 
-    // 5. Bootstrap the job. `kickstart -k` then forces a restart in
+    // 4. Bootstrap the job. `kickstart -k` then forces a restart in
     // case launchd cached an earlier instance.
     let mut last_err = String::new();
     let mut bootstrapped = false;
@@ -217,6 +224,76 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     })
 }
 
+/// Put a copy of `source` at `target` if the copy is `tailscaled` as
+/// SuperManager signs it: SuperManager's team and `DAEMON_IDENTIFIER`.
+/// The copy is what gets checked, in the helper's own directory, so the
+/// file launchd runs is the file that passed. The source is read once,
+/// as a regular file and not through a symlink.
+fn install_binary(source: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut from = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(source)
+        .with_context(|| format!("open {}", source.display()))?;
+    if !from.metadata()?.is_file() {
+        bail!("{} is not a regular file", source.display());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let staged = PathBuf::from(format!(
+        "{}.{}.tmp",
+        target.display(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| -> Result<()> {
+        let mut to = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&staged)
+            .with_context(|| format!("create {}", staged.display()))?;
+        std::io::copy(&mut from, &mut to).context("copy tailscaled")?;
+        to.sync_all()?;
+        drop(to);
+        verify_daemon_signature(&staged)?;
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        fs::rename(&staged, target).with_context(|| format!("install {}", target.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn verify_daemon_signature(path: &Path) -> Result<()> {
+    use core_foundation::url::CFURL;
+    use security_framework::os::macos::code_signing::{Flags, SecRequirement, SecStaticCode};
+    let requirement: SecRequirement = format!(
+        "anchor apple generic and certificate leaf[subject.OU] = \"{}\" \
+         and identifier \"{DAEMON_IDENTIFIER}\"",
+        crate::client_auth::TEAM_ID
+    )
+    .parse()
+    .context("tailscaled code requirement")?;
+    let url = CFURL::from_path(path, false).context("tailscaled path")?;
+    SecStaticCode::from_path(&url, Flags::NONE)
+        .and_then(|code| {
+            code.check_validity(
+                Flags::CHECK_ALL_ARCHITECTURES | Flags::STRICT_VALIDATE,
+                &requirement,
+            )
+        })
+        .map_err(|e| anyhow::anyhow!("not tailscaled as SuperManager signs it ({e})"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verify_daemon_signature(_: &Path) -> Result<()> {
+    bail!("code signatures can only be checked on macOS")
+}
+
 /// Uninstall the daemon. Removes the LaunchDaemon, the binary, and
 /// the launchd registration. Leaves the state directory intact —
 /// the user's node key + tailnet identity is in there, and a future
@@ -230,8 +307,10 @@ pub fn uninstall(_: UninstallArgs) -> Result<InstallResult> {
     if Path::new(LAUNCH_DAEMON_PLIST).exists() {
         let _ = fs::remove_file(LAUNCH_DAEMON_PLIST);
     }
-    if Path::new(DAEMON_INSTALL_PATH).exists() {
-        let _ = fs::remove_file(DAEMON_INSTALL_PATH);
+    for binary in [DAEMON_INSTALL_PATH, LEGACY_INSTALL_PATH] {
+        if Path::new(binary).exists() {
+            let _ = fs::remove_file(binary);
+        }
     }
     Ok(InstallResult {
         success: true,
@@ -1689,6 +1768,22 @@ pub fn ensure_plist_current() {
     let wanted = render_launchd_plist();
     let plist_current = existing == wanted;
 
+    // An older helper installed the binary where the plist still points.
+    // Move it here first if it is SuperManager's; otherwise keep that
+    // install running as it is until the app installs the daemon again.
+    if !plist_current && !Path::new(DAEMON_INSTALL_PATH).exists() {
+        if let Err(e) = install_binary(
+            Path::new(LEGACY_INSTALL_PATH),
+            Path::new(DAEMON_INSTALL_PATH),
+        ) {
+            tracing::warn!("tailscaled: keeping the install at {LEGACY_INSTALL_PATH}: {e:#}");
+            if !daemon_is_loaded() {
+                reload_daemon();
+            }
+            return;
+        }
+    }
+
     match plist_action(plist_current, daemon_is_loaded()) {
         PlistAction::Skip => {}
         PlistAction::ReloadOnly => reload_daemon(),
@@ -1704,6 +1799,7 @@ pub fn ensure_plist_current() {
                 .args(["root:wheel", LAUNCH_DAEMON_PLIST])
                 .status();
             reload_daemon();
+            let _ = fs::remove_file(LEGACY_INSTALL_PATH);
         }
     }
 }
@@ -1814,6 +1910,61 @@ fn reload_daemon() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("supermanager-tsd-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    /// Signed by Apple, but not SuperManager's tailscaled: nothing is
+    /// installed, and the staged copy is gone.
+    #[test]
+    fn a_program_that_is_not_supermanagers_tailscaled_is_not_installed() {
+        let dir = scratch_dir();
+        let target = dir.join("tailscaled");
+        let err = install_binary(Path::new("/usr/bin/true"), &target).unwrap_err();
+        assert!(format!("{err:#}").contains("not tailscaled as SuperManager signs it"));
+        assert!(!target.exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_source_is_not_read_through_a_symlink() {
+        let dir = scratch_dir();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
+        assert!(install_binary(&link, &dir.join("tailscaled")).is_err());
+        assert!(install_binary(&dir, &dir.join("tailscaled")).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The daemon a signed release bundles installs. Run with the path of
+    /// an installed release:
+    ///
+    /// ```text
+    /// SUPERMANAGER_RELEASE_APP=/Applications/SuperManager.app \
+    ///     cargo test -p supermanager-helper -- --ignored bundled_tailscaled
+    /// ```
+    #[test]
+    #[ignore = "needs a signed SuperManager build, see the doc comment"]
+    fn the_bundled_tailscaled_of_a_release_installs() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let app = std::env::var("SUPERMANAGER_RELEASE_APP").unwrap();
+        let dir = scratch_dir();
+        let target = dir.join("tailscaled");
+        install_binary(
+            &Path::new(&app).join("Contents/Resources/tailscale-bin/tailscaled"),
+            &target,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Only addresses: nothing else sent as a server reaches `scutil`.
     #[test]

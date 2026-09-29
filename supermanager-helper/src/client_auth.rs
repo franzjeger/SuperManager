@@ -23,7 +23,7 @@ use std::os::fd::AsRawFd;
 
 use tokio::net::UnixStream;
 
-const TEAM_ID: &str = "LY6LJ395B8";
+pub(crate) const TEAM_ID: &str = "LY6LJ395B8";
 const APP_ID: &str = "com.sybr.supermanager";
 
 /// Which clients this helper accepts, decided by how the helper itself is
