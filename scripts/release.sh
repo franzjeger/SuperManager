@@ -158,6 +158,7 @@ xcodebuild \
     -scheme SuperManagerMac \
     -configuration Release \
     -destination 'platform=macOS' \
+    -onlyUsePackageVersionsFromResolvedFile \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGN_IDENTITY="" \
