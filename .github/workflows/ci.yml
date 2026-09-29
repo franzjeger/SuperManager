@@ -48,6 +48,8 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p 'test_*provisioning.py' -v
       - name: Test the Linux updater against a throwaway origin
         run: python3 -m unittest scripts/tests/test_update_linux.py -v
+      - name: Test the Mac app's version against throwaway tags
+        run: python3 -m unittest scripts/tests/test_app_version.py -v
 
       # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
       - name: Parse every tracked shell script

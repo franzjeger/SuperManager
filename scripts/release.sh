@@ -11,7 +11,8 @@
 # What it does:
 #   1. Pre-flight: confirm version isn't already tagged, Developer ID
 #      cert is in Keychain, App Store Connect API key is configured.
-#   2. Bump CFBundleShortVersionString + CFBundleVersion in project.yml.
+#   2. Build with SUPERMANAGER_VERSION set, which the Xcode build stamps
+#      into the app instead of the version it reads from the release tags.
 #   3. Build Release configuration via xcodebuild → unsigned .app.
 #   4. Sign the .app + the two embedded Rust binaries with the
 #      Developer ID Application identity. Hardened runtime + timestamp.
@@ -132,14 +133,12 @@ if [ -z "$SIGN_UPDATE" ]; then
     exit 1
 fi
 
-# ---- 2. Bump version --------------------------------------------------------
+# ---- 2. Version -------------------------------------------------------------
 
-echo "→ Bumping version to $VERSION in project.yml"
-# `sed -i ''` is required on macOS for in-place edit.
-sed -i '' "s|CFBundleShortVersionString: .*|CFBundleShortVersionString: \"$VERSION\"|" \
-    "$REPO_ROOT/SuperManagerMac/project.yml"
-sed -i '' "s|CFBundleVersion: .*|CFBundleVersion: \"$VERSION\"|" \
-    "$REPO_ROOT/SuperManagerMac/project.yml"
+# The Xcode build stamps its version from the release tags
+# (scripts/app-version.sh). A local release builds before it tags, so the
+# version is handed over explicitly, and checked on the built app below.
+echo "→ Building version $VERSION"
 
 (cd "$REPO_ROOT/SuperManagerMac" && xcodegen generate)
 
@@ -162,6 +161,7 @@ xcodebuild \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGN_IDENTITY="" \
+    SUPERMANAGER_VERSION="$VERSION" \
     clean build \
     > "$RELEASE_DIR/build.log" 2>&1 || {
         tail -80 "$RELEASE_DIR/build.log"
@@ -177,7 +177,16 @@ if [ ! -d "$APP" ]; then
     echo "error: .app not found at $APP after build" >&2
     exit 1
 fi
-echo "  built: $APP"
+# The appcast will announce $VERSION. An app that reports anything else never
+# counts as updated: Sparkle would offer the same release again forever.
+for key in CFBundleShortVersionString CFBundleVersion; do
+    built="$(/usr/libexec/PlistBuddy -c "Print :$key" "$APP/Contents/Info.plist")"
+    if [ "$built" != "$VERSION" ]; then
+        echo "error: the built app's $key is $built, not $VERSION" >&2
+        exit 1
+    fi
+done
+echo "  built: $APP ($VERSION)"
 
 # ---- 4. Sign (already done by build.sh post-build, but re-sign Release with
 #               Developer ID instead of Apple Development) ---------------------
