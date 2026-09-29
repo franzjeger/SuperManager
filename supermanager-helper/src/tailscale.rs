@@ -146,9 +146,16 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
     // 2. Bootout any prior incarnation of the daemon. Failures are
     // expected on first install (job doesn't exist) — ignored.
     //
+    // Its utun goes with it, so drop exit-node routes through it first:
+    // left behind, they would take every connection into a dead
+    // interface until the new daemon's exit node is back. Removing them
+    // fails open, to the local uplink, like every other exit-route
+    // removal here.
+    //
     // `bootout` returns once launchd has stopped the job, and launchd gives
     // a job 20 s (its default ExitTimeOut) before SIGKILL. Cut shorter, the
     // bootstrap below races a daemon that is still going away.
+    let _ = remove_exit_routes(ExitRoutesArgs::default());
     let _ = Command::new("/bin/launchctl")
         .args(["bootout", &format!("system/{}", LAUNCH_LABEL)])
         .budget(crate::proc::SLOW)
