@@ -1077,6 +1077,13 @@ class AppState {
     /// in the header.
     var tailscaledRunning: Bool?
     var tailscaledInstalled: Bool?
+    /// The installed `tailscaled`, as the helper reports it.
+    var tailscaledBinaryPath: String?
+    /// The installed `tailscaled` is not the one this app bundles, most
+    /// likely because an earlier version of the app installed it. Updating
+    /// restarts the service and drops tailnet connections for a moment, so
+    /// the user chooses when: the Tailscale menu and settings offer it.
+    var tailscaledOutdated = false
     /// Per-profile-id auto-reconnect-enabled flag. Refreshed
     /// from helper's `auto_reconnect_list` RPC. Drives the
     /// "Always on" toggle in the VPN detail view.

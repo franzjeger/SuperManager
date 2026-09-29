@@ -348,6 +348,7 @@ extension AppState {
                     break
                 }
             }
+            tailscaledBinaryPath = nil // compare the new binary again
             await refreshTailscaledDaemon()
             DebugLog.write("[ts] installTailscaled: done. running=\(tailscaledRunning?.description ?? "nil") backend=\(tailscaleStatus?.backendState ?? "nil")")
         } catch {
@@ -376,11 +377,30 @@ extension AppState {
             let r = try await HelperClient.shared.tailscaledStatus()
             tailscaledInstalled = (r["installed"] as? Bool) ?? false
             tailscaledRunning = (r["running"] as? Bool) ?? false
+            let binary = r["binary"] as? String
+            if binary != tailscaledBinaryPath {
+                tailscaledBinaryPath = binary
+                tailscaledOutdated = await Self.differsFromBundled(installed: binary)
+            }
         } catch {
             // Helper unreachable: we don't know either way. Leave
             // the values alone rather than flapping to nil — UI
             // treats nil as "loading."
         }
+    }
+
+    /// Whether the installed daemon at `installed` is not the one this app
+    /// bundles. Reads both files, so it runs off the main actor, and only
+    /// when the helper names a binary the app has not compared yet: at
+    /// launch, and after an install.
+    nonisolated static func differsFromBundled(
+        installed: String?,
+        bundled: String? = TailscaleClient.bundledDaemonPath
+    ) async -> Bool {
+        guard let installed, let bundled else { return false }
+        return await Task.detached(priority: .utility) {
+            !FileManager.default.contentsEqual(atPath: installed, andPath: bundled)
+        }.value
     }
 
     /// Emergency reset: clear exit-node + accept-routes via the CLI,
