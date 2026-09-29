@@ -44,11 +44,7 @@ impl client::Handler for SshClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // We hash the SSH wire-format public key. Different from OpenSSH's
-        // base64-truncated SHA256 representation, but stable across
-        // restarts and we only need to compare it to ourselves.
-        let key_bytes = server_public_key.public_key_bytes();
-        let fingerprint = KnownHostsStore::fingerprint(&key_bytes);
+        let fingerprint = host_key_fingerprint(server_public_key);
 
         match self
             .known_hosts
@@ -88,6 +84,14 @@ impl client::Handler for SshClientHandler {
             }
         }
     }
+}
+
+/// What `known_hosts` records for `key`: the SHA-256 of its SSH wire form, in
+/// hex. Not OpenSSH's base64 `SHA256:` form, but stable, and we only ever
+/// compare it with ourselves. It must never shift, or every recorded host
+/// reads as a changed key.
+fn host_key_fingerprint(key: &PublicKey) -> String {
+    KnownHostsStore::fingerprint(&key.public_key_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +963,40 @@ mod shell_tests {
     }
 }
 
+/// Host-key fingerprints are stored, so they must survive library upgrades.
+/// The expected values below were computed outside any SSH library, from
+/// keys made by `ssh-keygen`: `shasum -a 256` over the base64-decoded key.
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    const ED25519: (&str, &str) = (
+        "AAAAC3NzaC1lZDI1NTE5AAAAIO88gW2+ekico7P/wx3hnEskuq3Vu6VATCjUhEtMlYzD",
+        "262c5a9e464b3ff6f888a4db6cd40fa1a5ca89aca000ff501a85307cbc964c53",
+    );
+    const RSA: (&str, &str) = (
+        "AAAAB3NzaC1yc2EAAAADAQABAAABAQC2yvjxYsTv+XWbvV4aymsNDMSeL4a/FRxY33k0knq7/DGaFZpkppQChYDJ\
+         qYVUdYqdvGZ3V0uEjSKkEhlyJ+l7cMigD2JWkDPqqng4yEDy7e1+oX7Ggbrty+zqgWptst0e5LO+MLTNYujrU3GC\
+         ll5HI94qkI5tsrCsiajMFg/5Q0RUGtCqd4/E2q7bttlYGeH0nsbDlMG7JYcBQfEvvDS6M9p6OOde9ODGA2AhaoPQ\
+         oOzDNlgwf+1p4rJJlF7o0gd7pgdb725kSvPdUV2iLr0+m9awrIUVNzK0iLmvqhXSNcDP9x8QbKZetPjJAbptC/RM\
+         PcHAOMYuzHuNcMPJ3ofJ",
+        "9a0e5f35e18f44da787e29a1adfdc913b362d99ada24d34ef4225c8ae647e344",
+    );
+    const ECDSA_P256: (&str, &str) = (
+        "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBBJbjIi7BbSJRV0fZw6cbjrOxdv+BW12bAOR\
+         I7tQIKnqt4hh9mDPwCfwlcPXrgb6tQr7WdyS1lHcf2/uyO5Nvd0=",
+        "7452945f1d26766d358217507f4321eaf76ad281732fa9fc7dda0e2d1079c7bb",
+    );
+
+    #[test]
+    fn fingerprints_match_what_known_hosts_already_holds() {
+        for (blob, expected) in [ED25519, RSA, ECDSA_P256] {
+            let key = russh_keys::parse_public_key_base64(blob).unwrap();
+            assert_eq!(host_key_fingerprint(&key), expected, "{blob}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;
@@ -1018,12 +1056,12 @@ mod session_tests {
         }
     }
 
-    /// Serve one connection on a loopback port, and log in to it.
-    async fn login(behaviour: Server, timeout_secs: u64) -> Result<SshSession, SshError> {
+    /// Serve one connection on a loopback port with `host_key`; returns the port.
+    async fn serve(behaviour: Server, host_key: russh_keys::key::KeyPair) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = Arc::new(server::Config {
-            keys: vec![russh_keys::key::KeyPair::generate_ed25519()],
+            keys: vec![host_key],
             auth_rejection_time: std::time::Duration::ZERO,
             ..server::Config::default()
         });
@@ -1033,6 +1071,12 @@ mod session_tests {
                 let _ = session.await;
             }
         });
+        port
+    }
+
+    /// Serve one connection on a loopback port, and log in to it.
+    async fn login(behaviour: Server, timeout_secs: u64) -> Result<SshSession, SshError> {
+        let port = serve(behaviour, russh_keys::key::KeyPair::generate_ed25519()).await;
         let known_hosts = tempfile::tempdir().unwrap();
         let known_hosts = Arc::new(KnownHostsStore::open(known_hosts.path()).unwrap());
         SshSession::connect_password(
@@ -1044,6 +1088,44 @@ mod session_tests {
             known_hosts,
         )
         .await
+    }
+
+    /// The ed25519 host key anyone can rebuild from 32 bytes of 7. OpenSSL
+    /// derived its public key, and `shasum` its fingerprint.
+    fn seeded_host_key() -> russh_keys::key::KeyPair {
+        let key = ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[7; 32]));
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        russh_keys::decode_secret_key(&pem, None).unwrap()
+    }
+
+    const SEEDED_HOST_KEY_FINGERPRINT: &str =
+        "cff7d2bf46744594be2dc71b73a668396c2dfdf6e3d5514919204a41ba3889c1";
+
+    /// The key a real handshake hands the host-key check must be recorded
+    /// with the fingerprint of its standard wire form, the one `known_hosts`
+    /// files already hold.
+    #[tokio::test]
+    async fn a_handshake_records_the_fingerprint_known_hosts_already_holds() {
+        let port = serve(Server::Answer, seeded_host_key()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let known_hosts = Arc::new(KnownHostsStore::open(dir.path()).unwrap());
+        SshSession::connect_password(
+            "127.0.0.1",
+            port,
+            "ops",
+            "secret",
+            5,
+            Arc::clone(&known_hosts),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            known_hosts.entries(),
+            [(
+                format!("127.0.0.1:{port}"),
+                SEEDED_HOST_KEY_FINGERPRINT.to_owned()
+            )]
+        );
     }
 
     fn reason(error: &SshError) -> &str {

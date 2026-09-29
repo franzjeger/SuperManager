@@ -55,10 +55,7 @@ impl client::Handler for SshClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // We hash the SSH wire-format public key. Different from OpenSSH's
-        // base64-truncated SHA256 representation, but stable across restarts
-        // and we only ever compare it to ourselves.
-        let fingerprint = KnownHostsStore::fingerprint(&server_public_key.public_key_bytes());
+        let fingerprint = host_key_fingerprint(server_public_key);
 
         match self
             .known_hosts
@@ -96,6 +93,14 @@ impl client::Handler for SshClientHandler {
             }
         }
     }
+}
+
+/// What `known_hosts` records for `key`: the SHA-256 of its SSH wire form, in
+/// hex. Not OpenSSH's base64 `SHA256:` form, but stable, and we only ever
+/// compare it with ourselves. It must never shift, or every recorded host
+/// reads as a changed key.
+fn host_key_fingerprint(key: &PublicKey) -> String {
+    KnownHostsStore::fingerprint(&key.public_key_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -712,5 +717,41 @@ impl RemoteShell for SshSession {
 
     async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
         Ok(Box::new(SftpFiles(self.sftp().await?)))
+    }
+}
+
+/// Host-key fingerprints are stored, so they must survive library upgrades.
+/// The expected values were computed outside any SSH library, from keys made
+/// by `ssh-keygen`: `shasum -a 256` over the base64-decoded key. The engine
+/// pins the same keys, and also runs them through a real handshake.
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprints_match_what_known_hosts_already_holds() {
+        let keys = [
+            (
+                "AAAAC3NzaC1lZDI1NTE5AAAAIO88gW2+ekico7P/wx3hnEskuq3Vu6VATCjUhEtMlYzD",
+                "262c5a9e464b3ff6f888a4db6cd40fa1a5ca89aca000ff501a85307cbc964c53",
+            ),
+            (
+                "AAAAB3NzaC1yc2EAAAADAQABAAABAQC2yvjxYsTv+XWbvV4aymsNDMSeL4a/FRxY33k0knq7/DGaFZpkppQChYDJ\
+                 qYVUdYqdvGZ3V0uEjSKkEhlyJ+l7cMigD2JWkDPqqng4yEDy7e1+oX7Ggbrty+zqgWptst0e5LO+MLTNYujrU3GC\
+                 ll5HI94qkI5tsrCsiajMFg/5Q0RUGtCqd4/E2q7bttlYGeH0nsbDlMG7JYcBQfEvvDS6M9p6OOde9ODGA2AhaoPQ\
+                 oOzDNlgwf+1p4rJJlF7o0gd7pgdb725kSvPdUV2iLr0+m9awrIUVNzK0iLmvqhXSNcDP9x8QbKZetPjJAbptC/RM\
+                 PcHAOMYuzHuNcMPJ3ofJ",
+                "9a0e5f35e18f44da787e29a1adfdc913b362d99ada24d34ef4225c8ae647e344",
+            ),
+            (
+                "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBBJbjIi7BbSJRV0fZw6cbjrOxdv+BW12bAOR\
+                 I7tQIKnqt4hh9mDPwCfwlcPXrgb6tQr7WdyS1lHcf2/uyO5Nvd0=",
+                "7452945f1d26766d358217507f4321eaf76ad281732fa9fc7dda0e2d1079c7bb",
+            ),
+        ];
+        for (blob, expected) in keys {
+            let key = russh_keys::parse_public_key_base64(blob).unwrap();
+            assert_eq!(host_key_fingerprint(&key), expected, "{blob}");
+        }
     }
 }

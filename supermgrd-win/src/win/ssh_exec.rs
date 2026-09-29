@@ -428,7 +428,7 @@ impl client::Handler for KnownHostsHandler {
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
         let algo = server_public_key.name();
-        let fingerprint = server_public_key.fingerprint();
+        let fingerprint = host_key_fingerprint(server_public_key);
         match self
             .store
             .check(&self.host, self.port, algo, &fingerprint)
@@ -457,6 +457,14 @@ impl client::Handler for KnownHostsHandler {
     }
 }
 
+/// What `known_hosts` records for `key`: the SHA-256 of its SSH wire form in
+/// unpadded base64, which is OpenSSH's `SHA256:` form without the prefix. It is
+/// stored and compared, so it must never shift, or every recorded host reads
+/// as a changed key.
+fn host_key_fingerprint(key: &PublicKey) -> String {
+    key.fingerprint()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -466,6 +474,48 @@ mod tests {
     use supermgr_core::{keyring::ZeroizingSecret, SecretError};
 
     use super::*;
+
+    /// Fingerprints are stored, so they must survive library upgrades. The
+    /// expected values are what `ssh-keygen -l` prints for these keys, after
+    /// `SHA256:`.
+    #[test]
+    fn fingerprints_match_what_known_hosts_already_holds() {
+        let keys = [
+            (
+                "AAAAC3NzaC1lZDI1NTE5AAAAIO88gW2+ekico7P/wx3hnEskuq3Vu6VATCjUhEtMlYzD",
+                "JixankZLP/b4iKTbbNQPoaXKiaygAP9QGoUwfLyWTFM",
+            ),
+            (
+                "AAAAB3NzaC1yc2EAAAADAQABAAABAQC2yvjxYsTv+XWbvV4aymsNDMSeL4a/FRxY33k0knq7/DGaFZpkppQChYDJ\
+                 qYVUdYqdvGZ3V0uEjSKkEhlyJ+l7cMigD2JWkDPqqng4yEDy7e1+oX7Ggbrty+zqgWptst0e5LO+MLTNYujrU3GC\
+                 ll5HI94qkI5tsrCsiajMFg/5Q0RUGtCqd4/E2q7bttlYGeH0nsbDlMG7JYcBQfEvvDS6M9p6OOde9ODGA2AhaoPQ\
+                 oOzDNlgwf+1p4rJJlF7o0gd7pgdb725kSvPdUV2iLr0+m9awrIUVNzK0iLmvqhXSNcDP9x8QbKZetPjJAbptC/RM\
+                 PcHAOMYuzHuNcMPJ3ofJ",
+                "mg5fNeGPRNp4fimhrf3JE7Ni2ZraJNNO9CJciuZH40Q",
+            ),
+            (
+                "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBBJbjIi7BbSJRV0fZw6cbjrOxdv+BW12bAOR\
+                 I7tQIKnqt4hh9mDPwCfwlcPXrgb6tQr7WdyS1lHcf2/uyO5Nvd0=",
+                "dFKUXx0mdm01ghdQf0Mh6vdq0oFzL6n8fdoOLRB5x7s",
+            ),
+        ];
+        for (blob, expected) in keys {
+            let key = russh_keys::parse_public_key_base64(blob).unwrap();
+            assert_eq!(host_key_fingerprint(&key), expected, "{blob}");
+        }
+    }
+
+    /// The ed25519 key made from 32 bytes of `seed`. For seed 7, OpenSSL
+    /// derived the public key and `ssh-keygen -l` its fingerprint,
+    /// `SEED_7_FINGERPRINT`, so a handshake with it pins the stored form too.
+    fn seeded_key(seed: u8) -> KeyPair {
+        let key =
+            ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]));
+        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
+        russh_keys::decode_secret_key(&pem, None).unwrap()
+    }
+
+    const SEED_7_FINGERPRINT: &str = "z/fSv0Z0RZS+Lccbc6ZoOWwt/fbj1VFJGSBKQbo4icE";
 
     #[test]
     fn failures_are_named_as_the_linux_daemon_names_them() {
@@ -518,7 +568,7 @@ mod tests {
 
     impl Server {
         async fn start() -> Self {
-            let keys = vec![KeyPair::generate_ed25519(), KeyPair::generate_ed25519()];
+            let keys = vec![seeded_key(7), seeded_key(8)];
             let configs: Vec<Arc<server::Config>> = keys
                 .iter()
                 .map(|key| {
@@ -551,7 +601,7 @@ mod tests {
         }
 
         fn fingerprint(&self, which: usize) -> String {
-            self.keys[which].clone_public_key().unwrap().fingerprint()
+            host_key_fingerprint(&self.keys[which].clone_public_key().unwrap())
         }
 
         fn present(&self, which: usize) {
@@ -591,8 +641,13 @@ mod tests {
             )
         };
 
-        // First sight: recorded and trusted.
+        // First sight: recorded, in the form known_hosts files already hold,
+        // and trusted.
         assert_eq!(test().await, json!({ "ssh": "ok" }));
+        assert_eq!(
+            known_hosts.entries().await[0].1.fingerprint,
+            SEED_7_FINGERPRINT
+        );
 
         // The machine is reinstalled.
         server.present(1);
