@@ -284,6 +284,11 @@ fn watchdog_loop() {
                             Ok(_) => {
                                 tracing::info!("panic_reset complete (exit peer dead, failed open to local uplink)");
                                 already_panic_reset = true;
+                                crate::events::record(
+                                    crate::events::Event::ConnectivityFailedOpen {
+                                        exit_node: true,
+                                    },
+                                );
                             }
                             Err(e) => tracing::error!("panic_reset failed: {e}"),
                         }
@@ -304,6 +309,9 @@ fn watchdog_loop() {
                         Ok(_) => {
                             tracing::info!("panic_reset complete");
                             already_panic_reset = true;
+                            crate::events::record(crate::events::Event::ConnectivityFailedOpen {
+                                exit_node: false,
+                            });
                         }
                         Err(e) => tracing::error!("panic_reset failed: {e}"),
                     }
