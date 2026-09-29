@@ -97,6 +97,9 @@ targets:
       properties:
         CFBundleName: SuperManager
         CFBundleIdentifier: com.sybr.supermanager
+        # Only a fallback. Each build is stamped from the release tags (see
+        # "Stamp version from git" below); this number is what a build
+        # carries when there are no tags to read, as in a shallow checkout.
         CFBundleVersion: "1.8.3"
         CFBundleShortVersionString: "1.8.3"
         LSMinimumSystemVersion: "14.0"
@@ -267,6 +270,28 @@ targets:
         # error with no way forward instead of a button.
         script: |
           "${SRCROOT}/Signing/bundle_tailscale.sh"
+      - name: Stamp version from git
+        # The version is the release tag the build descends from, not the
+        # number above: X.Y.Z on a release's tag, X.Y.Z.N for N commits past
+        # it (scripts/app-version.sh). That number was only ever bumped
+        # inside release builds, so every build from main said 1.8.3 and
+        # Sparkle replaced it with the latest release within a day,
+        # dropping every unreleased fix. release.sh passes the version it
+        # releases as SUPERMANAGER_VERSION. Must stay before the embed phase
+        # below: it re-seals the bundle, and an Info.plist changed after
+        # sealing breaks the signature.
+        script: |
+          set -euo pipefail
+          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
+          if VERSION="$("${SRCROOT}/../scripts/app-version.sh")"; then
+              /usr/libexec/PlistBuddy \
+                  -c "Set :CFBundleShortVersionString ${VERSION}" \
+                  -c "Set :CFBundleVersion ${VERSION}" \
+                  "${PLIST}"
+              echo "note: stamped version ${VERSION}"
+          else
+              echo "note: no release tag to read; keeping project.yml's version"
+          fi
       - name: Embed Rust binaries and LaunchDaemons plist
         # Copies the cargo-built binaries into the .app/Contents/MacOS
         # directory and re-signs them with the project's signing
