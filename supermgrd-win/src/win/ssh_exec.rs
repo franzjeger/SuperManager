@@ -25,8 +25,8 @@
 
 use std::{sync::Arc, time::Duration};
 
+use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{client, ChannelMsg};
-use russh_keys::key::PublicKey;
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -251,20 +251,24 @@ async fn open_session(
                 .authenticate_password(username, pw)
                 .await
                 .map_err(|e| RpcError::Backend(format!("ssh password auth: {e}")))?;
-            if !ok {
+            if !ok.success() {
                 return Err(
                     RpcError::PermissionDenied("password authentication rejected".into()).into(),
                 );
             }
         }
         AuthMethod::Key(pem) => {
-            let keypair = russh_keys::decode_secret_key(&pem, None)
+            let keypair = russh::keys::decode_secret_key(&pem, None)
                 .map_err(|e| RpcError::Other(format!("decode stored SSH key: {e}")))?;
+            let hash = signature_hash(&session, &keypair).await;
             let ok = session
-                .authenticate_publickey(username, Arc::new(keypair))
+                .authenticate_publickey(
+                    username,
+                    PrivateKeyWithHashAlg::new(Arc::new(keypair), hash),
+                )
                 .await
                 .map_err(|e| RpcError::Backend(format!("ssh pubkey auth: {e}")))?;
-            if !ok {
+            if !ok.success() {
                 return Err(RpcError::PermissionDenied(
                     "public-key authentication rejected".into(),
                 )
@@ -419,7 +423,6 @@ impl From<russh::Error> for HandshakeError {
     }
 }
 
-#[async_trait::async_trait]
 impl client::Handler for KnownHostsHandler {
     type Error = HandshakeError;
 
@@ -427,7 +430,11 @@ impl client::Handler for KnownHostsHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        let algo = server_public_key.name();
+        // The key's type, `ssh-rsa` for any RSA key, where russh 0.46 gave
+        // the signature hash it negotiated, `rsa-sha2-512`. It is only shown
+        // to the operator; known_hosts compares fingerprints.
+        let algorithm = server_public_key.algorithm();
+        let algo = algorithm.as_str();
         let fingerprint = host_key_fingerprint(server_public_key);
         match self
             .store
@@ -462,7 +469,28 @@ impl client::Handler for KnownHostsHandler {
 /// stored and compared, so it must never shift, or every recorded host reads
 /// as a changed key.
 fn host_key_fingerprint(key: &PublicKey) -> String {
-    key.fingerprint()
+    key.fingerprint(HashAlg::Sha256)
+        .to_string()
+        .trim_start_matches("SHA256:")
+        .to_owned()
+}
+
+/// The signature hash for public-key authentication with `key`. For RSA it is
+/// what the server says it accepts (RFC 8308 `server-sig-algs`), and
+/// rsa-sha2-512 when it says nothing, which is what russh 0.46 always used
+/// for OpenSSH-format keys. Other key types have no choice to make, and skip
+/// waiting up to a second for the server's answer.
+async fn signature_hash<H: client::Handler>(
+    handle: &client::Handle<H>,
+    key: &PrivateKey,
+) -> Option<HashAlg> {
+    if !key.algorithm().is_rsa() {
+        return None;
+    }
+    match handle.best_supported_rsa_hash().await {
+        Ok(Some(accepted)) => accepted,
+        Ok(None) | Err(_) => Some(HashAlg::Sha512),
+    }
 }
 
 #[cfg(test)]
@@ -470,7 +498,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use russh::server;
-    use russh_keys::key::KeyPair;
     use supermgr_core::{keyring::ZeroizingSecret, SecretError};
 
     use super::*;
@@ -500,7 +527,7 @@ mod tests {
             ),
         ];
         for (blob, expected) in keys {
-            let key = russh_keys::parse_public_key_base64(blob).unwrap();
+            let key = russh::keys::parse_public_key_base64(blob).unwrap();
             assert_eq!(host_key_fingerprint(&key), expected, "{blob}");
         }
     }
@@ -508,11 +535,10 @@ mod tests {
     /// The ed25519 key made from 32 bytes of `seed`. For seed 7, OpenSSL
     /// derived the public key and `ssh-keygen -l` its fingerprint,
     /// `SEED_7_FINGERPRINT`, so a handshake with it pins the stored form too.
-    fn seeded_key(seed: u8) -> KeyPair {
-        let key =
-            ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]));
-        let pem = key.to_openssh(ssh_key::LineEnding::LF).unwrap();
-        russh_keys::decode_secret_key(&pem, None).unwrap()
+    fn seeded_key(seed: u8) -> PrivateKey {
+        PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from_seed(
+            &[seed; 32],
+        ))
     }
 
     const SEED_7_FINGERPRINT: &str = "z/fSv0Z0RZS+Lccbc6ZoOWwt/fbj1VFJGSBKQbo4icE";
@@ -549,7 +575,6 @@ mod tests {
     /// A server that lets anyone in with a password.
     struct AnyPassword;
 
-    #[async_trait::async_trait]
     impl server::Handler for AnyPassword {
         type Error = russh::Error;
 
@@ -562,7 +587,7 @@ mod tests {
     /// the way a reinstalled machine's would be.
     struct Server {
         port: u16,
-        keys: Vec<KeyPair>,
+        keys: Vec<PrivateKey>,
         current: Arc<AtomicUsize>,
     }
 
@@ -601,7 +626,7 @@ mod tests {
         }
 
         fn fingerprint(&self, which: usize) -> String {
-            host_key_fingerprint(&self.keys[which].clone_public_key().unwrap())
+            host_key_fingerprint(self.keys[which].public_key())
         }
 
         fn present(&self, which: usize) {

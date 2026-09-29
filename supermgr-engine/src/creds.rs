@@ -185,12 +185,11 @@ async fn ssh_try_auth(
     // Do not copy this handler into a code path that transmits keys,
     // passwords the user owns, or device configuration.
     struct Client;
-    #[async_trait::async_trait]
     impl russh::client::Handler for Client {
         type Error = russh::Error;
         async fn check_server_key(
             &mut self,
-            _server_public_key: &russh_keys::key::PublicKey,
+            _server_public_key: &russh::keys::PublicKey,
         ) -> Result<bool, Self::Error> {
             Ok(true)
         }
@@ -221,7 +220,8 @@ async fn ssh_try_auth(
         .await
         .map_err(|e| EngineError::SshDisconnected {
             reason: format!("auth path: {e}"),
-        })?;
+        })?
+        .success();
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "", "")
         .await;
