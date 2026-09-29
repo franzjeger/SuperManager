@@ -22,7 +22,7 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Best-effort cleanup of `supermanager-*` swanctl configs and secrets
@@ -1297,27 +1297,13 @@ fn validate_host(host: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Publish secrets atomically with mode 0600 from creation. Replacing the
-/// directory entry also avoids following an old symlink or keeping its mode.
+/// Publish secrets with mode 0600 from creation; see `private_file`.
 async fn write_private_config(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-    let result = async {
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .await?;
-        file.write_all(contents).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&tmp, path).await
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    }
-    result.with_context(|| format!("write private config {}", path.display()))
+    let (target, contents) = (path.to_owned(), contents.to_owned());
+    tokio::task::spawn_blocking(move || crate::private_file::write(&target, &contents))
+        .await
+        .context("private config writer")?
+        .with_context(|| format!("write private config {}", path.display()))
 }
 
 /// Secrets file format per
@@ -1987,33 +1973,6 @@ mod tests {
         assert!(build_swanctl_secrets(&a).contains(&format!("id = {quoted}")));
     }
 
-    #[tokio::test]
-    async fn secrets_replace_permissive_file_and_do_not_follow_symlink() {
-        let dir =
-            std::env::temp_dir().join(format!("supermanager-secrets-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("secrets.conf");
-        std::fs::write(&path, "old").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        write_private_config(&path, b"private").await.unwrap();
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        let target = dir.join("untouched");
-        std::fs::write(&target, "original").unwrap();
-        std::fs::remove_file(&path).unwrap();
-        std::os::unix::fs::symlink(&target, &path).unwrap();
-        write_private_config(&path, b"replacement").await.unwrap();
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
-        assert!(!std::fs::symlink_metadata(&path)
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
     struct StartupFixture(PathBuf);
     impl StartupFixture {
         fn new() -> Self {

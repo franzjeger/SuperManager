@@ -57,6 +57,7 @@ mod dns_health_watchdog;
 mod events;
 mod kill_switch;
 mod openvpn;
+mod private_file;
 mod proc;
 // `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
 // links IOKit + CoreFoundation, and a cargo linker-signed ad-hoc signature on
