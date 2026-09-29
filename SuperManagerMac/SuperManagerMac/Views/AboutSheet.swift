@@ -22,7 +22,6 @@ struct AboutSheet: View {
     @State private var helperVersion: String?
     @State private var helperMethodCount: Int?
     @State private var helperBuildTimestamp: String?
-    @State private var helperDevRpc: Bool = false
     @State private var helperError: String?
 
     /// First line of `tailscaled --version`. Loads in parallel
@@ -75,7 +74,7 @@ struct AboutSheet: View {
                 )
                 componentRow(
                     label: "Helper RPCs",
-                    value: helperMethodCount.map { "\($0) methods\(helperDevRpc ? " (dev RPCs enabled)" : "")" } ?? "…",
+                    value: helperMethodCount.map { "\($0) methods" } ?? "…",
                     error: nil
                 )
                 componentRow(
@@ -151,7 +150,6 @@ struct AboutSheet: View {
             let r = try await HelperClient.shared.helperVersion()
             self.helperVersion = (r["version"] as? String) ?? "?"
             self.helperBuildTimestamp = r["build_timestamp"] as? String
-            self.helperDevRpc = (r["dev_rpc"] as? Bool) ?? false
             if let methods = r["methods"] as? [String] {
                 self.helperMethodCount = methods.count
             } else {
@@ -207,7 +205,7 @@ struct AboutSheet: View {
         var lines: [String] = []
         lines.append("SuperManager \(appVersion) (build \(appBuild))")
         if let v = helperVersion {
-            lines.append("Helper: \(v)" + (helperDevRpc ? " (dev RPCs)" : ""))
+            lines.append("Helper: \(v)")
         } else if let e = helperError {
             lines.append("Helper: ERROR \(e)")
         }

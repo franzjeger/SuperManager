@@ -321,7 +321,7 @@ impl OpenVpn {
             unsafe {
                 cmd.as_std_mut().pre_exec(|| {
                     // New session — child won't get SIGHUP if the
-                    // helper restarts via deploy_self.
+                    // helper restarts.
                     libc::setsid();
                     Ok(())
                 });

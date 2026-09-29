@@ -9,13 +9,6 @@ license     = "GPL-3.0-or-later"
 name = "supermanager-helper"
 path = "src/main.rs"
 
-[features]
-default = []
-# Enables the `deploy_self` RPC, which lets an admin-group user replace
-# the root-owned helper binary without an admin auth prompt. NEVER ship
-# this in a production build — it's strictly a dev-iteration shortcut.
-dev-rpc = []
-
 [dependencies]
 tokio              = { workspace = true }
 serde              = { workspace = true }
