@@ -24,7 +24,7 @@ chmod 644 "$PLIST"
 # Warn if the privileged helper binary is not yet present.
 # The daemon's ProgramArguments point at this path; it will run correctly once
 # SuperManager.app has been launched and SMAppService has installed the helper.
-HELPER="/Library/PrivilegedHelperTools/no.sybr.supermanager.helper"
+HELPER="/Library/PrivilegedHelperTools/com.sybr.supermanager.helper"
 if [ ! -x "$HELPER" ]; then
     echo "Note: $HELPER not found." >&2
     echo "  Launch SuperManager.app once to install the privileged helper." >&2

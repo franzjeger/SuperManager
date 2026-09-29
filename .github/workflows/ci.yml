@@ -50,6 +50,8 @@ jobs:
         run: python3 -m unittest scripts/tests/test_update_linux.py -v
       - name: Test the Mac app's version against throwaway tags
         run: python3 -m unittest scripts/tests/test_app_version.py -v
+      - name: Test that launchd jobs run the installed helper
+        run: python3 -m unittest scripts/tests/test_launchd_paths.py -v
 
       # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
       - name: Parse every tracked shell script
