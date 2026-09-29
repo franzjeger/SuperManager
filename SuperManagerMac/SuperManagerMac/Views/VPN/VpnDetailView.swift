@@ -273,6 +273,8 @@ struct VpnDetailView: View {
                         .font(.caption)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        // A reconnect failure's reason rarely fits one line.
+                        .help(ev.message)
                     Spacer()
                     Text(ev.timestamp, format: .relative(presentation: .numeric))
                         .font(.caption2)

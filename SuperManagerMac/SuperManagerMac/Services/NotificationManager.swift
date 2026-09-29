@@ -33,28 +33,32 @@ enum NotificationManager {
         }
     }
 
-    /// Auto-reconnect just brought a profile back up.
+    /// Auto-reconnect just brought a profile back up: an Always-on tunnel
+    /// that had gone down, or (`routesOnly`) a hand-connected full tunnel
+    /// whose routes had gone missing, sending traffic around it.
     /// Gated by `AppSettings.notifyVpnReconnected` — the user can
     /// silence this category from the General preferences pane
     /// without losing the others.
-    static func vpnReconnected(profileLabel: String) {
+    static func vpnReconnected(profileLabel: String, routesOnly: Bool) {
         guard AppSettings.shared.notifyVpnReconnected else { return }
         post(
             id: "vpn-reconnected-\(profileLabel)",
-            title: "VPN reconnected",
-            body: "\(profileLabel) was down — auto-reconnect restored it."
+            title: routesOnly ? "VPN routes restored" : "VPN reconnected",
+            body: routesOnly
+                ? "\(profileLabel) had lost its full-tunnel routes. SuperManager put them back."
+                : "\(profileLabel) was down — auto-reconnect restored it."
         )
     }
 
-    /// Auto-reconnect failed N times in a row. Surface this so
-    /// the user knows their always-on profile is broken (likely
-    /// stale credentials / config) and we're not silently retrying.
-    static func vpnReconnectFailing(profileLabel: String, attempts: Int) {
+    /// An Always-on profile failed to reconnect `attempts` times in a row.
+    /// The helper keeps retrying; this says it is not working and why,
+    /// rather than guessing at the cause.
+    static func vpnReconnectFailing(profileLabel: String, attempts: Int, error: String) {
         guard AppSettings.shared.notifyVpnReconnectFailing else { return }
         post(
             id: "vpn-reconnect-failing-\(profileLabel)",
             title: "Always-on VPN failing",
-            body: "\(profileLabel) auto-reconnect failed \(attempts)× — check credentials."
+            body: "\(profileLabel) failed to reconnect \(attempts) times in a row: \(error)"
         )
     }
 
