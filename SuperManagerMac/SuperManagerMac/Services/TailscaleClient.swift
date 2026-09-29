@@ -277,8 +277,16 @@ enum TailscaleClient {
     static func up() async throws {
         guard let bin = locateBinary() else { throw ClientError.notInstalled }
         // Reconnecting to the coordination server takes real network time.
-        _ = try await runTask(bin: bin, args: ["up", "--reset"], timeout: .seconds(60))
+        _ = try await runTask(bin: bin, args: upArguments, timeout: .seconds(60))
     }
+
+    /// `tailscale up` with no flags. For a signed-in node, Tailscale treats
+    /// that as bringing the network up without any changes. `--reset`
+    /// instead put every setting not named on the command line back to its
+    /// default, so each Connect dropped accepted subnet routes, Tailscale
+    /// SSH, the hostname and the rest. Only the exit node came back, through
+    /// the helper.
+    static let upArguments = ["up"]
 
     /// Bring the Tailscale tunnel down. Useful for the "vår WG
     /// tunnel collides with Tailscale" workflow — disconnect
