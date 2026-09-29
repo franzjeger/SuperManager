@@ -187,24 +187,18 @@ struct AzureSignInSheet: View {
         // to 1.8.14 staged it in /tmp instead; don't leave one behind.
         try? FileManager.default.removeItem(atPath: "/tmp/supermgr-azure-\(profileId).ovpn")
 
-        switch await HelperClient.shared.health() {
-        case .healthy:
-            break
-        case .absent:
+        // The helper must run the build this app bundles: an older one
+        // does not take the request below. `install()` is a fast no-op
+        // when the build matches; an upgrade asks for an administrator.
+        do {
+            try await HelperInstaller.install()
+        } catch {
             ActivityLog.shared.record(
                 profileId: profileId,
                 kind: .connectFailed,
-                message: "Azure VPN: privileged helper unreachable"
+                message: "Azure VPN: privileged helper — \(error.localizedDescription)"
             )
-            phase = .error("The privileged helper isn't reachable. Approve it in System Settings → General → Login Items, then try again.")
-            return
-        case .unresponsive:
-            ActivityLog.shared.record(
-                profileId: profileId,
-                kind: .connectFailed,
-                message: "Azure VPN: privileged helper not answering"
-            )
-            phase = .error("The privileged helper is running but not answering. Wait a moment, then try again.")
+            phase = .error(error.localizedDescription)
             return
         }
 
