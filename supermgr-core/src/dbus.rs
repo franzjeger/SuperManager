@@ -124,16 +124,16 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn unifi_set_controller(&self, host_id: &str, url: &str, username: &str, password: &str) -> fdo::Result<()> { ... }
 //
 //       #[zbus(signal)]
-//       async fn state_changed(ctx: &zbus::SignalContext<'_>, state_json: String) -> zbus::Result<()>;
+//       async fn state_changed(ctx: &zbus::object_server::SignalEmitter<'_>, state_json: String) -> zbus::Result<()>;
 //
 //       #[zbus(signal)]
-//       async fn stats_updated(ctx: &zbus::SignalContext<'_>, stats_json: String) -> zbus::Result<()>;
+//       async fn stats_updated(ctx: &zbus::object_server::SignalEmitter<'_>, stats_json: String) -> zbus::Result<()>;
 //
 //       #[zbus(signal)]
-//       async fn auth_challenge(ctx: &zbus::SignalContext<'_>, user_code: String, verification_url: String) -> zbus::Result<()>;
+//       async fn auth_challenge(ctx: &zbus::object_server::SignalEmitter<'_>, user_code: String, verification_url: String) -> zbus::Result<()>;
 //
 //       #[zbus(signal)]
-//       async fn ssh_operation_progress(ctx: &zbus::SignalContext<'_>, operation_id: String, host_label: String, message: String) -> zbus::Result<()>;
+//       async fn ssh_operation_progress(ctx: &zbus::object_server::SignalEmitter<'_>, operation_id: String, host_label: String, message: String) -> zbus::Result<()>;
 //
 //       async fn ssh_host_health(&self) -> fdo::Result<String> { ... }
 //
@@ -154,7 +154,7 @@ pub fn core_error_to_fdo(err: crate::error::CoreError) -> fdo::Error {
 //       async fn fortigate_compliance_check(&self, host_id: &str) -> fdo::Result<String> { ... }
 //
 //       #[zbus(signal)]
-//       async fn host_health_changed(ctx: &zbus::SignalContext<'_>, host_id: String, reachable: bool) -> zbus::Result<()>;
+//       async fn host_health_changed(ctx: &zbus::object_server::SignalEmitter<'_>, host_id: String, reachable: bool) -> zbus::Result<()>;
 //   }
 
 // ---------------------------------------------------------------------------
