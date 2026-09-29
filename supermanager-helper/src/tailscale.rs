@@ -82,6 +82,10 @@ pub struct DaemonStatus {
     pub installed: bool,
     /// Free-form diagnostic for the UI to show on errors.
     pub message: String,
+    /// The installed daemon binary, so the app can tell whether it is the
+    /// one it bundles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -96,14 +100,17 @@ pub struct InstallResult {
 ///     Could be a transient crash; UI shows "Start" button.
 ///   • `!installed` — plist not present. UI shows "Install" button.
 pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
-    let installed = Path::new(LAUNCH_DAEMON_PLIST).exists()
-        && (Path::new(DAEMON_INSTALL_PATH).exists() || Path::new(LEGACY_INSTALL_PATH).exists());
+    let binary = [DAEMON_INSTALL_PATH, LEGACY_INSTALL_PATH]
+        .into_iter()
+        .find(|path| Path::new(path).exists());
+    let installed = Path::new(LAUNCH_DAEMON_PLIST).exists() && binary.is_some();
 
     if !installed {
         return Ok(DaemonStatus {
             running: false,
             installed: false,
             message: "tailscaled is not installed.".to_string(),
+            binary: None,
         });
     }
 
@@ -125,6 +132,7 @@ pub fn status(_: DaemonStatusArgs) -> Result<DaemonStatus> {
         } else {
             "tailscaled is installed but not running.".to_string()
         },
+        binary: binary.map(str::to_owned),
     })
 }
 
