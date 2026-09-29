@@ -395,6 +395,7 @@ struct ProvisioningView: View {
                 }
                 Spacer()
                 if let activeSite = site {
+                    let target = pickFortigateHostId(customer: customer, site: activeSite)
                     Button {
                         diffPreviewHostId = pickFortigateHostId(customer: customer, site: activeSite)
                         if diffPreviewHostId != nil {
@@ -404,8 +405,10 @@ struct ProvisioningView: View {
                         Label("Preview diff…", systemImage: "arrow.triangle.branch")
                     }
                     .controlSize(.large)
-                    .disabled(rendering || effectiveTemplateId(customer: customer) == nil
-                              || pickFortigateHostId(customer: customer, site: activeSite) == nil)
+                    .disabled(rendering || effectiveTemplateId(customer: customer) == nil || target == nil)
+                    .help(target == nil
+                          ? "Preview and deploy need exactly one FortiGate linked to this site, and to no other customer's site."
+                          : "Compare this site's rendered configuration with the FortiGate's running one.")
                 }
                 Button {
                     Task { await render() }
@@ -450,35 +453,12 @@ struct ProvisioningView: View {
             ?? appState.provisioningTemplates.first?.id
     }
 
-    /// Pick the first FortiGate host attached to the site, or
-    /// fall back to any FortiGate host owned by the customer.
-    /// Diff/deploy needs an actual device target — without one,
-    /// the buttons stay disabled.
+    /// The FortiGate diff/deploy targets: the one this site links. Without
+    /// exactly one, the buttons stay disabled. There used to be a fallback to
+    /// any FortiGate on the customer's other sites, which aimed one site's
+    /// config at another site's firewall.
     private func pickFortigateHostId(customer: Customer, site: Site) -> String? {
-        // Prefer site-attached hosts. Resolve each Site.hostIds token through
-        // the HostIndex: the token is usually an IP (what the discovery/
-        // autodetect writers store), not a record id, so a raw `$0.id ==
-        // hostId` match never resolved an auto-discovered FortiGate — which
-        // is what kept Preview-diff/deploy permanently disabled for them.
-        for token in site.hostIds {
-            if let host = appState.hostIndex.host(forToken: token),
-               host.deviceType == .fortigate {
-                return host.id
-            }
-        }
-        // Fall back to any FortiGate the customer's other sites
-        // have attached. Lets a user with a single FortiGate at
-        // multiple sites (uncommon but happens with shared HQ
-        // gateways) deploy without explicit attachment.
-        for s in customer.sites {
-            for token in s.hostIds {
-                if let host = appState.hostIndex.host(forToken: token),
-                   host.deviceType == .fortigate {
-                    return host.id
-                }
-            }
-        }
-        return nil
+        appState.hostIndex.provisioningHost(customer: customer, site: site)?.id
     }
 
 
