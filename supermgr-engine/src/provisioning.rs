@@ -751,18 +751,39 @@ async fn open_session(
         .map_err(|e| anyhow!("ssh connect: {e}"))
 }
 
+/// The unit's running configuration: the backup a deploy rolls back to,
+/// and what a preview diffs against. Whatever else comes back is an error.
 async fn fetch_full_config(session: &crate::ssh::connection::SshSession) -> Result<String> {
     // The whole config of a large unit can take a while to print; a
     // backup that doesn't finish aborts the deploy, which is the safe way
     // round.
-    let (_, stdout, _) = session
+    let (status, stdout, stderr) = session
         .exec(
             "show full-configuration",
             Some(std::time::Duration::from_secs(300)),
         )
         .await
         .map_err(|e| anyhow!("show full-configuration: {e}"))?;
+    if !is_full_config(&stdout) {
+        let answer = stderr
+            .lines()
+            .chain(stdout.lines())
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("nothing");
+        return Err(anyhow!(
+            "show full-configuration returned no configuration (exit status {status}): {answer}"
+        ));
+    }
     Ok(stdout)
+}
+
+/// Whether `text` is a whole `FortiOS` configuration: top-level `config`
+/// blocks, the last one closed by `end`. An error line, an empty answer
+/// and output cut off inside a block are not.
+fn is_full_config(text: &str) -> bool {
+    text.lines().any(|line| line.starts_with("config "))
+        && text.lines().map(str::trim).rfind(|line| !line.is_empty()) == Some("end")
 }
 
 /// Render → fetch live → diff. Returns a structured response
@@ -975,6 +996,14 @@ pub async fn rollback(
     let id = uuid::Uuid::new_v4().simple().to_string();
     let backup_text =
         std::fs::read_to_string(backup_path).with_context(|| format!("read {backup_path}"))?;
+    // Backups taken before the read was checked can hold an error message
+    // instead. Pushing that restores nothing and would be recorded as a
+    // rollback all the same.
+    if !is_full_config(&backup_text) {
+        return Err(anyhow!(
+            "{backup_path} is not a FortiOS configuration; nothing was restored"
+        ));
+    }
 
     let mut record = Deployment {
         id: id.clone(),
@@ -1207,4 +1236,42 @@ fn register_filters(tera: &mut Tera) {
             )))
         },
     );
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::is_full_config;
+
+    const CONFIG: &str = "#config-version=FGT60F-7.2.8-FW-build1639-240313:opmode=0:vdom=0\n\
+                          #conf_file_ver=1\n\
+                          config system global\n    \
+                              set hostname \"branch\"\n\
+                          end\n\
+                          config system interface\n    \
+                              edit \"wan1\"\n        \
+                                  set mode dhcp\n    \
+                              next\n\
+                          end\n";
+
+    #[test]
+    fn a_configuration_is_one() {
+        assert!(is_full_config(CONFIG));
+        // Line endings and trailing blank lines are the device's business.
+        assert!(is_full_config(&CONFIG.replace('\n', "\r\n")));
+        assert!(is_full_config(&format!("{CONFIG}\n\n")));
+    }
+
+    #[test]
+    fn an_error_or_nothing_is_not_a_configuration() {
+        assert!(!is_full_config(""));
+        assert!(!is_full_config("\n"));
+        assert!(!is_full_config("Command fail. Return code -61\n"));
+        assert!(!is_full_config("Unknown action 0\nend\n"));
+    }
+
+    #[test]
+    fn output_cut_off_inside_a_block_is_not_a_configuration() {
+        let cut = &CONFIG[..CONFIG.find("set mode").unwrap()];
+        assert!(!is_full_config(cut));
+    }
 }
