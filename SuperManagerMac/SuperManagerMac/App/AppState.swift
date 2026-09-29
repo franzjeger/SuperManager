@@ -174,7 +174,7 @@ class AppState {
         // Make sure the deployed privileged helper has the same RPC
         // surface as the helper we just bundled. Without this, every
         // Cargo iteration that adds a new RPC surfaces as "unknown
-        // method" until the user manually re-runs install_helper.sh.
+        // method" until the helper is reinstalled.
         // This step is best-effort: if it fails, we continue and let
         // individual call sites handle missing RPCs gracefully.
         await ensureHelperUpToDate()
@@ -236,8 +236,9 @@ class AppState {
     ///   5. We poll the socket for ~3 seconds for the respawn to
     ///      happen, then return.
     ///
-    /// If the deployed helper has no `deploy_self` (production build,
-    /// or first-ever install before install_helper.sh), we surface a
+    /// If the deployed helper has no `deploy_self` (only a `dev-rpc`
+    /// build has it, and nothing builds one since install_helper.sh was
+    /// retired), we surface a
     /// gentle log message and let the user install via the normal
     /// path. We don't block the rest of `connectToDaemon` on this.
     private func ensureHelperUpToDate() async {
