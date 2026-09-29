@@ -149,7 +149,7 @@ echo "→ Building version $VERSION"
 echo "→ Testing VPN helper startup and recovery"
 (cd "$REPO_ROOT" && cargo test --locked -p supermanager-helper)
 echo "→ Building Rust release binaries from Git sources"
-(cd "$REPO_ROOT" && cargo build --release -p supermgrd-mac -p supermanager-helper)
+(cd "$REPO_ROOT" && cargo build --release --locked -p supermgrd-mac -p supermanager-helper)
 
 echo "→ Building Release configuration"
 cd "$REPO_ROOT/SuperManagerMac"
