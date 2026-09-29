@@ -100,8 +100,15 @@ fi
 # ---------------------------------------------------------------------------
 
 say "Checking origin for updates"
-git -C "$CHECKOUT" fetch --tags --quiet origin \
-    || die "git fetch failed — no network, or the remote is unreachable"
+# Tags only name the build (`git describe`), and origin has re-pointed one
+# before: v1.8.0 went through five commits. A checkout that fetched an earlier
+# one had `fetch --tags` refuse to clobber it on every run after, and each
+# update failed as "no network". Origin's tags win. When the fetch still fails,
+# git's own message is the answer; the old one was a guess, usually wrong.
+if ! fetch_output="$(git -C "$CHECKOUT" fetch --tags --force --quiet origin 2>&1)"; then
+    die "git fetch from origin failed:
+$(printf '%s\n' "$fetch_output" | sed 's/^/       /')"
+fi
 
 LOCAL="$(git -C "$CHECKOUT" rev-parse HEAD)"
 # Upstream of the current branch when it has one, origin/main otherwise —

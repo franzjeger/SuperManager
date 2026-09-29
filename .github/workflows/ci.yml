@@ -46,6 +46,8 @@ jobs:
 
       - name: Test macOS distribution provisioning policy
         run: python3 -m unittest discover -s scripts/tests -p 'test_*provisioning.py' -v
+      - name: Test the Linux updater against a throwaway origin
+        run: python3 -m unittest scripts/tests/test_update_linux.py -v
 
       # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
       - name: Parse every tracked shell script
