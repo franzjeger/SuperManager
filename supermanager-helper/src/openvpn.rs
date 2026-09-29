@@ -11,20 +11,19 @@
 //! ## What the GUI sends us
 //!
 //! - `profile_id` (UUID from the daemon)
-//! - `config_file` — absolute path to the `.ovpn` already on disk
-//!   under `<data_dir>/ovpn/<id>.ovpn` (placed there by the daemon's
-//!   `vpn_import_openvpn` handler at import time, mode 0600)
+//! - `config` — the profile's configuration. OpenVPN runs as root, so
+//!   the helper holds it to `openvpn_config::check` and runs OpenVPN on
+//!   its own copy in `PRIVATE_DIR`, never on a file the user can change.
 //! - optionally `username` + `password` for `--auth-user-pass`
-//!   profiles; we materialise the creds into a 0600 root-owned file
-//!   under `/var/run/`, hand the path to `openvpn`, and `unlink()`
+//!   profiles; we materialise the creds into a root-only file in
+//!   `PRIVATE_DIR`, hand the path to `openvpn`, and `unlink()`
 //!   immediately after — the kernel keeps the inode alive while the
 //!   child holds the fd, but no other process can `open()` it
 //!
 //! ## Logging
 //!
-//! Each session logs to `/var/log/supermgr-ovpn-<sanitized-id>.log`.
-//! The privileged helper reads / tails it for the GUI. We don't
-//! currently rotate these — TODO once we ship to non-developer users.
+//! Each session logs to `PRIVATE_DIR/<sanitized-id>.log`, which only
+//! root can read. The GUI asks for it through `tail_log`.
 //!
 //! ## Why not openvpn3 / Tunnelblick / OpenVPN Connect?
 //!
@@ -44,14 +43,14 @@ const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 
 /// Where we keep per-profile PID files.
 const PID_DIR: &str = "/var/run";
-/// Where we keep per-profile log files. `/tmp` instead of
-/// `/var/log` so that the GUI process (running as the user, not
-/// root) can read what openvpn actually said. The log file is
-/// the only way to diagnose mid-handshake failures (AUTH_FAILED,
-/// "Cannot resolve host", TLS errors) — without world-readable
-/// logs, "openvpn started but the tunnel never reached
-/// connected" is a complete black box for the user.
-const LOG_DIR: &str = "/tmp";
+/// Each tunnel's checked configuration and its log. The one can hold
+/// keys and the other usernames and addresses, so the directory is
+/// root's alone; the GUI reads a log through `tail_log`.
+const PRIVATE_DIR: &str = "/var/run/supermanager-ovpn";
+/// Where helpers up to 1.8.14 wrote the logs.
+const LEGACY_LOG_DIR: &str = "/tmp";
+/// A profile's configuration is kilobytes; certificates included.
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 #[derive(Default)]
 pub struct OpenVpn {}
@@ -59,7 +58,14 @@ pub struct OpenVpn {}
 #[derive(Debug, Deserialize)]
 pub struct OvpnConnectArgs {
     pub profile_id: String,
-    pub config_file: String,
+    /// The profile's configuration.
+    #[serde(default)]
+    pub config: Option<String>,
+    /// Where helpers up to 1.8.14 were told to read the configuration.
+    /// Only a connect stored for auto-reconnect by one of them still
+    /// names it; see `OvpnConnectArgs::configuration`.
+    #[serde(default)]
+    pub config_file: Option<String>,
     /// Azure Entra ID tokens require our OpenVPN 3 client path.
     /// Never silently fall back to OpenVPN 2 for these sessions.
     #[serde(default)]
@@ -85,9 +91,43 @@ pub struct OvpnStatusArgs {
 pub struct OvpnConnectResult {
     pub success: bool,
     pub message: String,
-    /// Path the GUI can read for failure diagnosis.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub log_path: Option<String>,
+}
+
+impl OvpnConnectArgs {
+    /// Whether the request carries a configuration to run.
+    #[must_use]
+    pub fn has_configuration(&self) -> bool {
+        self.config.is_some() || self.config_file.is_some()
+    }
+
+    /// The configuration to run: the one the request carries or, for a
+    /// connect an older helper stored for auto-reconnect, the file it
+    /// names. That file is read without following a symlink and must be
+    /// a regular file of configuration size; it is checked like any other
+    /// configuration.
+    fn configuration(&self) -> anyhow::Result<String> {
+        use std::io::Read as _;
+        if let Some(config) = &self.config {
+            return Ok(config.clone());
+        }
+        let Some(path) = &self.config_file else {
+            return Err(anyhow!("the connect request carries no configuration"));
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .with_context(|| format!("open {path}"))?;
+        let meta = file.metadata().with_context(|| format!("stat {path}"))?;
+        if !meta.is_file() || meta.len() > MAX_CONFIG_BYTES {
+            return Err(anyhow!("{path} is not a profile configuration"));
+        }
+        let mut config = String::new();
+        file.take(MAX_CONFIG_BYTES)
+            .read_to_string(&mut config)
+            .with_context(|| format!("read {path}"))?;
+        Ok(config)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -173,11 +213,13 @@ impl OpenVpn {
     pub async fn connect(&mut self, args: &OvpnConnectArgs) -> anyhow::Result<OvpnConnectResult> {
         let openvpn = locate_openvpn(args.require_openvpn3)?;
         tracing::info!(
-            "ovpn_connect: profile={} config={} openvpn={}",
+            "ovpn_connect: profile={} openvpn={}",
             args.profile_id,
-            args.config_file,
             openvpn.display()
         );
+        let config_body = args.configuration()?;
+        crate::openvpn_config::check(&config_body)
+            .map_err(|refusal| anyhow!("the profile can't be used as it is: {refusal}"))?;
 
         // Suppress the connectivity watchdog during the connect/handshake window.
         // A full-tunnel OpenVPN/Azure profile installs 0/1+128/1 and briefly has
@@ -187,26 +229,9 @@ impl OpenVpn {
         // The reconciler arms the same pause around its own route work.
         crate::connectivity_watchdog::pause_for(45);
 
-        // Pre-flight: refuse to launch if the .ovpn doesn't exist.
-        // Otherwise the failure surfaces only via the log file the
-        // child never finished writing.
-        if !Path::new(&args.config_file).exists() {
-            tracing::error!("ovpn_connect: config file missing: {}", args.config_file);
-            return Err(anyhow!("config file does not exist: {}", args.config_file));
-        }
-        // Stat the config so we know what we're dealing with —
-        // size (sanity check the daemon actually wrote it),
-        // permissions (root vs user), inline-key presence.
-        if let Ok(meta) = std::fs::metadata(&args.config_file) {
-            tracing::info!(
-                "ovpn_connect: config size={} bytes, mode={:o}",
-                meta.len(),
-                std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
-            );
-        }
-        let config_body = std::fs::read_to_string(&args.config_file).unwrap_or_default();
         tracing::info!(
-            "ovpn_connect: config has_remote={} has_ca={} has_tls_auth={} has_tls_crypt={} has_auth_user_pass={} has_client_cert={}",
+            "ovpn_connect: config bytes={} has_remote={} has_ca={} has_tls_auth={} has_tls_crypt={} has_auth_user_pass={} has_client_cert={}",
+            config_body.len(),
             config_body.contains("\nremote ") || config_body.starts_with("remote "),
             config_body.contains("<ca>"),
             config_body.contains("<tls-auth>"),
@@ -218,24 +243,19 @@ impl OpenVpn {
         let safe = sanitize_id(&args.profile_id);
         let pid_path = pid_path_for(&safe);
         let log_path = log_path_for(&safe);
+        let config_path = config_path_for(&safe);
 
-        // Truncate the log before spawn. Otherwise our post-spawn
-        // diagnostic check (`FATAL.iter().find(|m| log_body.contains(m))`)
-        // sees stale errors from previous failed attempts that
-        // haven't been GC'd — particularly when openvpn 2.x's
-        // `--daemon` retry loop keeps appending its own failures
-        // to the same path. Fresh log per spawn = unambiguous
+        ensure_private_dir()?;
+        crate::private_file::write(&config_path, config_body.as_bytes())
+            .with_context(|| format!("write {}", config_path.display()))?;
+        // Start the log empty. Otherwise our post-spawn diagnostic check
+        // (`FATAL.iter().find(|m| log_body.contains(m))`) sees stale
+        // errors from previous failed attempts — particularly when
+        // openvpn 2.x's `--daemon` retry loop keeps appending its own
+        // failures to the same path. Fresh log per spawn = unambiguous
         // diagnostics.
-        let _ = std::fs::write(&log_path, "");
-        // Make the log world-readable so the GUI (running as the
-        // user, not root) can `cat` it for the "View log" affordance
-        // and for failure summaries. Without this the log is mode
-        // 0600 root-owned and post-mortem debugging is impossible
-        // without sudo, which the user has explicitly forbidden.
-        let _ = std::fs::set_permissions(
-            &log_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o644),
-        );
+        crate::private_file::write(&log_path, b"")
+            .with_context(|| format!("create {}", log_path.display()))?;
         // Same for the PID file — a stale PID from a previous
         // attempt causes the post-spawn `kill(pid, 0)` aliveness
         // check to spuriously claim a different process is "the
@@ -280,12 +300,10 @@ impl OpenVpn {
             use std::os::unix::process::CommandExt as _;
             // Open the log file for stdout+stderr redirection.
             // ovpncli writes status to stderr; we merge both into
-            // one log so the GUI can `cat` it for diagnostics.
+            // one log.
             let log_for_stdout = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
                 .write(true)
-                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW)
                 .open(&log_path)
                 .with_context(|| format!("open log {}", log_path.display()))?;
             let log_for_stderr = log_for_stdout.try_clone().context("dup log fd")?;
@@ -317,7 +335,7 @@ impl OpenVpn {
                 .arg(user)
                 .arg("--password")
                 .arg(pass)
-                .arg(&args.config_file)
+                .arg(&config_path)
                 .stdin(std::process::Stdio::null())
                 .stdout(log_for_stdout)
                 .stderr(log_for_stderr);
@@ -363,7 +381,12 @@ impl OpenVpn {
         } else {
             let mut argv: Vec<String> = vec![
                 "--config".into(),
-                args.config_file.clone(),
+                config_path.display().to_string(),
+                // After the configuration, so it wins: built-in commands
+                // only, never a script. `openvpn_config::check` allows no
+                // directive that names one either.
+                "--script-security".into(),
+                "1".into(),
                 "--daemon".into(),
                 format!("supermgr-ovpn-{safe}"),
                 "--writepid".into(),
@@ -389,7 +412,11 @@ impl OpenVpn {
             crate::proc::bounded_async(&mut cmd, crate::proc::MUTATE)
                 .await
                 .with_context(|| {
-                    format!("run {} --config {}", openvpn.display(), args.config_file)
+                    format!(
+                        "run {} --config {}",
+                        openvpn.display(),
+                        config_path.display()
+                    )
                 })?
         };
         tracing::info!(
@@ -446,13 +473,13 @@ impl OpenVpn {
                 (false, false) => format!("{stderr}\n--- log ---\n{log_tail}"),
                 (true, false) => log_tail,
                 (false, true) => stderr,
-                (true, true) => format!("(no diagnostic output, see {})", log_path.display()),
+                (true, true) => "(no diagnostic output)".to_owned(),
             };
             tracing::error!("ovpn_connect: refused to start:\n{combined}");
+            let _ = std::fs::remove_file(&config_path);
             return Ok(OvpnConnectResult {
                 success: false,
                 message: format!("openvpn refused to start:\n{combined}"),
-                log_path: Some(log_path.display().to_string()),
             });
         }
         tracing::info!(
@@ -534,13 +561,10 @@ impl OpenVpn {
                     lines[start..].join("\n")
                 };
                 tracing::error!("ovpn_connect: post-fork failure: {reason}\n{log_tail}");
+                let _ = std::fs::remove_file(&config_path);
                 return Ok(OvpnConnectResult {
                     success: false,
-                    message: format!(
-                        "{reason}\n\nLast 25 log lines from {}:\n{log_tail}",
-                        log_path.display()
-                    ),
-                    log_path: Some(log_path.display().to_string()),
+                    message: format!("{reason}\n\nLast 25 log lines:\n{log_tail}"),
                 });
             }
         }
@@ -551,13 +575,6 @@ impl OpenVpn {
                 format!("OpenVPN 3.x tunnel '{safe}' up — session managed by openvpn3 daemon")
             } else {
                 format!("OpenVPN tunnel '{safe}' up")
-            },
-            // openvpn3 owns its own log; only the 2.x path has a
-            // file we can hand back to the GUI's "View log" button.
-            log_path: if is_v3 {
-                None
-            } else {
-                Some(log_path.display().to_string())
             },
         })
     }
@@ -604,6 +621,7 @@ impl OpenVpn {
         // (next connect's read says "tunnel already up").
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(log_path_for(&safe));
+        let _ = std::fs::remove_file(config_path_for(&safe));
 
         // Restore DNS. Both openvpn 2.x (via --up/--down scripts that
         // call networksetup) and ovpncli (via its platform DNS abstraction)
@@ -1164,6 +1182,7 @@ pub async fn terminate_all() -> usize {
         }
         let _ = std::fs::remove_file(entry.path());
         let _ = std::fs::remove_file(log_path_for(safe));
+        let _ = std::fs::remove_file(config_path_for(safe));
     }
     killed
 }
@@ -1243,27 +1262,72 @@ pub fn has_live_tunnel() -> bool {
 }
 
 fn log_path_for(safe: &str) -> PathBuf {
-    Path::new(LOG_DIR).join(format!("supermgr-ovpn-{safe}.log"))
+    Path::new(PRIVATE_DIR).join(format!("{safe}.log"))
 }
 
-/// Write user/password to a 0600 root:wheel file under `/var/run`.
+/// The log of `profile_id`'s tunnel, for `tail_log`.
+pub fn log_path(profile_id: &str) -> PathBuf {
+    log_path_for(&sanitize_id(profile_id))
+}
+
+fn config_path_for(safe: &str) -> PathBuf {
+    Path::new(PRIVATE_DIR).join(format!("{safe}.ovpn"))
+}
+
+/// Create `PRIVATE_DIR` root-only if it is missing, and refuse it if it is
+/// anything but a directory only root can use.
+fn ensure_private_dir() -> anyhow::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    match std::fs::DirBuilder::new().mode(0o700).create(PRIVATE_DIR) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("create {PRIVATE_DIR}")),
+    }
+    let meta =
+        std::fs::symlink_metadata(PRIVATE_DIR).with_context(|| format!("stat {PRIVATE_DIR}"))?;
+    if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o077 != 0 {
+        return Err(anyhow!(
+            "{PRIVATE_DIR} is not a directory only root can use"
+        ));
+    }
+    Ok(())
+}
+
+/// Remove the session logs helpers up to 1.8.14 kept in `/tmp`. Only
+/// root's own regular files: a name there can belong to anyone.
+pub fn sweep_legacy_logs() {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(entries) = std::fs::read_dir(LEGACY_LOG_DIR) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_log = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("supermgr-ovpn-"))
+            .is_some_and(|rest| rest.strip_suffix(".log").is_some());
+        if !is_log {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if meta.is_file() && meta.uid() == 0 {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Write user/password to a root-only file in `PRIVATE_DIR`.
 /// Returns the path; caller deletes after openvpn has consumed it.
 fn write_auth_file(safe: &str, user: &str, password: &str) -> anyhow::Result<PathBuf> {
-    use std::io::Write;
-    let path = Path::new(PID_DIR).join(format!("supermgr-ovpn-{safe}.auth"));
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)
+    let path = Path::new(PRIVATE_DIR).join(format!("{safe}.auth"));
+    crate::private_file::write(&path, format!("{user}\n{password}\n").as_bytes())
         .with_context(|| format!("create {}", path.display()))?;
-    writeln!(f, "{user}").context("write username")?;
-    writeln!(f, "{password}").context("write password")?;
     Ok(path)
 }
 
-// `mode` requires the OpenOptionsExt trait in scope; bring it in
+// `custom_flags` requires the OpenOptionsExt trait in scope; bring it in
 // here so the rest of the file doesn't have a stray import line.
 use std::os::unix::fs::OpenOptionsExt;
 // `ExitStatus::from_raw` for the synthetic Output we build on the
@@ -1284,8 +1348,8 @@ async fn collect_openvpn_pids_for(safe: &str) -> Vec<u32> {
     // `supermgr-ovpn-` daemon-name prefix — that prefix only
     // appears for openvpn 2.x in `--daemon` mode. ovpncli has
     // no daemon-name argv, but the config-file path DOES carry
-    // the profile id (`/tmp/supermgr-azure-<id>.ovpn`), so a
-    // bare-id match catches both backends.
+    // the profile id (`PRIVATE_DIR/<id>.ovpn`), so a bare-id
+    // match catches both backends.
     let needle = safe.to_string();
     let mut out: Vec<u32> = Vec::new();
     let output = match crate::proc::bounded_async(
@@ -1325,8 +1389,8 @@ async fn find_openvpn_pid_for(safe: &str) -> Option<u32> {
     // `supermgr-ovpn-` daemon-name prefix — that prefix only
     // appears for openvpn 2.x in `--daemon` mode. ovpncli has
     // no daemon-name argv, but the config-file path DOES carry
-    // the profile id (`/tmp/supermgr-azure-<id>.ovpn`), so a
-    // bare-id match catches both backends.
+    // the profile id (`PRIVATE_DIR/<id>.ovpn`), so a bare-id
+    // match catches both backends.
     let needle = safe.to_string();
     let output = crate::proc::bounded_async(
         tokio::process::Command::new("/bin/ps").args(["-Ao", "pid,command"]),
@@ -1426,16 +1490,45 @@ mod tests {
     }
 
     #[test]
-    fn existing_connect_requests_remain_compatible() {
+    fn connect_requests_carry_the_configuration() {
         let args: OvpnConnectArgs =
-            serde_json::from_str(r#"{"profile_id":"test","config_file":"/tmp/test.ovpn"}"#)
-                .unwrap();
+            serde_json::from_str(r#"{"profile_id":"test","config":"client\n"}"#).unwrap();
         assert!(!args.require_openvpn3);
+        assert!(args.has_configuration());
+        assert_eq!(args.configuration().unwrap(), "client\n");
         let args: OvpnConnectArgs = serde_json::from_str(
-            r#"{"profile_id":"test","config_file":"/tmp/test.ovpn","require_openvpn3":true}"#,
+            r#"{"profile_id":"test","config":"client\n","require_openvpn3":true}"#,
         )
         .unwrap();
         assert!(args.require_openvpn3);
+        // What the GUI enrols before a first connect: nothing to run yet.
+        let args: OvpnConnectArgs = serde_json::from_str(r#"{"profile_id":"test"}"#).unwrap();
+        assert!(!args.has_configuration());
+        assert!(args.configuration().is_err());
+    }
+
+    /// A connect an older helper stored for auto-reconnect names a file.
+    /// It is read only as a regular file, never through a symlink.
+    #[test]
+    fn a_stored_connect_that_names_a_file_reads_only_a_regular_file() {
+        let dir = std::env::temp_dir().join(format!("supermanager-ovpn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("profile.ovpn");
+        std::fs::write(&file, "client\n").unwrap();
+        let link = dir.join("link.ovpn");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let stored = |path: &Path| OvpnConnectArgs {
+            profile_id: "test".into(),
+            config: None,
+            config_file: Some(path.display().to_string()),
+            require_openvpn3: false,
+            username: None,
+            password: None,
+        };
+        assert_eq!(stored(&file).configuration().unwrap(), "client\n");
+        assert!(stored(&link).configuration().is_err());
+        assert!(stored(&dir).configuration().is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
