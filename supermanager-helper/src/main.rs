@@ -67,7 +67,6 @@ mod route_guardian;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;
-mod traffic_capture;
 mod wireguard;
 
 /// Bundle of per-backend controllers. Each is a long-lived
@@ -172,7 +171,6 @@ fn helper_version_info() -> serde_json::Value {
         "auto_reconnect_list",
         "kill_switch_enable",
         "kill_switch_disable",
-        "traffic_capture",
         "system_sleep",
         "system_wake",
     ];
@@ -1218,20 +1216,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
             }
         }
-
-        // Passive traffic capture for cleartext-protocol audit.
-        // Runs tcpdump as root (the helper's natural privilege)
-        // to a caller-specified pcap path inside the user's
-        // engagement directory. Tight argument validation: no
-        // shell injection, BPF filter length-capped, output path
-        // must be under the user's per-engagement captures dir.
-        //
-        // See `traffic_capture::run` for the full validation
-        // logic; the helper just calls into it.
-        "traffic_capture" => match traffic_capture::run(req.params).await {
-            Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
-            Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
-        },
 
         // ── System sleep / wake ──────────────────────────────────────────
         //
