@@ -72,23 +72,16 @@ struct VpnDetailView: View {
     private var helperMissing: Bool { appState.helperHealth == .absent }
     @State private var pollTask: Task<Void, Never>?
 
-    /// The two "helper isn't up yet" banners surfaced during a boot race
-    /// (the app probed the socket before launchd finished spawning the
-    /// daemon). Hoisted to constants so `refreshHelperState()` can clear
-    /// exactly these once the socket comes up, and never a genuine connect
-    /// error. Setting them inline and clearing by loose string match would
-    /// silently drift apart.
+    /// The "helper isn't up yet" banner surfaced during a boot race (the
+    /// app probed the socket before launchd finished spawning the daemon).
+    /// Hoisted to a constant so `refreshHelperState()` can clear exactly
+    /// this once the socket comes up, and never a genuine connect error.
+    /// Setting it inline and clearing by loose string match would silently
+    /// drift apart.
     static let helperSocketPendingMessage =
         "Helper installed but socket isn't up yet. " +
         "Check System Settings → General → Login Items if a " +
         "background-item approval prompt was shown."
-    static let helperNotRunningMessage =
-        "Helper isn't running yet. Approve the " +
-        "background daemon prompt in System Settings → " +
-        "General → Login Items, then click Connect again."
-    static let helperUnresponsiveMessage =
-        "The helper is running but not answering. " +
-        "Wait a moment and try again."
 
     /// Helper-log viewer state. Surfaced as a sheet from the inline
     /// "View Helper Log" button that appears next to a connect error.
@@ -1267,13 +1260,11 @@ struct VpnDetailView: View {
         // "helper isn't up" banner) before launchd finishes spawning it.
         // Once the socket is actually live, drop that stale banner so a
         // reboot doesn't leave the profile looking permanently broken.
-        // Only the two helper-availability messages are cleared — a real
-        // connect error, set while the helper was already reachable, is
-        // never one of these and so is left untouched.
+        // Only the helper-availability message is cleared — a real connect
+        // error, set while the helper was already reachable, is never it
+        // and so is left untouched.
         if appState.helperHealth == .healthy,
-           actionError == Self.helperSocketPendingMessage
-            || actionError == Self.helperNotRunningMessage
-            || actionError == Self.helperUnresponsiveMessage {
+           actionError == Self.helperSocketPendingMessage {
             actionError = nil
         }
         guard appState.helperHealth == .healthy, let profile = profile else {
@@ -1381,6 +1372,23 @@ struct VpnDetailView: View {
         // still holding the previous action's last word.
         actionState = vpnState
         appState.vpnBusyProfiles.insert(profileId)
+    }
+
+    /// Make sure the helper runs the build this app bundles before a
+    /// connect, as the IKEv2 path does. Reachability alone leaves an old
+    /// helper running after an app update, and an older helper does not
+    /// take the requests this app sends. `install()` is a fast no-op when
+    /// the build matches; an upgrade asks for an administrator once.
+    /// False, with the error shown, when it fails.
+    private func ensureCurrentHelper() async -> Bool {
+        do {
+            try await HelperInstaller.install()
+            appState.helperHealth = .healthy
+            return true
+        } catch {
+            actionError = error.localizedDescription
+            return false
+        }
     }
 
     private func installHelper() async {
@@ -1496,24 +1504,7 @@ struct VpnDetailView: View {
     private func connectWireGuard(_ profile: VpnProfile) async {
         beginAction()
         defer { appState.vpnBusyProfiles.remove(profileId) }
-
-        // Re-probe helper, as in the IKEv2 path. Same race window
-        // applies — user might toggle the SMAppService approval
-        // between view appearance and clicking Connect.
-        if appState.helperHealth != .healthy {
-            let health = await HelperClient.shared.health()
-            appState.helperHealth = health
-            switch health {
-            case .absent:
-                actionError = Self.helperNotRunningMessage
-                return
-            case .unresponsive:
-                actionError = Self.helperUnresponsiveMessage
-                return
-            case .healthy:
-                break
-            }
-        }
+        guard await ensureCurrentHelper() else { return }
 
         actionState = "connecting"
         let (ok, message) = await appState.wireguardConnect(profileId: profile.id)
@@ -1564,21 +1555,7 @@ struct VpnDetailView: View {
     private func connectOpenVPN(_ profile: VpnProfile, configFile: String) async {
         beginAction()
         defer { appState.vpnBusyProfiles.remove(profileId) }
-
-        if appState.helperHealth != .healthy {
-            let health = await HelperClient.shared.health()
-            appState.helperHealth = health
-            switch health {
-            case .absent:
-                actionError = Self.helperNotRunningMessage
-                return
-            case .unresponsive:
-                actionError = Self.helperUnresponsiveMessage
-                return
-            case .healthy:
-                break
-            }
-        }
+        guard await ensureCurrentHelper() else { return }
 
         // Credentials (if any) are pulled from DPK by AppState —
         // they were stashed there at import time when the user filled
