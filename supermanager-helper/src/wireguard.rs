@@ -163,6 +163,7 @@ impl WireGuard {
     ///   4. Inspect `/var/run/wireguard/<name>.name` to determine
     ///      which `utunN` `wireguard-go` actually picked.
     pub async fn connect(&mut self, args: &WgConnectArgs) -> anyhow::Result<WgConnectResult> {
+        refuse_hooks(&args.conf_content)?;
         let wg_quick = locate_wg_quick()?;
         let name = interface_name(&args.profile_id);
         let conf_path = conf_path_for(&name);
@@ -597,9 +598,58 @@ async fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String
         .ok_or_else(|| anyhow!("no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"))
 }
 
+/// `wg-quick` runs these as shell commands, as root.
+const HOOK_KEYS: [&str; 4] = ["PreUp", "PostUp", "PreDown", "PostDown"];
+
+/// Refuse a config with `wg-quick` hooks. SuperManager renders its configs
+/// from profile fields and never writes one, so a config that has them did
+/// not come from SuperManager.
+fn refuse_hooks(conf: &str) -> anyhow::Result<()> {
+    for line in conf.lines() {
+        // wg-quick drops everything after a `#`.
+        let setting = line.split('#').next().unwrap_or_default();
+        let Some((key, _)) = setting.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if let Some(hook) = HOOK_KEYS.iter().find(|hook| key.eq_ignore_ascii_case(hook)) {
+            return Err(anyhow!(
+                "refusing a WireGuard config with {hook}: wg-quick would run it as root"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const RENDERED: &str =
+        "[Interface]\nPrivateKey = aaaa\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n\
+                            [Peer]\nPublicKey = bbbb\nEndpoint = vpn.example.com:51820\n\
+                            AllowedIPs = 0.0.0.0/0\n";
+
+    #[test]
+    fn a_config_as_supermanager_renders_it_is_accepted() {
+        refuse_hooks(RENDERED).unwrap();
+        // A hook named in a comment runs nothing.
+        refuse_hooks(&format!("# PostUp = never\n{RENDERED}")).unwrap();
+    }
+
+    #[test]
+    fn a_config_that_would_run_commands_as_root_is_refused() {
+        for hook in [
+            "PostUp = echo hook",
+            "PreUp=echo hook",
+            "  postdown = echo hook",
+            "PreDown = echo hook # cleanup",
+        ] {
+            let conf = RENDERED.replace("[Peer]", &format!("{hook}\n[Peer]"));
+            let err = refuse_hooks(&conf).unwrap_err();
+            assert!(err.to_string().contains("run it as root"), "{hook}: {err}");
+        }
+    }
 
     #[test]
     fn interface_name_is_short_and_stable() {

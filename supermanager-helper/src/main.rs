@@ -50,6 +50,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 mod auto_reconnect;
+mod client_auth;
 mod connectivity_watchdog;
 mod dns;
 mod dns_health_watchdog;
@@ -346,6 +347,10 @@ async fn main() -> anyhow::Result<()> {
 
     info!("listening on {}", socket_path.display());
 
+    // Who may connect depends on how this helper is signed; see client_auth.
+    let client_policy = client_auth::own_policy();
+    info!(?client_policy, "only SuperManager may use this helper");
+
     let controllers = Controllers {
         strongswan: Arc::new(Mutex::new(strongswan::Strongswan::new())),
         wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new())),
@@ -373,6 +378,11 @@ async fn main() -> anyhow::Result<()> {
             Ok((stream, _addr)) => {
                 let ctrls = controllers.clone();
                 tokio::spawn(async move {
+                    if let Err(refusal) = client_auth::authorize(&stream, client_policy).await {
+                        warn!("refused a client: {refusal}");
+                        refuse(stream, &refusal).await;
+                        return;
+                    }
                     if let Err(e) = handle_connection(stream, ctrls).await {
                         warn!("client error: {e:#}");
                     }
@@ -387,6 +397,17 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Tell a refused client why, then hang up. Nothing it sent has been read.
+async fn refuse(mut stream: UnixStream, refusal: &client_auth::Refusal) {
+    let response = Response::err(0, -32001, format!("refused: {refusal}"));
+    let Ok(body) = serde_json::to_vec(&response) else {
+        return;
+    };
+    let len = u32::try_from(body.len()).unwrap_or(u32::MAX).to_be_bytes();
+    let _ = stream.write_all(&len).await;
+    let _ = stream.write_all(&body).await;
 }
 
 /// Read the last `want_bytes` of a file. If the file is shorter than that,

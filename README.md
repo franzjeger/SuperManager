@@ -483,21 +483,13 @@ The build script regenerates `SuperManager.xcodeproj` from `project.yml` via `xc
 
 #### Helper install
 
-The privileged helper needs to be installed once into `/Library/PrivilegedHelperTools/`:
+The app installs its privileged helper itself the first time it needs one: macOS asks for an admin password once, and the helper installed is the one inside the app bundle, signed like the app. There is no separate install script. The helper answers only the signed SuperManager app (`supermanager-helper/src/client_auth.rs`); a helper signed for development also accepts Xcode's Debug builds.
+
+If you once enabled passwordless sudo with the retired `enable_nopasswd.sh`, remove the rule:
 
 ```bash
-./SuperManagerMac/Signing/install_helper.sh
+./SuperManagerMac/Signing/disable_nopasswd.sh
 ```
-
-This requires `sudo` for the install + `launchctl bootstrap`. Re-run after pulling helper-side changes; subsequent builds can hot-swap the helper via the dev-rpc `deploy_self` path with no admin prompt.
-
-For a smoother dev loop, pre-authorise the specific commands the install script uses:
-
-```bash
-./SuperManagerMac/Signing/enable_nopasswd.sh   # writes /etc/sudoers.d/supermanager-dev
-```
-
-(Disable with `disable_nopasswd.sh` when done.)
 
 #### VPN DNS cleanup package
 
