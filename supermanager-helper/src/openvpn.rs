@@ -204,16 +204,16 @@ impl OpenVpn {
                 std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777,
             );
         }
-        if let Ok(body) = std::fs::read_to_string(&args.config_file) {
-            tracing::info!(
-                "ovpn_connect: config has_remote={} has_ca={} has_tls_auth={} has_tls_crypt={} has_auth_user_pass={}",
-                body.contains("\nremote ") || body.starts_with("remote "),
-                body.contains("<ca>"),
-                body.contains("<tls-auth>"),
-                body.contains("<tls-crypt>"),
-                body.contains("auth-user-pass"),
-            );
-        }
+        let config_body = std::fs::read_to_string(&args.config_file).unwrap_or_default();
+        tracing::info!(
+            "ovpn_connect: config has_remote={} has_ca={} has_tls_auth={} has_tls_crypt={} has_auth_user_pass={} has_client_cert={}",
+            config_body.contains("\nremote ") || config_body.starts_with("remote "),
+            config_body.contains("<ca>"),
+            config_body.contains("<tls-auth>"),
+            config_body.contains("<tls-crypt>"),
+            config_body.contains("auth-user-pass"),
+            has_client_certificate(&config_body),
+        );
 
         let safe = sanitize_id(&args.profile_id);
         let pid_path = pid_path_for(&safe);
@@ -305,12 +305,15 @@ impl OpenVpn {
             // mitigations are (a) keep tokens short-lived (Azure
             // gives us 1h) and (b) trust the operator's machine.
             let mut cmd = Command::new(&openvpn);
-            cmd.arg("--no-cert") // Azure VPN auths via JWT in
-                // auth-user-pass — no client
-                // cert. Without this flag
-                // ovpncli aborts with
-                // `Missing External PKI alias`.
-                .arg("--username")
+            // A profile without a client certificate (Azure VPN signs in
+            // with a token through auth-user-pass) needs `--no-cert`, or
+            // ovpncli aborts with `Missing External PKI alias`. A profile
+            // that has one must not get it: the certificate would be ignored
+            // and the server would refuse the connection.
+            if !has_client_certificate(&config_body) {
+                cmd.arg("--no-cert");
+            }
+            cmd.arg("--username")
                 .arg(user)
                 .arg("--password")
                 .arg(pass)
@@ -1014,27 +1017,35 @@ fn locate_openvpn(require_openvpn3: bool) -> anyhow::Result<PathBuf> {
     select_openvpn(require_openvpn3, |path| path.is_file())
 }
 
+/// Which OpenVPN runs a profile. Azure VPN needs OpenVPN 3 and gets nothing
+/// else. Every other profile gets OpenVPN 2 when it is installed and OpenVPN
+/// 3 only as a last resort: OpenVPN 3 used to come first for everything, so
+/// installing it for Azure moved every other profile onto it, where the
+/// password travels on the command line.
 fn select_openvpn(
     require_openvpn3: bool,
     is_available: impl Fn(&Path) -> bool,
 ) -> anyhow::Result<PathBuf> {
-    // OpenVPN 3 first. Required for Azure VPN with Entra ID.
     const OVPN3_PATHS: &[&str] = &[
         "/opt/homebrew/bin/openvpn3",
         "/usr/local/bin/openvpn3",
         "/opt/local/bin/openvpn3",
     ];
-    for path in OVPN3_PATHS {
-        if is_available(Path::new(path)) {
-            return Ok(PathBuf::from(path));
-        }
-    }
+    let openvpn3 = || {
+        OVPN3_PATHS
+            .iter()
+            .map(Path::new)
+            .find(|path| is_available(path))
+            .map(Path::to_path_buf)
+    };
     if require_openvpn3 {
-        return Err(anyhow!(
-            "Azure VPN requires OpenVPN 3, which is not installed. \
+        return openvpn3().ok_or_else(|| {
+            anyhow!(
+                "Azure VPN requires OpenVPN 3, which is not installed. \
              OpenVPN 2 can fail to fit the Microsoft sign-in token in its TLS buffer. \
              Install OpenVPN 3 using contrib/build-openvpn3-mac.sh, then try again."
-        ));
+            )
+        });
     }
     // Locally-built openvpn 2.x with patched `TLS_CHANNEL_BUF_SIZE`.
     // Useful for non-Azure profiles where 2.x works fine — kept
@@ -1058,6 +1069,9 @@ fn select_openvpn(
             return Ok(alt);
         }
     }
+    if let Some(path) = openvpn3() {
+        return Ok(path);
+    }
     Err(anyhow!(
         "openvpn not found. For Azure VPN profiles install \
          OpenVPN 3 by running `contrib/build-openvpn3-mac.sh` \
@@ -1065,6 +1079,21 @@ fn select_openvpn(
          ID auth flow). For other profiles `brew install openvpn` \
          is sufficient."
     ))
+}
+
+/// Whether an OpenVPN config carries a client certificate: an inline
+/// `<cert>` or `<pkcs12>` block, or a `cert` or `pkcs12` directive.
+fn has_client_certificate(config: &str) -> bool {
+    config.lines().any(|line| {
+        let line = line.trim_start();
+        if line.starts_with('#') || line.starts_with(';') {
+            return false;
+        }
+        matches!(
+            line.split_whitespace().next(),
+            Some("<cert>" | "<pkcs12>" | "cert" | "pkcs12")
+        )
+    })
 }
 
 /// True when the located binary is OpenVPN 3.x. Used to switch
@@ -1342,6 +1371,49 @@ mod tests {
     fn azure_selects_openvpn3_when_both_versions_are_installed() {
         let path = select_openvpn(true, |_| true).unwrap();
         assert_eq!(path, Path::new("/opt/homebrew/bin/openvpn3"));
+    }
+
+    /// Installing OpenVPN 3 for Azure must not move every other profile
+    /// onto it.
+    #[test]
+    fn ordinary_profiles_prefer_openvpn2_when_both_are_installed() {
+        let path = select_openvpn(false, |_| true).unwrap();
+        assert_eq!(path, Path::new("/opt/homebrew/bin/openvpn-patched"));
+        let path = select_openvpn(false, |path| {
+            path != Path::new("/opt/homebrew/bin/openvpn-patched")
+                && path != Path::new("/usr/local/bin/openvpn-patched")
+        })
+        .unwrap();
+        assert_eq!(path, Path::new("/opt/homebrew/sbin/openvpn"));
+    }
+
+    #[test]
+    fn ordinary_profiles_use_openvpn3_only_as_a_last_resort() {
+        let path = select_openvpn(false, |path| {
+            path == Path::new("/opt/homebrew/bin/openvpn3")
+        })
+        .unwrap();
+        assert_eq!(path, Path::new("/opt/homebrew/bin/openvpn3"));
+    }
+
+    #[test]
+    fn a_client_certificate_is_recognised_in_every_form() {
+        for config in [
+            "client\n<cert>\n-----BEGIN CERTIFICATE-----\n</cert>\n",
+            "client\ncert client.crt\nkey client.key\n",
+            "client\npkcs12 client.p12\n",
+            "client\n<pkcs12>\nMIIK\n</pkcs12>\n",
+        ] {
+            assert!(has_client_certificate(config), "{config}");
+        }
+        for config in [
+            // Azure VPN: a token through auth-user-pass, no certificate.
+            "client\nauth-user-pass\n<ca>\n-----BEGIN CERTIFICATE-----\n</ca>\n",
+            "client\n# cert client.crt\n; pkcs12 old.p12\n",
+            "client\nremote-cert-tls server\n",
+        ] {
+            assert!(!has_client_certificate(config), "{config}");
+        }
     }
 
     #[test]
