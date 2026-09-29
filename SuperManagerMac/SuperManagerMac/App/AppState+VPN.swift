@@ -477,15 +477,17 @@ extension AppState {
                 args["dns_servers"] = r.dnsServers
             } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
                 backendStr = "openvpn"
-                // OpenVPN connect needs config_file + creds. Read
-                // from secret store if present.
+                // The same arguments a manual connect sends: the
+                // configuration itself, and the stored credentials.
+                let profile: VpnProfile = try await client.call(
+                    "vpn_get_profile", params: ["id": profileId])
+                guard case .openvpn(let cfg) = profile.config else {
+                    tailscaleActionError = "Profile \(summary.name) is not an OpenVPN profile"
+                    return false
+                }
+                args["config"] = try String(contentsOfFile: cfg.configFile, encoding: .utf8)
                 let username = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username")
                 let password = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")
-                // config file path is on the profile — we'd need
-                // to fetch full profile. Use the imported path
-                // convention.
-                let dataDir = ("~/Library/Application Support/SuperManager/openvpn" as NSString).expandingTildeInPath
-                args["configFile"] = "\(dataDir)/\(profileId).ovpn"
                 if let u = username { args["username"] = u }
                 if let p = password { args["password"] = p }
             } else if backendLower.contains("fortigate") || backendLower.contains("forti_gate") || backendLower.contains("ikev2") || backendLower.contains("ipsec") {
@@ -787,7 +789,7 @@ extension AppState {
         do {
             let result = try await HelperClient.shared.ovpnConnect(
                 profileId: profileId,
-                configFile: configFile,
+                config: try String(contentsOfFile: configFile, encoding: .utf8),
                 username: username,
                 password: password
             )

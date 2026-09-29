@@ -156,16 +156,18 @@ final class HelperClient {
     /// (`<data_dir>/ovpn/<id>.ovpn`). Username + password are passed
     /// only when the .ovpn declares `auth-user-pass`; otherwise omit.
     @discardableResult
+    /// `config` is the profile's configuration itself: the helper checks it
+    /// and runs OpenVPN on its own copy, never on a file the user can change.
     func ovpnConnect(
         profileId: String,
-        configFile: String,
+        config: String,
         username: String? = nil,
         password: String? = nil,
         requireOpenVPN3: Bool = false
     ) async throws -> [String: Any] {
         var params: [String: Any] = [
             "profile_id": profileId,
-            "config_file": configFile,
+            "config": config,
             "require_openvpn3": requireOpenVPN3,
         ]
         if let u = username { params["username"] = u }
@@ -432,9 +434,12 @@ final class HelperClient {
     /// `/var/log/supermanager-helper.log` (or the whole file if shorter).
     /// Used by the "View Helper Log" button so a user diagnosing a
     /// failed connect can see what charon actually said without escalating
-    /// out of the app.
-    func tailLog(bytes: Int = 8 * 1024) async throws -> String {
-        let result = try await call("tail_log", params: ["bytes": bytes])
+    /// out of the app. With `profileId`, the log of that profile's OpenVPN
+    /// tunnel instead, which only root can read.
+    func tailLog(bytes: Int = 8 * 1024, profileId: String? = nil) async throws -> String {
+        var params: [String: Any] = ["bytes": bytes]
+        if let profileId { params["profile_id"] = profileId }
+        let result = try await call("tail_log", params: params)
         return result["log"] as? String ?? ""
     }
 

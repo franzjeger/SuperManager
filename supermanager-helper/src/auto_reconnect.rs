@@ -91,7 +91,8 @@ impl WatchedProfile {
         let a = self.last_connect_args.clone();
         match self.backend.as_str() {
             "wireguard" => serde_json::from_value::<crate::wireguard::WgConnectArgs>(a).is_ok(),
-            "openvpn" => serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a).is_ok(),
+            "openvpn" => serde_json::from_value::<crate::openvpn::OvpnConnectArgs>(a)
+                .is_ok_and(|a| a.has_configuration()),
             "ikev2" => serde_json::from_value::<crate::strongswan::ConnectArgs>(a).is_ok(),
             _ => false,
         }

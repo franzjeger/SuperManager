@@ -57,6 +57,7 @@ mod dns_health_watchdog;
 mod events;
 mod kill_switch;
 mod openvpn;
+mod openvpn_config;
 mod private_file;
 mod proc;
 // `power` (IOKit system-power monitor) is disabled in dev/ad-hoc builds: it
@@ -250,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
     // we'd rather not have on disk. The next `vpn_connect` regenerates
     // them from scratch.
     strongswan::sweep_stale_configs().await;
+    openvpn::sweep_legacy_logs();
 
     // Spawn the default-route guardian. It lives for the helper's
     // lifetime; a restarted helper spawns its own. Idempotent on
@@ -409,7 +411,7 @@ async fn refuse(mut stream: UnixStream, refusal: &client_auth::Refusal) {
 /// Read the last `want_bytes` of a file. If the file is shorter than that,
 /// return the whole thing. Used to surface helper-side diagnostics in the
 /// GUI without granting root read access to the log file directly.
-async fn tail_file(path: &str, want_bytes: u64) -> anyhow::Result<String> {
+async fn tail_file(path: &std::path::Path, want_bytes: u64) -> anyhow::Result<String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
     let mut f = tokio::fs::File::open(path).await?;
     let len = f.metadata().await?.len();
@@ -664,6 +666,8 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // Bounded to 64 KiB max — any single failure's diagnostic context
         // fits there comfortably and we don't want to ship megabytes
         // through the JSON-RPC pipe.
+        // The helper's log, or with `profile_id` that OpenVPN tunnel's,
+        // which only root can read.
         "tail_log" => {
             const HELPER_LOG: &str = "/var/log/supermanager-helper.log";
             const DEFAULT_BYTES: u64 = 8 * 1024;
@@ -674,7 +678,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(DEFAULT_BYTES)
                 .min(MAX_BYTES);
-            match tail_file(HELPER_LOG, want).await {
+            let path = match req.params.get("profile_id").and_then(|v| v.as_str()) {
+                Some(profile) => openvpn::log_path(profile),
+                None => PathBuf::from(HELPER_LOG),
+            };
+            match tail_file(&path, want).await {
                 Ok(text) => Response::ok(id, serde_json::json!({"log": text})),
                 Err(e) => Response::err(id, -32000, format!("tail_log: {e}")),
             }
@@ -760,6 +768,11 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         "ovpn_connect" => {
             let raw_args = req.params.clone();
             match serde_json::from_value::<openvpn::OvpnConnectArgs>(req.params) {
+                // The configuration comes in the request. Only a connect
+                // stored by an older helper names a file instead.
+                Ok(args) if args.config.is_none() => {
+                    Response::err(id, -32602, "bad params: missing field `config`")
+                }
                 Ok(args) => {
                     let pid = args.profile_id.clone();
                     let mut ov = openvpn.lock().await;

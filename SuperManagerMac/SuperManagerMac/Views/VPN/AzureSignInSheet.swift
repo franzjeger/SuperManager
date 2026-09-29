@@ -183,32 +183,9 @@ struct AzureSignInSheet: View {
             return
         }
 
-        // /tmp instead of ~/Library/Caches: the privileged
-        // helper runs as root, but macOS TCC can block root
-        // processes from traversing user-Library paths
-        // (especially under privacy-protected directories), and
-        // the resulting `EPERM` when openvpn tries to read the
-        // config surfaces as a generic "openvpn refused to
-        // start" with an empty stderr — exactly what we just
-        // saw. /tmp is mode-1777 world-readable; both Mac (as
-        // user) and helper (as root) can read it without TCC
-        // friction. Same pattern production SuperManager Linux
-        // uses with /run/supermgrd/azure-<uuid>/.
-        let ovpnPath = URL(fileURLWithPath: "/tmp/supermgr-azure-\(profileId).ovpn")
-        do {
-            try render.ovpnBody.write(to: ovpnPath, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: ovpnPath.path)
-            DebugLog.write("[AzureSignIn] wrote .ovpn to \(ovpnPath.path) (mode 0644)")
-        } catch {
-            DebugLog.write("[AzureSignIn] failed to write \(ovpnPath.path): \(error)")
-            ActivityLog.shared.record(
-                profileId: profileId,
-                kind: .connectFailed,
-                message: "Azure VPN: stage .ovpn failed — \(error.localizedDescription)"
-            )
-            phase = .error("Couldn't stage the OpenVPN config on disk: \(error.localizedDescription)")
-            return
-        }
+        // The configuration goes to the helper in the request. Versions up
+        // to 1.8.14 staged it in /tmp instead; don't leave one behind.
+        try? FileManager.default.removeItem(atPath: "/tmp/supermgr-azure-\(profileId).ovpn")
 
         switch await HelperClient.shared.health() {
         case .healthy:
@@ -243,12 +220,12 @@ struct AzureSignInSheet: View {
         do {
             connectResult = try await HelperClient.shared.ovpnConnect(
                 profileId: profileId,
-                configFile: ovpnPath.path,
+                config: render.ovpnBody,
                 username: token.username,
                 password: token.accessToken,
                 requireOpenVPN3: true
             )
-            DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?"), log_path=\(connectResult["log_path"] ?? "?")")
+            DebugLog.write("[AzureSignIn] helper.ovpnConnect returned: success=\(connectResult["success"] ?? "?"), message=\(connectResult["message"] ?? "?")")
         } catch {
             DebugLog.write("[AzureSignIn] helper.ovpnConnect RPC threw: \(error)")
             ActivityLog.shared.record(
@@ -260,8 +237,8 @@ struct AzureSignInSheet: View {
             return
         }
 
-        // Helper returns `{success: bool, message: string,
-        // log_path?: string}` — `success: false` means openvpn's
+        // Helper returns `{success: bool, message: string}` —
+        // `success: false` means openvpn's
         // initial fork+exec returned non-zero (config error,
         // missing binary, etc). Surface the helper's message
         // verbatim so the user sees what openvpn actually said.
@@ -290,8 +267,7 @@ struct AzureSignInSheet: View {
         // reason; we use 30s here because the Mac UI feels
         // unresponsive past that and we'd rather surface a
         // "still trying" error the user can retry than freeze.
-        let logPath = connectResult["log_path"] as? String
-        DebugLog.write("[AzureSignIn] polling ovpn_status for tunnel-up confirmation (log_path=\(logPath ?? "<none>"))")
+        DebugLog.write("[AzureSignIn] polling ovpn_status for tunnel-up confirmation")
         var connected = false
         var lastStatus: String = "unknown"
         for attempt in 0..<30 {              // up to ~30 seconds at 1s/poll
@@ -308,12 +284,13 @@ struct AzureSignInSheet: View {
             }
         }
         guard connected else {
-            // Read log file for the actual openvpn error so the
-            // user sees AUTH_FAILED / Cannot load CA / whatever.
+            // Ask the helper for the tunnel's log so the user sees
+            // AUTH_FAILED / Cannot load CA / whatever openvpn said.
             var logTail = ""
-            if let p = logPath, let body = try? String(contentsOfFile: p) {
+            if let body = try? await HelperClient.shared.tailLog(bytes: 16 * 1024, profileId: profileId),
+               !body.isEmpty {
                 let lines = body.split(separator: "\n").suffix(15).joined(separator: "\n")
-                logTail = "\n\nLast 15 lines of \(p):\n\(lines)"
+                logTail = "\n\nLast 15 lines of the OpenVPN log:\n\(lines)"
             }
             DebugLog.write("[AzureSignIn] tunnel never reached connected (last status=\(lastStatus))\(logTail)")
             ActivityLog.shared.record(
