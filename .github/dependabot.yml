@@ -15,6 +15,14 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # rtnetlink builds on specific netlink-packet-* versions. Bumped on
+      # its own, one of them gives supermgrd two incompatible copies of
+      # the same types, and the Linux build fails (#191). Listed first:
+      # a dependency joins the first group it matches.
+      netlink:
+        patterns:
+          - "rtnetlink"
+          - "netlink-*"
       cargo-minor-and-patch:
         update-types:
           - minor

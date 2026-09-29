@@ -25,7 +25,6 @@ async-trait     = { workspace = true }
 base64          = { workspace = true }
 chrono          = { workspace = true }
 ipnet           = { workspace = true }
-rand            = { workspace = true }
 reqwest         = { workspace = true }
 rsa             = { workspace = true }
 russh           = { workspace = true }

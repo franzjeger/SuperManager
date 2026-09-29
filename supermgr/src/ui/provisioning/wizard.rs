@@ -3260,8 +3260,8 @@ fn build_generation_prompt(s: &WizardState) -> String {
     }
 
     // Auto-generate secure passwords/PSKs for the config.
-    // rand 0.9 renamed thread_rng()→rng() and Rng::gen_range→random_range.
-    use rand::Rng;
+    // `random_range` is on `RngExt` since rand 0.10.
+    use rand::RngExt;
     let mut rng = rand::rng();
     let mut gen_pass = |len: usize| -> String {
         const CHARS: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%&*";
