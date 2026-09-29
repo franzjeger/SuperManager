@@ -783,13 +783,26 @@ extension AppState {
                                   message: "User clicked Connect (OpenVPN)")
         let username = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username")
         let password = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-password")
+        let config: String
+        do {
+            config = try String(contentsOfFile: configFile, encoding: .utf8)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+        // The helper passes credentials only when it has both.
+        if username == nil || password == nil, OpenVPNCredentials.areAsked(in: config) {
+            let message = "This profile asks for a username and password, and none are stored "
+                + "for it. Add them with Edit credentials, then connect."
+            ActivityLog.shared.record(profileId: profileId, kind: .connectFailed, message: message)
+            return (false, message)
+        }
 
         vpnConnectionStates[profileId] = "connecting"
         bumpVpnFastPolling()
         do {
             let result = try await HelperClient.shared.ovpnConnect(
                 profileId: profileId,
-                config: try String(contentsOfFile: configFile, encoding: .utf8),
+                config: config,
                 username: username,
                 password: password
             )
