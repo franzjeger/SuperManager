@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use supermgr_core::host::Host;
 use supermgr_core::ssh::key::SshKey;
-use supermgr_core::vpn::profile::Profile;
+use supermgr_core::vpn::profile::{Profile, ProfileConfig};
 use supermgr_core::vpn::state::VpnState;
 
 use crate::ssh::known_hosts::KnownHostsStore;
@@ -27,6 +27,9 @@ pub struct DaemonState {
 
     /// Directory where VPN profile TOML files are persisted.
     pub profile_dir: PathBuf,
+
+    /// Where imported OpenVPN configurations live, as `<profile id>.ovpn`.
+    pub ovpn_dir: PathBuf,
 
     /// SSH keys, keyed by UUID.
     pub ssh_keys: HashMap<Uuid, SshKey>,
@@ -84,6 +87,7 @@ impl DaemonState {
             profiles: HashMap::new(),
             vpn_state: VpnState::Disconnected,
             profile_dir: data_dir.join("profiles"),
+            ovpn_dir: data_dir.join("ovpn"),
             ssh_keys: HashMap::new(),
             ssh_hosts: HashMap::new(),
             host_health: HashMap::new(),
@@ -107,17 +111,27 @@ impl DaemonState {
 
     /// Load all `.toml` profile files from `profile_dir`.
     pub fn load_profiles(&mut self) -> anyhow::Result<()> {
+        let mut relocated = Vec::new();
         load_toml_dir(&self.profile_dir, |text, path| {
             match toml::from_str::<Profile>(&text) {
-                Ok(profile) => {
+                Ok(mut profile) => {
                     info!("loaded profile '{}' from {:?}", profile.name, path);
+                    if relocate_openvpn_config(&mut profile, &self.ovpn_dir) {
+                        relocated.push(profile.id);
+                    }
                     self.profiles.insert(profile.id, profile);
                 }
                 Err(e) => {
                     warn!("skipping malformed profile {:?}: {}", path, e);
                 }
             }
-        })
+        })?;
+        for id in relocated {
+            if let Err(e) = self.save_profile(&self.profiles[&id]) {
+                warn!("could not save relocated profile {id}: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// Persist a single profile to disk.
@@ -223,6 +237,33 @@ impl DaemonState {
 // TOML persistence helpers
 // ---------------------------------------------------------------------------
 
+/// Point an OpenVPN profile at its configuration in `ovpn_dir` when the
+/// path it records is gone. Import and duplicate write the configuration
+/// to `ovpn_dir/<profile id>.ovpn` and record the absolute path, so a data
+/// directory copied to another account or Mac keeps profiles naming the
+/// old home, and they cannot connect. Only that one file is taken, never
+/// another by a similar name. Returns whether the profile changed.
+fn relocate_openvpn_config(profile: &mut Profile, ovpn_dir: &std::path::Path) -> bool {
+    let ProfileConfig::OpenVpn(config) = &mut profile.config else {
+        return false;
+    };
+    if std::path::Path::new(&config.config_file).exists() {
+        return false;
+    }
+    let own = ovpn_dir.join(format!("{}.ovpn", profile.id));
+    if !own.is_file() {
+        return false;
+    }
+    info!(
+        "profile '{}': configuration moved from {} to {}",
+        profile.name,
+        config.config_file,
+        own.display()
+    );
+    config.config_file = own.to_string_lossy().into_owned();
+    true
+}
+
 fn load_toml_dir(dir: &PathBuf, mut on_entry: impl FnMut(String, PathBuf)) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -292,5 +333,80 @@ mod trust_startup_tests {
         std::fs::write(&path, "invalid JSON").unwrap();
         assert!(DaemonState::new(dir.path().to_owned()).is_err());
         assert_eq!(std::fs::read_to_string(path).unwrap(), "invalid JSON");
+    }
+}
+
+#[cfg(test)]
+mod relocation_tests {
+    use super::*;
+    use supermgr_core::vpn::profile::OpenVpnConfig;
+
+    fn openvpn_profile(config_file: &str) -> Profile {
+        Profile::new(
+            "OpenVPN-Server",
+            ProfileConfig::OpenVpn(OpenVpnConfig {
+                config_file: config_file.into(),
+                username: None,
+                password: None,
+            }),
+        )
+    }
+
+    fn config_file(state: &DaemonState, id: Uuid) -> String {
+        match &state.profiles[&id].config {
+            ProfileConfig::OpenVpn(config) => config.config_file.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// A data directory copied from another account: the profile names the
+    /// old home, and its configuration is here under the profile's id.
+    #[test]
+    fn a_profile_naming_a_moved_home_finds_its_configuration_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = DaemonState::new(dir.path().to_owned()).unwrap();
+        let mut profile = openvpn_profile("");
+        let old_home = format!(
+            "/Users/someone-else/Library/Application Support/SuperManager/ovpn/{}.ovpn",
+            profile.id
+        );
+        if let ProfileConfig::OpenVpn(config) = &mut profile.config {
+            config.config_file = old_home;
+        }
+        std::fs::create_dir_all(&state.ovpn_dir).unwrap();
+        let own = state.ovpn_dir.join(format!("{}.ovpn", profile.id));
+        std::fs::write(&own, "client\n").unwrap();
+        state.save_profile(&profile).unwrap();
+
+        state.load_profiles().unwrap();
+        assert_eq!(config_file(&state, profile.id), own.to_string_lossy());
+        // Saved that way, so the next start finds it directly.
+        let saved = std::fs::read_to_string(state.profile_dir.join(format!("{}.toml", profile.id)))
+            .unwrap();
+        assert!(saved.contains(&*own.to_string_lossy()), "{saved}");
+    }
+
+    /// A path that exists stays, and a missing path with no copy here is
+    /// not replaced by a guess.
+    #[test]
+    fn a_path_that_exists_or_has_no_copy_here_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = DaemonState::new(dir.path().to_owned()).unwrap();
+        let elsewhere = dir.path().join("client.ovpn");
+        std::fs::write(&elsewhere, "client\n").unwrap();
+        let existing = openvpn_profile(&elsewhere.to_string_lossy());
+        let missing = openvpn_profile("/nowhere/other.ovpn");
+        std::fs::create_dir_all(&state.ovpn_dir).unwrap();
+        // A file here, but under another profile's id.
+        std::fs::write(state.ovpn_dir.join("other.ovpn"), "client\n").unwrap();
+        state.save_profile(&existing).unwrap();
+        state.save_profile(&missing).unwrap();
+
+        state.load_profiles().unwrap();
+        assert_eq!(
+            config_file(&state, existing.id),
+            elsewhere.to_string_lossy()
+        );
+        assert_eq!(config_file(&state, missing.id), "/nowhere/other.ovpn");
     }
 }
