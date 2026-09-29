@@ -6,9 +6,8 @@
 use std::sync::Arc;
 
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse, Msg};
+use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::Channel;
-use russh_keys::key::PublicKey;
-use russh_keys::PublicKeyBase64;
 use supermgr_core::error::SshError;
 use supermgr_core::ssh::known_hosts::{HostKeyCheck, KnownHostsStore};
 use supermgr_core::ssh::remote::{RemoteFiles, RemoteShell};
@@ -47,7 +46,6 @@ impl SshClientHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl client::Handler for SshClientHandler {
     type Error = anyhow::Error;
 
@@ -55,10 +53,7 @@ impl client::Handler for SshClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // We hash the SSH wire-format public key. Different from OpenSSH's
-        // base64-truncated SHA256 representation, but stable across restarts
-        // and we only ever compare it to ourselves.
-        let fingerprint = KnownHostsStore::fingerprint(&server_public_key.public_key_bytes());
+        let fingerprint = host_key_fingerprint(server_public_key)?;
 
         match self
             .known_hosts
@@ -98,6 +93,32 @@ impl client::Handler for SshClientHandler {
     }
 }
 
+/// What `known_hosts` records for `key`: the SHA-256 of its SSH wire form, in
+/// hex. Not OpenSSH's base64 `SHA256:` form, but stable, and we only ever
+/// compare it with ourselves. It must never shift, or every recorded host
+/// reads as a changed key.
+fn host_key_fingerprint(key: &PublicKey) -> Result<String, russh::keys::ssh_key::Error> {
+    Ok(KnownHostsStore::fingerprint(&key.to_bytes()?))
+}
+
+/// The signature hash for public-key authentication with `key`. For RSA it is
+/// what the server says it accepts (RFC 8308 `server-sig-algs`), and
+/// rsa-sha2-512 when it says nothing, which is what russh 0.46 always used
+/// for OpenSSH-format keys. Other key types have no choice to make, and skip
+/// waiting up to a second for the server's answer.
+async fn signature_hash<H: client::Handler>(
+    handle: &Handle<H>,
+    key: &PrivateKey,
+) -> Option<HashAlg> {
+    if !key.algorithm().is_rsa() {
+        return None;
+    }
+    match handle.best_supported_rsa_hash().await {
+        Ok(Some(accepted)) => accepted,
+        Ok(None) | Err(_) => Some(HashAlg::Sha512),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Session wrapper
 // ---------------------------------------------------------------------------
@@ -121,9 +142,9 @@ impl SshSession {
     ) -> Result<bool, SshError> {
         // 1. Try plain password auth.
         match handle.authenticate_password(username, password).await {
-            Ok(true) => return Ok(true),
-            Ok(false) => {} // server rejected – try keyboard-interactive
-            Err(_) => {}    // protocol error – try keyboard-interactive
+            Ok(result) if result.success() => return Ok(true),
+            Ok(_) => {}  // server rejected – try keyboard-interactive
+            Err(_) => {} // protocol error – try keyboard-interactive
         }
 
         // 2. Try keyboard-interactive (macOS, some Linux PAM setups).
@@ -145,7 +166,7 @@ impl SshSession {
                     Err(e) => Err(SshError::AuthFailed(e.to_string())),
                 }
             }
-            Ok(KeyboardInteractiveAuthResponse::Failure) => Ok(false),
+            Ok(KeyboardInteractiveAuthResponse::Failure { .. }) => Ok(false),
             Err(e) => Err(SshError::AuthFailed(e.to_string())),
         }
     }
@@ -254,7 +275,7 @@ impl SshSession {
         timeout_secs: u64,
         known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
-        let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
+        let key_pair = russh::keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
         let config = Arc::new(client::Config::default());
@@ -279,14 +300,16 @@ impl SshSession {
 
         // Try certificate auth first if a certificate is provided.
         if let Some(cert_data) = cert_pem {
-            match ssh_key::Certificate::from_openssh(cert_data) {
+            // russh's own `Certificate`: russh uses a newer ssh-key than the
+            // rest of the workspace.
+            match russh::keys::Certificate::from_openssh(cert_data) {
                 Ok(cert) => {
                     match handle
                         .authenticate_openssh_cert(username, key_pair.clone(), cert)
                         .await
                     {
-                        Ok(true) => return Ok(Self { handle }),
-                        Ok(false) => {
+                        Ok(result) if result.success() => return Ok(Self { handle }),
+                        Ok(_) => {
                             // Certificate rejected — fall through to plain pubkey.
                         }
                         Err(e) => {
@@ -302,12 +325,13 @@ impl SshSession {
         }
 
         // Plain public-key authentication.
+        let hash = signature_hash(&handle, &key_pair).await;
         let auth_ok = handle
-            .authenticate_publickey(username, key_pair)
+            .authenticate_publickey(username, PrivateKeyWithHashAlg::new(key_pair, hash))
             .await
             .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
-        if !auth_ok {
+        if !auth_ok.success() {
             return Err(SshError::AuthFailed(
                 "public-key authentication rejected by server".into(),
             ));
@@ -372,7 +396,7 @@ impl SshSession {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
+        let key_pair = russh::keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
         let config = Arc::new(client::Config::default());
@@ -386,12 +410,14 @@ impl SshSession {
                 reason: format!("stream connect failed: {e}"),
             })?;
 
+        let key_pair = Arc::new(key_pair);
+        let hash = signature_hash(&handle, &key_pair).await;
         let auth_ok = handle
-            .authenticate_publickey(username, Arc::new(key_pair))
+            .authenticate_publickey(username, PrivateKeyWithHashAlg::new(key_pair, hash))
             .await
             .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
-        if !auth_ok {
+        if !auth_ok.success() {
             return Err(SshError::AuthFailed(
                 "public-key authentication rejected by server (via tunnel)".into(),
             ));
@@ -712,5 +738,41 @@ impl RemoteShell for SshSession {
 
     async fn files(&self) -> Result<Box<dyn RemoteFiles + Send + Sync + '_>, SshError> {
         Ok(Box::new(SftpFiles(self.sftp().await?)))
+    }
+}
+
+/// Host-key fingerprints are stored, so they must survive library upgrades.
+/// The expected values were computed outside any SSH library, from keys made
+/// by `ssh-keygen`: `shasum -a 256` over the base64-decoded key. The engine
+/// pins the same keys, and also runs them through a real handshake.
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprints_match_what_known_hosts_already_holds() {
+        let keys = [
+            (
+                "AAAAC3NzaC1lZDI1NTE5AAAAIO88gW2+ekico7P/wx3hnEskuq3Vu6VATCjUhEtMlYzD",
+                "262c5a9e464b3ff6f888a4db6cd40fa1a5ca89aca000ff501a85307cbc964c53",
+            ),
+            (
+                "AAAAB3NzaC1yc2EAAAADAQABAAABAQC2yvjxYsTv+XWbvV4aymsNDMSeL4a/FRxY33k0knq7/DGaFZpkppQChYDJ\
+                 qYVUdYqdvGZ3V0uEjSKkEhlyJ+l7cMigD2JWkDPqqng4yEDy7e1+oX7Ggbrty+zqgWptst0e5LO+MLTNYujrU3GC\
+                 ll5HI94qkI5tsrCsiajMFg/5Q0RUGtCqd4/E2q7bttlYGeH0nsbDlMG7JYcBQfEvvDS6M9p6OOde9ODGA2AhaoPQ\
+                 oOzDNlgwf+1p4rJJlF7o0gd7pgdb725kSvPdUV2iLr0+m9awrIUVNzK0iLmvqhXSNcDP9x8QbKZetPjJAbptC/RM\
+                 PcHAOMYuzHuNcMPJ3ofJ",
+                "9a0e5f35e18f44da787e29a1adfdc913b362d99ada24d34ef4225c8ae647e344",
+            ),
+            (
+                "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBBJbjIi7BbSJRV0fZw6cbjrOxdv+BW12bAOR\
+                 I7tQIKnqt4hh9mDPwCfwlcPXrgb6tQr7WdyS1lHcf2/uyO5Nvd0=",
+                "7452945f1d26766d358217507f4321eaf76ad281732fa9fc7dda0e2d1079c7bb",
+            ),
+        ];
+        for (blob, expected) in keys {
+            let key = russh::keys::parse_public_key_base64(blob).unwrap();
+            assert_eq!(host_key_fingerprint(&key).unwrap(), expected, "{blob}");
+        }
     }
 }

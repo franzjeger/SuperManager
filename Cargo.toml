@@ -79,12 +79,11 @@ sha2        = "0.11"
 ssh-key     = { version = "0.6",  features = ["ed25519", "rsa", "std", "rand_core", "getrandom"] }
 # RSA key generation with bit-size control
 rsa         = { version = "0.9",  features = ["std"] }
-# Async SSH client (pure Rust, tokio-native)
-russh       = "0.46"
+# Async SSH client (pure Rust, tokio-native). Its key handling, formerly the
+# separate russh-keys crate, is `russh::keys`.
+russh       = "0.62"
 # SFTP over russh
 russh-sftp  = "2.0"
-# SSH key loading for russh authentication
-russh-keys  = "0.46"
 # Random number generation
 rand        = "0.9"
 # Template engine for FortiGate / UniFi configuration generation.

@@ -7,8 +7,7 @@
 use std::sync::Arc;
 
 use russh::client::{self, Handle};
-use russh_keys::key::PublicKey;
-use russh_keys::PublicKeyBase64;
+use russh::keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use supermgr_core::error::SshError;
 
 use super::known_hosts::{HostKeyCheck, KnownHostsStore};
@@ -36,7 +35,6 @@ struct SshClientHandler {
     port: u16,
 }
 
-#[async_trait::async_trait]
 impl client::Handler for SshClientHandler {
     type Error = anyhow::Error;
 
@@ -44,11 +42,7 @@ impl client::Handler for SshClientHandler {
         &mut self,
         server_public_key: &PublicKey,
     ) -> Result<bool, Self::Error> {
-        // We hash the SSH wire-format public key. Different from OpenSSH's
-        // base64-truncated SHA256 representation, but stable across
-        // restarts and we only need to compare it to ourselves.
-        let key_bytes = server_public_key.public_key_bytes();
-        let fingerprint = KnownHostsStore::fingerprint(&key_bytes);
+        let fingerprint = host_key_fingerprint(server_public_key)?;
 
         match self
             .known_hosts
@@ -87,6 +81,32 @@ impl client::Handler for SshClientHandler {
                 ))
             }
         }
+    }
+}
+
+/// What `known_hosts` records for `key`: the SHA-256 of its SSH wire form, in
+/// hex. Not OpenSSH's base64 `SHA256:` form, but stable, and we only ever
+/// compare it with ourselves. It must never shift, or every recorded host
+/// reads as a changed key.
+fn host_key_fingerprint(key: &PublicKey) -> Result<String, russh::keys::ssh_key::Error> {
+    Ok(KnownHostsStore::fingerprint(&key.to_bytes()?))
+}
+
+/// The signature hash for public-key authentication with `key`. For RSA it is
+/// what the server says it accepts (RFC 8308 `server-sig-algs`), and
+/// rsa-sha2-512 when it says nothing, which is what russh 0.46 always used
+/// for OpenSSH-format keys. Other key types have no choice to make, and skip
+/// waiting up to a second for the server's answer.
+async fn signature_hash<H: client::Handler>(
+    handle: &Handle<H>,
+    key: &PrivateKey,
+) -> Option<HashAlg> {
+    if !key.algorithm().is_rsa() {
+        return None;
+    }
+    match handle.best_supported_rsa_hash().await {
+        Ok(Some(accepted)) => accepted,
+        Ok(None) | Err(_) => Some(HashAlg::Sha512),
     }
 }
 
@@ -182,7 +202,7 @@ impl SshSession {
         .await?
         .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
-        if !auth_ok {
+        if !auth_ok.success() {
             return Err(SshError::AuthFailed(
                 "password authentication rejected by server".into(),
             ));
@@ -263,7 +283,7 @@ impl SshSession {
         timeout_secs: u64,
         known_hosts: Arc<KnownHostsStore>,
     ) -> Result<Self, SshError> {
-        let key_pair = russh_keys::decode_secret_key(private_key_pem, None)
+        let key_pair = russh::keys::decode_secret_key(private_key_pem, None)
             .map_err(|e| SshError::AuthFailed(format!("failed to decode private key: {e}")))?;
 
         let addr = format!("{hostname}:{port}");
@@ -292,11 +312,13 @@ impl SshSession {
         if let Some(cert_data) = cert_pem {
             // Trim before parsing. `validate_openssh_certificate` accepts a
             // cert with surrounding whitespace (it validates `cert.trim()`),
-            // but the value is stored untrimmed and `ssh_key::from_openssh`
-            // only trims the END — leading whitespace makes it fail to parse
-            // here, and the non-fatal fallback below then silently drops to
-            // plain pubkey auth despite a cert that validated fine on save.
-            match ssh_key::Certificate::from_openssh(cert_data.trim()) {
+            // but the value is stored untrimmed and `from_openssh` only trims
+            // the END — leading whitespace makes it fail to parse here, and
+            // the non-fatal fallback below then silently drops to plain
+            // pubkey auth despite a cert that validated fine on save. Parsed
+            // as russh's own `Certificate`: russh uses a newer ssh-key than
+            // the rest of the workspace.
+            match russh::keys::Certificate::from_openssh(cert_data.trim()) {
                 Ok(cert) => match within(
                     timeout_secs,
                     &addr,
@@ -305,8 +327,8 @@ impl SshSession {
                 )
                 .await?
                 {
-                    Ok(true) => return Ok(Self { handle }),
-                    Ok(false) => {
+                    Ok(result) if result.success() => return Ok(Self { handle }),
+                    Ok(_) => {
                         tracing::warn!(
                             host = %hostname,
                             "server rejected SSH certificate, trying plain pubkey"
@@ -330,16 +352,17 @@ impl SshSession {
             }
         }
 
+        let hash = signature_hash(&handle, &key_pair).await;
         let auth_ok = within(
             timeout_secs,
             &addr,
             "authentication",
-            handle.authenticate_publickey(username, key_pair),
+            handle.authenticate_publickey(username, PrivateKeyWithHashAlg::new(key_pair, hash)),
         )
         .await?
         .map_err(|e| SshError::AuthFailed(e.to_string()))?;
 
-        if !auth_ok {
+        if !auth_ok.success() {
             return Err(SshError::AuthFailed(
                 "public-key authentication rejected by server".into(),
             ));
@@ -959,10 +982,44 @@ mod shell_tests {
     }
 }
 
+/// Host-key fingerprints are stored, so they must survive library upgrades.
+/// The expected values below were computed outside any SSH library, from
+/// keys made by `ssh-keygen`: `shasum -a 256` over the base64-decoded key.
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    const ED25519: (&str, &str) = (
+        "AAAAC3NzaC1lZDI1NTE5AAAAIO88gW2+ekico7P/wx3hnEskuq3Vu6VATCjUhEtMlYzD",
+        "262c5a9e464b3ff6f888a4db6cd40fa1a5ca89aca000ff501a85307cbc964c53",
+    );
+    const RSA: (&str, &str) = (
+        "AAAAB3NzaC1yc2EAAAADAQABAAABAQC2yvjxYsTv+XWbvV4aymsNDMSeL4a/FRxY33k0knq7/DGaFZpkppQChYDJ\
+         qYVUdYqdvGZ3V0uEjSKkEhlyJ+l7cMigD2JWkDPqqng4yEDy7e1+oX7Ggbrty+zqgWptst0e5LO+MLTNYujrU3GC\
+         ll5HI94qkI5tsrCsiajMFg/5Q0RUGtCqd4/E2q7bttlYGeH0nsbDlMG7JYcBQfEvvDS6M9p6OOde9ODGA2AhaoPQ\
+         oOzDNlgwf+1p4rJJlF7o0gd7pgdb725kSvPdUV2iLr0+m9awrIUVNzK0iLmvqhXSNcDP9x8QbKZetPjJAbptC/RM\
+         PcHAOMYuzHuNcMPJ3ofJ",
+        "9a0e5f35e18f44da787e29a1adfdc913b362d99ada24d34ef4225c8ae647e344",
+    );
+    const ECDSA_P256: (&str, &str) = (
+        "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBBJbjIi7BbSJRV0fZw6cbjrOxdv+BW12bAOR\
+         I7tQIKnqt4hh9mDPwCfwlcPXrgb6tQr7WdyS1lHcf2/uyO5Nvd0=",
+        "7452945f1d26766d358217507f4321eaf76ad281732fa9fc7dda0e2d1079c7bb",
+    );
+
+    #[test]
+    fn fingerprints_match_what_known_hosts_already_holds() {
+        for (blob, expected) in [ED25519, RSA, ECDSA_P256] {
+            let key = russh::keys::parse_public_key_base64(blob).unwrap();
+            assert_eq!(host_key_fingerprint(&key).unwrap(), expected, "{blob}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;
-    use russh::server::{self, Auth, Msg, Session};
+    use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
     use russh::{Channel, ChannelId};
 
     /// How the test server behaves once a client is in.
@@ -980,7 +1037,6 @@ mod session_tests {
 
     struct Handler(Server);
 
-    #[async_trait::async_trait]
     impl server::Handler for Handler {
         type Error = russh::Error;
 
@@ -994,9 +1050,11 @@ mod session_tests {
         async fn channel_open_session(
             &mut self,
             _: Channel<Msg>,
+            reply: ChannelOpenHandle,
             _: &mut Session,
-        ) -> Result<bool, Self::Error> {
-            Ok(true)
+        ) -> Result<(), Self::Error> {
+            reply.accept().await;
+            Ok(())
         }
 
         async fn exec_request(
@@ -1007,9 +1065,9 @@ mod session_tests {
         ) -> Result<(), Self::Error> {
             match self.0 {
                 Server::Answer => {
-                    session.data(channel, russh::CryptoVec::from_slice(b"ok\n"));
-                    session.exit_status_request(channel, 0);
-                    session.close(channel);
+                    session.data(channel, b"ok\n".as_slice())?;
+                    session.exit_status_request(channel, 0)?;
+                    session.close(channel)?;
                 }
                 Server::DropOnExec => return Err(russh::Error::Disconnect),
                 Server::StallExec | Server::StallAuth => {}
@@ -1018,12 +1076,12 @@ mod session_tests {
         }
     }
 
-    /// Serve one connection on a loopback port, and log in to it.
-    async fn login(behaviour: Server, timeout_secs: u64) -> Result<SshSession, SshError> {
+    /// Serve one connection on a loopback port with `host_key`; returns the port.
+    async fn serve(behaviour: Server, host_key: PrivateKey) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let config = Arc::new(server::Config {
-            keys: vec![russh_keys::key::KeyPair::generate_ed25519()],
+            keys: vec![host_key],
             auth_rejection_time: std::time::Duration::ZERO,
             ..server::Config::default()
         });
@@ -1033,6 +1091,12 @@ mod session_tests {
                 let _ = session.await;
             }
         });
+        port
+    }
+
+    /// Serve one connection on a loopback port, and log in to it.
+    async fn login(behaviour: Server, timeout_secs: u64) -> Result<SshSession, SshError> {
+        let port = serve(behaviour, seeded_host_key()).await;
         let known_hosts = tempfile::tempdir().unwrap();
         let known_hosts = Arc::new(KnownHostsStore::open(known_hosts.path()).unwrap());
         SshSession::connect_password(
@@ -1044,6 +1108,44 @@ mod session_tests {
             known_hosts,
         )
         .await
+    }
+
+    /// The ed25519 host key anyone can rebuild from 32 bytes of 7. OpenSSL
+    /// derived its public key, and `shasum` its fingerprint.
+    fn seeded_host_key() -> PrivateKey {
+        PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from_seed(
+            &[7; 32],
+        ))
+    }
+
+    const SEEDED_HOST_KEY_FINGERPRINT: &str =
+        "cff7d2bf46744594be2dc71b73a668396c2dfdf6e3d5514919204a41ba3889c1";
+
+    /// The key a real handshake hands the host-key check must be recorded
+    /// with the fingerprint of its standard wire form, the one `known_hosts`
+    /// files already hold.
+    #[tokio::test]
+    async fn a_handshake_records_the_fingerprint_known_hosts_already_holds() {
+        let port = serve(Server::Answer, seeded_host_key()).await;
+        let dir = tempfile::tempdir().unwrap();
+        let known_hosts = Arc::new(KnownHostsStore::open(dir.path()).unwrap());
+        SshSession::connect_password(
+            "127.0.0.1",
+            port,
+            "ops",
+            "secret",
+            5,
+            Arc::clone(&known_hosts),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            known_hosts.entries(),
+            [(
+                format!("127.0.0.1:{port}"),
+                SEEDED_HOST_KEY_FINGERPRINT.to_owned()
+            )]
+        );
     }
 
     fn reason(error: &SshError) -> &str {
