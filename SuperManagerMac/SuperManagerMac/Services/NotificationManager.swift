@@ -62,8 +62,9 @@ enum NotificationManager {
         )
     }
 
-    /// Tailscale exit-node was auto-reverted by panic-reset because
-    /// the chosen peer wasn't forwarding traffic.
+    /// A Tailscale exit node stopped forwarding traffic and egress went
+    /// back to direct routing: the app's post-selection probes found the
+    /// path dead, or the helper's watchdog failed open after an outage.
     static func exitNodeAutoReverted(peerName: String) {
         guard AppSettings.shared.notifyExitNodeReverted else { return }
         post(
