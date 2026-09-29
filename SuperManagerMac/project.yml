@@ -226,6 +226,7 @@ targets:
     #      per-binary entitlements (so the daemon also gets DPK access)
     preBuildScripts:
       - name: Build Rust binaries via cargo
+        basedOnDependencyAnalysis: false
         # Runs on every build. Critical: do NOT specify outputFiles —
         # Xcode would skip the script when those output paths exist,
         # which means a Rust source-only edit (no Swift change) wouldn't
@@ -257,6 +258,9 @@ targets:
 
     postBuildScripts:
       - name: Bundle Tailscale CLI + daemon
+        # Every build, like each script here; the script decides itself
+        # whether there is anything to copy.
+        basedOnDependencyAnalysis: false
         # The CLI binaries (`tailscale`, `tailscaled`) from Homebrew's
         # formula — NOT the GUI app. The App Store Tailscale.app can be
         # removed at any moment, leaving a dead /usr/local/bin shim;
@@ -271,6 +275,7 @@ targets:
         script: |
           "${SRCROOT}/Signing/bundle_tailscale.sh"
       - name: Stamp version from git
+        basedOnDependencyAnalysis: false
         # The version is the release tag the build descends from, not the
         # number above: X.Y.Z on a release's tag, X.Y.Z.N for N commits past
         # it (scripts/app-version.sh). That number was only ever bumped
@@ -293,6 +298,7 @@ targets:
               echo "note: no release tag to read; keeping project.yml's version"
           fi
       - name: Embed Rust binaries and LaunchDaemons plist
+        basedOnDependencyAnalysis: false
         # Copies the cargo-built binaries into the .app/Contents/MacOS
         # directory and re-signs them with the project's signing
         # identity + their own entitlements files. The LaunchDaemon
