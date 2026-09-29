@@ -141,4 +141,91 @@ final class HostIndexTests: XCTestCase {
         let idx = HostIndex(hosts: [h], customers: [customer(slug: "acme", siteId: "s1", hostIds: ["10.0.0.10"])])
         XCTAssertEqual(idx.recordIds(forCustomer: "acme"), ["h7"])
     }
+
+    // MARK: - Ambiguity: an address is not an identity
+
+    /// Two customers' firewalls on the same private address: the address
+    /// resolves to neither, whichever order the hosts load in. It used to
+    /// resolve to the last one, handing one customer the other's firewall.
+    func testSharedAddressNeverChoosesLastCustomer() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let b = host(id: "b", ip: "10.0.0.1", group: "beta")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["10.0.0.1"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["10.0.0.1"])
+        for hosts in [[a, b], [b, a]] {
+            let idx = HostIndex(hosts: hosts, customers: [acme, beta])
+            XCTAssertNil(idx.host(forToken: "10.0.0.1"))
+            XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+            XCTAssertEqual(idx.recordIds(forCustomer: "acme"), ["a"])
+            XCTAssertEqual(idx.recordIds(forCustomer: "beta"), ["b"])
+        }
+    }
+
+    /// Linking by record id instead of address settles it.
+    func testExplicitLinksDisambiguateSharedAddresses() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "")
+        let b = host(id: "b", ip: "10.0.0.1", group: "")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["a"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["b"])
+        let idx = HostIndex(hosts: [a, b], customers: [acme, beta])
+        XCTAssertEqual(idx.provisioningHost(customer: acme, site: acme.sites[0])?.id, "a")
+        XCTAssertEqual(idx.customerSlug(forHost: b), "beta")
+    }
+
+    /// A firewall that two customers' sites both link is deployable by
+    /// neither: which one it serves is a question, not a guess.
+    func testConflictingCustomerLinksDisableDeployment() {
+        let h = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["a"])
+        let beta = customer(slug: "beta", siteId: "hq", hostIds: ["a"])
+        let idx = HostIndex(hosts: [h], customers: [acme, beta])
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+        XCTAssertNil(idx.provisioningHost(customer: beta, site: beta.sites[0]))
+        XCTAssertEqual(idx.recordIds(forCustomer: "beta"), [])
+    }
+
+    /// A site with two firewalls has no single target, and a site with
+    /// none does not borrow another site's.
+    func testNoOtherSiteFallbackOrArbitraryFirstFirewall() {
+        let a = host(id: "a", ip: "10.0.0.1", group: "acme")
+        let b = host(id: "b", ip: "10.0.0.2", group: "acme")
+        var acme = customer(slug: "acme", siteId: "hq", hostIds: ["a", "b"])
+        acme.sites.append(customer(slug: "acme", siteId: "branch", hostIds: []).sites[0])
+        let idx = HostIndex(hosts: [a, b], customers: [acme])
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[0]))
+        XCTAssertNil(idx.provisioningHost(customer: acme, site: acme.sites[1]))
+    }
+
+    /// One firewall serving two sites of the same customer (a shared HQ
+    /// gateway) is the target of each site that links it.
+    func testOneFirewallLinkedBySitesOfOneCustomerServesEach() {
+        let gateway = host(id: "gw", ip: "10.0.0.1", group: "acme")
+        var acme = customer(slug: "acme", siteId: "hq", hostIds: ["gw"])
+        acme.sites.append(customer(slug: "acme", siteId: "branch", hostIds: ["10.0.0.1"]).sites[0])
+        let idx = HostIndex(hosts: [gateway], customers: [acme])
+        XCTAssertEqual(idx.provisioningHost(customer: acme, site: acme.sites[0])?.id, "gw")
+        XCTAssertEqual(idx.provisioningHost(customer: acme, site: acme.sites[1])?.id, "gw")
+    }
+
+    /// The case HostIndex exists for: an auto-discovered firewall linked
+    /// to its site by address is that site's target.
+    func testDiscoveredFirewallLinkedByAddressIsTheTarget() {
+        let h = host(id: "fw", ip: "10.0.0.5", group: "Discovered")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: ["10.0.0.5"])
+        let idx = HostIndex(hosts: [h], customers: [acme])
+        XCTAssertEqual(idx.provisioningHost(customer: acme, site: acme.sites[0])?.id, "fw")
+    }
+
+    /// Record ids resolve whatever their spelling (the Rust side persists
+    /// the compact form), and an id two hosts share resolves to neither.
+    func testUuidSpellingsResolveButDuplicateIdsDoNot() {
+        let id = "12345678-1234-4234-8234-123456789ABC"
+        let compact = id.replacingOccurrences(of: "-", with: "").lowercased()
+        let h = host(id: id, ip: "10.0.0.1", group: "acme")
+        let acme = customer(slug: "acme", siteId: "hq", hostIds: [compact])
+        let index = HostIndex(hosts: [h], customers: [acme])
+        XCTAssertEqual(index.provisioningHost(customer: acme, site: acme.sites[0])?.id, id)
+        let duplicate = host(id: compact, ip: "10.0.0.2", group: "acme")
+        XCTAssertNil(HostIndex(hosts: [h, duplicate], customers: [acme]).host(forToken: id))
+    }
 }
