@@ -65,9 +65,7 @@ pub fn spawn_watchdog() -> Result<()> {
 
     // Load persisted fallbacks (if any).
     if let Ok(s) = fs::read_to_string(FALLBACK_PATH) {
-        if let Ok(list) = serde_json::from_str::<Vec<String>>(&s) {
-            *FALLBACKS.lock().unwrap() = list;
-        }
+        *FALLBACKS.lock().unwrap() = stored_fallbacks(&s);
     }
     if FALLBACKS.lock().unwrap().is_empty() {
         // Sensible default — two well-known public resolvers.
@@ -93,15 +91,38 @@ pub fn spawn_watchdog() -> Result<()> {
 /// Replace the fallback list. Persisted to disk so a helper
 /// restart preserves the user's preference.
 pub fn set_fallbacks(list: Vec<String>) -> Result<()> {
-    if list.is_empty() {
-        anyhow::bail!("fallback list cannot be empty");
-    }
+    let list: Vec<String> = crate::tailscale::dns_servers(&list)?
+        .iter()
+        .map(ToString::to_string)
+        .collect();
     let parent = Path::new(FALLBACK_PATH).parent().unwrap();
     fs::create_dir_all(parent).context("creating fallback dir")?;
     let json = serde_json::to_string(&list).context("encoding json")?;
     fs::write(FALLBACK_PATH, json).context("writing fallback file")?;
     *FALLBACKS.lock().unwrap() = list;
     Ok(())
+}
+
+/// The addresses in a stored fallback file. A file written before servers
+/// were validated may hold other entries; only addresses are kept.
+fn stored_fallbacks(json: &str) -> Vec<String> {
+    let Ok(list) = serde_json::from_str::<Vec<String>>(json) else {
+        return Vec::new();
+    };
+    let kept: Vec<String> = list
+        .iter()
+        .filter_map(|server| crate::tailscale::dns_servers(std::slice::from_ref(server)).ok())
+        .flatten()
+        .map(|address| address.to_string())
+        .collect();
+    if kept.len() != list.len() {
+        tracing::warn!(
+            stored = list.len(),
+            kept = kept.len(),
+            "dropping DNS fallbacks that are not IP addresses"
+        );
+    }
+    kept
 }
 
 pub fn current_fallbacks() -> Vec<String> {
@@ -263,6 +284,17 @@ fn probe_resolver(ip: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file written before servers were validated keeps only its
+    /// addresses.
+    #[test]
+    fn a_stored_fallback_that_is_not_an_address_is_dropped() {
+        assert_eq!(
+            stored_fallbacks(r#"["1.1.1.1", "resolver.example", "x", " 9.9.9.9 "]"#),
+            ["1.1.1.1", "9.9.9.9"]
+        );
+        assert!(stored_fallbacks("not json").is_empty());
+    }
 
     /// The exact shape scutil emits on a machine whose DHCP server
     /// hands out a dead primary and a working secondary — the case

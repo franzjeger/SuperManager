@@ -613,9 +613,7 @@ fn rollback_exemptions(ips: &[String]) {
 /// store, so this works regardless of the user's specific
 /// service ID.
 pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
-    if args.servers.is_empty() {
-        bail!("force_dns_state requires at least one server");
-    }
+    let servers = dns_servers(&args.servers)?;
     // Find the active service UUID. We look in
     // Setup:/Network/Service/<UUID>/DNS keys and pick the one
     // that has IPv4 servers in its config.
@@ -627,9 +625,9 @@ pub fn force_dns_state(args: SetDnsArgs) -> Result<InstallResult> {
     // overwrites the dictionary at that key.
     let mut script = String::from("d.init\n");
     script.push_str("d.add ServerAddresses *");
-    for s in &args.servers {
+    for server in &servers {
         script.push(' ');
-        script.push_str(s);
+        script.push_str(&server.to_string());
     }
     script.push_str("\n");
     script.push_str(&format!("set State:/Network/Service/{uuid}/DNS\n"));
@@ -727,6 +725,24 @@ pub fn set_dns_servers(args: SetDnsArgs) -> Result<InstallResult> {
 #[derive(Deserialize, Debug)]
 pub struct SetDnsArgs {
     pub servers: Vec<String>,
+}
+
+/// DNS servers as IP addresses, and nothing else. They go into an `scutil`
+/// script the helper runs as root, and the fallback list is stored and
+/// reused by the DNS watchdog; an address is all either should carry.
+pub fn dns_servers(servers: &[String]) -> Result<Vec<std::net::IpAddr>> {
+    if servers.is_empty() {
+        bail!("at least one DNS server is required");
+    }
+    servers
+        .iter()
+        .map(|server| {
+            server
+                .trim()
+                .parse()
+                .map_err(|_| anyhow::anyhow!("{server:?} is not an IP address"))
+        })
+        .collect()
 }
 
 /// Find the user-facing network service name for the primary
@@ -1798,6 +1814,29 @@ fn reload_daemon() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only addresses: nothing else sent as a server reaches `scutil`.
+    #[test]
+    fn dns_servers_are_addresses_and_nothing_else() {
+        let parsed = dns_servers(&["1.1.1.1".into(), " 2606:4700:4700::1111 ".into()]).unwrap();
+        assert_eq!(
+            parsed.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["1.1.1.1", "2606:4700:4700::1111"]
+        );
+        for bad in ["1.1.1.1\n9.9.9.9", "", "dns.google", "1.1.1.1 9.9.9.9"] {
+            assert!(dns_servers(&[bad.into()]).is_err(), "{bad:?}");
+        }
+        assert!(dns_servers(&[]).is_err());
+    }
+
+    #[test]
+    fn force_dns_state_refuses_before_running_anything() {
+        let err = force_dns_state(SetDnsArgs {
+            servers: vec!["not-an-address".into()],
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("not an IP address"), "{err}");
+    }
 
     /// The whole point of the reload rework: a plist that already matches
     /// the template but a daemon that is NOT loaded must still reload.
