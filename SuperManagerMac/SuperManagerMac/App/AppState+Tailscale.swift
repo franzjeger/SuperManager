@@ -618,7 +618,12 @@ extension AppState {
                 DebugLog.write("[ts/exit] === AUTO-REVERT: no internet through peer ===")
                 tailscaleActionError =
                     "Internet didn't recover through the exit node — auto-reverted."
+                // Named before the reset clears the pref it is read from. The
+                // probes take up to half a minute, long enough to have left
+                // this screen: the notification is how the user finds out.
+                let peer = currentExitNodeName() ?? "The exit node"
                 await panicResetTailscale()
+                NotificationManager.exitNodeAutoReverted(peerName: peer)
                 _ = try? await HelperClient.shared.tailscaleResumeWatchdog()
             }
         }

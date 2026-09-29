@@ -425,6 +425,22 @@ final class HelperClient {
         try await call("tailscale_panic_reset", params: ["clear_pref": true])
     }
 
+    /// What the helper did on its own after `cursor`: auto-reconnects,
+    /// reconnects that keep failing, watchdog fail-opens. No cursor, or one
+    /// from before the helper last restarted, gets everything it still holds.
+    func eventsSince(_ cursor: HelperEventCursor?) async throws -> HelperEventBatch {
+        var params: [String: Any] = [:]
+        if let cursor {
+            params["boot"] = cursor.boot
+            params["after"] = cursor.seq
+        }
+        let result = try await call("events_since", params: params)
+        guard let batch = HelperEventBatch(result) else {
+            throw HelperError.decodeFailure("events_since: not an event batch")
+        }
+        return batch
+    }
+
     /// Tail the helper's log file. Returns the trailing `bytes` of
     /// `/var/log/supermanager-helper.log` (or the whole file if shorter).
     /// Used by the "View Helper Log" button so a user diagnosing a
@@ -468,7 +484,8 @@ final class HelperClient {
     /// coming up.
     private static func budget(for method: String) -> Duration {
         switch method {
-        case "ping":
+        case "ping", "events_since":
+            // Neither waits on anything in the helper, and both are polled.
             return .seconds(3)
         case "tailscaled_install", "tailscale_panic_reset":
             // `launchctl bootstrap` / `ipconfig set … DHCP` run on 60 s budgets.

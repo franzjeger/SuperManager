@@ -31,12 +31,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+use crate::events::{self, Event};
 use crate::openvpn::OpenVpn;
 use crate::strongswan::Strongswan;
 use crate::wireguard::WireGuard;
 
 const STATE_PATH: &str = "/var/lib/supermanager/auto_reconnect.json";
 const POLL_INTERVAL_SECS: u64 = 30;
+
+/// Failed replays in a row after which an Always-on profile is reported as
+/// failing: 90 s at the 30 s tick. Long enough to ride out a network change,
+/// short enough that the user hears about stale credentials from us rather
+/// than from a connection that quietly stayed down.
+const FAILING_AFTER: u32 = 3;
 
 /// How aggressively the watchdog keeps a profile alive.
 #[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
@@ -95,6 +102,32 @@ impl WatchedProfile {
 #[derive(Default)]
 struct State {
     watched: HashMap<String, WatchedProfile>,
+    /// Failed replays in a row, per profile. In memory only: a restarted
+    /// helper counts from zero again.
+    failures: HashMap<String, u32>,
+}
+
+impl State {
+    /// Count a failed replay of `p`. Returns the event to record when this
+    /// failure completes a run of `FAILING_AFTER`: once per run, not on every
+    /// tick after it.
+    fn replay_failed(&mut self, p: &WatchedProfile, error: &str) -> Option<Event> {
+        // Only an armed Always-on entry is a promise we are failing to keep.
+        // An unarmed one cannot replay yet and the GUI already says so; a
+        // RouteGuard entry belongs to a manual connection.
+        if p.mode != WatchMode::AlwaysOn || !p.is_armed() {
+            return None;
+        }
+        let run = self.failures.entry(p.profile_id.clone()).or_insert(0);
+        *run = run.saturating_add(1);
+        let attempts = *run;
+        (attempts == FAILING_AFTER).then(|| Event::VpnReconnectFailing {
+            profile_id: p.profile_id.clone(),
+            backend: p.backend.clone(),
+            attempts,
+            error: error.to_owned(),
+        })
+    }
 }
 
 static STATE: tokio::sync::OnceCell<Arc<Mutex<State>>> = tokio::sync::OnceCell::const_new();
@@ -115,7 +148,10 @@ pub async fn spawn_watchdog(
                 }
                 Err(_) => HashMap::new(),
             };
-            Arc::new(Mutex::new(State { watched: map }))
+            Arc::new(Mutex::new(State {
+                watched: map,
+                ..State::default()
+            }))
         })
         .await
         .clone();
@@ -148,6 +184,9 @@ pub async fn enable(profile_id: String, backend: String, args: serde_json::Value
             mode: WatchMode::AlwaysOn,
         },
     );
+    // New args are a new promise: a run of failures with the old ones must not
+    // keep a later run from being reported.
+    g.failures.remove(&profile_id);
     persist(&g.watched)?;
     tracing::info!(profile_id = %profile_id, "auto-reconnect enabled");
     Ok(())
@@ -157,6 +196,7 @@ pub async fn disable(profile_id: &str) -> Result<()> {
     let state = STATE.get().context("watchdog not initialised")?.clone();
     let mut g = state.lock().await;
     g.watched.remove(profile_id);
+    g.failures.remove(profile_id);
     persist(&g.watched)?;
     tracing::info!(profile_id = %profile_id, "auto-reconnect disabled");
     Ok(())
@@ -302,11 +342,12 @@ async fn watchdog_loop(
             continue;
         }
         for p in snapshot {
+            let state = state.clone();
             let wg = wg.clone();
             let ov = ov.clone();
             let sw = sw.clone();
             tokio::spawn(async move {
-                check_and_reconnect(&p, wg, ov, sw).await;
+                check_and_reconnect(&p, &state, wg, ov, sw).await;
             });
         }
     }
@@ -314,6 +355,7 @@ async fn watchdog_loop(
 
 async fn check_and_reconnect(
     p: &WatchedProfile,
+    state: &Mutex<State>,
     wg: Arc<Mutex<WireGuard>>,
     ov: Arc<Mutex<OpenVpn>>,
     sw: Arc<Mutex<Strongswan>>,
@@ -328,6 +370,7 @@ async fn check_and_reconnect(
         }
     };
     if connected {
+        state.lock().await.failures.remove(&p.profile_id);
         return;
     }
 
@@ -361,17 +404,31 @@ async fn check_and_reconnect(
         _ => unreachable!(),
     };
     match result {
-        Ok(_) => tracing::info!(
-            profile_id = %p.profile_id,
-            backend = %p.backend,
-            "auto-reconnect succeeded"
-        ),
-        Err(e) => tracing::warn!(
-            profile_id = %p.profile_id,
-            backend = %p.backend,
-            error = %e,
-            "auto-reconnect failed; will retry next cycle"
-        ),
+        Ok(()) => {
+            tracing::info!(
+                profile_id = %p.profile_id,
+                backend = %p.backend,
+                "auto-reconnect succeeded"
+            );
+            state.lock().await.failures.remove(&p.profile_id);
+            events::record(Event::VpnReconnected {
+                profile_id: p.profile_id.clone(),
+                backend: p.backend.clone(),
+                mode: p.mode,
+            });
+        }
+        Err(e) => {
+            tracing::warn!(
+                profile_id = %p.profile_id,
+                backend = %p.backend,
+                error = %e,
+                "auto-reconnect failed; will retry next cycle"
+            );
+            let failing = state.lock().await.replay_failed(p, &format!("{e:#}"));
+            if let Some(event) = failing {
+                events::record(event);
+            }
+        }
     }
 }
 
@@ -482,6 +539,80 @@ mod tests {
         }"#;
         let wp: WatchedProfile = serde_json::from_str(json).unwrap();
         assert_eq!(wp.mode, WatchMode::AlwaysOn);
+    }
+
+    fn watched(mode: WatchMode, args: serde_json::Value) -> WatchedProfile {
+        WatchedProfile {
+            profile_id: "p1".into(),
+            backend: "wireguard".into(),
+            last_connect_args: args,
+            mode,
+        }
+    }
+
+    fn armed_args() -> serde_json::Value {
+        serde_json::json!({ "profile_id": "p1", "conf_content": "[Interface]\n" })
+    }
+
+    fn attempts(event: Option<Event>) -> Option<u32> {
+        event.and_then(|e| match e {
+            Event::VpnReconnectFailing { attempts, .. } => Some(attempts),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_run_of_failed_replays_is_reported_once_as_it_reaches_the_threshold() {
+        let mut state = State::default();
+        let p = watched(WatchMode::AlwaysOn, armed_args());
+
+        let reported: Vec<_> = (0..5)
+            .map(|_| attempts(state.replay_failed(&p, "handshake timed out")))
+            .collect();
+        assert_eq!(reported, [None, None, Some(FAILING_AFTER), None, None]);
+
+        // A success (or finding the tunnel up) ends the run; the next run is
+        // reported again.
+        state.failures.remove(&p.profile_id);
+        let reported: Vec<_> = (0..3)
+            .map(|_| attempts(state.replay_failed(&p, "handshake timed out")))
+            .collect();
+        assert_eq!(reported, [None, None, Some(FAILING_AFTER)]);
+    }
+
+    #[test]
+    fn the_failing_report_carries_the_last_error() {
+        let mut state = State::default();
+        let p = watched(WatchMode::AlwaysOn, armed_args());
+        state.replay_failed(&p, "first");
+        state.replay_failed(&p, "second");
+        assert_eq!(
+            state.replay_failed(&p, "third"),
+            Some(Event::VpnReconnectFailing {
+                profile_id: "p1".into(),
+                backend: "wireguard".into(),
+                attempts: FAILING_AFTER,
+                error: "third".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn only_armed_always_on_profiles_can_be_failing() {
+        let mut state = State::default();
+        let unarmed = watched(
+            WatchMode::AlwaysOn,
+            serde_json::json!({ "profile_id": "p1" }),
+        );
+        let route_guard = watched(WatchMode::RouteGuard, armed_args());
+        for _ in 0..FAILING_AFTER * 2 {
+            assert_eq!(state.replay_failed(&unarmed, "decode wg args"), None);
+            assert_eq!(
+                state.replay_failed(&route_guard, "handshake timed out"),
+                None
+            );
+        }
+        assert!(state.failures.is_empty());
     }
 
     #[test]

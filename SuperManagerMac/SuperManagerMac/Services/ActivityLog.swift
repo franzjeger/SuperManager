@@ -41,9 +41,9 @@ final class ActivityLog {
         let kind: Kind
         let message: String     // free-form one-line description
 
-        init(profileId: String?, kind: Kind, message: String) {
+        init(profileId: String?, kind: Kind, message: String, timestamp: Date = Date()) {
             self.id = UUID()
-            self.timestamp = Date()
+            self.timestamp = timestamp
             self.profileId = profileId
             self.kind = kind
             self.message = message
@@ -67,14 +67,23 @@ final class ActivityLog {
         load()
     }
 
-    /// Append a new event + persist. Trims oldest if over the cap.
-    func record(profileId: String?, kind: Kind, message: String) {
-        let ev = Event(profileId: profileId, kind: kind, message: message)
-        events.append(ev)
-        if events.count > Self.maxEvents {
-            events.removeFirst(events.count - Self.maxEvents)
-        }
+    /// Add an event + persist. Trims oldest if over the cap. `timestamp`
+    /// is when it happened: a helper event arrives a poll late, or hours
+    /// late after the app was closed, and still lands in time order.
+    func record(profileId: String?, kind: Kind, message: String, at timestamp: Date = Date()) {
+        let ev = Event(profileId: profileId, kind: kind, message: message, timestamp: timestamp)
+        Self.insert(ev, into: &events, cap: Self.maxEvents)
         persist()
+    }
+
+    /// Insert `event` in time order, after every event that is not later so
+    /// equal times keep their arrival order, then drop the oldest past `cap`.
+    nonisolated static func insert(_ event: Event, into events: inout [Event], cap: Int) {
+        let index = events.lastIndex { $0.timestamp <= event.timestamp }.map { $0 + 1 } ?? 0
+        events.insert(event, at: index)
+        if events.count > cap {
+            events.removeFirst(events.count - cap)
+        }
     }
 
     /// Filter to a specific profile, newest first. Used by the

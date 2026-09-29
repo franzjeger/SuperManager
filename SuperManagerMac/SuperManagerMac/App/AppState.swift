@@ -266,6 +266,7 @@ class AppState {
             "tailscale_install_magicdns_resolver",
             "tailscale_install_exit_routes",
             "tailscale_remove_exit_routes",
+            "events_since",
         ]
         let methods = (deployed["methods"] as? [String]) ?? []
         let missing = requiredMethods.filter { !methods.contains($0) }
@@ -489,10 +490,9 @@ class AppState {
                     lastHostHealthPoll = Date()
                     await refreshHostHealth()
                 }
-                // Surface helper-side events (auto-reconnect
-                // succeeded, panic_reset escalation) as user
-                // notifications. Cheap tail-of-log read.
-                await pollHelperEventsForNotifications()
+                // What the helper did on its own (auto-reconnect, watchdog
+                // fail-open), as activity entries and notifications.
+                await pollHelperEvents()
                 // The menu bar icon shows WHETHER a tunnel is up; the
                 // tooltip is where WHICH one lives. Refreshed here
                 // rather than from MenuBarView, which only exists while
@@ -578,90 +578,60 @@ class AppState {
         }
     }
 
-    /// Mirrors `auto_reconnect_succeeded` lines in the helper log
-    /// onto a per-profile timestamp so we can avoid renotifying
-    /// on the same event after every poll.
-    var lastReconnectNotifiedAt: [String: Date] = [:]
+    /// How far this app has read in the helper's event list. Persisted, so
+    /// what the helper did while the app was closed still reaches the
+    /// activity log the next time it opens.
+    private var helperEventCursor = HelperEventCursor.load()
 
-    /// Track byte position in the helper log so we only scan the
-    /// new tail each poll instead of re-parsing 200 KB every time.
-    ///
-    /// `nil` means "not yet positioned": the first poll seeks to the CURRENT
-    /// end of the log rather than starting at 0. Starting at 0 replayed the
-    /// whole 5 MB history as if it had just happened — every past
-    /// `escalating to panic_reset` and `auto-reconnect succeeded` line fired a
-    /// fresh notification and wrote a fresh activity entry stamped with the
-    /// time of the replay, which is why a single incident shows up as a dozen
-    /// identically-timestamped "Connectivity watchdog fired" rows. We only
-    /// ever want lines the helper emits while we are watching.
-    private var helperLogReadOffset: Int?
+    /// Picks which of those events are news worth a notification.
+    private var helperEventInbox = HelperEventInbox(openedAt: Date())
 
-    /// Poll the helper log for newly-emitted "auto-reconnect
-    /// succeeded" / "panic_reset" lines and surface them as
-    /// notifications. Runs alongside the VPN status poller.
-    /// Cheap because we only read the file's tail.
-    func pollHelperEventsForNotifications() async {
-        let path = "/var/log/supermanager-helper.log"
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? Int else { return }
-        // First poll of this app run: start at the end. Anything already in
-        // the log happened before we were watching and has been notified about
-        // (or deliberately not) long ago.
-        guard var offset = helperLogReadOffset else {
-            helperLogReadOffset = size
-            return
-        }
-        // Log was truncated/rotated under us — start over from its new start.
-        if size < offset { offset = 0 }
-        guard size > offset else { return }
-
-        guard let handle = FileHandle(forReadingAtPath: path) else { return }
-        defer { try? handle.close() }
-        try? handle.seek(toOffset: UInt64(offset))
-        let chunk = (try? handle.read(upToCount: size - offset)) ?? Data()
-        helperLogReadOffset = size
-
-        guard let text = String(data: chunk, encoding: .utf8) else { return }
-        for rawLine in text.split(separator: "\n") {
-            let line = String(rawLine)
-            // "auto-reconnect succeeded profile_id=<uuid> backend=..."
-            if line.contains("auto-reconnect succeeded") {
-                if let pid = extractField(line, key: "profile_id") {
-                    let label = vpnProfiles.first(where: { $0.id == pid })?.name ?? pid
-                    ActivityLog.shared.record(
-                        profileId: pid, kind: .autoReconnectFired,
-                        message: "Always-on watchdog restored \(label)")
-                    let last = lastReconnectNotifiedAt[pid] ?? .distantPast
-                    if Date().timeIntervalSince(last) > 60 {
-                        NotificationManager.vpnReconnected(profileLabel: label)
-                        lastReconnectNotifiedAt[pid] = Date()
-                    }
-                }
-            } else if line.contains("escalating to panic_reset") {
-                ActivityLog.shared.record(profileId: nil, kind: .panicReset,
-                                          message: "Connectivity watchdog fired")
-                NotificationManager.connectivityWatchdogFired()
-            } else if line.contains("AUTO-REVERT: 12s no internet") {
-                // Captured client-side too, but if user has GUI
-                // closed we still want the notification.
-                let peer = appState_currentExitName() ?? "exit node"
-                NotificationManager.exitNodeAutoReverted(peerName: peer)
+    /// Surface what the helper did on its own since the last poll —
+    /// auto-reconnects, reconnects that keep failing, watchdog fail-opens —
+    /// as activity entries, and as notifications when they are news. A
+    /// helper that is down, or too old to know `events_since`, is skipped
+    /// quietly; the next poll asks again.
+    func pollHelperEvents() async {
+        guard let batch = try? await HelperClient.shared.eventsSince(helperEventCursor) else { return }
+        for event in batch.events {
+            let entry = event.activity(name: vpnProfileLabel)
+            ActivityLog.shared.record(
+                profileId: entry.profileId, kind: entry.kind, message: entry.message, at: event.at)
+            if helperEventInbox.shouldNotify(event) {
+                notify(event)
             }
+        }
+        if batch.next != helperEventCursor {
+            helperEventCursor = batch.next
+            batch.next.save()
         }
     }
 
-    private func appState_currentExitName() -> String? {
+    private func notify(_ event: HelperEvent) {
+        switch event.kind {
+        case let .vpnReconnected(profileId, routesOnly):
+            NotificationManager.vpnReconnected(
+                profileLabel: vpnProfileLabel(profileId), routesOnly: routesOnly)
+        case let .vpnReconnectFailing(profileId, attempts, error):
+            NotificationManager.vpnReconnectFailing(
+                profileLabel: vpnProfileLabel(profileId), attempts: attempts, error: error)
+        case .connectivityFailedOpen(exitNode: true):
+            NotificationManager.exitNodeAutoReverted(peerName: currentExitNodeName() ?? "The exit node")
+        case .connectivityFailedOpen(exitNode: false):
+            NotificationManager.connectivityWatchdogFired()
+        }
+    }
+
+    /// What the user calls a VPN profile, or its id once it is deleted.
+    private func vpnProfileLabel(_ profileId: String) -> String {
+        vpnProfiles.first(where: { $0.id == profileId })?.name ?? profileId
+    }
+
+    /// Host name of the exit node Tailscale's prefs point at, if any.
+    func currentExitNodeName() -> String? {
         guard let prefs = tailscalePrefs,
               let peers = tailscaleStatus?.peers else { return nil }
         return prefs.currentExitNode(in: peers)?.hostName
-    }
-
-    private func extractField(_ line: String, key: String) -> String? {
-        // tracing format: ` profile_id=abcdef-1234 ...`
-        guard let r = line.range(of: "\(key)=") else { return nil }
-        let after = line[r.upperBound...]
-        let value = after.prefix(while: { !$0.isWhitespace })
-        return value.isEmpty ? nil : String(value)
     }
 
     /// Refresh all data from the daemon.

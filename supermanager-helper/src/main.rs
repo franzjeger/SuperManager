@@ -53,6 +53,7 @@ mod auto_reconnect;
 mod connectivity_watchdog;
 mod dns;
 mod dns_health_watchdog;
+mod events;
 mod kill_switch;
 mod openvpn;
 mod proc;
@@ -141,6 +142,7 @@ fn helper_version_info() -> serde_json::Value {
         #[cfg(feature = "dev-rpc")]
         "deploy_self",
         "tail_log",
+        "events_since",
         "vpn_connect",
         "vpn_disconnect",
         "vpn_status",
@@ -188,6 +190,11 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_env("SM_HELPER_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // launchd writes stdout to /var/log/supermanager-helper.log, which
+        // the app shows in its log viewer, after a failed connect and in
+        // support bundles. Colour codes there are just `[2m…[0m` noise, so
+        // colour only a terminal: the helper run by hand.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     // `--version` lets a binary that is NOT running answer for itself.
@@ -481,6 +488,7 @@ fn is_read_only(method: &str) -> bool {
         "ping"
             | "helper_version"
             | "tail_log"
+            | "events_since"
             | "vpn_status"
             | "wg_status"
             | "ovpn_status"
@@ -751,6 +759,23 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Ok(text) => Response::ok(id, serde_json::json!({"log": text})),
                 Err(e) => Response::err(id, -32000, format!("tail_log: {e}")),
             }
+        }
+
+        // What the helper did on its own since the caller last asked:
+        // reconnects, reconnects that keep failing, watchdog fail-opens. The
+        // caller passes back `boot` and `latest` from its previous answer as
+        // `boot` and `after`. See `events`.
+        "events_since" => {
+            let boot = req.params.get("boot").and_then(serde_json::Value::as_str);
+            let after = req
+                .params
+                .get("after")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Response::ok(
+                id,
+                serde_json::to_value(events::since(boot, after)).unwrap_or_default(),
+            )
         }
 
         "vpn_status" => match serde_json::from_value::<strongswan::StatusArgs>(req.params) {
@@ -1291,6 +1316,7 @@ mod connection_tests {
     #[test]
     fn only_reads_are_cancellable() {
         for method in [
+            "events_since",
             "vpn_status",
             "wg_status",
             "ovpn_status",
