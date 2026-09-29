@@ -111,7 +111,7 @@ struct ProvisioningView: View {
                     // entered on the form, so the diff + deploy use the exact
                     // config they rendered and reviewed — not one rendered
                     // with empty extras.
-                    extras: Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
+                    extras: extraValues
                 )
             }
         }
@@ -346,18 +346,15 @@ struct ProvisioningView: View {
                 Text("Extras")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
-                ForEach(extras.indices, id: \.self) { i in
+                ForEach($extras) { $extra in
                     HStack {
-                        Text(extras[i].key)
+                        Text(extra.key)
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .frame(width: 140, alignment: .leading)
-                        TextField("value", text: Binding(
-                            get: { extras[i].value },
-                            set: { extras[i].value = $0 }
-                        ))
+                        TextField("value", text: $extra.value)
                         Button {
-                            extras.remove(at: i)
+                            extras.removeAll { $0.id == extra.id }
                         } label: {
                             Image(systemName: "minus.circle")
                                 .foregroundStyle(.red)
@@ -373,13 +370,15 @@ struct ProvisioningView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 200)
                     Button("Add") {
-                        let trimmed = newExtraKey.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty {
-                            extras.append(ExtraField(key: trimmed, value: ""))
-                            newExtraKey = ""
-                            showingAddExtra = false
-                        }
+                        guard let key = newExtraKeyToAdd else { return }
+                        extras.append(ExtraField(key: key, value: ""))
+                        newExtraKey = ""
+                        showingAddExtra = false
                     }
+                    .disabled(newExtraKeyToAdd == nil)
+                    .help(extras.contains { $0.key == trimmedNewExtraKey }
+                          ? "This variable is already in the list; edit its value there."
+                          : "Add the variable to the list.")
                     Button("Cancel") {
                         newExtraKey = ""
                         showingAddExtra = false
@@ -552,6 +551,24 @@ struct ProvisioningView: View {
         )
     }
 
+    /// The key the Add button would add: the typed one, trimmed, unless it
+    /// is empty or already in the list. One key has one value.
+    private var newExtraKeyToAdd: String? {
+        let key = trimmedNewExtraKey
+        return key.isEmpty || extras.contains { $0.key == key } ? nil : key
+    }
+
+    private var trimmedNewExtraKey: String {
+        newExtraKey.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The extras as the renderer takes them. Add keeps keys unique; should
+    /// one repeat all the same, the row further down wins rather than the
+    /// app trapping.
+    private var extraValues: [String: String] {
+        Dictionary(extras.map { ($0.key, $0.value) }, uniquingKeysWith: { _, later in later })
+    }
+
     // MARK: - Actions
 
     private func render() async {
@@ -564,12 +581,11 @@ struct ProvisioningView: View {
         renderError = nil
         rendered = nil
         defer { rendering = false }
-        let extrasDict = Dictionary(uniqueKeysWithValues: extras.map { ($0.key, $0.value) })
         if let result = await appState.renderProvisioningTemplate(
             templateId: templateId,
             customerSlug: customer.slug,
             siteId: site.id,
-            extras: extrasDict
+            extras: extraValues
         ) {
             rendered = result
         } else {
@@ -595,7 +611,8 @@ struct ProvisioningView: View {
     }
 }
 
-private struct ExtraField {
+private struct ExtraField: Identifiable {
+    let id = UUID()
     var key: String
     var value: String
 }
