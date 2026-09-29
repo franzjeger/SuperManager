@@ -57,8 +57,7 @@ use std::time::Duration;
 static SNAPSHOT_V4: OnceLock<Mutex<Option<RouteSnapshot>>> = OnceLock::new();
 static SNAPSHOT_V6: OnceLock<Mutex<Option<RouteSnapshot>>> = OnceLock::new();
 /// Track whether the guardian is already running so multiple
-/// `spawn` calls collapse to a no-op (idempotent at helper
-/// startup or after `deploy_self` respawns).
+/// `spawn` calls collapse to a no-op.
 static SPAWNED: Mutex<bool> = Mutex::new(false);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -380,32 +379,6 @@ fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
         af.label(),
         stderr.trim()
     ))
-}
-
-/// **TEST ONLY** — deletes the default route to simulate
-/// tailscaled's prefs-reconfig strip. Guardian should detect +
-/// restore within ~1 second. Used for isolation testing the
-/// guardian without involving tailscaled. NOT exposed in
-/// production paths — only an RPC handler we run from the
-/// command line during verification.
-/// Gated to match its only dispatch arm in `main.rs`. Without this the
-/// function is compiled into production builds where nothing can reach
-/// it, and the compiler rightly calls it dead — a root helper should not
-/// carry a "delete the default route" primitive it never uses.
-#[cfg(feature = "dev-rpc")]
-pub fn debug_strip_default_route() -> Result<()> {
-    let out = crate::proc::bounded(
-        Command::new("/sbin/route").args(["-q", "delete", "default"]),
-        crate::proc::MUTATE,
-    )?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "delete failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ))
-    }
 }
 
 /// Returns true if the given interface (e.g. `en0`) is `UP`.

@@ -5,9 +5,9 @@ import XCTest
 final class HelperBuildInfoTests: XCTestCase {
     private func metadata(
         version: String = "0.1.0", timestamp: String = "2000",
-        methods: [String] = ["helper_version", "vpn_connect"], devRPC: Bool = false
+        methods: [String] = ["helper_version", "vpn_connect"]
     ) -> [String: Any] {
-        ["version": version, "build_timestamp": timestamp, "methods": methods, "dev_rpc": devRPC]
+        ["version": version, "build_timestamp": timestamp, "methods": methods]
     }
 
     func testMatchingHelperBuildDoesNotDependOnAppBundleVersion() throws {
@@ -23,12 +23,19 @@ final class HelperBuildInfoTests: XCTestCase {
         }
     }
 
-    func testVersionCapabilitiesAndBuildModeMustMatch() throws {
+    func testVersionAndCapabilitiesMustMatch() throws {
         let bundled = try XCTUnwrap(HelperBuildInfo(json: metadata()))
-        for changed in [metadata(version: "0.2.0"), metadata(methods: ["helper_version"]),
-                        metadata(devRPC: true)] {
+        for changed in [metadata(version: "0.2.0"), metadata(methods: ["helper_version"])] {
             XCTAssertFalse(try XCTUnwrap(HelperBuildInfo(json: changed)).matches(bundled))
         }
+    }
+
+    /// Helpers up to 1.8.14 also report `dev_rpc`. Their metadata still
+    /// parses, so the app can tell they differ and reinstall.
+    func testMetadataFromOlderHelpersStillParses() throws {
+        var old = metadata()
+        old["dev_rpc"] = false
+        XCTAssertNotNil(HelperBuildInfo(json: old))
     }
 
     func testUnknownAndInvalidMetadataCannotPassReadiness() {
@@ -41,7 +48,7 @@ final class HelperBuildInfoTests: XCTestCase {
     }
 
     func testProbeReadsHelperMetadata() async throws {
-        let file = try makeExecutable("#!/bin/sh\necho '{\"version\":\"0.1.0\",\"build_timestamp\":\"2000\",\"methods\":[\"helper_version\"],\"dev_rpc\":false}'\n")
+        let file = try makeExecutable("#!/bin/sh\necho '{\"version\":\"0.1.0\",\"build_timestamp\":\"2000\",\"methods\":[\"helper_version\"]}'\n")
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         let info = try await HelperBuildInfo.read(from: file)
         XCTAssertEqual(info.timestamp, 2000)

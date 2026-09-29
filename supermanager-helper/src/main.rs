@@ -67,7 +67,6 @@ mod route_guardian;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;
-mod traffic_capture;
 mod wireguard;
 
 /// Bundle of per-backend controllers. Each is a long-lived
@@ -140,8 +139,6 @@ fn helper_version_info() -> serde_json::Value {
     let methods = vec![
         "helper_version",
         "restart",
-        #[cfg(feature = "dev-rpc")]
-        "deploy_self",
         "tail_log",
         "events_since",
         "vpn_connect",
@@ -172,7 +169,6 @@ fn helper_version_info() -> serde_json::Value {
         "auto_reconnect_list",
         "kill_switch_enable",
         "kill_switch_disable",
-        "traffic_capture",
         "system_sleep",
         "system_wake",
     ];
@@ -180,7 +176,6 @@ fn helper_version_info() -> serde_json::Value {
         "version": env!("CARGO_PKG_VERSION"),
         "build_timestamp": env!("HELPER_BUILD_TIMESTAMP"),
         "methods": methods,
-        "dev_rpc": cfg!(feature = "dev-rpc"),
     })
 }
 
@@ -256,8 +251,8 @@ async fn main() -> anyhow::Result<()> {
     strongswan::sweep_stale_configs().await;
 
     // Spawn the default-route guardian. It lives for the helper's
-    // lifetime; on `deploy_self` the new helper instance spawns
-    // its own. Idempotent on multiple calls.
+    // lifetime; a restarted helper spawns its own. Idempotent on
+    // multiple calls.
     if let Err(e) = route_guardian::spawn_guardian() {
         tracing::warn!("could not spawn route guardian: {e:#}");
     }
@@ -360,7 +355,7 @@ async fn main() -> anyhow::Result<()> {
     // Always-on auto-reconnect watchdog. Reads its persisted
     // watch list from /var/lib/supermanager/auto_reconnect.json
     // and re-establishes connections every 30s for any profile
-    // that's down. Survives helper restart (deploy_self / boot)
+    // that's down. Survives a helper restart or reboot
     // because it's a LaunchDaemon, so this is true always-on
     // (not "always-on while GUI is running").
     if let Err(e) = auto_reconnect::spawn_watchdog(
@@ -581,16 +576,10 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             serde_json::json!({"pong": true, "version": env!("CARGO_PKG_VERSION")}),
         ),
 
-        // Dev convenience: exit non-zero so launchd's KeepAlive (Crashed=true)
-        // respawns us from the bundle-managed BundleProgram path. This lets
-        // us iterate on the helper binary without going through the
-        // osascript-with-admin install dance every time. Production builds
-        // can keep this — it's harmless and only the registering app can
-        // Version + capability probe. Always available regardless
-        // of feature flags — the GUI uses this to detect a stale
-        // deployed helper (one missing RPCs the new code expects)
-        // and auto-redeploy via `deploy_self` before any other
-        // call site fails with "unknown method."
+        // Version + capability probe. The GUI compares it with the
+        // helper bundled in the app and reinstalls a helper that
+        // differs, before any other call site fails with "unknown
+        // method."
         //
         // `methods` is the canonical list this binary knows about.
         // The GUI checks the methods it intends to call against this
@@ -598,7 +587,8 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // dev branches can ship out of order.
         "helper_version" => Response::ok(id, helper_version_info()),
 
-        // talk to the socket.
+        // Exit non-zero so launchd's KeepAlive (Crashed=true) respawns us
+        // from the installed binary.
         "restart" => {
             // Acknowledge the request before exiting so the client gets a
             // proper response, then schedule the abort.
@@ -608,99 +598,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 std::process::exit(1);
             });
             Response::ok(id, serde_json::json!({"restarting": true}))
-        }
-
-        // Self-update: copy a user-supplied binary into our system install
-        // path and then exit non-zero so launchd's KeepAlive(Crashed=true)
-        // respawns from the new binary. The helper runs as root, so the
-        // copy works without an extra admin prompt.
-        //
-        // SECURITY: This is a privilege-escalation vector — any admin-group
-        // process (not just SuperManager) that can connect to the socket
-        // can swap the root-owned helper binary. We compile it in only
-        // when the `dev-rpc` cargo feature is active. Production releases
-        // build *without* the feature, so this method returns "unknown
-        // method" and admin auth is required to swap the helper. Dev
-        // iteration: `cargo build --release -p supermanager-helper --features dev-rpc`.
-        #[cfg(feature = "dev-rpc")]
-        "deploy_self" => {
-            let src = match req.params.get("source").and_then(|v| v.as_str()) {
-                Some(s) => s.to_owned(),
-                None => return Response::err(id, -32602, "missing param: source"),
-            };
-            let target = "/Library/PrivilegedHelperTools/com.sybr.supermanager.helper";
-            // Quick sanity: the source must exist and be a regular file
-            // owned by the calling user (rough check — we trust the
-            // socket-level gating above).
-            let src_size = match std::fs::metadata(&src) {
-                Ok(m) if m.is_file() => m.len(),
-                Ok(_) => return Response::err(id, -32602, "source is not a regular file"),
-                Err(e) => return Response::err(id, -32602, format!("source missing: {e}")),
-            };
-            if src_size == 0 {
-                return Response::err(id, -32602, "source binary is 0 bytes — refusing");
-            }
-            // Atomic-rename pattern. The previous code did
-            // `fs::copy(src, target)` directly, which opens
-            // `target` with O_TRUNC and THEN copies bytes. If the
-            // helper exited or crashed during the copy (which is
-            // actually likely because we're overwriting the very
-            // binary we're running from), the file was left at 0
-            // bytes and launchd refused to spawn it (EX_CONFIG=78),
-            // killing the entire helper subsystem.
-            //
-            // Fix: copy to a temp file in the same directory first,
-            // verify size, then rename atomically. `rename(2)` is
-            // atomic on the same filesystem — the target is either
-            // the old binary or the new binary, never half-written.
-            let tmp_target = format!("{target}.tmp-{}", std::process::id());
-            if let Err(e) = std::fs::copy(&src, &tmp_target) {
-                let _ = std::fs::remove_file(&tmp_target);
-                return Response::err(id, -32000, format!("copy {src} -> {tmp_target}: {e}"));
-            }
-            // Sanity-check: the temp file should match src size.
-            // Catches partial copies, full disk, etc. before we
-            // commit to the rename.
-            match std::fs::metadata(&tmp_target) {
-                Ok(m) if m.len() == src_size => {}
-                Ok(m) => {
-                    let _ = std::fs::remove_file(&tmp_target);
-                    return Response::err(
-                        id,
-                        -32000,
-                        format!("size mismatch after copy: src={src_size} tmp={}", m.len()),
-                    );
-                }
-                Err(e) => {
-                    return Response::err(id, -32000, format!("stat tmp: {e}"));
-                }
-            }
-            // chmod 755 + chown root:wheel on the temp file BEFORE
-            // the rename so the active binary always has correct
-            // permissions.
-            let _ = proc::bounded(
-                std::process::Command::new("/bin/chmod").args(["755", &tmp_target]),
-                proc::MUTATE,
-            );
-            let _ = proc::bounded(
-                std::process::Command::new("/usr/sbin/chown").args(["root:wheel", &tmp_target]),
-                proc::MUTATE,
-            );
-            // Atomic rename. If this fails, the existing target is
-            // untouched.
-            if let Err(e) = std::fs::rename(&tmp_target, target) {
-                let _ = std::fs::remove_file(&tmp_target);
-                return Response::err(id, -32000, format!("rename to {target}: {e}"));
-            }
-            tracing::info!("deploy_self: replaced {target} with {src_size} bytes from {src}");
-            tokio::spawn(async {
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                tracing::info!(
-                    "deploy_self complete — exiting so launchd respawns from new binary"
-                );
-                std::process::exit(1);
-            });
-            Response::ok(id, serde_json::json!({"deployed": true, "size": src_size}))
         }
 
         "vpn_connect" => {
@@ -1053,10 +950,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
             }
         }
 
-        // TEST-ONLY: strip the default route so we can verify
-        // the route guardian's recovery in isolation. Available
-        // because dev-rpc is on; production builds wouldn't have
-        // the rest of dev-rpc either.
         // Set system DNS servers via networksetup. Used to
         // recover when macOS's resolver gets stuck on an
         // unreachable nameserver. Always available — DNS rescue
@@ -1210,28 +1103,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                 Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
             }
         }
-
-        #[cfg(feature = "dev-rpc")]
-        "debug_strip_default_route" => {
-            match blocking(route_guardian::debug_strip_default_route).await {
-                Ok(_) => Response::ok(id, serde_json::json!({"stripped": true})),
-                Err(e) => Response::err(id, -32000, format!("strip failed: {e:#}")),
-            }
-        }
-
-        // Passive traffic capture for cleartext-protocol audit.
-        // Runs tcpdump as root (the helper's natural privilege)
-        // to a caller-specified pcap path inside the user's
-        // engagement directory. Tight argument validation: no
-        // shell injection, BPF filter length-capped, output path
-        // must be under the user's per-engagement captures dir.
-        //
-        // See `traffic_capture::run` for the full validation
-        // logic; the helper just calls into it.
-        "traffic_capture" => match traffic_capture::run(req.params).await {
-            Ok(report) => Response::ok(id, serde_json::to_value(report).unwrap_or_default()),
-            Err(e) => Response::err(id, -32000, format!("traffic_capture: {e:#}")),
-        },
 
         // ── System sleep / wake ──────────────────────────────────────────
         //

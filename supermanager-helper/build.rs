@@ -1,9 +1,8 @@
 // Inject a build timestamp the helper exposes via `helper_version`.
 //
-// The GUI uses this to detect a stale deployed helper: if the
-// timestamp the deployed helper reports is older than the bundled
-// helper's, hot-swap via `deploy_self`. Avoids the "unknown method"
-// surprise after every Cargo iteration.
+// The GUI uses this to detect a stale deployed helper: a helper whose
+// build differs from the one bundled in the app is reinstalled. Avoids
+// the "unknown method" surprise after every Cargo iteration.
 //
 // `cargo:rerun-if-changed=build.rs` keeps the timestamp fresh on
 // every rebuild — without it the env var would be cached forever

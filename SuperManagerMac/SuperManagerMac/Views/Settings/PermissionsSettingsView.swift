@@ -13,8 +13,8 @@ import SwiftUI
 /// approved. The operator has no way from inside the app to see
 /// "do we have that permission?". This view surfaces:
 ///
-///   1. Helper version + dev-rpc flag (we already had the RPC;
-///      no in-app surface for the answer).
+///   1. Helper version (we already had the RPC; no in-app surface
+///      for the answer).
 ///   2. Homebrew tool readiness via the existing `tools_status`
 ///      RPC, with per-tool brew-install hints copyable to
 ///      clipboard. Surfaces the previously-wired-but-invisible
@@ -33,7 +33,6 @@ struct PermissionsSettingsView: View {
     @State private var loadingTools = false
     @State private var helperVersion: String = ""
     @State private var helperMethods: [String] = []
-    @State private var helperDevRpc: Bool = false
     @State private var helperUnreachable: Bool = false
 
     var body: some View {
@@ -51,7 +50,7 @@ struct PermissionsSettingsView: View {
 
     // MARK: - Helper
 
-    /// Helper version + dev-rpc flag + reachability. Driven by
+    /// Helper version + reachability. Driven by
     /// the existing `helper_version` RPC. The "Reveal helper
     /// log in Finder" + "Save support bundle" buttons live in
     /// the Help menu already; we link out rather than
@@ -68,7 +67,6 @@ struct PermissionsSettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             } else {
                 LabeledContent("Version", value: helperVersion.isEmpty ? "—" : helperVersion)
-                LabeledContent("Dev RPC enabled", value: helperDevRpc ? "yes (development build)" : "no")
                 LabeledContent("Advertised methods") {
                     Text("\(helperMethods.count) endpoints")
                         .foregroundStyle(.secondary)
@@ -222,12 +220,10 @@ struct PermissionsSettingsView: View {
             let result = try await HelperClient.shared.helperVersion()
             helperVersion = (result["version"] as? String) ?? "—"
             helperMethods = (result["methods"] as? [String]) ?? []
-            helperDevRpc = (result["dev_rpc"] as? Bool) ?? false
         } catch {
             helperUnreachable = true
             helperVersion = ""
             helperMethods = []
-            helperDevRpc = false
         }
     }
 

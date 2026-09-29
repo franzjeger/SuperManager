@@ -7,26 +7,23 @@ struct HelperBuildInfo: Sendable {
     let version: String
     let timestamp: UInt64
     let methods: Set<String>
-    let devRPC: Bool
 
     init?(json: [String: Any]) {
         guard let version = json["version"] as? String, !version.isEmpty,
               let rawTimestamp = json["build_timestamp"] as? String,
               let timestamp = UInt64(rawTimestamp), timestamp > 0,
               let methods = json["methods"] as? [String],
-              methods.contains("helper_version"),
-              let devRPC = json["dev_rpc"] as? Bool else { return nil }
+              methods.contains("helper_version") else { return nil }
         self.version = version
         self.timestamp = timestamp
         self.methods = Set(methods)
-        self.devRPC = devRPC
     }
 
     /// A newer timestamp alone says nothing about protocol compatibility.
     /// Pinning to the bundled build also supports intentional app rollbacks.
     func matches(_ bundled: HelperBuildInfo) -> Bool {
         version == bundled.version && timestamp == bundled.timestamp
-            && devRPC == bundled.devRPC && methods.isSuperset(of: bundled.methods)
+            && methods.isSuperset(of: bundled.methods)
     }
 
     enum ProbeError: Error { case timedOut, invalidMetadata }

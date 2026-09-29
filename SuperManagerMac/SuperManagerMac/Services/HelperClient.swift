@@ -198,22 +198,8 @@ final class HelperClient {
         } catch HelperError.rpcFailure(_, let msg) where msg.contains("unknown method") {
             // Pre-versioning helper — pretend we got an empty
             // capability set so the caller decides to redeploy.
-            return ["version": "0.0.0", "methods": [String](), "build_timestamp": "0", "dev_rpc": false]
+            return ["version": "0.0.0", "methods": [String](), "build_timestamp": "0"]
         }
-    }
-
-    /// Hand the deployed helper an absolute path to a *new* binary
-    /// and have it copy itself, then exit so launchd respawns from
-    /// the new code. Only works when the deployed helper was built
-    /// with `--features dev-rpc`, which neither the Xcode build nor a release
-    /// does.
-    ///
-    /// Production hardening: replace this with a notarised installer
-    /// + admin auth prompt before shipping. Documented at the
-    /// `deploy_self` RPC in `supermanager-helper/src/main.rs`.
-    @discardableResult
-    func deploySelf(sourcePath: String) async throws -> [String: Any] {
-        try await call("deploy_self", params: ["source": sourcePath])
     }
 
     // MARK: - Tailscale daemon management
@@ -503,7 +489,7 @@ final class HelperClient {
              "tailscale_install_exit_routes", "tailscale_remove_exit_routes",
              "tailscale_test_exit_reachability", "tailscale_force_dns_state",
              "tailscale_install_magicdns_resolver", "kill_switch_enable",
-             "kill_switch_disable", "system_wake", "deploy_self":
+             "kill_switch_disable", "system_wake":
             return .seconds(45)
         default:
             return .seconds(15)

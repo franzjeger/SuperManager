@@ -9,7 +9,7 @@
 //!
 //! The watch list is persisted at
 //! `/var/lib/supermanager/auto_reconnect.json` so a helper
-//! restart (deploy_self, system reboot, crash) preserves the
+//! restart (update, system reboot, crash) preserves the
 //! user's always-on selections. The connect args are stored
 //! alongside — they're the same bytes the GUI passed to
 //! `wg_connect` / `ovpn_connect` / `vpn_connect` last time the
