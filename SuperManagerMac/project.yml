@@ -30,6 +30,15 @@ options:
   generateEmptyDirectories: true
   # Don't synthesise an Info.plist — we want the keys we control below.
   createIntermediateGroups: true
+  # The Swift packages' exact versions and revisions: Package.resolved
+  # beside this file, put where Xcode reads it. release.sh and CI build
+  # with -onlyUsePackageVersionsFromResolvedFile, so a release carries
+  # the reviewed versions, not whatever `from:` resolves to that day. To
+  # update: resolve in Xcode (File > Packages > Update to Latest Package
+  # Versions), then copy the project's Package.resolved over this one.
+  postGenCommand: >-
+    mkdir -p SuperManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm &&
+    cp Package.resolved SuperManager.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
 # ---------------------------------------------------------------------------
 # External Swift packages.
