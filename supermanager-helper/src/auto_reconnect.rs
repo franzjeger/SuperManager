@@ -7,7 +7,7 @@
 //!
 //! ## State persistence
 //!
-//! The watch list is persisted at
+//! The watch list is persisted, readable by root only, at
 //! `/var/lib/supermanager/auto_reconnect.json` so a helper
 //! restart (deploy_self, system reboot, crash) preserves the
 //! user's always-on selections. The connect args are stored
@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -148,6 +149,12 @@ pub async fn spawn_watchdog(
                 }
                 Err(_) => HashMap::new(),
             };
+            // A file an earlier helper wrote gets the same mode.
+            if let Err(e) = fs::set_permissions(STATE_PATH, fs::Permissions::from_mode(0o600)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("auto_reconnect: could not restrict {STATE_PATH}: {e}");
+                }
+            }
             Arc::new(Mutex::new(State {
                 watched: map,
                 ..State::default()
@@ -304,11 +311,14 @@ pub async fn unguard_routes(profile_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The connect arguments hold the profiles' credentials, so the file is
+/// root's alone.
 fn persist(map: &HashMap<String, WatchedProfile>) -> Result<()> {
     let parent = Path::new(STATE_PATH).parent().unwrap();
     fs::create_dir_all(parent).context("creating state dir")?;
     let json = serde_json::to_string_pretty(map).context("encoding json")?;
-    fs::write(STATE_PATH, json).context("writing state file")?;
+    crate::private_file::write(Path::new(STATE_PATH), json.as_bytes())
+        .context("writing state file")?;
     Ok(())
 }
 
