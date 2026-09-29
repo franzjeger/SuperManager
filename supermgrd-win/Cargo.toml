@@ -46,7 +46,7 @@ zeroize         = { workspace = true }
 
 # Directory discovery (LocalAppData, ProgramData) without re-implementing
 # SHGetKnownFolderPath ourselves.
-directories = "5"
+directories = "6"
 
 # Locate openvpn.exe and other helpers on %PATH%. Cross-platform crate;
 # we don't gate it because using `which` in non-Windows builds is harmless
