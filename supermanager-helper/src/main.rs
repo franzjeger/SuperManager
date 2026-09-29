@@ -190,6 +190,11 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_env("SM_HELPER_LOG")
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
+        // launchd writes stdout to /var/log/supermanager-helper.log, which
+        // the app shows in its log viewer, after a failed connect and in
+        // support bundles. Colour codes there are just `[2m…[0m` noise, so
+        // colour only a terminal: the helper run by hand.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
     // `--version` lets a binary that is NOT running answer for itself.
