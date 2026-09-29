@@ -353,9 +353,24 @@ struct TailscaleSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Toggle("Auto-update Tailscale",
-                   isOn: bindAutoUpdate)
-            .help("Only takes effect on installs from the Tailscale installer — Homebrew / App Store builds ignore this and update via their own channel.")
+            if TailscaleClient.usesNativeApp {
+                Toggle("Auto-update Tailscale",
+                       isOn: bindAutoUpdate)
+                .help("Only takes effect on installs from the Tailscale installer — Homebrew / App Store builds ignore this and update via their own channel.")
+            } else {
+                // Tailscale's own updater does not touch SuperManager's
+                // service: it runs the tailscaled this app bundles.
+                Text("SuperManager's Tailscale service runs the tailscaled this app bundles, and is updated with the app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if appState.tailscaledOutdated {
+                    Button("Update Tailscale service") {
+                        Task { await appState.installTailscaled() }
+                    }
+                    .controlSize(.small)
+                    .help(TailscaleHeaderView.updateServiceHelp)
+                }
+            }
         }
     }
 

@@ -268,6 +268,14 @@ struct TailscaleHeaderView: View {
                 Label("Always on (LaunchDaemon)", systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .help("tailscaled runs as a system LaunchDaemon — auto-starts at boot, auto-reconnects after sleep.")
+                if appState.tailscaledOutdated {
+                    Button {
+                        runAction { await appState.installTailscaled() }
+                    } label: {
+                        Label("Update Tailscale service", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .help(Self.updateServiceHelp)
+                }
             } else if appState.canInstallTailscaled {
                 Button {
                     runAction { await appState.installTailscaled() }
@@ -559,6 +567,8 @@ struct TailscaleHeaderView: View {
 
     /// Wrap async work so we can flip the `working` flag cleanly
     /// without leaking it on early-return paths.
+    static let updateServiceHelp = "The installed tailscaled is not the one this version of SuperManager bundles. Updating installs the bundled one and restarts the service, which drops tailnet connections for a few seconds."
+
     private func runAction(_ block: @escaping () async -> Void) {
         Task {
             working = true
