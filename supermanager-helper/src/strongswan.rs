@@ -1802,12 +1802,11 @@ pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
         return crate::route_table::exact_route(&net);
     }
     // A host: the route a packet to it takes.
-    let out = match crate::proc::bounded(
+    let Ok(out) = crate::proc::bounded(
         std::process::Command::new("/sbin/route").args(["-n", "get", family, dest]),
         crate::proc::PROBE,
-    ) {
-        Ok(out) => out,
-        Err(_) => return None,
+    ) else {
+        return None;
     };
     if !out.status.success() {
         return None;

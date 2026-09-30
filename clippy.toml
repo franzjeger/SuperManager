@@ -1,0 +1,13 @@
+# Names of products and protocols, not code: doc_markdown would put them in
+# backticks. ".." keeps clippy's own list (macOS, IPv4, GitHub, ...).
+doc-valid-idents = [
+    "SuperManager",
+    "WireGuard",
+    "OpenVPN",
+    "IKEv2",
+    "IPsec",
+    "FortiGate",
+    "MagicDNS",
+    "AppleScript",
+    "..",
+]

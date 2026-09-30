@@ -100,9 +100,8 @@ pub fn exact_route(net: &IpNet) -> Option<String> {
         crate::proc::PROBE,
     ) {
         Ok(out) if out.status.success() => route_for(&String::from_utf8_lossy(&out.stdout), net),
-        Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => exact_route_in_dump(net),
-        Err(_) => None,
+        _ => None,
     }
 }
 
