@@ -473,8 +473,8 @@ extension AppState {
                     "vpn_render_wireguard_conf",
                     params: ["profile_id": profileId]
                 )
-                args["confContent"] = r.conf
-                args["dns_servers"] = r.dnsServers
+                args = HelperClient.wgConnectArgs(
+                    profileId: profileId, confContent: r.conf, dnsServers: r.dnsServers)
             } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
                 backendStr = "openvpn"
                 // The same arguments a manual connect sends: the
