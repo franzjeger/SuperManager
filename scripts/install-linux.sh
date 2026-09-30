@@ -62,7 +62,7 @@ warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 # set -e exits without a word. Under supermgr-update's GUI dialog that leaves
 # "see the output above" pointing at nothing, so name what failed.
-trap 'rc=$?; printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
+trap 'printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 
 # ---------------------------------------------------------------------------
 # Where cargo puts the binaries.

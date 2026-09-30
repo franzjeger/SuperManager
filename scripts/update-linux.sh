@@ -55,7 +55,7 @@ warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 # set -e exits without a word, and the GUI dialog then says "see the output
 # above" about nothing. Name what failed.
-trap 'rc=$?; printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
+trap 'printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 
 if [ -n "$INSTALLED_COMMIT" ] \
    && [[ ! "$INSTALLED_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
