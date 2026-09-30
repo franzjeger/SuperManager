@@ -50,7 +50,12 @@ pub struct InstallResult {
 /// already installed with the same content is left alone; one that fails
 /// its check is not installed, and the one before it stays.
 pub fn install(args: &InstallArgs) -> Result<InstallResult> {
-    install_into(Path::new(&args.bundled_dir), Path::new(RUNTIME_DIR))
+    let result = install_into(Path::new(&args.bundled_dir), Path::new(RUNTIME_DIR))
+        .inspect_err(|e| tracing::warn!("VPN runtime not installed: {e:#}"))?;
+    if !result.installed.is_empty() {
+        tracing::info!(installed = ?result.installed, "VPN runtime installed in {RUNTIME_DIR}");
+    }
+    Ok(result)
 }
 
 fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
@@ -198,7 +203,8 @@ fn homebrew(name: &str) -> Result<PathBuf> {
         })?;
     if !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
-            "WireGuard runs from Homebrew: this build bundles no VPN runtime for {RUNTIME_DIR}"
+            "WireGuard uses Homebrew's tools: no VPN runtime is installed in {RUNTIME_DIR} \
+             (the app installs the one it bundles before a WireGuard connect)"
         );
     }
     Ok(found)
