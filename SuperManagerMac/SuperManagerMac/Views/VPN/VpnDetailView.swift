@@ -63,6 +63,13 @@ struct VpnDetailView: View {
         var isEmpty: Bool {
             interface.isEmpty && virtualIp.isEmpty && routes.isEmpty
         }
+
+        /// A full tunnel the gateway narrowed: asked for everything, it
+        /// granted only `routes`, so everything else goes out directly.
+        /// IKEv2 only, where `routes` are the negotiated selectors.
+        func narrows(fullTunnel: Bool) -> Bool {
+            fullTunnel && !routes.isEmpty && !routes.contains("0.0.0.0/0")
+        }
     }
 
     @State private var live = LiveTunnel()
@@ -1046,6 +1053,17 @@ struct VpnDetailView: View {
                     )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.red)
+                    .padding(.top, 2)
+                }
+                if let profile, case .ikev2 = profile.config,
+                   live.narrows(fullTunnel: profile.fullTunnel) {
+                    Label(
+                        "Full tunnel requested, but the gateway only allows these networks — everything else goes out directly",
+                        systemImage: "arrow.triangle.branch"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, 2)
                 }
             }
