@@ -67,6 +67,7 @@ mod proc;
 // mod power;
 mod route_guardian;
 mod route_table;
+mod signed_file;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;

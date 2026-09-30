@@ -24,7 +24,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
 
@@ -233,73 +233,11 @@ pub fn install(args: InstallArgs) -> Result<InstallResult> {
 }
 
 /// Put a copy of `source` at `target` if the copy is `tailscaled` as
-/// SuperManager signs it: SuperManager's team and `DAEMON_IDENTIFIER`.
-/// The copy is what gets checked, in the helper's own directory, so the
-/// file launchd runs is the file that passed. The source is read once,
-/// as a regular file and not through a symlink.
+/// SuperManager signs it (`signed_file`).
 fn install_binary(source: &Path, target: &Path) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-    let mut from = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(source)
-        .with_context(|| format!("open {}", source.display()))?;
-    if !from.metadata()?.is_file() {
-        bail!("{} is not a regular file", source.display());
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let staged = PathBuf::from(format!(
-        "{}.{}.tmp",
-        target.display(),
-        uuid::Uuid::new_v4().simple()
-    ));
-    let result = (|| -> Result<()> {
-        let mut to = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&staged)
-            .with_context(|| format!("create {}", staged.display()))?;
-        std::io::copy(&mut from, &mut to).context("copy tailscaled")?;
-        to.sync_all()?;
-        drop(to);
-        verify_daemon_signature(&staged)?;
-        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
-        fs::rename(&staged, target).with_context(|| format!("install {}", target.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&staged);
-    }
-    result
-}
-
-#[cfg(target_os = "macos")]
-fn verify_daemon_signature(path: &Path) -> Result<()> {
-    use core_foundation::url::CFURL;
-    use security_framework::os::macos::code_signing::{Flags, SecRequirement, SecStaticCode};
-    let requirement: SecRequirement = format!(
-        "anchor apple generic and certificate leaf[subject.OU] = \"{}\" \
-         and identifier \"{DAEMON_IDENTIFIER}\"",
-        crate::client_auth::TEAM_ID
-    )
-    .parse()
-    .context("tailscaled code requirement")?;
-    let url = CFURL::from_path(path, false).context("tailscaled path")?;
-    SecStaticCode::from_path(&url, Flags::NONE)
-        .and_then(|code| {
-            code.check_validity(
-                Flags::CHECK_ALL_ARCHITECTURES | Flags::STRICT_VALIDATE,
-                &requirement,
-            )
-        })
-        .map_err(|e| anyhow::anyhow!("not tailscaled as SuperManager signs it ({e})"))
-}
-
-#[cfg(not(target_os = "macos"))]
-fn verify_daemon_signature(_: &Path) -> Result<()> {
-    bail!("code signatures can only be checked on macOS")
+    crate::signed_file::install(source, target, |copy| {
+        crate::signed_file::signed_by_supermanager(copy, DAEMON_IDENTIFIER)
+    })
 }
 
 /// Uninstall the daemon. Removes the LaunchDaemon, the binary, and
@@ -1918,34 +1856,12 @@ fn reload_daemon() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn scratch_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("supermanager-tsd-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&dir).unwrap();
         dir
-    }
-
-    /// Signed by Apple, but not SuperManager's tailscaled: nothing is
-    /// installed, and the staged copy is gone.
-    #[test]
-    fn a_program_that_is_not_supermanagers_tailscaled_is_not_installed() {
-        let dir = scratch_dir();
-        let target = dir.join("tailscaled");
-        let err = install_binary(Path::new("/usr/bin/true"), &target).unwrap_err();
-        assert!(format!("{err:#}").contains("not tailscaled as SuperManager signs it"));
-        assert!(!target.exists());
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn the_source_is_not_read_through_a_symlink() {
-        let dir = scratch_dir();
-        let link = dir.join("link");
-        std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
-        assert!(install_binary(&link, &dir.join("tailscaled")).is_err());
-        assert!(install_binary(&dir, &dir.join("tailscaled")).is_err());
-        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The daemon a signed release bundles installs. Run with the path of
