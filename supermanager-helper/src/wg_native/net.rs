@@ -1,7 +1,7 @@
 //! The tunnel's addresses, MTU and routes, set with `ifconfig` and `route`
 //! as wg-quick set them, and the routing table as `netstat` shows it.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use anyhow::{bail, Context, Result};
 use ipnet::IpNet;
@@ -88,20 +88,71 @@ fn family(ip: IpAddr) -> &'static str {
     }
 }
 
-/// Whether traffic to `net` already leaves through `interface`.
-pub async fn routed_via(net: &IpNet, interface: &str) -> bool {
-    let wanted = format!("interface: {interface}");
-    read(ROUTE, &["-n", "get", family(net.addr()), &net.to_string()])
-        .await
-        .is_some_and(|out| out.lines().any(|line| line.trim() == wanted))
+/// The route traffic to `ip` takes: the prefix it is for, and its
+/// interface. `-host` makes it a lookup of the address. Without it,
+/// route(8) reads an address ending in zeros as a network (128.0.0.0 as
+/// 128.0/16, 0.0.0.0 as the default route), and macOS answers a network
+/// with any route sharing its key: asked for 128.0.0.0/1, it finds 0/1.
+async fn lookup(ip: IpAddr) -> Option<(IpNet, String)> {
+    let address = ip.to_string();
+    let out = read(ROUTE, &["-n", "get", family(ip), "-host", &address]).await?;
+    parse_route_get(&out, ip.is_ipv4())
 }
 
+/// `route -n get` output: `destination:` (`default` for all zeros),
+/// `mask:` (`default` for none; no line for a host route) and
+/// `interface:`.
+fn parse_route_get(out: &str, v4: bool) -> Option<(IpNet, String)> {
+    let (mut destination, mut mask, mut interface) = (None, None, None);
+    for line in out.lines() {
+        let Some((key, value)) = line.trim().split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match key {
+            "destination" => destination = Some(value),
+            "mask" => mask = Some(value),
+            "interface" => interface = Some(value),
+            _ => {}
+        }
+    }
+    let unspecified = if v4 {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    };
+    let address = match destination? {
+        "default" => unspecified,
+        address => address.parse().ok()?,
+    };
+    let prefix = match mask {
+        None => {
+            if v4 {
+                32
+            } else {
+                128
+            }
+        }
+        Some("default") => 0,
+        Some(mask) => ipnet::ip_mask_to_prefix(mask.parse().ok()?).ok()?,
+    };
+    Some((IpNet::new(address, prefix).ok()?, interface?.to_owned()))
+}
+
+/// Whether `net` has a route of its own through `interface`.
+pub async fn has_own_route(net: &IpNet, interface: &str) -> bool {
+    lookup(net.network())
+        .await
+        .is_some_and(|(found, through)| found == net.trunc() && through == interface)
+}
+
+/// Route `net` through `interface`. A route for it already there is fine
+/// if it is this one: the one for the interface's own address, say.
 pub async fn add_route(net: &IpNet, interface: &str) -> Result<()> {
     let dest = net.to_string();
-    change(
+    let added = change(
         ROUTE,
         &[
-            "-q",
             "-n",
             "add",
             family(net.addr()),
@@ -110,7 +161,11 @@ pub async fn add_route(net: &IpNet, interface: &str) -> Result<()> {
             interface,
         ],
     )
-    .await
+    .await;
+    match added {
+        Err(_) if has_own_route(net, interface).await => Ok(()),
+        added => added,
+    }
 }
 
 /// The way out of the primary default route, which a peer's endpoint
@@ -173,7 +228,7 @@ fn parse_default_route(table: &str) -> (Via, Option<String>) {
 /// A host route for a peer's endpoint.
 pub async fn add_host_route(ip: IpAddr, via: &Via) -> Result<()> {
     let dest = ip.to_string();
-    let mut args = vec!["-q", "-n", "add", family(ip), "-host", dest.as_str()];
+    let mut args = vec!["-n", "add", family(ip), "-host", dest.as_str()];
     let blackhole = if ip.is_ipv4() { "127.0.0.1" } else { "::1" };
     match via {
         Via::Gateway(gateway) => args.extend(["-gateway", gateway.as_str()]),
@@ -325,6 +380,41 @@ mod tests {
             (Via::Gateway("10.0.0.1".into()), Some("en0".into()))
         );
         assert_eq!(parse_default_route("no table here"), (Via::Nowhere, None));
+    }
+
+    /// What `route -n get -host` printed on a Mac with a WireGuard full
+    /// tunnel half set up: 0/1 through utun9, and no 128.0/1.
+    #[test]
+    fn a_lookup_names_the_route_it_found() {
+        let parse = |out: &str, v4| parse_route_get(out, v4).map(|(net, i)| (net.to_string(), i));
+        let half = "   route to: default\ndestination: default\n       mask: 128.0.0.0\n\
+                    \x20 interface: utun9\n      flags: <UP,DONE,STATIC,PRCLONING,GLOBAL>\n";
+        assert_eq!(
+            parse(half, true),
+            Some(("0.0.0.0/1".into(), "utun9".into()))
+        );
+        let default = "   route to: 128.0.0.0\ndestination: default\n       mask: default\n\
+                       \x20   gateway: 192.168.2.55\n  interface: en0\n";
+        assert_eq!(
+            parse(default, true),
+            Some(("0.0.0.0/0".into(), "en0".into()))
+        );
+        let host = "   route to: 51.174.175.4\ndestination: 51.174.175.4\n\
+                    \x20   gateway: 192.168.2.55\n  interface: en0\n      flags: <UP,GATEWAY,HOST,DONE,STATIC>\n";
+        assert_eq!(
+            parse(host, true),
+            Some(("51.174.175.4/32".into(), "en0".into()))
+        );
+        let v6 = "   route to: fd7a:115c:a1e0::1\ndestination: fd7a:115c:a1e0::\n\
+                  \x20      mask: ffff:ffff:ffff::\n  interface: utun0\n";
+        assert_eq!(
+            parse(v6, false),
+            Some(("fd7a:115c:a1e0::/48".into(), "utun0".into()))
+        );
+        assert_eq!(
+            parse("route: writing to routing socket: not in table\n", true),
+            None
+        );
     }
 
     #[test]

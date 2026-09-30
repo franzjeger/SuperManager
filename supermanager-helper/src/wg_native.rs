@@ -10,11 +10,11 @@
 //! - `wg addconf`: [`uapi::set`], with each endpoint resolved first.
 //! - `ifconfig`: the addresses; the MTU, the config's or the primary
 //!   interface's less 80; up.
-//! - A route per AllowedIPs prefix, the most specific first, unless the
-//!   tunnel already carries it. All of IPv4 or IPv6 becomes its two
-//!   halves, which win over the default route without replacing it; each
-//!   peer's endpoint then keeps a host route the way the default route
-//!   goes, so the tunnel's own packets stay out of the tunnel.
+//! - A route per AllowedIPs prefix, the most specific first. All of IPv4
+//!   or IPv6 becomes its two halves, which win over the default route
+//!   without replacing it; each peer's endpoint then keeps a host route
+//!   the way the default route goes, so the tunnel's own packets stay out
+//!   of the tunnel.
 //! - A supervisor that moves the endpoint routes and the MTU with the
 //!   network, and cleans up when the tunnel goes: [`supervise`].
 //! - Down: without its socket wireguard-go exits, and the utun and every
@@ -253,9 +253,7 @@ async fn configure(
     refresh_endpoint_routes(state).await;
     state.save()?;
     for net in &plan.routes {
-        if !net::routed_via(net, &interface).await {
-            net::add_route(net, &interface).await?;
-        }
+        net::add_route(net, &interface).await?;
     }
     Ok(())
 }
@@ -712,7 +710,7 @@ mod tests {
         let (interface, tunnel) = up(name, &config).await.unwrap();
         assert!(net::exists(&interface));
         assert_eq!(read_name_file(name).as_deref(), Some(interface.as_str()));
-        assert!(net::routed_via(&"10.213.1.0/24".parse().unwrap(), &interface).await);
+        assert!(net::has_own_route(&"10.213.1.0/24".parse().unwrap(), &interface).await);
         assert_eq!(
             uapi::endpoints(&interface).await.unwrap(),
             ips(&["192.0.2.1"])
