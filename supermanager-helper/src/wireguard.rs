@@ -182,6 +182,7 @@ impl WireGuard {
         let _ = std::fs::remove_file(conf_path_for(name));
         match crate::wg_native::up(name, &args.conf_content).await {
             Ok((interface, tunnel)) => {
+                tracing::info!(tunnel = %name, %interface, "WireGuard tunnel up without wg-quick");
                 self.native.insert(name.to_owned(), tunnel);
                 if !args.dns_servers.is_empty() {
                     crate::dns::set_vpn_dns(&args.dns_servers);
@@ -192,11 +193,14 @@ impl WireGuard {
                     interface: Some(interface),
                 }
             }
-            Err(e) => WgConnectResult {
-                success: false,
-                message: format!("{e:#}"),
-                interface: None,
-            },
+            Err(e) => {
+                tracing::warn!(tunnel = %name, "WireGuard connect without wg-quick failed: {e:#}");
+                WgConnectResult {
+                    success: false,
+                    message: format!("{e:#}"),
+                    interface: None,
+                }
+            }
         }
     }
 
@@ -285,17 +289,20 @@ impl WireGuard {
             // Best-effort cleanup so the next attempt isn't poisoned
             // by a half-up state.
             let _ = std::fs::remove_file(&conf_path);
+            let message = format!(
+                "wg-quick up failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            tracing::warn!(tunnel = %name, "{message}");
             return Ok(WgConnectResult {
                 success: false,
-                message: format!(
-                    "wg-quick up failed: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
+                message,
                 interface: None,
             });
         }
 
         let interface = detect_interface(&name).await.ok();
+        tracing::info!(tunnel = %name, interface = ?interface, wg_quick = %wg_quick.describe(), "WireGuard tunnel up");
 
         if !args.dns_servers.is_empty() {
             crate::dns::set_vpn_dns(&args.dns_servers);
@@ -325,6 +332,10 @@ impl WireGuard {
         if let Some(result) = self.native_down(&name).await {
             let _ = std::fs::remove_file(conf_path_for(&name));
             crate::dns::clear_vpn_dns();
+            match &result {
+                Ok(()) => tracing::info!(tunnel = %name, "WireGuard tunnel down"),
+                Err(e) => tracing::warn!(tunnel = %name, "WireGuard tunnel still up: {e:#}"),
+            }
             return Ok(match result {
                 Ok(()) => WgDisconnectResult {
                     success: true,
@@ -420,6 +431,11 @@ impl WireGuard {
             .as_deref()
             .map(interface_exists)
             .unwrap_or(false);
+        if final_alive {
+            tracing::warn!(tunnel = %name, "WireGuard tunnel still up: {}", messages.join("; "));
+        } else {
+            tracing::info!(tunnel = %name, "WireGuard tunnel down: {}", messages.join("; "));
+        }
         Ok(WgDisconnectResult {
             success: !final_alive,
             message: if final_alive {
