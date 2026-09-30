@@ -1,5 +1,5 @@
 //! The tunnel's addresses, MTU and routes, set with `ifconfig` and `route`
-//! as wg-quick set them, and the routing table as `netstat` shows it.
+//! as wg-quick set them.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -11,7 +11,6 @@ use tokio::process::Command;
 
 const IFCONFIG: &str = "/sbin/ifconfig";
 const ROUTE: &str = "/sbin/route";
-const NETSTAT: &str = "/usr/sbin/netstat";
 
 /// Run a command that changes something; its stderr is the error.
 async fn change(program: &str, args: &[&str]) -> Result<()> {
@@ -180,49 +179,32 @@ pub enum Via {
     Nowhere,
 }
 
+/// The primary default route (`route_table::primary_default`): its way
+/// out, and its interface.
 pub async fn default_route(v4: bool) -> (Via, Option<String>) {
-    let family = if v4 { "inet" } else { "inet6" };
-    match read(NETSTAT, &["-nr", "-f", family]).await {
-        Some(table) => parse_default_route(&table),
+    let route = tokio::task::spawn_blocking(move || crate::route_table::primary_default(!v4))
+        .await
+        .ok()
+        .flatten();
+    match route {
+        Some(route) => (way_out(&route), Some(route.interface)),
         None => (Via::Nowhere, None),
     }
 }
 
-/// The primary default route in `netstat -nr` output: the first `default`
-/// that is not bound to one interface (flag `I`). Its way out, and its
-/// interface.
-fn parse_default_route(table: &str) -> (Via, Option<String>) {
-    let mut columns = None;
-    for line in table.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.first() == Some(&"Destination") {
-            let find = |name: &str| fields.iter().position(|field| *field == name);
-            columns = find("Gateway").zip(find("Flags")).zip(find("Netif"));
-            continue;
-        }
-        let Some(((gateway, flags), netif)) = columns else {
-            continue;
-        };
-        if fields.first() != Some(&"default") {
-            continue;
-        }
-        let (Some(gateway), Some(flags), Some(netif)) =
-            (fields.get(gateway), fields.get(flags), fields.get(netif))
-        else {
-            continue;
-        };
-        if flags.contains('I') {
-            continue;
-        }
-        let address = gateway.split('%').next().unwrap_or_default();
-        let via = if address.parse::<IpAddr>().is_ok() {
-            Via::Gateway((*gateway).to_owned())
-        } else {
-            Via::Interface((*netif).to_owned())
-        };
-        return (via, Some((*netif).to_owned()));
+/// Its gateway, with the scope a link-local one has; its interface for a
+/// route straight out of one; nowhere for one through loopback, which is
+/// no way out.
+fn way_out(route: &crate::route_table::DefaultRoute) -> Via {
+    if route.interface.starts_with("lo") {
+        return Via::Nowhere;
     }
-    (Via::Nowhere, None)
+    let address = route.gateway.split('%').next().unwrap_or_default();
+    if address.parse::<IpAddr>().is_ok() {
+        Via::Gateway(route.gateway.clone())
+    } else {
+        Via::Interface(route.interface.clone())
+    }
 }
 
 /// A host route for a peer's endpoint.
@@ -329,57 +311,32 @@ impl RouteEvents {
 mod tests {
     use super::*;
 
-    const INET: &str = "Routing tables\n\nInternet:\n\
-        Destination        Gateway            Flags               Netif Expire\n\
-        default            link#23            UCSIg               utun7\n\
-        default            192.168.2.55       UGScg                 en0\n\
-        default            192.168.2.55       UGScIg                en1\n\
-        127                127.0.0.1          UCS                   lo0\n";
-
-    #[test]
-    fn the_primary_default_route_is_the_one_not_bound_to_an_interface() {
-        assert_eq!(
-            parse_default_route(INET),
-            (Via::Gateway("192.168.2.55".into()), Some("en0".into()))
-        );
+    fn route(gateway: &str, interface: &str) -> crate::route_table::DefaultRoute {
+        crate::route_table::DefaultRoute {
+            gateway: gateway.into(),
+            interface: interface.into(),
+            flags: "UGScg".into(),
+        }
     }
 
     #[test]
-    fn an_ipv6_gateway_keeps_its_scope_and_tunnels_are_skipped() {
-        let table = "Internet6:\n\
-            Destination                             Gateway                                 Flags               Netif Expire\n\
-            default                                 fe80::%utun1                            UGcIg               utun1\n\
-            default                                 fe80::1%en0                             UGcg                  en0\n";
+    fn endpoints_leave_the_way_the_default_route_does() {
         assert_eq!(
-            parse_default_route(table),
-            (Via::Gateway("fe80::1%en0".into()), Some("en0".into()))
+            way_out(&route("192.168.2.55", "en0")),
+            Via::Gateway("192.168.2.55".into())
         );
-        // Only tunnels' own defaults: no default for the endpoint.
-        let only_tunnels = table.replace("UGcg ", "UGcIg");
-        assert_eq!(parse_default_route(&only_tunnels), (Via::Nowhere, None));
-    }
-
-    #[test]
-    fn a_default_route_out_of_an_interface_is_followed_there() {
-        let table = "Destination        Gateway            Flags               Netif Expire\n\
-            default            link#20            UCSg                utun5\n";
+        // A link-local gateway keeps its scope.
         assert_eq!(
-            parse_default_route(table),
-            (Via::Interface("utun5".into()), Some("utun5".into()))
+            way_out(&route("fe80::1%en0", "en0")),
+            Via::Gateway("fe80::1%en0".into())
         );
-    }
-
-    #[test]
-    fn columns_are_found_by_their_heading() {
-        // Older macOS printed Refs and Use before Netif.
-        let table =
-            "Destination        Gateway            Flags        Refs      Use   Netif Expire\n\
-            default            10.0.0.1           UGSc           47        0     en0\n";
+        // Straight out of an interface, with no gateway.
         assert_eq!(
-            parse_default_route(table),
-            (Via::Gateway("10.0.0.1".into()), Some("en0".into()))
+            way_out(&route("link#20", "utun5")),
+            Via::Interface("utun5".into())
         );
-        assert_eq!(parse_default_route("no table here"), (Via::Nowhere, None));
+        // Through loopback is no way out.
+        assert_eq!(way_out(&route("::1", "lo0")), Via::Nowhere);
     }
 
     /// What `route -n get -host` printed on a Mac with a WireGuard full
