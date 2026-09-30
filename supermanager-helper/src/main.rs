@@ -71,6 +71,10 @@ mod tailscale;
 mod tailscale_state;
 mod wireguard;
 
+/// Where launchd writes the helper's output (the plist's StandardOutPath),
+/// and charon writes its own.
+pub(crate) const HELPER_LOG: &str = "/var/log/supermanager-helper.log";
+
 /// Bundle of per-backend controllers. Each is a long-lived
 /// `tokio::sync::Mutex` so RPC handlers serialize on the same
 /// controller without blocking the event loop. Cloning is one
@@ -669,7 +673,6 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         // The helper's log, or with `profile_id` that OpenVPN tunnel's,
         // which only root can read.
         "tail_log" => {
-            const HELPER_LOG: &str = "/var/log/supermanager-helper.log";
             const DEFAULT_BYTES: u64 = 8 * 1024;
             const MAX_BYTES: u64 = 64 * 1024;
             let want = req
