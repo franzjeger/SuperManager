@@ -1905,12 +1905,9 @@ fn parse_netstat_net(dest: &str) -> Option<ipnet::IpNet> {
 pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     // WireGuard: `wg show interfaces` prints a space-separated list of the
-    // utun devices wireguard-go currently owns.
-    for prefix in BREW_PATHS {
-        let wg = std::path::Path::new(prefix).join("bin/wg");
-        if !wg.exists() {
-            continue;
-        }
+    // utun devices wireguard-go currently owns. The `wg` WireGuard runs
+    // with, which need not be Homebrew's.
+    if let Ok(wg) = crate::vpn_runtime::wg() {
         if let Ok(out) = crate::proc::bounded(
             std::process::Command::new(&wg).args(["show", "interfaces"]),
             crate::proc::PROBE,
@@ -1921,7 +1918,6 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
                 }
             }
         }
-        break;
     }
     // OpenVPN: live tunnels expose their utun via the helper's log parse.
     for iface in crate::openvpn::live_tunnel_interfaces() {
