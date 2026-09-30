@@ -902,8 +902,6 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     None
 }
 
-/// Poll the actual control channel instead of assuming that a process is
-/// ready 500 ms after spawn. Never load credentials until charon answers.
 /// The pid in charon's pid file, if a process with it runs `charon`.
 fn running_charon(pid_file: &Path, charon: &Path) -> Option<i32> {
     let pid = std::fs::read_to_string(pid_file)
@@ -960,6 +958,8 @@ fn read_from(path: &Path, offset: u64, max: usize) -> String {
     String::from_utf8_lossy(&tail[tail.len().saturating_sub(max)..]).into_owned()
 }
 
+/// Poll the actual control channel instead of assuming that a process is
+/// ready 500 ms after spawn. Never load credentials until charon answers.
 async fn wait_for_charon(
     child: &mut tokio::process::Child,
     swanctl: &Path,
