@@ -621,8 +621,9 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
                             .await;
                             // A manual full-tunnel connect enrols the profile for
                             // route-only healing (no-op if it's already Always-on).
-                            // Split tunnels install no 0/1, so nothing to guard.
-                            if args.full_tunnel {
+                            // Split tunnels install no 0/1, so nothing to guard,
+                            // and neither does a full tunnel the gateway narrowed.
+                            if args.full_tunnel && s.narrowed_to.is_empty() {
                                 let _ = auto_reconnect::guard_routes(
                                     pid.clone(),
                                     "ikev2".to_string(),

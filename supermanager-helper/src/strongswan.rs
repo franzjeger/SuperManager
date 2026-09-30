@@ -154,6 +154,10 @@ pub struct StatusArgs {
 pub struct ConnectResult {
     pub ok: bool,
     pub message: String,
+    /// The networks the gateway narrowed a full tunnel down to: everything
+    /// else goes out directly. Empty for a tunnel carried as asked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub narrowed_to: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,6 +449,25 @@ impl Strongswan {
         // swanctl prints "initiate completed successfully" on the happy path.
         let ok = out.contains("completed successfully") || out.contains("CHILD_SA");
 
+        // A gateway grants the selectors it allows, which can be less than a
+        // full tunnel asks for. Then only those networks go through the
+        // tunnel: blocking IPv6 or asking DNS that only answers inside it
+        // would cut off the rest, and the route guard would take the missing
+        // 0/1 for a broken tunnel and reconnect it every 30 s.
+        let granted = if ok {
+            self.granted_selectors(&args.profile_id).await
+        } else {
+            Vec::new()
+        };
+        let narrowed = narrowed(args.full_tunnel, &granted);
+        if narrowed {
+            tracing::warn!(
+                profile = %args.profile_id,
+                granted = ?granted,
+                "the gateway narrowed the full tunnel to these networks; only they go through it"
+            );
+        }
+
         // IPv6 leak protection. Our full-tunnel config is IPv4-only
         // (vips = 0.0.0.0, remote_ts = 0.0.0.0/0) — charon installs the
         // 0/1 + 128/1 split-defaults for IPv4 but nothing for IPv6, so
@@ -453,7 +476,7 @@ impl Strongswan {
         // traffic is tunnelled. Since the FortiGate side doesn't carry v6,
         // we fail closed: blackhole all IPv6 for the duration of the
         // tunnel. Torn down by delete_full_tunnel_routes() on disconnect.
-        if ok && args.full_tunnel {
+        if ok && args.full_tunnel && !narrowed {
             install_ipv6_leak_block();
         }
 
@@ -462,7 +485,7 @@ impl Strongswan {
             // its selected addresses, but publish an unscoped VPN resolver
             // so macOS sends DNS using the tunnel route. Explicit profile
             // servers override negotiated DNS; blank means automatic.
-            let servers = if args.dns_servers.is_empty() {
+            let servers: Vec<String> = if args.dns_servers.is_empty() {
                 crate::dns_health_watchdog::read_active_resolvers()
                     .into_iter()
                     .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
@@ -470,13 +493,44 @@ impl Strongswan {
             } else {
                 args.dns_servers.clone()
             };
+            // Through a narrowed tunnel only the servers inside it answer;
+            // the others are the Mac's own business, reached directly.
+            let servers = if narrowed {
+                covered_by(&servers, &granted)
+            } else {
+                servers
+            };
             crate::dns::set_vpn_dns(&servers);
         }
 
+        let mut message = out.lines().last().unwrap_or("").to_owned();
+        if narrowed {
+            message = format!(
+                "{message}. The gateway only allows {}: only those go through the tunnel.",
+                granted.join(", ")
+            );
+        }
         Ok(ConnectResult {
             ok,
-            message: out.lines().last().unwrap_or("").to_owned(),
+            message,
+            narrowed_to: if narrowed { granted } else { Vec::new() },
         })
+    }
+
+    /// The remote traffic selectors the gateway granted `profile_id`'s child
+    /// SA. Empty when they cannot be read, which is not narrowing: the
+    /// tunnel is then set up as asked.
+    async fn granted_selectors(&self, profile_id: &str) -> Vec<String> {
+        let swanctl = self.swanctl.as_ref().expect("resolved before connect");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run(swanctl, &["--list-sas"]),
+        )
+        .await
+        {
+            Ok(Ok(out)) => parse_child_remote_ts(&extract_sa_block(&out, profile_id)),
+            _ => Vec::new(),
+        }
     }
 
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
@@ -632,6 +686,27 @@ impl Strongswan {
             packets_out,
         })
     }
+}
+
+/// Whether the gateway narrowed a full tunnel: asked for everything, it
+/// granted selectors that leave something out. Selectors that could not be
+/// read are not narrowing.
+fn narrowed(full_tunnel: bool, granted: &[String]) -> bool {
+    full_tunnel && !granted.is_empty() && !granted.iter().any(|ts| ts == "0.0.0.0/0")
+}
+
+/// The servers a packet reaches through the selectors `granted`.
+fn covered_by(servers: &[String], granted: &[String]) -> Vec<String> {
+    let nets: Vec<ipnet::IpNet> = granted.iter().filter_map(|ts| ts.parse().ok()).collect();
+    servers
+        .iter()
+        .filter(|server| {
+            server
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| nets.iter().any(|net| net.contains(&ip)))
+        })
+        .cloned()
+        .collect()
 }
 
 /// Does every negotiated selector have a kernel route pointing at this
@@ -2210,6 +2285,38 @@ mod tests {
             parse_virtual_ip(no_vip),
             None,
             "[4500] is a port, not an address"
+        );
+    }
+
+    /// Elteco's gateway, asked for a full tunnel, granted
+    /// `10.20.200.10/32 === 10.20.3.0/24 10.20.21.0/24`.
+    #[test]
+    fn a_full_tunnel_the_gateway_narrowed_is_not_one() {
+        let elteco = ["10.20.3.0/24".to_owned(), "10.20.21.0/24".to_owned()];
+        assert!(narrowed(true, &elteco));
+        assert!(!narrowed(true, &["0.0.0.0/0".to_owned()]));
+        // Asked for a split tunnel: whatever was granted is the split.
+        assert!(!narrowed(false, &elteco));
+        // Selectors that could not be read change nothing.
+        assert!(!narrowed(true, &[]));
+    }
+
+    #[test]
+    fn only_dns_inside_a_narrowed_tunnel_is_asked_through_it() {
+        let granted = ["10.20.3.0/24".to_owned(), "10.20.21.0/24".to_owned()];
+        let servers =
+            ["10.20.200.1", "10.20.21.53", "8.8.8.8", "not an address"].map(str::to_owned);
+        assert_eq!(
+            covered_by(&servers, &granted),
+            vec!["10.20.21.53".to_owned()]
+        );
+        assert_eq!(
+            covered_by(&servers, &["0.0.0.0/0".to_owned()]),
+            vec![
+                "10.20.200.1".to_owned(),
+                "10.20.21.53".to_owned(),
+                "8.8.8.8".to_owned()
+            ]
         );
     }
 
