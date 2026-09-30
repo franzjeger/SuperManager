@@ -379,27 +379,33 @@ fi
 # Package names drift between distro releases; pkg-config asks the
 # question that matters. Catching it here turns a wall of C linker errors
 # ten minutes into a build into one line before the build starts.
+#
+# Only when building. `--no-build` installs what is already built, and it is
+# how supermgr-update's GUI path arrives here: as root under pkexec, where
+# cargo is not on PATH at all when rustup lives in the user's home.
 # ---------------------------------------------------------------------------
 
-say "Checking build prerequisites"
-command -v cargo >/dev/null || die "cargo not found. Install Rust via your package manager or https://rustup.rs"
+if [ "$DO_BUILD" = 1 ]; then
+    say "Checking build prerequisites"
+    command -v cargo >/dev/null || die "cargo not found. Install Rust via your package manager or https://rustup.rs"
 
-MISSING_LIBS=()
-if command -v pkg-config >/dev/null; then
-    for lib in gtk4 libadwaita-1 vte-2.91-gtk4 openssl dbus-1 glib-2.0; do
-        pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS+=("$lib")
-    done
-else
-    warn "pkg-config not found — skipping the library check; the build will tell you"
-fi
+    MISSING_LIBS=()
+    if command -v pkg-config >/dev/null; then
+        for lib in gtk4 libadwaita-1 vte-2.91-gtk4 openssl dbus-1 glib-2.0; do
+            pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS+=("$lib")
+        done
+    else
+        warn "pkg-config not found — skipping the library check; the build will tell you"
+    fi
 
-if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
-    die "development libraries missing: ${MISSING_LIBS[*]}
+    if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
+        die "development libraries missing: ${MISSING_LIBS[*]}
        The GUI cannot build without them. Install your distro's -dev/-devel
        packages for those, then re-run. (Re-running with --no-deps skips
        straight to the build once you have.)"
+    fi
+    note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
 fi
-note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
 
 # Package installation succeeding does not guarantee that every runtime CLI
 # exists (transitional and split packages are common).  Fail here with the
