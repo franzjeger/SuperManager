@@ -76,7 +76,7 @@ jobs:
       - name: Install build deps
         run: |
           brew update
-          brew install xcodegen pandoc xcbeautify tailscale
+          brew install xcodegen pandoc xcbeautify tailscale wireguard-tools wireguard-go
 
       # Set up a *temporary* keychain just for this run. We import
       # the Developer ID cert into it, then nuke the keychain at

@@ -230,6 +230,18 @@ for ts_bin in tailscale tailscaled; do
         "$ts_path"
 done
 
+# The VPN runtime the helper installs and runs WireGuard with. It checks
+# these signatures (team and identifier) before it runs them as root;
+# wg-quick is a script it checks by content instead.
+for rt_bin in bash wg wireguard-go; do
+    rt_path="$APP/Contents/Resources/vpn-runtime/$rt_bin"
+    [ -f "$rt_path" ] || continue
+    codesign --force --options runtime --timestamp \
+        --sign "$DEVELOPER_ID_APP" \
+        --identifier "com.sybr.supermanager.vpn.$rt_bin" \
+        "$rt_path"
+done
+
 # Sign inside-out, explicitly. NOT `--deep`: it re-signs every nested
 # binary with the OUTER options, which silently stripped the
 # entitlements just applied to the helper and daemon above. Apple
@@ -335,6 +347,30 @@ for ts_bin in tailscale tailscaled; do
     esac
 done
 echo "  tailscale + tailscaled bundled and Developer ID-signed"
+
+# Without the VPN runtime the helper would run Homebrew's WireGuard. A
+# release carries its own, which the helper installs where only root can
+# write.
+echo "→ Verifying bundled VPN runtime"
+for rt_file in bash wg wg-quick wireguard-go; do
+    if [ ! -x "$APP/Contents/Resources/vpn-runtime/$rt_file" ]; then
+        echo "error: vpn-runtime/$rt_file missing from the bundle." >&2
+        echo "       Run 'brew install wireguard-tools wireguard-go' and rebuild." >&2
+        exit 1
+    fi
+done
+for rt_bin in bash wg wireguard-go; do
+    rt_sig="$(codesign -dvv "$APP/Contents/Resources/vpn-runtime/$rt_bin" 2>&1 || true)"
+    case "$rt_sig" in
+        *"Authority=Developer ID Application"*"Identifier=com.sybr.supermanager.vpn.$rt_bin"* \
+        | *"Identifier=com.sybr.supermanager.vpn.$rt_bin"*"Authority=Developer ID Application"*) ;;
+        *)
+            echo "error: bundled $rt_bin is not Developer ID-signed as com.sybr.supermanager.vpn.$rt_bin" >&2
+            exit 1
+            ;;
+    esac
+done
+echo "  VPN runtime bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------
 #
