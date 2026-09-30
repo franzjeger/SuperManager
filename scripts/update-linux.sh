@@ -53,6 +53,9 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+# set -e exits without a word, and the GUI dialog then says "see the output
+# above" about nothing. Name what failed.
+trap 'rc=$?; printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
 
 if [ -n "$INSTALLED_COMMIT" ] \
    && [[ ! "$INSTALLED_COMMIT" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
@@ -133,7 +136,9 @@ ahead)   note "your checkout is ahead of origin — nothing to pull" ;;
 behind)
     COUNT="$(git -C "$CHECKOUT" rev-list --count "$LOCAL..$REMOTE")"
     note "$COUNT new commit(s) on origin:"
-    git -C "$CHECKOUT" log --oneline "$LOCAL..$REMOTE" | head -10 | sed 's/^/    /'
+    # -n, not `| head`: head closing the pipe early SIGPIPEs git log, and
+    # under pipefail that ended the script with 141 whenever >10 were new.
+    git -C "$CHECKOUT" log --oneline -n 10 "$LOCAL..$REMOTE" | sed 's/^/    /'
     [ "$COUNT" -le 10 ] || note "    … and $((COUNT - 10)) more"
     ;;
 diverged)
@@ -211,18 +216,23 @@ BUILD_DIR=$(cd "$CHECKOUT" && cargo metadata --format-version 1 --no-deps 2>/dev
 
 say "Installing"
 INSTALL=(bash "$CHECKOUT/scripts/install-linux.sh" --no-deps --no-build --yes)
+rc=0
 if [ -t 0 ]; then
-    "${INSTALL[@]}"
+    "${INSTALL[@]}" || rc=$?
 else
     command -v pkexec >/dev/null \
         || die "no terminal to ask for sudo in, and pkexec is missing.
        Run supermgr-update from a terminal instead."
     if [ -n "$BUILD_DIR" ]; then
-        pkexec env "CARGO_TARGET_DIR=$BUILD_DIR" "${INSTALL[@]}"
+        pkexec env "CARGO_TARGET_DIR=$BUILD_DIR" "${INSTALL[@]}" || rc=$?
     else
-        pkexec "${INSTALL[@]}"
+        pkexec "${INSTALL[@]}" || rc=$?
     fi
+    # pkexec's own 126: the password prompt was dismissed.
+    [ "$rc" != 126 ] || die "authentication was cancelled, so nothing was installed.
+       The build is done; running the update again only installs it."
 fi
+[ "$rc" = 0 ] || die "the install step failed (exit $rc) — the new build is not installed"
 
 say "Updated to $(git -C "$CHECKOUT" rev-parse --short HEAD)"
 note "The daemon has been restarted with the new binary."

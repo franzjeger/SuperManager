@@ -60,6 +60,9 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+# set -e exits without a word. Under supermgr-update's GUI dialog that leaves
+# "see the output above" pointing at nothing, so name what failed.
+trap 'rc=$?; printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$rc" >&2' ERR
 
 # ---------------------------------------------------------------------------
 # Where cargo puts the binaries.
@@ -81,12 +84,15 @@ die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 # ~20ms and needs no network.
 #
 # The fallback chain matters for the `--no-build` path, which is allowed to run
-# without a usable cargo: env var first, then plain `target`.
+# without a usable cargo: env var first, then plain `target`. "On PATH" is not
+# "usable": as root under supermgr-update's pkexec, /usr/bin/cargo is rustup's
+# shim with no toolchain behind it, and under pipefail its failure used to end
+# the script right here, silently.
 # ---------------------------------------------------------------------------
 BUILD_DIR=""
 if command -v cargo >/dev/null 2>&1; then
     BUILD_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
-        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || BUILD_DIR=""
 fi
 [ -n "$BUILD_DIR" ] || BUILD_DIR="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}"
 
