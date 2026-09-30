@@ -79,11 +79,8 @@ impl Af {
             Af::V6 => "v6",
         }
     }
-    fn route_get_args(self) -> &'static [&'static str] {
-        match self {
-            Af::V4 => &["-n", "get", "default"],
-            Af::V6 => &["-n", "get", "-inet6", "default"],
-        }
+    fn is_v6(self) -> bool {
+        self == Af::V6
     }
     fn route_add_args(self, gw: &str) -> Vec<String> {
         match self {
@@ -112,6 +109,8 @@ pub fn spawn_guardian() -> Result<()> {
 
     SNAPSHOT_V4.get_or_init(|| Mutex::new(None));
     SNAPSHOT_V6.get_or_init(|| Mutex::new(None));
+    remove_stray_loopback_default(Af::V4);
+    remove_stray_loopback_default(Af::V6);
 
     thread::Builder::new()
         .name("route-guardian".into())
@@ -283,83 +282,76 @@ fn tick_one(af: Af, missing: &mut u32) {
     }
 }
 
-/// Parse `/sbin/route -n get [-inet6] default` for gateway + iface.
+/// The primary default route, if it is the user's own way out: not a
+/// tunnel's (utun), not through loopback, and through a gateway it can be
+/// put back by.
 ///
-/// Path note: macOS keeps `route(8)` only at `/sbin/route`.
-/// `/usr/sbin/route` doesn't exist; an early version of this
-/// helper called the wrong path, ENOENT was swallowed, the
-/// guardian became a no-op, and bricks went unrecovered. Always
-/// hard-code `/sbin/route`.
-///
-/// Filtering: we want only the user-facing default route (en0
-/// or similar physical iface), not utun-bound default routes
-/// that tailscale or other VPNs install. `route -n get default`
-/// without filters returns the highest-priority default — which
-/// might be a utun. We post-filter to require non-utun iface.
+/// The entry itself, from the routing table: `route -n get default` is a
+/// lookup, and for IPv6 a lookup of `::`, which the IPv6 leak block of a
+/// full tunnel answers (`::/1` via `::1` on lo0). Taking that for the
+/// default route put a default through loopback back once the tunnel was
+/// gone.
 fn read_default_route(af: Af) -> Option<RouteSnapshot> {
-    let out = crate::proc::bounded(
-        Command::new("/sbin/route").args(af.route_get_args()),
-        crate::proc::PROBE,
-    )
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut gateway = None;
-    let mut iface = None;
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("gateway:") {
-            gateway = Some(rest.trim().to_string());
-        } else if let Some(rest) = trimmed.strip_prefix("interface:") {
-            iface = Some(rest.trim().to_string());
-        }
-    }
-    let snap = RouteSnapshot {
-        gateway: gateway?,
-        interface: iface?,
-    };
-    // Skip utun-bound defaults — those are tailscale's own
-    // routes and aren't what we want to snapshot/restore as
-    // "the user's gateway."
-    if snap.interface.starts_with("utun") {
-        return None;
-    }
-    Some(snap)
+    snapshot_of(crate::route_table::primary_default(af.is_v6()))
 }
 
-/// Like `read_default_route` but WITHOUT filtering utun interfaces.
-///
-/// Used only by `tick_one` to detect whether a VPN tunnel has
-/// legitimately taken over the default route. Not used for
-/// snapshotting — we never want to snapshot a utun default as
-/// "the user's gateway" (we'd restore a utun route that no
-/// longer exists after the tunnel tears down).
-fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
-    let out = crate::proc::bounded(
-        Command::new("/sbin/route").args(af.route_get_args()),
-        crate::proc::PROBE,
-    )
-    .ok()?;
-    if !out.status.success() {
+fn snapshot_of(route: Option<crate::route_table::DefaultRoute>) -> Option<RouteSnapshot> {
+    let route = route?;
+    if route.interface.starts_with("utun")
+        || route.interface.starts_with("lo")
+        || route.gateway.starts_with("link#")
+    {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut gateway = None;
-    let mut iface = None;
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("gateway:") {
-            gateway = Some(rest.trim().to_string());
-        } else if let Some(rest) = trimmed.strip_prefix("interface:") {
-            iface = Some(rest.trim().to_string());
-        }
-    }
     Some(RouteSnapshot {
-        gateway: gateway?,
-        interface: iface?,
+        gateway: route.gateway,
+        interface: route.interface,
     })
+}
+
+/// The primary default route, whoever's it is: `tick_one` uses it to see a
+/// VPN's tunnel has taken the default route over. Never a snapshot, which
+/// would put back a tunnel's route after the tunnel is gone.
+fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
+    crate::route_table::primary_default(af.is_v6()).map(|route| RouteSnapshot {
+        gateway: route.gateway,
+        interface: route.interface,
+    })
+}
+
+/// Remove a default route through loopback, which no network needs and
+/// which sends everything of its family nowhere. The guardian put one back
+/// after an IKEv2 full tunnel, while it read the default route by lookup
+/// (see `read_default_route`); a helper since then clears it once, here.
+fn remove_stray_loopback_default(af: Af) {
+    let Some(route) = crate::route_table::primary_default(af.is_v6()) else {
+        return;
+    };
+    if !route.is_stray_loopback() {
+        return;
+    }
+    let mut args = vec!["-n", "delete"];
+    if af.is_v6() {
+        args.push("-inet6");
+    }
+    args.extend(["default", route.gateway.as_str()]);
+    match crate::proc::bounded(Command::new("/sbin/route").args(&args), crate::proc::MUTATE) {
+        Ok(out) if out.status.success() => tracing::warn!(
+            af = %af.label(),
+            gw = %route.gateway,
+            iface = %route.interface,
+            "removed a default route through loopback"
+        ),
+        Ok(out) => tracing::warn!(
+            af = %af.label(),
+            "could not remove the default route through loopback: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::warn!(
+            af = %af.label(),
+            "could not remove the default route through loopback: {e}"
+        ),
+    }
 }
 
 /// Re-add the default route via `route -q add [-inet6] default <gw>`.
@@ -399,4 +391,39 @@ fn interface_is_up(iface: &str) -> bool {
         .next()
         .map(|l| l.contains("<UP,") || l.contains(",UP,") || l.contains(",UP>"))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::route_table::DefaultRoute;
+
+    fn route(gateway: &str, interface: &str) -> Option<DefaultRoute> {
+        Some(DefaultRoute {
+            gateway: gateway.into(),
+            interface: interface.into(),
+            flags: "UGScg".into(),
+        })
+    }
+
+    #[test]
+    fn only_the_users_own_way_out_is_kept() {
+        assert_eq!(
+            snapshot_of(route("192.168.2.55", "en0")),
+            Some(RouteSnapshot {
+                gateway: "192.168.2.55".into(),
+                interface: "en0".into(),
+            })
+        );
+        assert_eq!(
+            snapshot_of(route("fe80::1%en0", "en0")).map(|s| s.gateway),
+            Some("fe80::1%en0".into())
+        );
+        // A tunnel's, one through loopback, and one with no gateway to put
+        // it back by.
+        assert_eq!(snapshot_of(route("link#23", "utun7")), None);
+        assert_eq!(snapshot_of(route("::1", "lo0")), None);
+        assert_eq!(snapshot_of(route("link#6", "en0")), None);
+        assert_eq!(snapshot_of(None), None);
+    }
 }
