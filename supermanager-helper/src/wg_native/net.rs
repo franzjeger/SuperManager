@@ -1,0 +1,370 @@
+//! The tunnel's addresses, MTU and routes, set with `ifconfig` and `route`
+//! as wg-quick set them, and the routing table as `netstat` shows it.
+
+use std::net::IpAddr;
+
+use anyhow::{bail, Context, Result};
+use ipnet::IpNet;
+use serde::{Deserialize, Serialize};
+use tokio::io::AsyncBufReadExt as _;
+use tokio::process::Command;
+
+const IFCONFIG: &str = "/sbin/ifconfig";
+const ROUTE: &str = "/sbin/route";
+const NETSTAT: &str = "/usr/sbin/netstat";
+
+/// Run a command that changes something; its stderr is the error.
+async fn change(program: &str, args: &[&str]) -> Result<()> {
+    let output = crate::proc::bounded_async(Command::new(program).args(args), crate::proc::MUTATE)
+        .await
+        .with_context(|| format!("run {program}"))?;
+    if !output.status.success() {
+        bail!(
+            "{program} {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// What a command prints, or None when it fails.
+async fn read(program: &str, args: &[&str]) -> Option<String> {
+    let output = crate::proc::bounded_async(Command::new(program).args(args), crate::proc::PROBE)
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether an interface of that name exists. A lookup in the kernel, so
+/// nothing to hang on the way `ifconfig` can on a half-removed utun.
+pub fn exists(interface: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(interface) else {
+        return false;
+    };
+    // SAFETY: a NUL-terminated name the call only reads.
+    unsafe { libc::if_nametoindex(name.as_ptr()) != 0 }
+}
+
+pub async fn add_address(interface: &str, address: &IpNet) -> Result<()> {
+    let net = address.to_string();
+    match address {
+        // A utun is point-to-point: its own address is the far end too.
+        IpNet::V4(v4) => {
+            let own = v4.addr().to_string();
+            change(IFCONFIG, &[interface, "inet", &net, &own, "alias"]).await
+        }
+        IpNet::V6(_) => change(IFCONFIG, &[interface, "inet6", &net, "alias"]).await,
+    }
+}
+
+pub async fn up(interface: &str) -> Result<()> {
+    change(IFCONFIG, &[interface, "up"]).await
+}
+
+pub async fn set_mtu(interface: &str, mtu: u32) -> Result<()> {
+    change(IFCONFIG, &[interface, "mtu", &mtu.to_string()]).await
+}
+
+pub async fn mtu(interface: &str) -> Option<u32> {
+    parse_mtu(&read(IFCONFIG, &[interface]).await?)
+}
+
+/// `en0: flags=8863<UP,...> mtu 1500`
+fn parse_mtu(ifconfig: &str) -> Option<u32> {
+    let mut words = ifconfig.lines().next()?.split_whitespace();
+    words.by_ref().find(|word| *word == "mtu")?;
+    words.next()?.parse().ok()
+}
+
+fn family(ip: IpAddr) -> &'static str {
+    if ip.is_ipv4() {
+        "-inet"
+    } else {
+        "-inet6"
+    }
+}
+
+/// Whether traffic to `net` already leaves through `interface`.
+pub async fn routed_via(net: &IpNet, interface: &str) -> bool {
+    let wanted = format!("interface: {interface}");
+    read(ROUTE, &["-n", "get", family(net.addr()), &net.to_string()])
+        .await
+        .is_some_and(|out| out.lines().any(|line| line.trim() == wanted))
+}
+
+pub async fn add_route(net: &IpNet, interface: &str) -> Result<()> {
+    let dest = net.to_string();
+    change(
+        ROUTE,
+        &[
+            "-q",
+            "-n",
+            "add",
+            family(net.addr()),
+            &dest,
+            "-interface",
+            interface,
+        ],
+    )
+    .await
+}
+
+/// The way out of the primary default route, which a peer's endpoint
+/// keeps taking while the tunnel takes everything else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Via {
+    Gateway(String),
+    /// A default route straight out of an interface, with no gateway.
+    Interface(String),
+    /// No default route: the endpoint's packets are dropped rather than
+    /// sent into the tunnel they carry.
+    Nowhere,
+}
+
+pub async fn default_route(v4: bool) -> (Via, Option<String>) {
+    let family = if v4 { "inet" } else { "inet6" };
+    match read(NETSTAT, &["-nr", "-f", family]).await {
+        Some(table) => parse_default_route(&table),
+        None => (Via::Nowhere, None),
+    }
+}
+
+/// The primary default route in `netstat -nr` output: the first `default`
+/// that is not bound to one interface (flag `I`). Its way out, and its
+/// interface.
+fn parse_default_route(table: &str) -> (Via, Option<String>) {
+    let mut columns = None;
+    for line in table.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.first() == Some(&"Destination") {
+            let find = |name: &str| fields.iter().position(|field| *field == name);
+            columns = find("Gateway").zip(find("Flags")).zip(find("Netif"));
+            continue;
+        }
+        let Some(((gateway, flags), netif)) = columns else {
+            continue;
+        };
+        if fields.first() != Some(&"default") {
+            continue;
+        }
+        let (Some(gateway), Some(flags), Some(netif)) =
+            (fields.get(gateway), fields.get(flags), fields.get(netif))
+        else {
+            continue;
+        };
+        if flags.contains('I') {
+            continue;
+        }
+        let address = gateway.split('%').next().unwrap_or_default();
+        let via = if address.parse::<IpAddr>().is_ok() {
+            Via::Gateway((*gateway).to_owned())
+        } else {
+            Via::Interface((*netif).to_owned())
+        };
+        return (via, Some((*netif).to_owned()));
+    }
+    (Via::Nowhere, None)
+}
+
+/// A host route for a peer's endpoint.
+pub async fn add_host_route(ip: IpAddr, via: &Via) -> Result<()> {
+    let dest = ip.to_string();
+    let mut args = vec!["-q", "-n", "add", family(ip), "-host", dest.as_str()];
+    let blackhole = if ip.is_ipv4() { "127.0.0.1" } else { "::1" };
+    match via {
+        Via::Gateway(gateway) => args.extend(["-gateway", gateway.as_str()]),
+        Via::Interface(interface) => args.extend(["-interface", interface.as_str()]),
+        Via::Nowhere => args.extend([blackhole, "-blackhole"]),
+    }
+    change(ROUTE, &args).await
+}
+
+pub async fn delete_host_route(ip: IpAddr) {
+    let dest = ip.to_string();
+    if let Err(e) = change(ROUTE, &["-q", "-n", "delete", family(ip), "-host", &dest]).await {
+        tracing::debug!("{e:#}");
+    }
+}
+
+/// The messages that say a route or an interface changed. The others,
+/// lookups and misses above all, come several times a second and change
+/// nothing; wg-quick redid its endpoint routes on every one.
+fn is_change(message: &str) -> bool {
+    const CHANGES: [&str; 6] = [
+        "RTM_ADD",
+        "RTM_DELETE",
+        "RTM_CHANGE",
+        "RTM_IFINFO",
+        "RTM_NEWADDR",
+        "RTM_DELADDR",
+    ];
+    message
+        .split(':')
+        .next()
+        .is_some_and(|kind| CHANGES.contains(&kind))
+}
+
+/// Changes to routes and interfaces, from `route -n monitor`.
+#[derive(Default)]
+pub struct RouteEvents {
+    monitor: Option<(
+        tokio::process::Child,
+        tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    )>,
+}
+
+impl RouteEvents {
+    /// Wait for a route or an interface to change, then for the burst one
+    /// change comes as (a network switch, a tunnel coming up) to settle, for
+    /// at most two seconds. Cancel-safe, for `select!`.
+    pub async fn changed(&mut self) {
+        loop {
+            if self.monitor.is_none() {
+                match Command::new(ROUTE)
+                    .args(["-n", "monitor"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        let stdout = child.stdout.take().expect("piped");
+                        let lines = tokio::io::BufReader::new(stdout).lines();
+                        self.monitor = Some((child, lines));
+                    }
+                    Err(e) => {
+                        tracing::warn!("route monitor: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+            }
+            let (_, lines) = self.monitor.as_mut().expect("started above");
+            match lines.next_line().await {
+                Ok(Some(line)) if is_change(&line) => break,
+                Ok(Some(_)) => {}
+                _ => {
+                    // It ended; start another after a pause.
+                    self.monitor = None;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+        if let Some((_, lines)) = self.monitor.as_mut() {
+            let quiet = std::time::Duration::from_millis(500);
+            let settled = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut until = tokio::time::Instant::now() + quiet;
+            while let Ok(Ok(Some(line))) =
+                tokio::time::timeout_at(until.min(settled), lines.next_line()).await
+            {
+                if is_change(&line) {
+                    until = tokio::time::Instant::now() + quiet;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INET: &str = "Routing tables\n\nInternet:\n\
+        Destination        Gateway            Flags               Netif Expire\n\
+        default            link#23            UCSIg               utun7\n\
+        default            192.168.2.55       UGScg                 en0\n\
+        default            192.168.2.55       UGScIg                en1\n\
+        127                127.0.0.1          UCS                   lo0\n";
+
+    #[test]
+    fn the_primary_default_route_is_the_one_not_bound_to_an_interface() {
+        assert_eq!(
+            parse_default_route(INET),
+            (Via::Gateway("192.168.2.55".into()), Some("en0".into()))
+        );
+    }
+
+    #[test]
+    fn an_ipv6_gateway_keeps_its_scope_and_tunnels_are_skipped() {
+        let table = "Internet6:\n\
+            Destination                             Gateway                                 Flags               Netif Expire\n\
+            default                                 fe80::%utun1                            UGcIg               utun1\n\
+            default                                 fe80::1%en0                             UGcg                  en0\n";
+        assert_eq!(
+            parse_default_route(table),
+            (Via::Gateway("fe80::1%en0".into()), Some("en0".into()))
+        );
+        // Only tunnels' own defaults: no default for the endpoint.
+        let only_tunnels = table.replace("UGcg ", "UGcIg");
+        assert_eq!(parse_default_route(&only_tunnels), (Via::Nowhere, None));
+    }
+
+    #[test]
+    fn a_default_route_out_of_an_interface_is_followed_there() {
+        let table = "Destination        Gateway            Flags               Netif Expire\n\
+            default            link#20            UCSg                utun5\n";
+        assert_eq!(
+            parse_default_route(table),
+            (Via::Interface("utun5".into()), Some("utun5".into()))
+        );
+    }
+
+    #[test]
+    fn columns_are_found_by_their_heading() {
+        // Older macOS printed Refs and Use before Netif.
+        let table =
+            "Destination        Gateway            Flags        Refs      Use   Netif Expire\n\
+            default            10.0.0.1           UGSc           47        0     en0\n";
+        assert_eq!(
+            parse_default_route(table),
+            (Via::Gateway("10.0.0.1".into()), Some("en0".into()))
+        );
+        assert_eq!(parse_default_route("no table here"), (Via::Nowhere, None));
+    }
+
+    #[test]
+    fn the_mtu_is_read_from_the_first_line() {
+        assert_eq!(
+            parse_mtu(
+                "en0: flags=8863<UP,BROADCAST,SMART,RUNNING> mtu 1500\n\toptions=6460<TSO4>\n"
+            ),
+            Some(1500)
+        );
+        assert_eq!(
+            parse_mtu("utun3: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST>"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_changes_count_as_events() {
+        for change in [
+            "RTM_ADD: Add Route: len 144, pid: 0, seq 0, errno 0, flags:<UP,GATEWAY>",
+            "RTM_DELETE: Delete Route: len 144, pid: 0, seq 0, errno 0",
+            "RTM_IFINFO: iface status change: len 112, if# 18, flags:<UP,POINTOPOINT>",
+            "RTM_NEWADDR: address being added to iface: len 64, metric 0",
+        ] {
+            assert!(is_change(change), "{change}");
+        }
+        for noise in [
+            "RTM_GET: Report Metrics: len 164, pid: 9588, seq 1, errno 0",
+            "RTM_MISS: Lookup failed on this address: len 92, pid: 0",
+            "got message of size 164 on Tue Sep 30 07:40:12 2026",
+            "",
+        ] {
+            assert!(!is_change(noise), "{noise}");
+        }
+    }
+
+    #[test]
+    fn interfaces_are_looked_up_in_the_kernel() {
+        assert!(exists("lo0"));
+        assert!(!exists("utun-not-there"));
+        assert!(!exists("bad\0name"));
+    }
+}

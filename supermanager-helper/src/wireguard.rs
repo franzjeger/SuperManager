@@ -37,9 +37,16 @@
 //! lines as shell commands, as root. SuperManager renders its configs from
 //! profile fields and never writes those, so a config that has them is
 //! refused (`refuse_hooks`).
+//!
+//! ## Without wg-quick
+//!
+//! With `WgConnectArgs::native` the helper sets the tunnel up itself
+//! (`wg_native`) and writes no config file. A tunnel it set up that way is
+//! taken down that way, whichever way the next connect asks for.
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
@@ -60,12 +67,13 @@ const WG_QUICK_BUDGET: u64 = 30;
 /// Absolute paths sidestep the resolver entirely.
 const WG_CONF_DIR: &str = "/etc/wireguard";
 
-/// Lifetime-of-process WireGuard controller. Not much state here yet
-/// — `wg-quick` itself is what tracks active interfaces — but
-/// keeping this as a struct mirrors the `Strongswan` shape so the
-/// dispatch in `main.rs` stays uniform.
+/// Lifetime-of-process WireGuard controller. `wg-quick` tracks the
+/// tunnels it set up itself; the ones the helper set up without it
+/// (`wg_native`) have their supervisors here.
 #[derive(Default)]
-pub struct WireGuard {}
+pub struct WireGuard {
+    native: HashMap<String, crate::wg_native::Tunnel>,
+}
 
 /// Arguments for `wg_connect`. Mirrors what the daemon sends.
 #[derive(Debug, Deserialize)]
@@ -83,6 +91,12 @@ pub struct WgConnectArgs {
 
     #[serde(default)]
     pub dns_servers: Vec<String>,
+
+    /// Set the tunnel up without wg-quick (`wg_native`). Off unless the
+    /// app's setting asks for it, until it has carried every kind of
+    /// profile.
+    #[serde(default)]
+    pub native: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +162,44 @@ impl WireGuard {
         Self::default()
     }
 
+    /// Supervise the tunnels an earlier helper set up without wg-quick.
+    pub async fn adopt_native(&mut self) {
+        self.native = crate::wg_native::adopt().await;
+    }
+
+    /// Take the tunnel `name` down if the helper set it up without
+    /// wg-quick; None if it did not.
+    async fn native_down(&mut self, name: &str) -> Option<anyhow::Result<()>> {
+        let tunnel = self.native.remove(name);
+        if tunnel.is_none() && !crate::wg_native::exists(name) {
+            return None;
+        }
+        Some(crate::wg_native::down(name, tunnel).await)
+    }
+
+    async fn native_connect(&mut self, name: &str, args: &WgConnectArgs) -> WgConnectResult {
+        // One an earlier wg-quick connect left has the private key in it.
+        let _ = std::fs::remove_file(conf_path_for(name));
+        match crate::wg_native::up(name, &args.conf_content).await {
+            Ok((interface, tunnel)) => {
+                self.native.insert(name.to_owned(), tunnel);
+                if !args.dns_servers.is_empty() {
+                    crate::dns::set_vpn_dns(&args.dns_servers);
+                }
+                WgConnectResult {
+                    success: true,
+                    message: format!("WireGuard tunnel '{name}' up on {interface}"),
+                    interface: Some(interface),
+                }
+            }
+            Err(e) => WgConnectResult {
+                success: false,
+                message: format!("{e:#}"),
+                interface: None,
+            },
+        }
+    }
+
     /// Bring the tunnel up. Idempotent — if a tunnel with this name
     /// already exists (e.g. a previous Connect that the GUI lost
     /// track of, or a wg-quick session left behind across an app
@@ -163,7 +215,6 @@ impl WireGuard {
     ///      which `utunN` `wireguard-go` actually picked.
     pub async fn connect(&mut self, args: &WgConnectArgs) -> anyhow::Result<WgConnectResult> {
         refuse_hooks(&args.conf_content)?;
-        let wg_quick = crate::vpn_runtime::wg_quick()?;
         let name = interface_name(&args.profile_id);
         let conf_path = conf_path_for(&name);
 
@@ -173,7 +224,10 @@ impl WireGuard {
         // wg-quick mid-failure can leave the utun up while our state
         // says it's down. Tear it down silently rather than greet
         // the user with "already exists."
-        if read_name_mapping(&name).is_some() {
+        if let Some(Err(e)) = self.native_down(&name).await {
+            tracing::warn!("leftover WireGuard tunnel {name}: {e:#}");
+        } else if read_name_mapping(&name).is_some() {
+            let wg_quick = crate::vpn_runtime::wg_quick()?;
             let _ = crate::proc::bounded_async(
                 wg_quick.command().arg("down").arg(&conf_path),
                 WG_QUICK_BUDGET,
@@ -192,6 +246,11 @@ impl WireGuard {
                 let _ = std::fs::remove_file(format!("/var/run/wireguard/{utun}.sock"));
             }
         }
+
+        if args.native {
+            return Ok(self.native_connect(&name, args).await);
+        }
+        let wg_quick = crate::vpn_runtime::wg_quick()?;
 
         // Make sure the parent dir exists with restrictive mode.
         std::fs::create_dir_all(WG_CONF_DIR).with_context(|| format!("create {WG_CONF_DIR}"))?;
@@ -262,8 +321,22 @@ impl WireGuard {
         &mut self,
         args: &WgDisconnectArgs,
     ) -> anyhow::Result<WgDisconnectResult> {
-        let wg_quick = crate::vpn_runtime::wg_quick()?;
         let name = interface_name(&args.profile_id);
+        if let Some(result) = self.native_down(&name).await {
+            let _ = std::fs::remove_file(conf_path_for(&name));
+            crate::dns::clear_vpn_dns();
+            return Ok(match result {
+                Ok(()) => WgDisconnectResult {
+                    success: true,
+                    message: format!("WireGuard tunnel '{name}' down"),
+                },
+                Err(e) => WgDisconnectResult {
+                    success: false,
+                    message: format!("Tunnel still up despite teardown: {e:#}"),
+                },
+            });
+        }
+        let wg_quick = crate::vpn_runtime::wg_quick()?;
 
         // 1. Capture the utun mapping before wg-quick deletes the
         //    `.name` file so we can still tear the interface down by

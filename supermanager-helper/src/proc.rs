@@ -397,6 +397,29 @@ fn kill(child: &mut Child, scope: Scope) {
     }
 }
 
+/// Whether process `pid` runs the executable at `path`. A pid written down
+/// can outlive its process, and the pid be reused by something else.
+pub fn process_is(pid: i32, path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let len = unsafe {
+        libc::proc_pidpath(
+            pid,
+            buf.as_mut_ptr().cast(),
+            u32::try_from(buf.len()).unwrap_or(0),
+        )
+    };
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    if len == 0 || pid <= 0 {
+        return false;
+    }
+    let running = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..len]));
+    std::fs::canonicalize(path).is_ok_and(|expected| expected == running)
+}
+
 /// [`bounded`] for tokio commands on the async RPC paths. The child is
 /// `SIGKILLed` through `kill_on_drop` when the budget runs out, and the timeout
 /// surfaces as `io::ErrorKind::TimedOut`, like the sync version.
