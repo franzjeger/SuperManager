@@ -134,9 +134,9 @@ struct NetworkSettingsView: View {
     private var wireGuardCard: some View {
         sectionCard(title: "WireGuard", systemImage: "lock.shield") {
             @Bindable var s = settings
-            Toggle("Set up tunnels without wg-quick (experimental)",
+            Toggle("Set up tunnels without wg-quick",
                    isOn: $s.wireguardNativeSetup)
-            Text("The helper starts wireguard-go and sets the tunnel's addresses, routes and MTU itself. No config file with the private key is written to disk, and a tunnel stays up when the helper restarts. Applies from the next connect; a tunnel already up is taken down the way it was set up.")
+            Text("The helper starts wireguard-go and sets the tunnel's addresses, routes and MTU itself. No config file with the private key is written to disk, and a tunnel stays up when the helper restarts. Turn this off to use wg-quick instead. Applies from the next connect; a tunnel already up is taken down the way it was set up.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

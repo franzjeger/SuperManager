@@ -83,8 +83,8 @@ final class AppSettings {
     // MARK: - VPN
 
     /// Have the helper set WireGuard tunnels up itself instead of running
-    /// wg-quick. Off by default until it has carried every kind of
-    /// profile; applies from the next connect.
+    /// wg-quick. On unless turned off, which goes back to wg-quick from the
+    /// next connect.
     var wireguardNativeSetup: Bool {
         didSet { defaults.set(wireguardNativeSetup, forKey: Keys.wireguardNativeSetup) }
     }
@@ -173,6 +173,6 @@ final class AppSettings {
         self.anthropicApiKey =
             (defaults.string(forKey: Keys.anthropicApiKey)) ?? ""
         self.wireguardNativeSetup =
-            (defaults.object(forKey: Keys.wireguardNativeSetup) as? Bool) ?? false
+            (defaults.object(forKey: Keys.wireguardNativeSetup) as? Bool) ?? true
     }
 }

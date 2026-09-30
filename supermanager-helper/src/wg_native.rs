@@ -1,7 +1,7 @@
 //! WireGuard without wg-quick. The helper starts wireguard-go from the VPN
 //! runtime, configures it over its socket, and sets up the tunnel's
-//! addresses, MTU and routes itself. It is behind `WgConnectArgs::native`
-//! until it has carried every kind of profile; wg-quick stays the default.
+//! addresses, MTU and routes itself. It is the default; the app's setting
+//! can still ask for wg-quick (`WgConnectArgs::native`).
 //!
 //! What wg-quick did for SuperManager's configs, and where it is here:
 //!
