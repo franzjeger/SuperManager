@@ -353,17 +353,28 @@ impl WireGuard {
                 },
             });
         }
-        let wg_quick = crate::vpn_runtime::wg_quick()?;
-
         // 1. Capture the utun mapping before wg-quick deletes the
         //    `.name` file so we can still tear the interface down by
         //    its real name if wg-quick fails.
         let utun_name_before = read_name_mapping(&name);
+        let conf_path = conf_path_for(&name);
+
+        // Not up at all. The app disconnects every profile before sleep,
+        // and running wg-quick for each one only failed and said so in
+        // the log. DNS is cleared as the teardown below would.
+        if !wg_quick_has_tunnel(utun_name_before.as_deref(), &conf_path) {
+            crate::dns::clear_vpn_dns();
+            tracing::debug!(tunnel = %name, "WireGuard tunnel was not up");
+            return Ok(WgDisconnectResult {
+                success: true,
+                message: format!("WireGuard tunnel '{name}' was not up"),
+            });
+        }
+        let wg_quick = crate::vpn_runtime::wg_quick()?;
 
         // 2. Try the clean path. Pass the absolute conf path for the
         //    same reason as in `connect` — bypass wg-quick's
         //    brew-baked-in CONFIG_PATH.
-        let conf_path = conf_path_for(&name);
         let output = crate::proc::bounded_async(
             wg_quick.command().arg("down").arg(&conf_path),
             WG_QUICK_BUDGET,
@@ -592,6 +603,12 @@ fn interface_name(profile_id: &str) -> String {
     format!("smwg{hex}")
 }
 
+/// Whether wg-quick has anything of a tunnel's to take down: the mapping
+/// to its utun, or the config file it was brought up from.
+fn wg_quick_has_tunnel(mapping: Option<&str>, conf: &Path) -> bool {
+    mapping.is_some() || conf.exists()
+}
+
 fn conf_path_for(name: &str) -> PathBuf {
     Path::new(WG_CONF_DIR).join(format!("{name}.conf"))
 }
@@ -713,6 +730,18 @@ mod tests {
         assert!(n.starts_with("smwg"));
         // Stability across repeated calls on the same input.
         assert_eq!(n, interface_name(id));
+    }
+
+    #[test]
+    fn wg_quick_is_run_only_for_a_tunnel_it_has() {
+        let dir = std::env::temp_dir().join(format!("smwg-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&dir).unwrap();
+        let conf = dir.join("smwg12345678.conf");
+        assert!(!wg_quick_has_tunnel(None, &conf));
+        assert!(wg_quick_has_tunnel(Some("utun9"), &conf));
+        std::fs::write(&conf, "[Interface]\n").unwrap();
+        assert!(wg_quick_has_tunnel(None, &conf));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
