@@ -485,24 +485,26 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
     let args = crate::strongswan::StatusArgs {
         profile_id: p.profile_id.clone(),
     };
-    let connected = {
+    let status = {
         let mut g = sw.lock().await;
-        matches!(g.status(&args).await, Ok(s) if s.state == "connected")
+        g.status(&args).await
     };
-    if !connected {
+    let Ok(status) = status else {
+        return false;
+    };
+    if status.state != "connected" {
         return false;
     }
     // Route-aware health: a full-tunnel SA can be ESTABLISHED while its
     // 0/1+128/1 split-defaults were externally flushed, leaving a live-but-
     // routeless tunnel that leaks traffic in cleartext while status reads
     // "connected". Treat that as not-connected so the watchdog replays the
-    // connect and re-installs the routes. Split-tunnel profiles install no
-    // 0/1, so only apply this when the profile asked for a full tunnel.
-    let full_tunnel =
-        serde_json::from_value::<crate::strongswan::ConnectArgs>(p.last_connect_args.clone())
-            .map(|a| a.full_tunnel)
-            .unwrap_or(false);
-    if full_tunnel && !crate::strongswan::full_tunnel_routes_present() {
+    // connect and re-installs the routes. Only a tunnel the gateway granted
+    // everything has those routes: a split tunnel has none, and neither has
+    // a full tunnel the gateway narrowed to its own networks, which would
+    // otherwise be replayed, and cut, every 30 s.
+    if carries_everything(&status.active_routes) && !crate::strongswan::full_tunnel_routes_present()
+    {
         tracing::warn!(
             profile = %p.profile_id,
             "auto_reconnect: SA established but full-tunnel routes missing — forcing replay"
@@ -510,6 +512,11 @@ async fn sw_connected(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> bool {
         return false;
     }
     true
+}
+
+/// Whether the negotiated selectors take all of IPv4 through the tunnel.
+fn carries_everything(selectors: &[String]) -> bool {
+    selectors.iter().any(|ts| ts == "0.0.0.0/0")
 }
 
 /// True if THIS profile's IKEv2 SA is ESTABLISHED, regardless of whether its
@@ -535,6 +542,19 @@ async fn replay_sw(p: &WatchedProfile, sw: Arc<Mutex<Strongswan>>) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The route guard wants the 0/1 halves only where the gateway granted
+    /// everything: Elteco's gateway, asked for a full tunnel, granted two
+    /// networks, and the guard reconnected it every 30 s.
+    #[test]
+    fn only_a_tunnel_granted_everything_needs_the_halves() {
+        assert!(carries_everything(&["0.0.0.0/0".to_owned()]));
+        assert!(!carries_everything(&[
+            "10.20.3.0/24".to_owned(),
+            "10.20.21.0/24".to_owned()
+        ]));
+        assert!(!carries_everything(&[]));
+    }
 
     #[test]
     fn watched_profile_without_mode_defaults_to_always_on() {
