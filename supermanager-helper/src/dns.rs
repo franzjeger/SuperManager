@@ -164,6 +164,53 @@ pub(crate) fn detect_active_network_service() -> Option<String> {
     None
 }
 
+/// The resolvers the Mac uses now: the primary service's, as configd
+/// derives them into `State:/Network/Global/DNS`. Empty when it has none,
+/// or they cannot be read.
+pub fn system_resolvers() -> Vec<String> {
+    let Ok(mut child) = std::process::Command::new("/usr/sbin/scutil")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(b"open\nshow State:/Network/Global/DNS\nquit\n");
+    }
+    crate::proc::wait_bounded(child, crate::proc::PROBE, "scutil (show DNS)")
+        .map(|out| server_addresses(&String::from_utf8_lossy(&out.stdout)))
+        .unwrap_or_default()
+}
+
+/// Keep the Mac's own resolvers answering through a tunnel that takes all
+/// of IPv4 or IPv6, and return them. mDNSResponder binds its queries to
+/// them to the primary interface, where the tunnel's two halves leave no
+/// route, so every lookup hangs. As VPN DNS they are not bound to an
+/// interface and follow the routes: through the tunnel, or straight onto
+/// the local network for a resolver there.
+pub fn follow_system_resolvers() -> Vec<String> {
+    let servers = system_resolvers();
+    set_vpn_dns(&servers);
+    servers
+}
+
+/// `ServerAddresses` from `scutil`'s `show` of a DNS dictionary: the
+/// entries of its array, each an address.
+fn server_addresses(dictionary: &str) -> Vec<String> {
+    dictionary
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("ServerAddresses"))
+        .skip(1)
+        .take_while(|line| line.trim() != "}")
+        .filter_map(|line| line.split_once(" : "))
+        .map(|(_, address)| address.trim())
+        .filter(|address| address.parse::<std::net::IpAddr>().is_ok())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Write VPN DNS directly to the State store via `scutil`.
 /// This avoids the persistent Setup store (`networksetup`), meaning
 /// it never leaves "manual DNS" behind if the process crashes.
@@ -230,6 +277,19 @@ mod tests {
         assert!(script.contains("SupplementalMatchOrders * # 100\n"));
         assert!(!script.contains("Global/DNS"));
         assert!(!script.contains("InterfaceName"));
+    }
+
+    #[test]
+    fn the_system_resolvers_are_the_server_addresses() {
+        let shown = "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 8.8.8.8\n    \
+                     1 : 2001:4860:4860::8888\n    2 : fe80::1%en0\n  }\n  \
+                     __IF_INDEX__ : 14\n  __ORDER__ : 0\n}\n";
+        // A scoped link-local address cannot leave unbound; it is left out.
+        assert_eq!(
+            server_addresses(shown),
+            vec!["8.8.8.8".to_owned(), "2001:4860:4860::8888".to_owned()]
+        );
+        assert!(server_addresses("  No such key\n").is_empty());
     }
 
     #[test]

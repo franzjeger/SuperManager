@@ -180,13 +180,10 @@ impl WireGuard {
     async fn native_connect(&mut self, name: &str, args: &WgConnectArgs) -> WgConnectResult {
         // One an earlier wg-quick connect left has the private key in it.
         let _ = std::fs::remove_file(conf_path_for(name));
-        match crate::wg_native::up(name, &args.conf_content).await {
+        match crate::wg_native::up(name, &args.conf_content, &args.dns_servers).await {
             Ok((interface, tunnel)) => {
                 tracing::info!(tunnel = %name, %interface, "WireGuard tunnel up without wg-quick");
                 self.native.insert(name.to_owned(), tunnel);
-                if !args.dns_servers.is_empty() {
-                    crate::dns::set_vpn_dns(&args.dns_servers);
-                }
                 WgConnectResult {
                     success: true,
                     message: format!("WireGuard tunnel '{name}' up on {interface}"),
@@ -306,6 +303,10 @@ impl WireGuard {
 
         if !args.dns_servers.is_empty() {
             crate::dns::set_vpn_dns(&args.dns_servers);
+        } else if crate::wg_native::takes_all(&args.conf_content) {
+            // The halves leave the Mac's own resolvers unreachable where
+            // mDNSResponder asks them; see `dns::follow_system_resolvers`.
+            crate::dns::follow_system_resolvers();
         }
 
         Ok(WgConnectResult {

@@ -20,7 +20,9 @@
 //! - Down: without its socket wireguard-go exits, and the utun and every
 //!   route through it go with it.
 //!
-//! DNS is the helper's own either way (`dns::set_vpn_dns`). There are no
+//! DNS is the helper's own (`dns::set_vpn_dns`): the servers the profile
+//! pushes, or for a tunnel that takes all of a family, the Mac's own
+//! resolvers, kept in line with the network ([`apply_dns`]). There are no
 //! hooks, and no config file with the private key on disk: the key goes
 //! from the RPC to wireguard-go's socket.
 //!
@@ -69,6 +71,10 @@ struct State {
     all6: bool,
     #[serde(default)]
     endpoint_routes: EndpointRoutes,
+    /// The Mac's own resolvers as the tunnel's DNS, when the tunnel takes
+    /// all of a family and the profile pushes none: see [`apply_dns`].
+    #[serde(default)]
+    system_dns: Option<Vec<String>>,
 }
 
 impl State {
@@ -128,9 +134,17 @@ fn read_name_file(name: &str) -> Option<String> {
     (!number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())).then(|| interface.to_owned())
 }
 
-/// Set up the tunnel `name` as `text`, a rendered config, says. Returns its
-/// utun and its supervisor.
-pub async fn up(name: &str, text: &str) -> Result<(String, Tunnel)> {
+/// Whether a rendered config takes all of IPv4 or IPv6 through the tunnel.
+pub fn takes_all(text: &str) -> bool {
+    conf::parse(text).is_ok_and(|config| {
+        let plan = plan_routes(config.peers.iter().flat_map(|peer| &peer.allowed_ips));
+        plan.all4 || plan.all6
+    })
+}
+
+/// Set up the tunnel `name` as `text`, a rendered config, says, with the
+/// DNS servers the profile pushes. Returns its utun and its supervisor.
+pub async fn up(name: &str, text: &str, dns: &[String]) -> Result<(String, Tunnel)> {
     let config = conf::parse(text).context("the WireGuard config")?;
     let program = crate::vpn_runtime::wireguard_go()?;
     let endpoints = resolve(&config).await?;
@@ -146,12 +160,44 @@ pub async fn up(name: &str, text: &str) -> Result<(String, Tunnel)> {
         all4: false,
         all6: false,
         endpoint_routes: EndpointRoutes::default(),
+        system_dns: None,
     };
     if let Err(e) = configure(&mut state, &config, &endpoints).await {
         teardown(&state, Some(child)).await;
         return Err(e);
     }
+    apply_dns(&mut state, dns);
+    if let Err(e) = state.save() {
+        tracing::warn!("{e:#}");
+    }
     Ok((interface, supervise(state, Some(child))))
+}
+
+/// The servers the profile pushes. Without them, a tunnel that takes all
+/// of a family keeps the Mac's own resolvers working through it
+/// (`dns::follow_system_resolvers`), and its supervisor follows them when
+/// the network changes them.
+fn apply_dns(state: &mut State, pushed: &[String]) {
+    if !pushed.is_empty() {
+        crate::dns::set_vpn_dns(pushed);
+    } else if state.all4 || state.all6 {
+        state.system_dns = Some(crate::dns::follow_system_resolvers());
+    }
+}
+
+/// The Mac's own resolvers again, if the network changed them. Returns
+/// whether it did.
+fn refresh_system_dns(state: &mut State) -> bool {
+    let Some(following) = &state.system_dns else {
+        return false;
+    };
+    let now = crate::dns::system_resolvers();
+    if now.is_empty() || &now == following {
+        return false;
+    }
+    crate::dns::set_vpn_dns(&now);
+    state.system_dns = Some(now);
+    true
 }
 
 /// Each peer's endpoint as an address. Resolved before anything changes:
@@ -431,7 +477,9 @@ fn supervise(mut state: State, mut child: Option<Child>) -> Tunnel {
                     if !net::exists(&state.interface) {
                         break "its interface is gone";
                     }
-                    if refresh_endpoint_routes(&mut state).await {
+                    let routes = refresh_endpoint_routes(&mut state).await;
+                    let dns = refresh_system_dns(&mut state);
+                    if routes || dns {
                         if let Err(e) = state.save() {
                             tracing::warn!("{e:#}");
                         }
@@ -707,7 +755,7 @@ mod tests {
             key(1),
             key(2)
         );
-        let (interface, tunnel) = up(name, &config).await.unwrap();
+        let (interface, tunnel) = up(name, &config, &[]).await.unwrap();
         assert!(net::exists(&interface));
         assert_eq!(read_name_file(name).as_deref(), Some(interface.as_str()));
         assert!(net::has_own_route(&"10.213.1.0/24".parse().unwrap(), &interface).await);
@@ -719,6 +767,21 @@ mod tests {
         assert!(!net::exists(&interface));
         assert!(!exists(name));
         assert!(read_name_file(name).is_none());
+    }
+
+    #[test]
+    fn a_full_tunnel_is_one_that_takes_all_of_a_family() {
+        let config = |allowed: &str| {
+            format!(
+                "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n\
+                 [Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+                 AllowedIPs = {allowed}\n"
+            )
+        };
+        assert!(takes_all(&config("0.0.0.0/0")));
+        assert!(takes_all(&config("192.168.100.0/24, ::/0")));
+        assert!(!takes_all(&config("192.168.100.0/24, 192.168.2.1/32")));
+        assert!(!takes_all("not a config"));
     }
 
     #[test]
@@ -735,6 +798,7 @@ mod tests {
                 via6: Some(Via::Interface("utun5".into())),
                 routed: ips(&["198.51.100.7"]),
             },
+            system_dns: Some(vec!["8.8.8.8".into()]),
         };
         let json = serde_json::to_vec(&state).unwrap();
         assert_eq!(serde_json::from_slice::<State>(&json).unwrap(), state);
