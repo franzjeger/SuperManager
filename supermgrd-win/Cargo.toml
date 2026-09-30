@@ -71,7 +71,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
 ] }
-eventlog = "0.3"
+eventlog = "0.4"
 log      = "0.4"
 # WireGuardNT Rust bindings. Dynamically loads `wireguard.dll` at runtime
 # via libloading, so this dep does not pull a build-time SDK requirement.
