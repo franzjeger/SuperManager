@@ -22,7 +22,6 @@
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Best-effort cleanup of `supermanager-*` swanctl configs and secrets
@@ -226,9 +225,17 @@ pub struct StatusResult {
     pub packets_out: u64,
 }
 
-/// Holds onto the strongSwan install paths and the supervised charon
-/// process. `&mut self` is required for connect/disconnect because they
-/// may need to (re)launch charon.
+/// Where charon records its pid; it refuses to start while that names a
+/// running charon.
+const CHARON_PID_FILE: &str = "/var/run/charon.pid";
+
+/// Holds onto the strongSwan install paths and the charon in use.
+/// `&mut self` is required for connect/disconnect because they may need
+/// to (re)launch charon.
+///
+/// charon runs in its own session and writes to the helper's log, so it
+/// and its tunnels outlive a helper restart or upgrade. A helper takes over
+/// the charon it finds answering instead of starting a second one.
 pub struct Strongswan {
     /// `<brew>/sbin/charon-systemd` — the daemon we launch as a child.
     /// Resolved lazily on first use because the user might not have
@@ -238,8 +245,13 @@ pub struct Strongswan {
     swanctl: Option<PathBuf>,
     /// `<brew>/etc` — strongSwan's config root.
     etc: Option<PathBuf>,
-    /// Handle to the charon daemon we launched. None until first connect.
+    /// The charon this helper started, kept so it can be reaped. None until
+    /// first connect, or when the charon in use is an adopted one.
     charon_child: Option<tokio::process::Child>,
+    /// A charon an earlier helper started, which this one took over.
+    adopted_charon: Option<i32>,
+    pid_file: PathBuf,
+    log_file: PathBuf,
 }
 
 impl Strongswan {
@@ -249,6 +261,9 @@ impl Strongswan {
             swanctl: None,
             etc: None,
             charon_child: None,
+            adopted_charon: None,
+            pid_file: PathBuf::from(CHARON_PID_FILE),
+            log_file: PathBuf::from(crate::HELPER_LOG),
         }
     }
 
@@ -298,85 +313,109 @@ impl Strongswan {
         ))
     }
 
-    /// Launch charon as a child process if it's not already running.
-    /// We supervise it ourselves rather than relying on a separate
-    /// LaunchDaemon so a SuperManager uninstall doesn't leave charon
-    /// hanging around as a system service.
+    /// Make sure a charon is running and answering: the one this helper
+    /// started, else one an earlier helper started and left running with
+    /// its tunnels, else a new one. We supervise it ourselves rather than
+    /// relying on a separate LaunchDaemon so a SuperManager uninstall
+    /// doesn't leave charon registered as a system service.
     async fn ensure_charon(&mut self) -> anyhow::Result<()> {
         if let Some(child) = &mut self.charon_child {
             // try_wait returns Ok(None) while still running.
             match child.try_wait() {
                 Ok(None) => return Ok(()),
-                Ok(Some(status)) => {
-                    tracing::warn!("charon previously exited: {status:?}");
-                    self.charon_child = None;
-                }
-                Err(e) => {
-                    tracing::warn!("charon try_wait error: {e}");
-                    self.charon_child = None;
-                }
+                Ok(Some(status)) => tracing::warn!("charon previously exited: {status:?}"),
+                Err(e) => tracing::warn!("charon try_wait error: {e}"),
             }
+            self.charon_child = None;
         }
+        let charon = self.charon.clone().expect("resolve() must run first");
+        let swanctl = self.swanctl.clone().expect("resolve() must run first");
+        let running = self
+            .adopted_charon
+            .or_else(|| running_charon(&self.pid_file, &charon));
+        if let Some(pid) = running.filter(|&pid| process_is(pid, &charon)) {
+            if answers(&swanctl).await {
+                if self.adopted_charon.replace(pid).is_none() {
+                    tracing::info!(pid, "took over the charon an earlier helper started");
+                }
+                return Ok(());
+            }
+            tracing::warn!(pid, "charon is not answering; starting a new one");
+            stop_process(pid).await;
+        }
+        self.adopted_charon = None;
+        self.start_charon(&charon, &swanctl).await
+    }
 
-        let charon = self
-            .charon
-            .as_ref()
-            .expect("resolve() must run first")
-            .clone();
-        let etc = self.etc.as_ref().expect("resolve() must run first").clone();
+    async fn start_charon(&mut self, charon: &Path, swanctl: &Path) -> anyhow::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::process::CommandExt as _;
+        let etc = self.etc.clone().expect("resolve() must run first");
+        // Output goes to the helper's log rather than through a pipe to
+        // this process, which would break when the helper exits.
+        let log = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o644)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&self.log_file)
+            .with_context(|| format!("open {}", self.log_file.display()))?;
+        let logged_before = log.metadata().map_or(0, |m| m.len());
 
         // charon-systemd reads /etc/strongswan.conf and the swanctl plugin
         // talks to /var/run/charon.vici. Set STRONGSWAN_CONF to point at
         // the brew prefix so we don't depend on /etc/strongswan.conf.
-        let mut cmd = Command::new(&charon);
+        let mut cmd = Command::new(charon);
         cmd.env("STRONGSWAN_CONF", etc.join("strongswan.conf"))
             .env("SWANCTL_DIR", etc.join("swanctl"))
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().context("share the log")?)
+            .stderr(log);
+        // Its own session, out of the helper's process group: launchd
+        // stops that group together with the helper, and the tunnels must
+        // not stop with it.
+        unsafe {
+            cmd.as_std_mut().pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawn {}", charon.display()))?;
-        // Keep a bounded startup diagnostic, and continue draining stderr
-        // after startup so a full pipe can never block charon.
-        let diagnostic = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-        let captured = diagnostic.clone();
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let reader = tokio::spawn(async move {
-            let mut chunk = [0u8; 2048];
-            while let Ok(count) = stderr.read(&mut chunk).await {
-                if count == 0 {
-                    break;
-                }
-                tracing::info!(
-                    "charon: {}",
-                    String::from_utf8_lossy(&chunk[..count]).trim()
-                );
-                let mut tail = captured.lock().unwrap();
-                tail.extend_from_slice(&chunk[..count]);
-                let excess = tail.len().saturating_sub(8192);
-                tail.drain(..excess);
-            }
-        });
-        if let Err(error) = wait_for_charon(
-            &mut child,
-            self.swanctl.as_ref().expect("resolve() must run first"),
-            std::time::Duration::from_secs(10),
-        )
-        .await
+        if let Err(error) =
+            wait_for_charon(&mut child, swanctl, std::time::Duration::from_secs(10)).await
         {
             let _ = child.kill().await;
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), reader).await;
-            let tail = diagnostic.lock().unwrap();
-            let details = String::from_utf8_lossy(&tail);
+            let details = read_from(&self.log_file, logged_before, 8192);
             return Err(anyhow!(
                 "{error:#}\n\nVPN engine startup details:\n{}",
                 details.trim()
             ));
         }
         self.charon_child = Some(child);
-
         Ok(())
+    }
+
+    /// Stop the charon in use, ours or adopted, before a fresh one starts.
+    async fn stop_charon(&mut self) {
+        if let Some(mut child) = self.charon_child.take() {
+            let _ = child.kill().await;
+        }
+        let adopted = self.adopted_charon.take().or_else(|| {
+            self.charon
+                .as_deref()
+                .and_then(|charon| running_charon(&self.pid_file, charon))
+        });
+        if let Some(pid) = adopted {
+            if self
+                .charon
+                .as_deref()
+                .is_some_and(|charon| process_is(pid, charon))
+            {
+                stop_process(pid).await;
+            }
+        }
     }
 
     pub async fn connect(&mut self, args: &ConnectArgs) -> anyhow::Result<ConnectResult> {
@@ -397,10 +436,8 @@ impl Strongswan {
         // existing charon that was started with stale config can produce
         // hard-to-diagnose "no shared key found" errors. Killing and
         // re-spawning is cheap (~500 ms) and guarantees clean state.
-        if let Some(mut child) = self.charon_child.take() {
-            let _ = child.kill().await;
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
+        self.stop_charon().await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.ensure_charon().await?;
 
         let etc = self.etc.as_ref().unwrap().clone();
@@ -863,6 +900,62 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
         return Some((iface.to_string(), peer));
     }
     None
+}
+
+/// The pid in charon's pid file, if a process with it runs `charon`.
+fn running_charon(pid_file: &Path, charon: &Path) -> Option<i32> {
+    let pid = std::fs::read_to_string(pid_file)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    process_is(pid, charon).then_some(pid)
+}
+
+/// Whether process `pid` runs the executable at `path`. A pid file can
+/// outlive its process, and the pid be reused by something else.
+fn process_is(pid: i32, path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    let Ok(len) = usize::try_from(len) else {
+        return false;
+    };
+    if len == 0 {
+        return false;
+    }
+    let running = Path::new(std::ffi::OsStr::from_bytes(&buf[..len]));
+    std::fs::canonicalize(path).is_ok_and(|expected| expected == running)
+}
+
+/// Whether charon answers on its control socket.
+async fn answers(swanctl: &Path) -> bool {
+    run_with_timeout(swanctl, &["--stats"], std::time::Duration::from_secs(2))
+        .await
+        .is_ok()
+}
+
+/// Kill `pid` and wait, briefly, for it to be gone.
+async fn stop_process(pid: i32) {
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while unsafe { libc::kill(pid, 0) } == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// What `path` gained past `offset`, at most its last `max` bytes.
+fn read_from(path: &Path, offset: u64, max: usize) -> String {
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = usize::try_from(offset)
+        .unwrap_or(bytes.len())
+        .min(bytes.len());
+    let tail = &bytes[start..];
+    String::from_utf8_lossy(&tail[tail.len().saturating_sub(max)..]).into_owned()
 }
 
 /// Poll the actual control channel instead of assuming that a process is
@@ -1919,6 +2012,7 @@ fn escape_swanctl(s: &str) -> String {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt as _;
 
     #[test]
     fn wire_validation_rejects_path_and_config_injection() {
@@ -1987,6 +2081,17 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
             path
         }
+        fn engine(&self, charon: PathBuf, swanctl: PathBuf) -> Strongswan {
+            Strongswan {
+                charon: Some(charon),
+                swanctl: Some(swanctl),
+                etc: Some(self.0.clone()),
+                charon_child: None,
+                adopted_charon: None,
+                pid_file: self.0.join("charon.pid"),
+                log_file: self.0.join("helper.log"),
+            }
+        }
     }
     impl Drop for StartupFixture {
         fn drop(&mut self) {
@@ -2028,16 +2133,97 @@ mod tests {
             "echo 'required VPN plugin is missing' >&2\nexit 3",
         );
         let swanctl = fixture.script("swanctl", "exit 2");
-        let mut engine = Strongswan {
-            charon: Some(charon),
-            swanctl: Some(swanctl),
-            etc: Some(fixture.0.clone()),
-            charon_child: None,
-        };
+        let mut engine = fixture.engine(charon, swanctl);
         let error = engine.ensure_charon().await.unwrap_err().to_string();
         assert!(error.contains("stopped during startup"), "{error}");
         assert!(error.contains("required VPN plugin is missing"), "{error}");
         assert!(engine.charon_child.is_none());
+    }
+
+    /// A helper restarted with a tunnel up finds charon still running, and
+    /// uses it instead of starting a second one.
+    #[tokio::test]
+    async fn a_charon_an_earlier_helper_left_running_is_taken_over() {
+        let fixture = StartupFixture::new();
+        let mut earlier = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = i32::try_from(earlier.id().unwrap()).unwrap();
+        std::fs::write(fixture.0.join("charon.pid"), format!("{pid}\n")).unwrap();
+        let swanctl = fixture.script("swanctl", "exit 0");
+        let mut engine = fixture.engine(PathBuf::from("/bin/sleep"), swanctl);
+        engine.ensure_charon().await.unwrap();
+        assert_eq!(engine.adopted_charon, Some(pid));
+        assert!(engine.charon_child.is_none(), "a second charon was started");
+        engine.stop_charon().await;
+        // Here it is the test's own child, so the test reaps it; a real
+        // adopted charon belongs to launchd, which does.
+        assert_eq!(earlier.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// A pid file can outlive charon, and the pid be reused. Only a process
+    /// running charon is charon.
+    #[tokio::test]
+    async fn a_pid_file_naming_another_program_is_not_charon() {
+        let fixture = StartupFixture::new();
+        let mut other = Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(other.id().unwrap()).unwrap();
+        std::fs::write(fixture.0.join("charon.pid"), format!("{pid}\n")).unwrap();
+        let charon = fixture.script("charon", "exec /bin/sleep 30");
+        let swanctl = fixture.script("swanctl", "exit 0");
+        let mut engine = fixture.engine(charon, swanctl);
+        engine.ensure_charon().await.unwrap();
+        assert_eq!(engine.adopted_charon, None);
+        assert!(engine.charon_child.is_some(), "no charon was started");
+        engine.stop_charon().await;
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "another program was stopped"
+        );
+        other.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_charon_that_does_not_answer_is_stopped() {
+        let fixture = StartupFixture::new();
+        let mut hung = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = i32::try_from(hung.id().unwrap()).unwrap();
+        std::fs::write(fixture.0.join("charon.pid"), format!("{pid}\n")).unwrap();
+        let swanctl = fixture.script("swanctl", "exit 2");
+        let mut engine = fixture.engine(PathBuf::from("/bin/sleep"), swanctl);
+        // The replacement cannot come up either: `/bin/sleep` without
+        // arguments exits at once.
+        assert!(engine.ensure_charon().await.is_err());
+        assert_eq!(hung.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// charon leads its own session, out of the helper's process group,
+    /// which launchd stops together with the helper.
+    #[tokio::test]
+    async fn charon_runs_in_its_own_session() {
+        let fixture = StartupFixture::new();
+        let group = fixture.0.join("group");
+        let charon = fixture.script(
+            "charon",
+            &format!(
+                "echo \"$$ $(ps -o pgid= -p $$)\" > '{}'\nexec /bin/sleep 30",
+                group.display()
+            ),
+        );
+        let swanctl = fixture.script("swanctl", &format!("test -f '{}'", group.display()));
+        let mut engine = fixture.engine(charon, swanctl);
+        engine.ensure_charon().await.unwrap();
+        let recorded = std::fs::read_to_string(&group).unwrap();
+        let ids: Vec<i32> = recorded
+            .split_whitespace()
+            .map(|n| n.parse().unwrap())
+            .collect();
+        assert_eq!(ids[0], ids[1], "charon does not lead its own process group");
+        assert_ne!(ids[1], unsafe { libc::getpgrp() });
+        engine.stop_charon().await;
     }
 
     #[tokio::test]
