@@ -80,6 +80,15 @@ final class AppSettings {
         didSet { defaults.set(notifyComplianceDrift, forKey: Keys.notifyComplianceDrift) }
     }
 
+    // MARK: - VPN
+
+    /// Have the helper set WireGuard tunnels up itself instead of running
+    /// wg-quick. Off by default until it has carried every kind of
+    /// profile; applies from the next connect.
+    var wireguardNativeSetup: Bool {
+        didSet { defaults.set(wireguardNativeSetup, forKey: Keys.wireguardNativeSetup) }
+    }
+
     // MARK: - Claude AI
 
     /// Anthropic API key for the "Explain config" / "Augment
@@ -132,6 +141,7 @@ final class AppSettings {
         static let complianceAutoScanEnabled = "compliance.autoScanEnabled"
         static let notifyComplianceDrift     = "notify.complianceDrift"
         static let anthropicApiKey           = "claude.anthropicApiKey"
+        static let wireguardNativeSetup      = "vpn.wireguardNativeSetup"
     }
 
     private init(defaults: UserDefaults = .standard) {
@@ -162,5 +172,7 @@ final class AppSettings {
             (defaults.object(forKey: Keys.notifyComplianceDrift) as? Bool) ?? true
         self.anthropicApiKey =
             (defaults.string(forKey: Keys.anthropicApiKey)) ?? ""
+        self.wireguardNativeSetup =
+            (defaults.object(forKey: Keys.wireguardNativeSetup) as? Bool) ?? false
     }
 }
