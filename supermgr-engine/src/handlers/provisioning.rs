@@ -64,7 +64,15 @@ impl EngineServer {
             Ok(r) => r,
             Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
         };
-        match crate::provisioning::diff_preview(&self.state, &self.secrets, host_id, &req).await {
+        match crate::provisioning::diff_preview(
+            &self.state,
+            &self.secrets,
+            &self.plans,
+            host_id,
+            &req,
+        )
+        .await
+        {
             Ok(result) => match serde_json::to_value(&result) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
@@ -88,30 +96,18 @@ impl EngineServer {
         }
     }
 
+    /// Deploy the plan a diff preview left: `{ plan_id }`. There is no way
+    /// to deploy a render request directly.
     pub(crate) async fn handle_provisioning_deploy(
         &self,
         id: u64,
         params: serde_json::Value,
     ) -> Response {
-        let host_id = match get_uuid_param(&params, "host_id") {
+        let plan_id = match get_uuid_param(&params, "plan_id") {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let render_value = match params.get("render_request").cloned() {
-            Some(v) => v,
-            None => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    "missing render_request".to_owned(),
-                )
-            }
-        };
-        let req: crate::provisioning::RenderRequest = match serde_json::from_value(render_value) {
-            Ok(r) => r,
-            Err(e) => return Response::err(id, protocol::INVALID_PARAMS, e.to_string()),
-        };
-        match crate::provisioning::deploy(&self.state, &self.secrets, host_id, &req).await {
+        match crate::provisioning::deploy(&self.state, &self.secrets, &self.plans, plan_id).await {
             Ok(record) => match serde_json::to_value(&record) {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
