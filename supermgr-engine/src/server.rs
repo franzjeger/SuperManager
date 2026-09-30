@@ -31,6 +31,9 @@ pub struct EngineServer {
     /// compliance run, etc.; the UI lists + cancels via the
     /// `operation_list` / `operation_cancel` RPC methods.
     pub operations: Arc<OperationRegistry>,
+    /// Provisioning previews waiting to be deployed, each as the exact
+    /// configuration it showed (`provisioning::plans`).
+    pub plans: Arc<crate::provisioning::PlanRegistry>,
 }
 
 impl EngineServer {
@@ -40,6 +43,7 @@ impl EngineServer {
             state: Arc::new(Mutex::new(state)),
             secrets,
             operations: Arc::new(OperationRegistry::new()),
+            plans: Arc::default(),
         }
     }
 

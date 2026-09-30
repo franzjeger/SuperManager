@@ -1036,9 +1036,19 @@ class AppState {
     }
 
     struct DiffPreviewResult: Codable {
+        /// What deploys exactly this preview: single use, and good for
+        /// `expiresInSecs` from when the preview was made.
+        let planId: String
+        let expiresInSecs: Double
         let rendered: String
         let sections: [SectionDiff]
         let summary: DiffSummary
+
+        enum CodingKeys: String, CodingKey {
+            case planId = "plan_id"
+            case expiresInSecs = "expires_in_secs"
+            case rendered, sections, summary
+        }
     }
 
     // Deployment + DeploymentStatus live in `Models/ProvisioningModels.swift`.

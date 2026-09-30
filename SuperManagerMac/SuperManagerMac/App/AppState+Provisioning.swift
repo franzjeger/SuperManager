@@ -146,27 +146,15 @@ extension AppState {
         }
     }
 
+    /// Deploy the plan a diff preview left: exactly the configuration it
+    /// showed, to the host it was for. The daemon renders nothing again,
+    /// and a plan is used once; a retry starts from a new preview.
     @discardableResult
-    func deployTemplate(
-        hostId: String,
-        templateId: String,
-        customerSlug: String,
-        siteId: String,
-        extras: [String: String] = [:]
-    ) async -> Deployment? {
+    func deployPlan(hostId: String, planId: String) async -> Deployment? {
         do {
-            let renderRequest: [String: Any] = [
-                "template_id": templateId,
-                "customer_slug": customerSlug,
-                "site_id": siteId,
-                "extras": extras,
-            ]
             let result: Deployment = try await client.call(
                 "provisioning_deploy",
-                params: [
-                    "host_id": hostId,
-                    "render_request": renderRequest,
-                ]
+                params: ["plan_id": planId]
             )
             // Push to local cache so the History list updates
             // immediately without a separate fetch.

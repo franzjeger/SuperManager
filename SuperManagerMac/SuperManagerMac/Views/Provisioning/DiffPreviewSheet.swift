@@ -20,14 +20,16 @@ struct DiffPreviewSheet: View {
     let customerSlug: String
     let siteId: String
     /// One-off render variables (PPPoE creds, S2S peer IP, etc.) the
-    /// operator filled in on the Provisioning form. These MUST flow
-    /// into both the diff and the deploy — otherwise we'd preview and
-    /// push a config rendered without them, i.e. review one config and
-    /// deploy a different one. Defaults to empty for callers with no extras.
+    /// operator filled in on the Provisioning form. The preview renders
+    /// with them, and the deploy pushes that rendering as it is: it takes
+    /// the preview's plan and renders nothing again. Defaults to empty for
+    /// callers with no extras.
     var extras: [String: String] = [:]
 
     @State private var loading = true
     @State private var preview: AppState.DiffPreviewResult?
+    /// When the preview's plan stops being deployable.
+    @State private var planExpiry: Date?
     @State private var loadError: String?
     @State private var selectedSectionPath: String?
     @State private var deploying = false
@@ -394,6 +396,15 @@ struct DiffPreviewSheet: View {
                     .foregroundStyle(.red)
             }
             Spacer()
+            // A plan is used by the attempt that takes it, and lasts only
+            // so long: after a failed deploy, or once it has expired, the
+            // way forward is a fresh preview of the unit as it is now.
+            if deployResult == nil, deployError != nil, !deploying {
+                Button("Preview again") {
+                    deployError = nil
+                    Task { await load() }
+                }
+            }
             Button(deployResult != nil ? "Close" : "Cancel") { dismiss() }
                 .keyboardShortcut(.cancelAction)
             if deployResult == nil {
@@ -411,7 +422,8 @@ struct DiffPreviewSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(deploying || preview == nil || (preview?.summary.modified == 0 && preview?.summary.added == 0))
+                .disabled(deploying || preview == nil || deployError != nil
+                          || (preview?.summary.modified == 0 && preview?.summary.added == 0))
                 .alert(
                     "Deploy to \(hostLabel)?",
                     isPresented: $showingDeployConfirm
@@ -445,6 +457,7 @@ struct DiffPreviewSheet: View {
         )
         if let result {
             preview = result
+            planExpiry = Date().addingTimeInterval(result.expiresInSecs)
         } else {
             loadError = appState.errorMessage.isEmpty
                 ? "Diff preview failed. The host may be unreachable, or SSH is not yet configured."
@@ -453,16 +466,15 @@ struct DiffPreviewSheet: View {
     }
 
     private func deploy() async {
+        guard let preview else { return }
+        if let planExpiry, Date() >= planExpiry {
+            deployError = "This preview has expired. Preview again, then deploy."
+            return
+        }
         deploying = true
         deployError = nil
         defer { deploying = false }
-        let result = await appState.deployTemplate(
-            hostId: hostId,
-            templateId: templateId,
-            customerSlug: customerSlug,
-            siteId: siteId,
-            extras: extras
-        )
+        let result = await appState.deployPlan(hostId: hostId, planId: preview.planId)
         if let result {
             deployResult = result
         } else {

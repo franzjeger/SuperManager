@@ -48,6 +48,9 @@ use crate::customer::{Customer, Site};
 use crate::ssh::connection::ShellInput;
 use supermgr_core::error::SshError;
 
+mod plans;
+pub use plans::PlanRegistry;
+
 // ---------------------------------------------------------------------------
 // Template metadata
 // ---------------------------------------------------------------------------
@@ -786,34 +789,68 @@ fn is_full_config(text: &str) -> bool {
         && text.lines().map(str::trim).rfind(|line| !line.is_empty()) == Some("end")
 }
 
-/// Render → fetch live → diff. Returns a structured response
-/// the GUI can render as a per-section preview before the user
-/// commits to a deploy.
+/// Render → fetch live → diff, for the site's own FortiGate. Returns a
+/// structured response the GUI can render as a per-section preview, and
+/// the plan a deploy of exactly this configuration takes (`plans`).
 pub async fn diff_preview(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
+    registry: &PlanRegistry,
     host_id: uuid::Uuid,
     request: &RenderRequest,
 ) -> Result<DiffPreviewResult> {
-    let render = render(request)?;
+    let (host, customer) = target(state, host_id, request).await?;
+    let site = customer
+        .sites
+        .iter()
+        .find(|s| s.id == request.site_id)
+        .ok_or_else(|| anyhow!("site '{}' not found", request.site_id))?;
+    let render = render_with_customer(&customer, site, &request.template_id, &request.extras)?;
     let (_host, session) = open_session(state, secrets, host_id).await?;
     let live = fetch_full_config(&session).await?;
     let _ = session.disconnect().await;
     let sections = diff_sections(&render.output, &live);
     let summary = summarise_sections(&sections);
+    let plan_id = registry.insert(plans::Plan::new(
+        host,
+        request.clone(),
+        render.output.clone(),
+    )?)?;
     Ok(DiffPreviewResult {
+        plan_id: plan_id.to_string(),
+        expires_in_secs: plans::TTL.as_secs(),
         rendered: render.output,
         sections,
         summary,
     })
 }
 
+/// The host and customer a preview or deploy is for, if `host_id` is the
+/// site's own FortiGate (`plans::validate_target`).
+async fn target(
+    state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
+    host_id: uuid::Uuid,
+    request: &RenderRequest,
+) -> Result<(supermgr_core::host::Host, Customer)> {
+    crate::customer::validate_slug(&request.customer_slug)?;
+    let customers = crate::customer::list_all()?;
+    let hosts: Vec<supermgr_core::host::Host> =
+        state.lock().await.ssh_hosts.values().cloned().collect();
+    let customer = plans::validate_target(&hosts, &customers, host_id, request)?.clone();
+    let host = hosts
+        .into_iter()
+        .find(|h| h.id == host_id)
+        .ok_or_else(|| anyhow!("host not found"))?;
+    Ok((host, customer))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffPreviewResult {
-    /// The full rendered template — handed back so the GUI's
-    /// "deploy this" call can reference what it preview'd
-    /// (avoids a re-render race if the customer changes mid-
-    /// flight).
+    /// What a deploy of exactly this preview takes: single use, and good
+    /// for `expires_in_secs`.
+    pub plan_id: String,
+    pub expires_in_secs: u64,
+    /// The full rendered template, as the deploy will push it.
     pub rendered: String,
     pub sections: Vec<SectionDiff>,
     pub summary: DiffSummary,
@@ -851,22 +888,29 @@ fn summarise_sections(sections: &[SectionDiff]) -> DiffSummary {
 // Deploy
 // ---------------------------------------------------------------------------
 
-/// Deploy a rendered template. The flow is:
+/// Deploy a preview's plan: exactly the configuration the preview showed,
+/// to the host it was for, which must still be the site's own FortiGate,
+/// reached the same way. Nothing is rendered again. The flow is:
 ///   1. Snapshot pre-deploy config to disk (recoverable rollback).
 ///   2. Push the rendered config via SSH using `shell_interact`
 ///      so we can wait for the `FortiOS` prompt between blocks
 ///      and abort on the first error.
 ///   3. Persist a Deployment record either way.
 ///
-/// Errors are surfaced with the line number of the failure so
-/// the user can find it in the rendered output.
+/// The plan is used up by the attempt, whatever its outcome: a retry
+/// starts from a new preview. Errors are surfaced with the line number of
+/// the failure so the user can find it in the rendered output.
 pub async fn deploy(
     state: &std::sync::Arc<tokio::sync::Mutex<crate::state::DaemonState>>,
     secrets: &std::sync::Arc<dyn supermgr_core::keyring::SecretStore>,
-    host_id: uuid::Uuid,
-    request: &RenderRequest,
+    registry: &std::sync::Arc<PlanRegistry>,
+    plan_id: uuid::Uuid,
 ) -> Result<Deployment> {
-    let render = render(request)?;
+    let (plan, _lease) = registry.take(plan_id)?;
+    let host_id = plan.host.id;
+    let request = &plan.request;
+    let (host, _) = target(state, host_id, request).await?;
+    plan.validate_target_unchanged(&host)?;
     let host_str = host_id.simple().to_string();
     let id = uuid::Uuid::new_v4().simple().to_string();
 
@@ -880,7 +924,7 @@ pub async fn deploy(
         finished_at: None,
         status: DeploymentStatus::Running,
         backup_path: None,
-        rendered_config: render.output.clone(),
+        rendered_config: plan.rendered.clone(),
         lines_pushed: 0,
         error: None,
     };
@@ -904,8 +948,8 @@ pub async fn deploy(
     // Step 2: push. Each line is sent separately via shell_interact
     // so we get prompt-level error checking. Lines starting with
     // `{#` (Tera comments left over) and blank lines are skipped.
-    let lines: Vec<String> = render
-        .output
+    let lines: Vec<String> = plan
+        .rendered
         .lines()
         .filter(|l| !l.trim_start().starts_with("{#") && !l.trim().is_empty())
         .map(str::to_owned)
