@@ -72,6 +72,7 @@ mod strongswan;
 mod tailscale;
 mod tailscale_state;
 mod vpn_runtime;
+mod wg_native;
 mod wireguard;
 
 /// Where launchd writes the helper's output (the plist's StandardOutPath),
@@ -362,6 +363,9 @@ async fn main() -> anyhow::Result<()> {
         wireguard: Arc::new(Mutex::new(wireguard::WireGuard::new())),
         openvpn: Arc::new(Mutex::new(openvpn::OpenVpn::new())),
     };
+    // WireGuard tunnels this helper's predecessor set up itself outlive it;
+    // supervise them before anything asks about them.
+    controllers.wireguard.lock().await.adopt_native().await;
 
     // Always-on auto-reconnect watchdog. Reads its persisted
     // watch list from /var/lib/supermanager/auto_reconnect.json

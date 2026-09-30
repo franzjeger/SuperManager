@@ -337,7 +337,7 @@ impl Strongswan {
         let running = self
             .adopted_charon
             .or_else(|| running_charon(&self.pid_file, &charon));
-        if let Some(pid) = running.filter(|&pid| process_is(pid, &charon)) {
+        if let Some(pid) = running.filter(|&pid| crate::proc::process_is(pid, &charon)) {
             if answers(&swanctl).await {
                 if self.adopted_charon.replace(pid).is_none() {
                     tracing::info!(pid, "took over the charon an earlier helper started");
@@ -415,7 +415,7 @@ impl Strongswan {
             if self
                 .charon
                 .as_deref()
-                .is_some_and(|charon| process_is(pid, charon))
+                .is_some_and(|charon| crate::proc::process_is(pid, charon))
             {
                 stop_process(pid).await;
             }
@@ -984,23 +984,7 @@ fn running_charon(pid_file: &Path, charon: &Path) -> Option<i32> {
         .trim()
         .parse()
         .ok()?;
-    process_is(pid, charon).then_some(pid)
-}
-
-/// Whether process `pid` runs the executable at `path`. A pid file can
-/// outlive its process, and the pid be reused by something else.
-fn process_is(pid: i32, path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
-    let len = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
-    let Ok(len) = usize::try_from(len) else {
-        return false;
-    };
-    if len == 0 {
-        return false;
-    }
-    let running = Path::new(std::ffi::OsStr::from_bytes(&buf[..len]));
-    std::fs::canonicalize(path).is_ok_and(|expected| expected == running)
+    crate::proc::process_is(pid, charon).then_some(pid)
 }
 
 /// Whether charon answers on its control socket.

@@ -20,6 +20,7 @@ import SwiftUI
 ///   Tranche-2 Window-C entry.
 struct NetworkSettingsView: View {
     @Environment(AppState.self) private var appState
+    @State private var settings = AppSettings.shared
 
     @State private var overrides: DeviceTypeOverrides = .empty
     @State private var loading = false
@@ -29,6 +30,7 @@ struct NetworkSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 deviceTypeOverridesCard
+                wireGuardCard
                 tranche2Placeholder
             }
             .padding(.vertical, 12)
@@ -125,6 +127,20 @@ struct NetworkSettingsView: View {
             .disabled(clearingKey != nil)
         }
         .padding(.vertical, 2)
+    }
+
+    // MARK: - WireGuard
+
+    private var wireGuardCard: some View {
+        sectionCard(title: "WireGuard", systemImage: "lock.shield") {
+            @Bindable var s = settings
+            Toggle("Set up tunnels without wg-quick (experimental)",
+                   isOn: $s.wireguardNativeSetup)
+            Text("The helper starts wireguard-go and sets the tunnel's addresses, routes and MTU itself. No config file with the private key is written to disk, and a tunnel stays up when the helper restarts. Applies from the next connect; a tunnel already up is taken down the way it was set up.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     // MARK: - Tranche 2 placeholder

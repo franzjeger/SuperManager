@@ -476,7 +476,8 @@ extension AppState {
                     params: ["profile_id": profileId]
                 )
                 args = HelperClient.wgConnectArgs(
-                    profileId: profileId, confContent: r.conf, dnsServers: r.dnsServers)
+                    profileId: profileId, confContent: r.conf, dnsServers: r.dnsServers,
+                    native: AppSettings.shared.wireguardNativeSetup)
             } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
                 backendStr = "openvpn"
                 // The same arguments a manual connect sends: the
@@ -696,7 +697,8 @@ extension AppState {
             let result = try await HelperClient.shared.wgConnect(
                 profileId: profileId,
                 confContent: rendered.conf,
-                dnsServers: rendered.dnsServers
+                dnsServers: rendered.dnsServers,
+                native: AppSettings.shared.wireguardNativeSetup
             )
             let success = (result["success"] as? Bool) ?? false
             let message = (result["message"] as? String)

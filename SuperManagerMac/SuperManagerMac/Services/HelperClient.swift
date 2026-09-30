@@ -126,12 +126,16 @@ final class HelperClient {
     // MARK: - WireGuard
 
     /// The arguments `wg_connect` takes. The helper also keeps them to
-    /// reconnect an always-on profile, so both go through here.
-    nonisolated static func wgConnectArgs(profileId: String, confContent: String, dnsServers: [String]) -> [String: Any] {
+    /// reconnect an always-on profile, so both go through here. `native`
+    /// has the helper set the tunnel up without wg-quick.
+    nonisolated static func wgConnectArgs(
+        profileId: String, confContent: String, dnsServers: [String], native: Bool
+    ) -> [String: Any] {
         [
             "profile_id": profileId,
             "conf_content": confContent,
             "dns_servers": dnsServers,
+            "native": native,
         ]
     }
 
@@ -141,9 +145,12 @@ final class HelperClient {
     /// `vpn_render_wireguard_conf` returned — the full file body
     /// including the spliced-in private key.
     @discardableResult
-    func wgConnect(profileId: String, confContent: String, dnsServers: [String]) async throws -> [String: Any] {
+    func wgConnect(
+        profileId: String, confContent: String, dnsServers: [String], native: Bool
+    ) async throws -> [String: Any] {
         try await call("wg_connect", params: Self.wgConnectArgs(
-            profileId: profileId, confContent: confContent, dnsServers: dnsServers))
+            profileId: profileId, confContent: confContent, dnsServers: dnsServers,
+            native: native))
     }
 
     /// The programs WireGuard runs with, as this app bundles them, in

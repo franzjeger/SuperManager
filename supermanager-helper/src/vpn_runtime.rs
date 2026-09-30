@@ -180,6 +180,16 @@ pub fn wg_quick() -> Result<WgQuick> {
     })
 }
 
+/// wireguard-go from the runtime, for the helper's own WireGuard setup
+/// (`wg_native`), which has no Homebrew fallback.
+pub fn wireguard_go() -> Result<PathBuf> {
+    let dir = Path::new(RUNTIME_DIR);
+    if !installed(dir) {
+        bail!("SuperManager's own WireGuard setup needs the VPN runtime, and it is not installed");
+    }
+    Ok(dir.join("wireguard-go"))
+}
+
 /// `wg`, from the runtime or else Homebrew.
 pub fn wg() -> Result<PathBuf> {
     let dir = Path::new(RUNTIME_DIR);

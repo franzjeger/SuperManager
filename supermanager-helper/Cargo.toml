@@ -24,6 +24,8 @@ libc               = "0.2"
 # WireGuard module hashes profile UUIDs into a 12-char interface name
 # (kernel's IFNAMSIZ-1 limit). Workspace already pins SHA-256.
 sha2               = { workspace = true }
+# WireGuard keys are base64 in a config and hex on wireguard-go's socket.
+base64             = { workspace = true }
 
 # Client authentication checks the connecting process's code signature
 # (src/client_auth.rs). The same versions the engine uses, so the build
