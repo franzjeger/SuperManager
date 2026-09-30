@@ -125,6 +125,16 @@ final class HelperClient {
 
     // MARK: - WireGuard
 
+    /// The arguments `wg_connect` takes. The helper also keeps them to
+    /// reconnect an always-on profile, so both go through here.
+    nonisolated static func wgConnectArgs(profileId: String, confContent: String, dnsServers: [String]) -> [String: Any] {
+        [
+            "profile_id": profileId,
+            "conf_content": confContent,
+            "dns_servers": dnsServers,
+        ]
+    }
+
     /// Bring up a WireGuard tunnel. The helper writes
     /// `/etc/wireguard/<derived-name>.conf` (mode 0600) and runs
     /// `wg-quick up`. `confContent` is what the daemon's
@@ -132,11 +142,8 @@ final class HelperClient {
     /// including the spliced-in private key.
     @discardableResult
     func wgConnect(profileId: String, confContent: String, dnsServers: [String]) async throws -> [String: Any] {
-        try await call("wg_connect", params: [
-            "profile_id": profileId,
-            "conf_content": confContent,
-            "dns_servers": dnsServers,
-        ])
+        try await call("wg_connect", params: Self.wgConnectArgs(
+            profileId: profileId, confContent: confContent, dnsServers: dnsServers))
     }
 
     @discardableResult
