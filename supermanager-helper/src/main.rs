@@ -66,6 +66,7 @@ mod proc;
 // Re-enable in the Developer-ID-signed release flow only. See build.rs.
 // mod power;
 mod route_guardian;
+mod route_table;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;
