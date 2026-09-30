@@ -37,7 +37,7 @@ secret-service = { workspace = true }
 zbus           = { workspace = true }
 # `paths::default_data_dir` branches on whether we are root: the daemon
 # writes under /etc/supermgrd, an unprivileged GUI under XDG_DATA_HOME.
-nix            = { version = "0.30", features = ["user"] }
+nix            = { version = "0.31", features = ["user"] }
 
 # Windows: Credential Manager (via the `keyring` crate's win-native
 # backend, which wraps `CredReadW` / `CredWriteW` / `CredDeleteW`).

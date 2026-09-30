@@ -38,7 +38,7 @@ zeroize         = { workspace = true }
 wireguard-control = { workspace = true }
 
 # Unix user/group inspection (uid root check) and network interface index lookup
-nix             = { version = "0.30", features = ["user", "net", "signal", "fs"] }
+nix             = { version = "0.31", features = ["user", "net", "signal", "fs"] }
 
 # Netlink for address assignment, interface deletion, and route management
 rtnetlink              = "0.14"
