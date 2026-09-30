@@ -71,6 +71,7 @@ mod signed_file;
 mod strongswan;
 mod tailscale;
 mod tailscale_state;
+mod vpn_runtime;
 mod wireguard;
 
 /// Where launchd writes the helper's output (the plist's StandardOutPath),
@@ -152,6 +153,7 @@ fn helper_version_info() -> serde_json::Value {
         "vpn_connect",
         "vpn_disconnect",
         "vpn_status",
+        "vpn_runtime_install",
         "wg_connect",
         "wg_disconnect",
         "wg_status",
@@ -723,6 +725,20 @@ async fn dispatch(req: Request, controllers: &Controllers) -> Response {
         },
 
         // -- WireGuard --
+        // The programs WireGuard runs with, from the app bundle into a
+        // directory only root can write (`vpn_runtime`). The app calls it
+        // before a WireGuard connect; unchanged programs are left alone.
+        // Synchronous file work, so it runs through `blocking`.
+        "vpn_runtime_install" => {
+            match serde_json::from_value::<vpn_runtime::InstallArgs>(req.params) {
+                Ok(args) => match blocking(move || vpn_runtime::install(&args)).await {
+                    Ok(s) => Response::ok(id, serde_json::to_value(s).unwrap_or_default()),
+                    Err(e) => Response::err(id, -32000, format!("vpn_runtime_install: {e:#}")),
+                },
+                Err(e) => Response::err(id, -32602, format!("bad params: {e}")),
+            }
+        }
+
         "wg_connect" => {
             let raw_args = req.params.clone();
             match serde_json::from_value::<wireguard::WgConnectArgs>(req.params) {

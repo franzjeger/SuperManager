@@ -283,6 +283,14 @@ targets:
         # error with no way forward instead of a button.
         script: |
           "${SRCROOT}/Signing/bundle_tailscale.sh"
+      - name: Bundle VPN runtime
+        basedOnDependencyAnalysis: false
+        # The programs the root helper runs WireGuard with, which it
+        # installs where only root can write instead of running them from
+        # Homebrew (scripts/build-vpn-runtime.sh). Before the embed phase,
+        # which re-seals the bundle.
+        script: |
+          "${SRCROOT}/Signing/bundle_vpn_runtime.sh"
       - name: Stamp version from git
         basedOnDependencyAnalysis: false
         # The version is the release tag the build descends from, not the

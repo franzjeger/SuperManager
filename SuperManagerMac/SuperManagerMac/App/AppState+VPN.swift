@@ -461,6 +461,8 @@ extension AppState {
         do {
             if backendLower.contains("wireguard") || backendLower.contains("wire_guard") {
                 backendStr = "wireguard"
+                // The helper reconnects with the runtime installed now.
+                await installVPNRuntime()
                 struct Rendered: Decodable {
                     let conf: String
                     let dnsServers: [String]
@@ -647,6 +649,22 @@ extension AppState {
     ///
     /// Returns the operational result (success/message) so the view
     /// can show inline diagnostics without a refresh round-trip.
+    /// Install the VPN runtime this app bundles before WireGuard uses it.
+    /// A failure is logged, not fatal: the helper keeps the runtime it
+    /// installed before, and a development build without one runs
+    /// Homebrew's WireGuard.
+    func installVPNRuntime() async {
+        guard let dir = HelperClient.bundledVPNRuntime else { return }
+        do {
+            let result = try await HelperClient.shared.vpnRuntimeInstall(bundledDir: dir)
+            if let installed = result["installed"] as? [String], !installed.isEmpty {
+                DebugLog.write("[vpn-runtime] installed \(installed)")
+            }
+        } catch {
+            DebugLog.write("[vpn-runtime] install failed: \(error)")
+        }
+    }
+
     @discardableResult
     func wireguardConnect(profileId: String) async -> (success: Bool, message: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .connectStarted,
@@ -656,6 +674,7 @@ extension AppState {
         // `pollAllVpnStates()` at the bottom of this method, which
         // either confirms or corrects.
         vpnConnectionStates[profileId] = "connecting"
+        await installVPNRuntime()
         // Drop poll cadence to 500 ms for the next 30 s so the
         // user sees the dot flip green within half a second of
         // the tunnel actually coming up, not after the next 4 s

@@ -4,9 +4,10 @@
 //!
 //! macOS doesn't have a kernel-mode WireGuard. The supported user-mode
 //! implementation is **`wireguard-go`**, driven by the **`wg-quick`**
-//! script that ships with `wireguard-tools`. Both come from
-//! `brew install wireguard-tools` (the `wireguard-go` binary is pulled
-//! in as a dependency on macOS).
+//! script that ships with `wireguard-tools`. Both run from the VPN runtime
+//! the helper installs where only root can write (`vpn_runtime`), with
+//! wg-quick run by the runtime's own bash; a development build without
+//! the runtime uses Homebrew's.
 //!
 //! `wg-quick up <name>` reads `/etc/wireguard/<name>.conf`, asks
 //! `wireguard-go` to spin up a `utun` device, then plumbs routes / DNS
@@ -30,11 +31,12 @@
 //! coexist without collision. The conf file is removed on disconnect
 //! so credentials don't linger.
 //!
-//! ## Why no `--script` etc
+//! ## No hooks
 //!
-//! `wg-quick` already runs `PostUp` / `PreDown` shell snippets defined
-//! in the `.conf`. We don't add our own — the user's own configuration
-//! is the single source of truth for what should happen at tunnel-up.
+//! `wg-quick` runs a config's `PreUp` / `PostUp` / `PreDown` / `PostDown`
+//! lines as shell commands, as root. SuperManager renders its configs from
+//! profile fields and never writes those, so a config that has them is
+//! refused (`refuse_hooks`).
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -45,9 +47,6 @@ use tokio::process::Command;
 /// wireguard-go and edits routes and DNS; slow is possible, never finishing
 /// is not. Under the WireGuard mutex, an unbounded run held every later RPC.
 const WG_QUICK_BUDGET: u64 = 30;
-
-/// Brew prefixes to probe for `wg-quick`. Apple Silicon vs Intel.
-const BREW_PREFIXES: &[&str] = &["/opt/homebrew", "/usr/local"];
 
 /// Configs we write live here. Created lazily with mode 0700 so a
 /// non-root local user can't peek at the directory listing.
@@ -164,7 +163,7 @@ impl WireGuard {
     ///      which `utunN` `wireguard-go` actually picked.
     pub async fn connect(&mut self, args: &WgConnectArgs) -> anyhow::Result<WgConnectResult> {
         refuse_hooks(&args.conf_content)?;
-        let wg_quick = locate_wg_quick()?;
+        let wg_quick = crate::vpn_runtime::wg_quick()?;
         let name = interface_name(&args.profile_id);
         let conf_path = conf_path_for(&name);
 
@@ -176,10 +175,7 @@ impl WireGuard {
         // the user with "already exists."
         if read_name_mapping(&name).is_some() {
             let _ = crate::proc::bounded_async(
-                Command::new(&wg_quick)
-                    .arg("down")
-                    .arg(&conf_path)
-                    .env("PATH", path_for_wg_quick(&wg_quick)),
+                wg_quick.command().arg("down").arg(&conf_path),
                 WG_QUICK_BUDGET,
             )
             .await;
@@ -220,16 +216,11 @@ impl WireGuard {
         // bare-name path resolves there, not in `/etc/wireguard`.
         // Passing the absolute path bypasses the search.
         let output = crate::proc::bounded_async(
-            Command::new(&wg_quick)
-                .arg("up")
-                .arg(&conf_path)
-                // wg-quick on Mac shells out to bash + bash needs a sane
-                // PATH to find `wireguard-go`, `route`, `networksetup`.
-                .env("PATH", path_for_wg_quick(&wg_quick)),
+            wg_quick.command().arg("up").arg(&conf_path),
             WG_QUICK_BUDGET,
         )
         .await
-        .with_context(|| format!("run {}", wg_quick.display()))?;
+        .with_context(|| format!("run {}", wg_quick.describe()))?;
 
         if !output.status.success() {
             // Best-effort cleanup so the next attempt isn't poisoned
@@ -245,7 +236,7 @@ impl WireGuard {
             });
         }
 
-        let interface = detect_interface(&wg_quick, &name).await.ok();
+        let interface = detect_interface(&name).await.ok();
 
         if !args.dns_servers.is_empty() {
             crate::dns::set_vpn_dns(&args.dns_servers);
@@ -271,7 +262,7 @@ impl WireGuard {
         &mut self,
         args: &WgDisconnectArgs,
     ) -> anyhow::Result<WgDisconnectResult> {
-        let wg_quick = locate_wg_quick()?;
+        let wg_quick = crate::vpn_runtime::wg_quick()?;
         let name = interface_name(&args.profile_id);
 
         // 1. Capture the utun mapping before wg-quick deletes the
@@ -284,14 +275,11 @@ impl WireGuard {
         //    brew-baked-in CONFIG_PATH.
         let conf_path = conf_path_for(&name);
         let output = crate::proc::bounded_async(
-            Command::new(&wg_quick)
-                .arg("down")
-                .arg(&conf_path)
-                .env("PATH", path_for_wg_quick(&wg_quick)),
+            wg_quick.command().arg("down").arg(&conf_path),
             WG_QUICK_BUDGET,
         )
         .await
-        .with_context(|| format!("run {} down", wg_quick.display()))?;
+        .with_context(|| format!("run {} down", wg_quick.describe()))?;
 
         let mut messages: Vec<String> = Vec::new();
         let wg_quick_ok = output.status.success();
@@ -402,16 +390,13 @@ impl WireGuard {
             }
         };
 
-        let wg_quick = locate_wg_quick()?;
-        let wg_bin = wg_binary_from(&wg_quick)?;
+        let wg_bin = crate::vpn_runtime::wg()?;
         // `wg show <if> dump` is the machine-readable kitchen sink:
         // one tab-separated line per peer with endpoint, allowed IPs,
         // last handshake (unix ts), rx/tx bytes, and keepalive.
         // The interface line precedes the peers.
         let output = crate::proc::bounded_async(
-            Command::new(&wg_bin)
-                .args(["show", &utun_name, "dump"])
-                .env("PATH", path_for_wg_quick(&wg_quick)),
+            Command::new(&wg_bin).args(["show", &utun_name, "dump"]),
             crate::proc::PROBE,
         )
         .await
@@ -498,47 +483,6 @@ impl WireGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Find `wg-quick` under one of the brew prefixes. We don't trust
-/// `$PATH` because launchd starts us with a minimal one.
-fn locate_wg_quick() -> anyhow::Result<PathBuf> {
-    for prefix in BREW_PREFIXES {
-        let candidate = Path::new(prefix).join("bin/wg-quick");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow!(
-        "wg-quick not found in /opt/homebrew/bin or /usr/local/bin. \
-         Install with `brew install wireguard-tools`."
-    ))
-}
-
-/// Find `wg` (the CLI used for `wg show transfer`) next to `wg-quick`.
-fn wg_binary_from(wg_quick: &Path) -> anyhow::Result<PathBuf> {
-    let wg = wg_quick
-        .parent()
-        .map(|p| p.join("wg"))
-        .ok_or_else(|| anyhow!("wg-quick has no parent dir"))?;
-    if !wg.exists() {
-        return Err(anyhow!(
-            "wg binary missing next to {}; reinstall wireguard-tools",
-            wg_quick.display()
-        ));
-    }
-    Ok(wg)
-}
-
-/// Augmented PATH for child `wg-quick` shells. They want `route`,
-/// `networksetup`, etc — all of which live in `/usr/sbin` and `/sbin`,
-/// neither of which launchd hands us by default.
-fn path_for_wg_quick(wg_quick: &Path) -> String {
-    let bin = wg_quick
-        .parent()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    format!("{bin}:/usr/local/sbin:/usr/sbin:/sbin:/usr/bin:/bin")
-}
-
 /// Sanitize a UUID-shaped profile id into a name that's both
 /// filesystem-safe and accepted by `utun`. The kernel's interface
 /// name limit is 15 chars (IFNAMSIZ-1). UUIDs are way over that, so
@@ -593,7 +537,7 @@ fn interface_exists(name: &str) -> bool {
 
 /// `wg-quick` wraps the real device name (`utunN`) — read it from
 /// the mapping file rather than re-deriving it via `wg show`.
-async fn detect_interface(_wg_quick: &Path, name: &str) -> anyhow::Result<String> {
+async fn detect_interface(name: &str) -> anyhow::Result<String> {
     read_name_mapping(name)
         .ok_or_else(|| anyhow!("no /var/run/wireguard/{name}.name mapping — tunnel didn't come up"))
 }

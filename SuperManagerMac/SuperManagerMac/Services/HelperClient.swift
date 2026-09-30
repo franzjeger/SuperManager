@@ -146,6 +146,25 @@ final class HelperClient {
             profileId: profileId, confContent: confContent, dnsServers: dnsServers))
     }
 
+    /// The programs WireGuard runs with, as this app bundles them, in
+    /// `Contents/Resources/vpn-runtime`. Nil when the build bundles none;
+    /// the helper then runs Homebrew's WireGuard.
+    static var bundledVPNRuntime: String? {
+        guard let dir = Bundle.main.resourceURL?.appendingPathComponent("vpn-runtime"),
+              ["bash", "wg", "wg-quick", "wireguard-go"].allSatisfy({
+                  FileManager.default.isExecutableFile(atPath: dir.appendingPathComponent($0).path)
+              }) else { return nil }
+        return dir.path
+    }
+
+    /// Have the helper install the bundled VPN runtime where only root can
+    /// write, checking each program first. Programs already installed as
+    /// bundled are left alone, so this is cheap to call before a connect.
+    @discardableResult
+    func vpnRuntimeInstall(bundledDir: String) async throws -> [String: Any] {
+        try await call("vpn_runtime_install", params: ["bundled_dir": bundledDir])
+    }
+
     @discardableResult
     func wgDisconnect(profileId: String) async throws -> [String: Any] {
         try await call("wg_disconnect", params: ["profile_id": profileId])
