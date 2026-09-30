@@ -41,8 +41,8 @@ wireguard-control = { workspace = true }
 nix             = { version = "0.31", features = ["user", "net", "signal", "fs"] }
 
 # Netlink for address assignment, interface deletion, and route management
-rtnetlink              = "0.14"
-netlink-packet-route   = "0.19"
+rtnetlink              = "0.23"
+netlink-packet-route   = "0.33"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Backup retention compresses files older than 7 days to gzip in place
