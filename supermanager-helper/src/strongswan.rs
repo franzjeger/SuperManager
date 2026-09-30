@@ -749,11 +749,10 @@ fn covered_by(servers: &[String], granted: &[String]) -> Vec<String> {
 /// Does every negotiated selector have a kernel route pointing at this
 /// tunnel's utun?
 ///
-/// `lookup` answers "which interface would carry a packet to this
-/// destination" (production: `route -n get`). If the specific route is
-/// missing, the kernel falls through to the physical default and the lookup
-/// returns en0 — which is exactly the failure being detected, so no separate
-/// "route absent" case is needed.
+/// `lookup` answers "which interface has the route for exactly this
+/// prefix" (production: `route_iface_family`). A missing route answers
+/// `None`, not this tunnel's utun — which is exactly the failure being
+/// detected, so no separate "route absent" case is needed.
 ///
 /// The v4 catch-all is checked as the two /1 halves: that's how a full tunnel
 /// is actually installed, because a literal 0.0.0.0/0 would tie with the
@@ -1695,15 +1694,19 @@ fn delete_split_default(
     foreign: &std::collections::HashSet<String>,
     live_sa: bool,
 ) {
-    if let Some(iface) = route_iface_family(get_spec, family) {
-        if foreign.contains(&iface) {
-            tracing::info!("route_cleanup: keeping {del_spec} — owned by live tunnel {iface}");
-            return;
-        }
-        if live_sa && iface.starts_with("utun") {
-            tracing::info!("route_cleanup: keeping {del_spec} — live strongSwan SA on {iface}");
-            return;
-        }
+    // Not in the table: nothing to delete, and nothing to report. Without
+    // this the cleanup "deleted" all four routes on every run, whether any
+    // of them were there or not.
+    let Some(iface) = route_iface_family(get_spec, family) else {
+        return;
+    };
+    if foreign.contains(&iface) {
+        tracing::info!("route_cleanup: keeping {del_spec} — owned by live tunnel {iface}");
+        return;
+    }
+    if live_sa && iface.starts_with("utun") {
+        tracing::info!("route_cleanup: keeping {del_spec} — live strongSwan SA on {iface}");
+        return;
     }
     let out = crate::proc::bounded(
         std::process::Command::new("/sbin/route").args(["-q", "delete", family, "-net", del_spec]),
@@ -1793,19 +1796,17 @@ fn install_ipv6_leak_block() {
 /// "cannot determine the owner", which every caller already treats as the
 /// cautious answer.
 pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
+    // A prefix: the route for exactly it. `route -n get <prefix>` is not
+    // that on macOS; see `route_table::exact_route`.
+    if let Ok(net) = dest.parse::<ipnet::IpNet>() {
+        return crate::route_table::exact_route(&net);
+    }
+    // A host: the route a packet to it takes.
     let out = match crate::proc::bounded(
         std::process::Command::new("/sbin/route").args(["-n", "get", family, dest]),
         crate::proc::PROBE,
     ) {
         Ok(out) => out,
-        // A timeout is not "no such route" — it is the RTM_GET hang itself,
-        // i.e. most likely a route on a dead utun, the one answer callers
-        // must not lose. `route get <cidr>` is an exact-prefix lookup, so
-        // the routing-table dump answers the same question without
-        // blocking. Host lookups need longest-prefix matching; no fallback.
-        Err(e) if e.kind() == std::io::ErrorKind::TimedOut && dest.contains('/') => {
-            return netstat_route_iface(dest, family);
-        }
         Err(_) => return None,
     };
     if !out.status.success() {
@@ -1821,55 +1822,6 @@ pub(crate) fn route_iface_family(dest: &str, family: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// The interface carrying the route for exactly `dest` (a CIDR), read from
-/// the kernel routing-table dump. `netstat -rn` gets that via sysctl, which
-/// never waits for a per-route reply — unlike `route -n get`, whose `RTM_GET`
-/// blocks when the route points at a torn-down utun. Same exact-prefix
-/// semantics as `route -n get <cidr>`.
-pub(crate) fn netstat_route_iface(dest: &str, family: &str) -> Option<String> {
-    let want: ipnet::IpNet = dest.parse().ok()?;
-    let af = if family == "-inet6" { "inet6" } else { "inet" };
-    let out = crate::proc::bounded(
-        std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", af]),
-        crate::proc::PROBE,
-    )
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    iface_for_net(&String::from_utf8_lossy(&out.stdout), want)
-}
-
-/// Find `want` in `netstat -rn` output (Destination Gateway Flags Netif …).
-fn iface_for_net(table: &str, want: ipnet::IpNet) -> Option<String> {
-    table.lines().find_map(|line| {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 4 {
-            return None;
-        }
-        (parse_netstat_net(fields[0])? == want).then(|| fields[3].to_owned())
-    })
-}
-
-/// Parse a destination as `netstat -rn` prints it: IPv4 networks drop
-/// trailing zero octets (`0/1`, `128.0/1`, `10.8/16`), IPv6 may carry a
-/// `%scope`. Host routes and `default` have no prefix and yield `None`.
-fn parse_netstat_net(dest: &str) -> Option<ipnet::IpNet> {
-    let (addr, len) = dest.split_once('/')?;
-    let addr = addr.split('%').next()?;
-    let full = if addr.contains(':') {
-        addr.to_owned()
-    } else {
-        let mut octets: Vec<&str> = addr.split('.').collect();
-        if octets.is_empty() || octets.len() > 4 {
-            return None;
-        }
-        octets.resize(4, "0");
-        octets.join(".")
-    };
-    format!("{full}/{len}").parse().ok()
 }
 
 /// Set of kernel interfaces currently owned by a live non-strongSwan VPN
@@ -2720,59 +2672,6 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert!(
             s.contains(r#"\"b\\c"#),
             "PSK quote/backslash not escaped:\n{s}"
-        );
-    }
-
-    #[test]
-    fn netstat_destinations_match_their_cidrs() {
-        let table = "\
-Routing tables
-
-Internet:
-Destination        Gateway            Flags               Netif Expire
-default            192.168.200.1      UGScg                 en0
-0/1                10.8.0.1           UGSc                utun7
-10.8/16            utun7              USc                 utun7
-100.64/10          utun12             USc                utun12
-128.0/1            10.8.0.1           UGSc                utun7
-169.254            link#14            UCS                   en0      !
-";
-        let net = |s: &str| s.parse::<ipnet::IpNet>().unwrap();
-        assert_eq!(
-            iface_for_net(table, net("0.0.0.0/1")).as_deref(),
-            Some("utun7")
-        );
-        assert_eq!(
-            iface_for_net(table, net("128.0.0.0/1")).as_deref(),
-            Some("utun7")
-        );
-        assert_eq!(
-            iface_for_net(table, net("10.8.0.0/16")).as_deref(),
-            Some("utun7")
-        );
-        assert_eq!(
-            iface_for_net(table, net("100.64.0.0/10")).as_deref(),
-            Some("utun12")
-        );
-        // Exact prefix, like `route -n get <cidr>`: a covering route is not a match.
-        assert_eq!(iface_for_net(table, net("100.64.0.0/12")), None);
-
-        let table6 = "\
-Internet6:
-Destination                             Gateway                                 Flags               Netif Expire
-default                                 fe80::aa9c:6cff:fe8c:4bd%en0            UGScg                 en0
-::/1                                    ::1                                     UGRSc                 lo0
-8000::/1                                fe80::%utun4                            UGcIg               utun4
-fe80::%utun4/64                         fe80::1%utun4                           UcI                 utun4
-";
-        assert_eq!(iface_for_net(table6, net("::/1")).as_deref(), Some("lo0"));
-        assert_eq!(
-            iface_for_net(table6, net("8000::/1")).as_deref(),
-            Some("utun4")
-        );
-        assert_eq!(
-            iface_for_net(table6, net("fe80::/64")).as_deref(),
-            Some("utun4")
         );
     }
 
