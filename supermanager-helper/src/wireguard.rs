@@ -40,9 +40,10 @@
 //!
 //! ## Without wg-quick
 //!
-//! With `WgConnectArgs::native` the helper sets the tunnel up itself
-//! (`wg_native`) and writes no config file. A tunnel it set up that way is
-//! taken down that way, whichever way the next connect asks for.
+//! By default (`WgConnectArgs::native`) the helper sets the tunnel up itself
+//! (`wg_native`) and writes no config file; the app's setting can still ask
+//! for wg-quick. A tunnel is taken down the way it was set up, whichever way
+//! the next connect asks for.
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
@@ -92,11 +93,15 @@ pub struct WgConnectArgs {
     #[serde(default)]
     pub dns_servers: Vec<String>,
 
-    /// Set the tunnel up without wg-quick (`wg_native`). Off unless the
-    /// app's setting asks for it, until it has carried every kind of
-    /// profile.
-    #[serde(default)]
+    /// Set the tunnel up without wg-quick (`wg_native`). On unless the
+    /// app's setting turns it off, including for connect arguments stored
+    /// before the setting existed.
+    #[serde(default = "native_by_default")]
     pub native: bool,
+}
+
+fn native_by_default() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -663,6 +668,21 @@ mod tests {
         "[Interface]\nPrivateKey = aaaa\nAddress = 10.0.0.2/32\nDNS = 10.0.0.1\n\n\
                             [Peer]\nPublicKey = bbbb\nEndpoint = vpn.example.com:51820\n\
                             AllowedIPs = 0.0.0.0/0\n";
+
+    /// Connect arguments without `native`, stored for always-on before the
+    /// setting existed, are set up without wg-quick like any other.
+    #[test]
+    fn a_tunnel_is_set_up_without_wg_quick_unless_asked() {
+        let args = |extra: &str| {
+            serde_json::from_str::<WgConnectArgs>(&format!(
+                r#"{{"profile_id": "p1", "conf_content": "[Interface]\n"{extra}}}"#
+            ))
+            .unwrap()
+        };
+        assert!(args("").native);
+        assert!(args(r#", "native": true"#).native);
+        assert!(!args(r#", "native": false"#).native);
+    }
 
     #[test]
     fn a_config_as_supermanager_renders_it_is_accepted() {
