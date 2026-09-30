@@ -9,6 +9,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or pull request supersedes a run still
+# going: only the latest commit's result decides anything, and the runners
+# are few. Eight merges in a row once queued eight full runs on main, and
+# the release waited behind them. Releases run in their own workflows, on
+# tags, and are never cancelled by this.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Shell scripts and packaging policy — the parts of the repo that ship
   # behaviour without going through the compiler, and until now were only ever
