@@ -503,6 +503,14 @@ impl Strongswan {
                 granted = ?granted,
                 "the gateway narrowed the full tunnel to these networks; only they go through it"
             );
+        } else if ok {
+            // The leak block and DNS below, and the route guard, go by these.
+            // Empty: they could not be read, and the tunnel is set up as asked.
+            tracing::info!(
+                profile = %args.profile_id,
+                granted = ?granted,
+                "the gateway granted these selectors"
+            );
         }
 
         // IPv6 leak protection. Our full-tunnel config is IPv4-only
