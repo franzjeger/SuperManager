@@ -518,12 +518,14 @@ impl Strongswan {
         }
 
         if ok && (args.full_tunnel || !args.dns_servers.is_empty()) {
-            // osx-attr adds gateway DNS to the physical service. Preserve
-            // its selected addresses, but publish an unscoped VPN resolver
-            // so macOS sends DNS using the tunnel route. Explicit profile
-            // servers override negotiated DNS; blank means automatic.
+            // osx-attr puts the gateway's DNS first in the primary service's.
+            // Publish that service's resolvers as an unscoped VPN resolver so
+            // macOS sends DNS along the tunnel route. They are read from the
+            // service itself: what macOS resolves with now can be another
+            // VPN's. Explicit profile servers override negotiated DNS; blank
+            // means automatic.
             let servers: Vec<String> = if args.dns_servers.is_empty() {
-                crate::dns_health_watchdog::read_active_resolvers()
+                crate::dns::system_resolvers()
                     .into_iter()
                     .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
                     .collect()
