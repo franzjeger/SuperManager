@@ -88,10 +88,16 @@ trap 'printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO
 # "usable": as root under supermgr-update's pkexec, /usr/bin/cargo is rustup's
 # shim with no toolchain behind it, and under pipefail its failure used to end
 # the script right here, silently.
+#
+# --manifest-path because this runs before the `cd "$REPO_ROOT"` below, from
+# wherever the script was started. supermgr-update starts it from the user's
+# directory, and pkexec from /home/<user>; cargo found no Cargo.toml there and
+# exited 101, ending the script the same silent way.
 # ---------------------------------------------------------------------------
 BUILD_DIR=""
 if command -v cargo >/dev/null 2>&1; then
-    BUILD_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+    BUILD_DIR=$(cargo metadata --manifest-path "$REPO_ROOT/Cargo.toml" \
+        --format-version 1 --no-deps 2>/dev/null \
         | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || BUILD_DIR=""
 fi
 [ -n "$BUILD_DIR" ] || BUILD_DIR="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}"
