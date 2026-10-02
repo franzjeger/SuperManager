@@ -9,11 +9,28 @@ import unittest
 
 SCRIPT = Path(__file__).parents[1] / "update-linux.sh"
 
+# git ends a commit, push or fetch by starting `git maintenance run --auto
+# --detach`, which holds a lock in the repository's objects/ while it runs.
+# One still running when tearDown removed the repositories failed the removal
+# with "Directory not empty: 'objects'" (CI, 2026-10-02). These repositories
+# are thrown away, so none of them needs maintenance. The update script's own
+# git commands get the same environment. The receiving end of a push does not:
+# git clears it for the other side, so origin's own config turns that off.
+ENV = dict(
+    os.environ,
+    GIT_CONFIG_COUNT="2",
+    GIT_CONFIG_KEY_0="maintenance.auto",
+    GIT_CONFIG_VALUE_0="false",
+    GIT_CONFIG_KEY_1="gc.auto",
+    GIT_CONFIG_VALUE_1="0",
+)
+
 
 def git(cwd, *args):
     return subprocess.run(
         ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
         cwd=cwd,
+        env=ENV,
         check=True,
         capture_output=True,
         text=True,
@@ -35,6 +52,7 @@ class UpdateLinuxFetchTests(unittest.TestCase):
         git(self.seed, "tag", "v1.0")
         git(self.seed, "commit", "-q", "--allow-empty", "-m", "second")
         git(root, "clone", "-q", "--bare", str(self.seed), str(self.origin))
+        git(self.origin, "config", "receive.autogc", "false")
         git(self.seed, "remote", "add", "origin", str(self.origin))
         git(root, "clone", "-q", str(self.origin), str(self.checkout))
 
@@ -42,7 +60,7 @@ class UpdateLinuxFetchTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def check(self):
-        env = dict(os.environ, SUPERMGR_CHECKOUT=str(self.checkout))
+        env = dict(ENV, SUPERMGR_CHECKOUT=str(self.checkout))
         return subprocess.run(
             ["bash", str(SCRIPT), "--check"], env=env, capture_output=True, text=True
         )
