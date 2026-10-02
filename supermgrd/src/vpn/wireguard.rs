@@ -45,12 +45,13 @@
 //! - `PeerStats` has `tx_bytes: u64`, `rx_bytes: u64`, `last_handshake_time: Option<SystemTime>`
 //! - Interface deletion is NOT in the crate API; we use rtnetlink directly.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt as _;
 use netlink_packet_route::route::{RouteAttribute, RouteMessage};
+use rtnetlink::{LinkUnspec, RouteMessageBuilder};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 use wireguard_control::{Backend, DeviceUpdate, InterfaceName, Key, PeerConfigBuilder};
@@ -136,6 +137,16 @@ fn route_gateway_and_oif(msg: &RouteMessage) -> Option<(IpAddr, u32)> {
     }
 }
 
+/// A request for every route of one address family: without a destination,
+/// rtnetlink sends it as a dump.
+fn route_dump(ipv6: bool) -> RouteMessage {
+    if ipv6 {
+        RouteMessageBuilder::<Ipv6Addr>::new().build()
+    } else {
+        RouteMessageBuilder::<Ipv4Addr>::new().build()
+    }
+}
+
 /// True when rtnetlink returned the specified kernel errno.
 ///
 /// Matching the numeric code avoids depending on the host locale or on the
@@ -184,16 +195,11 @@ async fn ifindex_to_name(idx: u32) -> Option<String> {
 /// Returns `None` if no default route exists. Only the first (lowest metric)
 /// default is captured; ECMP setups will have the primary restored.
 async fn capture_default_route(ipv6: bool) -> Result<Option<RouteMessage>, BackendError> {
-    let family = if ipv6 {
-        rtnetlink::IpVersion::V6
-    } else {
-        rtnetlink::IpVersion::V4
-    };
     let (conn, handle, _) = rtnetlink::new_connection()
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
 
-    let mut routes = handle.route().get(family).execute();
+    let mut routes = handle.route().get(route_dump(ipv6)).execute();
     let mut best: Option<RouteMessage> = None;
 
     while let Some(route) = routes
@@ -284,11 +290,8 @@ async fn restore_default_route(saved: &RouteMessage) -> Result<(), BackendError>
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
 
-    // Rebuild the route via the add API using the saved message.
-    let mut req = handle.route().add();
-    *req.message_mut() = saved.clone();
-    // Ensure NLM_F_CREATE is set.
-    match req.execute().await {
+    // Add the saved message back: NLM_F_CREATE | NLM_F_EXCL, like `ip route add`.
+    match handle.route().add(saved.clone()).execute().await {
         Ok(()) => {
             info!(
                 "restored {} default route — ok",
@@ -324,26 +327,20 @@ async fn add_host_route(ip: IpAddr, gateway: IpAddr, oif: u32) -> Result<(), Bac
 
     let result = match (ip, gateway) {
         (IpAddr::V4(dst), IpAddr::V4(gw)) => {
-            handle
-                .route()
-                .add()
-                .v4()
+            let route = RouteMessageBuilder::<Ipv4Addr>::new()
                 .destination_prefix(dst, 32)
                 .gateway(gw)
                 .output_interface(oif)
-                .execute()
-                .await
+                .build();
+            handle.route().add(route).execute().await
         }
         (IpAddr::V6(dst), IpAddr::V6(gw)) => {
-            handle
-                .route()
-                .add()
-                .v6()
+            let route = RouteMessageBuilder::<Ipv6Addr>::new()
                 .destination_prefix(dst, 128)
                 .gateway(gw)
                 .output_interface(oif)
-                .execute()
-                .await
+                .build();
+            handle.route().add(route).execute().await
         }
         _ => {
             return Err(BackendError::Interface(
@@ -364,12 +361,7 @@ async fn delete_host_route(cidr: &str) -> Result<(), BackendError> {
     tokio::spawn(conn);
 
     // Find the matching route.
-    let family = if ip.is_ipv4() {
-        rtnetlink::IpVersion::V4
-    } else {
-        rtnetlink::IpVersion::V6
-    };
-    let mut routes = handle.route().get(family).execute();
+    let mut routes = handle.route().get(route_dump(ip.is_ipv6())).execute();
     while let Some(route) = routes
         .try_next()
         .await
@@ -417,32 +409,27 @@ async fn add_allowed_ip_route(
         .map_err(|e| BackendError::Interface(format!("rtnetlink: {e}")))?;
     tokio::spawn(conn);
 
-    let result = match ip {
+    let route = match ip {
         IpAddr::V4(v4) => {
-            let mut req = handle
-                .route()
-                .add()
-                .v4()
+            let mut builder = RouteMessageBuilder::<Ipv4Addr>::new()
                 .destination_prefix(v4, prefix)
                 .output_interface(iface_index);
             if let Some(m) = metric {
-                req = req.priority(m);
+                builder = builder.priority(m);
             }
-            req.execute().await
+            builder.build()
         }
         IpAddr::V6(v6) => {
-            let mut req = handle
-                .route()
-                .add()
-                .v6()
+            let mut builder = RouteMessageBuilder::<Ipv6Addr>::new()
                 .destination_prefix(v6, prefix)
                 .output_interface(iface_index);
             if let Some(m) = metric {
-                req = req.priority(m);
+                builder = builder.priority(m);
             }
-            req.execute().await
+            builder.build()
         }
     };
+    let result = handle.route().add(route).execute().await;
 
     result.map_err(|e| {
         let hint = if rtnetlink_has_errno(&e, nix::errno::Errno::EACCES)
@@ -869,8 +856,7 @@ impl WireGuardBackend {
         // Bring the interface up.
         handle
             .link()
-            .set(if_index)
-            .up()
+            .set(LinkUnspec::new_with_index(if_index).up().build())
             .execute()
             .await
             .map_err(|e| {
