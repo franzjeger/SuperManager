@@ -984,7 +984,7 @@ pub struct ExitRoutesArgs {
 /// Find the `utunN` interface tailscaled installed for the tailnet.
 /// We look for the route to the standard CGNAT range (100.64/10) —
 /// that's always present when tailscaled is up and routing.
-fn detect_tailscale_utun() -> Option<String> {
+pub(crate) fn detect_tailscale_utun() -> Option<String> {
     let out = Command::new("/usr/sbin/netstat")
         .args(["-rn", "-f", "inet"])
         .output()
@@ -1213,12 +1213,38 @@ pub struct PanicResetArgs {
 /// Locate the bundled/installed tailscale CLI (same candidates the panic path
 /// uses). Returns the first existing path.
 fn tailscale_cli() -> Option<&'static str> {
-    const CANDIDATES: [&str; 3] = [
+    // The app is built as SuperManagerMac.app. An install that was renamed,
+    // and that Sparkle has since updated in place, is SuperManager.app. The
+    // bundled CLI matches the bundled tailscaled, so it comes before Homebrew's.
+    const CANDIDATES: [&str; 4] = [
         "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
+        "/Applications/SuperManager.app/Contents/Resources/tailscale-bin/tailscale",
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
     ];
     CANDIDATES.into_iter().find(|p| Path::new(p).exists())
+}
+
+/// tailscaled's prefs and status, as `tailscale debug prefs` and
+/// `tailscale status --json` print them. None when tailscaled is not running
+/// or no CLI answers.
+pub(crate) fn prefs_and_status() -> Option<(serde_json::Value, serde_json::Value)> {
+    if !Path::new("/var/run/tailscaled.socket").exists() {
+        return None;
+    }
+    let cli = tailscale_cli()?;
+    let ask = |args: &[&str]| -> Option<serde_json::Value> {
+        let out = Command::new(cli)
+            .arg("--socket=/var/run/tailscaled.socket")
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&out.stdout).ok()
+    };
+    Some((ask(&["debug", "prefs"])?, ask(&["status", "--json"])?))
 }
 
 /// Read the currently-selected exit node `(id, ip)` from tailscaled's prefs.
