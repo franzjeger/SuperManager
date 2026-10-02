@@ -503,6 +503,14 @@ impl Strongswan {
                 granted = ?granted,
                 "the gateway narrowed the full tunnel to these networks; only they go through it"
             );
+        } else if ok {
+            // The leak block and DNS below, and the route guard, go by these.
+            // Empty: they could not be read, and the tunnel is set up as asked.
+            tracing::info!(
+                profile = %args.profile_id,
+                granted = ?granted,
+                "the gateway granted these selectors"
+            );
         }
 
         // IPv6 leak protection. Our full-tunnel config is IPv4-only
@@ -518,12 +526,14 @@ impl Strongswan {
         }
 
         if ok && (args.full_tunnel || !args.dns_servers.is_empty()) {
-            // osx-attr adds gateway DNS to the physical service. Preserve
-            // its selected addresses, but publish an unscoped VPN resolver
-            // so macOS sends DNS using the tunnel route. Explicit profile
-            // servers override negotiated DNS; blank means automatic.
+            // osx-attr puts the gateway's DNS first in the primary service's.
+            // Publish that service's resolvers as an unscoped VPN resolver so
+            // macOS sends DNS along the tunnel route. They are read from the
+            // service itself: what macOS resolves with now can be another
+            // VPN's. Explicit profile servers override negotiated DNS; blank
+            // means automatic.
             let servers: Vec<String> = if args.dns_servers.is_empty() {
-                crate::dns_health_watchdog::read_active_resolvers()
+                crate::dns::system_resolvers()
                     .into_iter()
                     .filter(|s| s.parse::<std::net::Ipv4Addr>().is_ok())
                     .collect()
@@ -1108,6 +1118,8 @@ async fn exec(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
 ///
 /// Patterns are matched in priority order: the first one that
 /// hits wins, so more specific patterns come first.
+// One rule per failure, and their order is what decides: they stay together.
+#[allow(clippy::too_many_lines)]
 fn diagnose_strongswan_failure(log: &str) -> Option<String> {
     let l = log.to_ascii_lowercase();
 
@@ -1141,6 +1153,22 @@ fn diagnose_strongswan_failure(log: &str) -> Option<String> {
              Check the `local_id` / `remote_id` in the profile."
                 .to_owned(),
         );
+    }
+    // Every profile here has the gateway prove itself with the pre-shared
+    // key. One that shows a certificate took the connection for another of
+    // its dial-up tunnels, which a FortiGate picks by the identity the client
+    // sends.
+    if l.contains("no trusted") && l.contains("public key found for") {
+        let identity = if l.contains("no idi configured") {
+            ", because the profile has no Local ID and the Mac identified \
+             itself by its IP address. Set the Local ID the gateway expects."
+        } else {
+            ". Check that the profile's Local ID is the one the gateway expects."
+        };
+        return Some(format!(
+            "The gateway answered with a certificate, not the pre-shared key: \
+             it took the connection for another of its VPN tunnels{identity}"
+        ));
     }
 
     // Crypto / proposal-mismatch failures.
@@ -1208,12 +1236,20 @@ fn diagnose_strongswan_failure(log: &str) -> Option<String> {
         );
     }
 
-    // Catch-all: connection attempt finished without a successful
-    // CHILD_SA. Common when the EAP phase was never reached.
+    // Catch-all: swanctl initiates the child, so it ends every failed
+    // initiate with "establishing CHILD_SA '<name>' failed", whatever
+    // failed. Only an established IKE SA means authentication got through.
     if l.contains("establishing child_sa") && l.contains("failed") {
+        if l.contains("] established between") {
+            return Some(
+                "IKE_AUTH completed but CHILD_SA setup failed — usually \
+                 a phase-2 proposal mismatch or traffic-selector issue."
+                    .to_owned(),
+            );
+        }
         return Some(
-            "IKE_AUTH completed but CHILD_SA setup failed — usually \
-             a phase-2 proposal mismatch or traffic-selector issue."
+            "The IKE negotiation stopped before the gateway accepted the \
+             connection. The output below shows the step that failed."
                 .to_owned(),
         );
     }
@@ -2752,6 +2788,54 @@ mod diagnose_tests {
                    [IKE] establishing CHILD_SA failed";
         let d = diagnose_strongswan_failure(log).unwrap();
         assert!(d.contains("AUTHENTICATION_FAILED"), "{d}");
+    }
+
+    /// A profile without its Local ID, against the Elteco gateway on
+    /// 2026-10-01: sent the Mac's IP address, it got the FortiGate's
+    /// certificate tunnel. That used to read "`IKE_AUTH` completed".
+    const ANOTHER_TUNNELS_CERTIFICATE: &str = "\
+[CFG] selected proposal: IKE:AES_GCM_16_256/PRF_HMAC_SHA2_384/ECP_384
+[IKE] local host is behind NAT, sending keep alives
+[CFG] no IDi configured, default to IP address 192.168.2.154
+[IKE] establishing CHILD_SA 4e01cf8c-9466-4d17-a983-fce3a25fb60e{1}
+[ENC] parsed IKE_AUTH response 1 [ IDr CERT AUTH EAP/REQ/ID ]
+[IKE] received end entity cert \"CN=vpn.elteco.no\"
+[CFG]   using certificate \"CN=vpn.elteco.no\"
+[CFG] no issuer certificate found for \"CN=vpn.elteco.no\"
+[CFG]   issuer is \"CN=Elteco VPN CA, O=Elteco AS\"
+[IKE] no trusted RSA public key found for '79.160.177.205'
+initiate failed: establishing CHILD_SA '4e01cf8c-9466-4d17-a983-fce3a25fb60e' failed
+";
+
+    #[test]
+    fn a_certificate_instead_of_the_psk_points_at_the_local_id() {
+        let d = diagnose_strongswan_failure(ANOTHER_TUNNELS_CERTIFICATE).unwrap();
+        assert!(d.contains("certificate"), "{d}");
+        assert!(d.contains("has no Local ID"), "{d}");
+        assert!(!d.contains("IKE_AUTH completed"), "{d}");
+
+        let with_id = ANOTHER_TUNNELS_CERTIFICATE.replace(
+            "[CFG] no IDi configured, default to IP address 192.168.2.154\n",
+            "",
+        );
+        let d = diagnose_strongswan_failure(&with_id).unwrap();
+        assert!(d.contains("Check that the profile's Local ID"), "{d}");
+    }
+
+    /// swanctl ends any failed initiate on the child, so the catch-all says
+    /// `IKE_AUTH` completed only when the log shows the IKE SA established.
+    #[test]
+    fn the_catch_all_claims_ike_auth_only_once_it_completed() {
+        let stopped = "[IKE] establishing CHILD_SA x{1}\n\
+                       initiate failed: establishing CHILD_SA 'x' failed";
+        let d = diagnose_strongswan_failure(stopped).unwrap();
+        assert!(!d.contains("IKE_AUTH completed"), "{d}");
+
+        let after_auth = "[IKE] IKE_SA x[1] established between \
+                          192.168.2.154[sybradmin]...79.160.177.205[79.160.177.205]\n\
+                          initiate failed: establishing CHILD_SA 'x' failed";
+        let d = diagnose_strongswan_failure(after_auth).unwrap();
+        assert!(d.contains("IKE_AUTH completed"), "{d}");
     }
 }
 

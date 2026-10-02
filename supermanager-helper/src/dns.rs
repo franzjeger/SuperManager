@@ -164,24 +164,69 @@ pub(crate) fn detect_active_network_service() -> Option<String> {
     None
 }
 
-/// The resolvers the Mac uses now: the primary service's, as configd
-/// derives them into `State:/Network/Global/DNS`. Empty when it has none,
-/// or they cannot be read.
+/// The Mac's own resolvers: the primary network service's. Ones set by
+/// hand in its Setup override what DHCP put in its State, which is where
+/// strongSwan's osx-attr also puts an IKEv2 gateway's. Empty when it has
+/// none, or they cannot be read.
+///
+/// Not `State:/Network/Global/DNS` or `scutil --dns`: those are what macOS
+/// resolves with now, and with another VPN up that can be that VPN's
+/// servers. A full tunnel cannot reach them. An IKEv2 full tunnel set up
+/// while an OpenVPN 3 session held them published them as its own, and no
+/// name resolved until it was disconnected.
 pub fn system_resolvers() -> Vec<String> {
-    let Ok(mut child) = std::process::Command::new("/usr/sbin/scutil")
+    let Some(service) = show("State:/Network/Global/IPv4")
+        .as_deref()
+        .and_then(primary_service)
+        .map(str::to_owned)
+    else {
+        return Vec::new();
+    };
+    own_resolvers(
+        show(&format!("Setup:/Network/Service/{service}/DNS")).as_deref(),
+        show(&format!("State:/Network/Service/{service}/DNS")).as_deref(),
+    )
+}
+
+/// A service's resolvers, from its Setup and State DNS dictionaries.
+/// configd lets the ones set by hand override the rest.
+fn own_resolvers(setup: Option<&str>, state: Option<&str>) -> Vec<String> {
+    let manual = setup.map(server_addresses).unwrap_or_default();
+    if manual.is_empty() {
+        state.map(server_addresses).unwrap_or_default()
+    } else {
+        manual
+    }
+}
+
+/// `PrimaryService` in `show State:/Network/Global/IPv4`. It goes into
+/// other keys' paths, so it has to look like a service ID.
+fn primary_service(ipv4: &str) -> Option<&str> {
+    ipv4.lines()
+        .find_map(|line| line.trim().strip_prefix("PrimaryService : "))
+        .map(str::trim)
+        .filter(|id| {
+            !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+        })
+}
+
+/// `scutil`'s `show` of `key`. None when scutil cannot be asked.
+fn show(key: &str) -> Option<String> {
+    let mut child = std::process::Command::new("/usr/sbin/scutil")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-    else {
-        return Vec::new();
-    };
+        .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(b"open\nshow State:/Network/Global/DNS\nquit\n");
+        let _ = stdin.write_all(format!("open\nshow {key}\nquit\n").as_bytes());
     }
-    crate::proc::wait_bounded(child, crate::proc::PROBE, "scutil (show DNS)")
-        .map(|out| server_addresses(&String::from_utf8_lossy(&out.stdout)))
-        .unwrap_or_default()
+    crate::proc::wait_bounded(child, crate::proc::PROBE, "scutil (show)")
+        .ok()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Keep the Mac's own resolvers answering through a tunnel that takes all
@@ -290,6 +335,37 @@ mod tests {
             vec!["8.8.8.8".to_owned(), "2001:4860:4860::8888".to_owned()]
         );
         assert!(server_addresses("  No such key\n").is_empty());
+    }
+
+    /// This Mac on 2026-10-01: Wi-Fi is primary, and its DNS holds what DHCP
+    /// handed out, with the Elteco gateway's resolver that osx-attr put first.
+    #[test]
+    fn the_own_resolvers_are_the_primary_services() {
+        let ipv4 = "<dictionary> {\n  PrimaryInterface : en0\n  \
+                    PrimaryService : 02C8522B-E796-4B29-AA2F-8322C955FF7C\n  \
+                    Router : 192.168.2.55\n}\n";
+        assert_eq!(
+            primary_service(ipv4),
+            Some("02C8522B-E796-4B29-AA2F-8322C955FF7C")
+        );
+        assert_eq!(primary_service("  No such key\n"), None);
+        // Interpolated into a key path: nothing that leaves the service's own.
+        assert_eq!(primary_service("  PrimaryService : x/../../Global\n"), None);
+        assert_eq!(primary_service("  PrimaryService : a b\n"), None);
+
+        let state = "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 10.20.200.1\n    \
+                     1 : 8.8.8.8\n  }\n}\n";
+        let manual = "<dictionary> {\n  ServerAddresses : <array> {\n    0 : 9.9.9.9\n  }\n}\n";
+        assert_eq!(
+            own_resolvers(Some("<dictionary> {\n}\n"), Some(state)),
+            vec!["10.20.200.1".to_owned(), "8.8.8.8".to_owned()]
+        );
+        assert_eq!(own_resolvers(Some("  No such key\n"), Some(state)).len(), 2);
+        assert_eq!(
+            own_resolvers(Some(manual), Some(state)),
+            vec!["9.9.9.9".to_owned()]
+        );
+        assert!(own_resolvers(None, None).is_empty());
     }
 
     #[test]
