@@ -1213,8 +1213,12 @@ pub struct PanicResetArgs {
 /// Locate the bundled/installed tailscale CLI (same candidates the panic path
 /// uses). Returns the first existing path.
 fn tailscale_cli() -> Option<&'static str> {
-    const CANDIDATES: [&str; 3] = [
+    // The app is built as SuperManagerMac.app. An install that was renamed,
+    // and that Sparkle has since updated in place, is SuperManager.app. The
+    // bundled CLI matches the bundled tailscaled, so it comes before Homebrew's.
+    const CANDIDATES: [&str; 4] = [
         "/Applications/SuperManagerMac.app/Contents/Resources/tailscale-bin/tailscale",
+        "/Applications/SuperManager.app/Contents/Resources/tailscale-bin/tailscale",
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
     ];
