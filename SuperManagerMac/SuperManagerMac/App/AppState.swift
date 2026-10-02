@@ -61,6 +61,11 @@ class AppState {
     /// run commits the transition. Not user-visible.
     var vpnStatusMissStreak: [String: Int] = [:]
 
+    /// What each connected tunnel routes, as its status reports it. Absent
+    /// for a backend whose status does not say, and dropped when the tunnel
+    /// goes down. Read by `tunnelConflicts`.
+    var vpnLiveRouting: [String: VpnLiveRouting] = [:]
+
     // MARK: - Tailscale
 
     /// Latest snapshot of `tailscale status --json`. Refreshed every

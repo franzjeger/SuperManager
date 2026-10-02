@@ -110,6 +110,13 @@ struct VpnDetailView: View {
     @State private var missingIKEv2Credentials: VPNKeychain.MissingIKEv2Credentials?
     @State private var showingAzureSignIn = false
     @State private var azureSummaryForSignIn: AzureVpnSummary?
+    /// A connect held back to say which tunnels already up it conflicts
+    /// with. Runs `start` if the user goes ahead.
+    @State private var pendingConnect: PendingConnect?
+    struct PendingConnect {
+        let conflicts: [TunnelConflict]
+        let start: () -> Void
+    }
     /// Inline-rename UI. Click the title in the header to enter
     /// edit mode; press Return to commit or Escape to cancel.
     @State private var isRenaming = false
@@ -170,6 +177,19 @@ struct VpnDetailView: View {
         }
         .onAppear { startPolling() }
         .onDisappear { stopPolling() }
+        .alert(
+            "Tunnels in each other's way",
+            isPresented: Binding(
+                get: { pendingConnect != nil },
+                set: { if !$0 { pendingConnect = nil } }
+            ),
+            presenting: pendingConnect
+        ) { pending in
+            Button("Connect Anyway") { pending.start() }
+            Button("Cancel", role: .cancel) {}
+        } message: { pending in
+            Text(pending.conflicts.map(\.message).joined(separator: "\n\n"))
+        }
         .sheet(isPresented: $showingLog) { logSheet }
         .sheet(isPresented: $editingOvpnCreds) {
             EditOvpnCredentialsSheet(profileId: profileId, onSaved: {
@@ -518,7 +538,7 @@ struct VpnDetailView: View {
                         // stuck is more useful than locking them out
                         // until polling clears the state.
                         Button(busy || vpnState == "connecting" ? "Connecting…" : "Connect") {
-                            Task { await connect(profile) }
+                            requestConnect(profile) { Task { await connect(profile) } }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
@@ -539,7 +559,7 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     } else {
                         Button(busy ? "Connecting…" : "Connect") {
-                            Task { await connectWireGuard(profile) }
+                            requestConnect(profile) { Task { await connectWireGuard(profile) } }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
@@ -562,7 +582,9 @@ struct VpnDetailView: View {
                         .disabled(busy)
                     } else {
                         Button(busy ? "Connecting…" : "Connect") {
-                            Task { await connectOpenVPN(profile, configFile: cfg.configFile) }
+                            requestConnect(profile) {
+                                Task { await connectOpenVPN(profile, configFile: cfg.configFile) }
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
@@ -597,8 +619,10 @@ struct VpnDetailView: View {
                         // fails. The sheet owns the polling Task;
                         // closing it cancels.
                         Button(busy ? "Connecting…" : "Connect") {
-                            azureSummaryForSignIn = az
-                            showingAzureSignIn = true
+                            requestConnect(profile) {
+                                azureSummaryForSignIn = az
+                                showingAzureSignIn = true
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy)
@@ -641,6 +665,15 @@ struct VpnDetailView: View {
                 .menuStyle(.borderlessButton)
                 .frame(width: 30)
                 .help("More actions")
+            }
+
+            if vpnState == "connected" {
+                ForEach(appState.tunnelConflicts(ofConnected: profileId), id: \.self) { conflict in
+                    Label(conflict.message, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             if let actionError {
@@ -1433,6 +1466,17 @@ struct VpnDetailView: View {
             }
         } catch {
             actionError = error.localizedDescription
+        }
+    }
+
+    /// Run `start`, the connect, unless tunnels already up conflict with
+    /// this one. Then say how first, and connect only if the user goes ahead.
+    private func requestConnect(_ profile: VpnProfile, _ start: @escaping () -> Void) {
+        let conflicts = appState.tunnelConflicts(connecting: profile)
+        if conflicts.isEmpty {
+            start()
+        } else {
+            pendingConnect = PendingConnect(conflicts: conflicts, start: start)
         }
     }
 

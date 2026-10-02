@@ -163,6 +163,11 @@ pub struct OvpnStatusResult {
     /// GUI can render them deterministically.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub active_routes: Vec<String>,
+    /// The gateway pushed `redirect-gateway def1`, so the tunnel took the
+    /// default route: everything not routed more specifically goes
+    /// through it. Its two halves are not in `active_routes`.
+    #[serde(default)]
+    pub takes_all: bool,
     /// Cumulative bytes received on the tunnel interface since
     /// it came up. Pulled from `netstat -ibn -I <iface>` — same
     /// counters the kernel exposes via the `if_data` struct.
@@ -690,6 +695,7 @@ impl OpenVpn {
                 virtual_ip: None,
                 virtual_gateway: None,
                 active_routes: Vec::new(),
+                takes_all: false,
                 rx_bytes: None,
                 tx_bytes: None,
                 error_reason: None,
@@ -713,7 +719,7 @@ impl OpenVpn {
         let connected = tunnel_state == OvpnState::Connected;
 
         let (interface, virtual_ip, virtual_gateway) = parse_tunnel_metadata(&body);
-        let active_routes = parse_active_routes(&body);
+        let (active_routes, takes_all) = parse_active_routes(&body);
 
         // Byte counters and tunnel metadata are only meaningful when
         // the session is actually up. Clear them for reconnecting /
@@ -731,6 +737,7 @@ impl OpenVpn {
             virtual_ip: if connected { virtual_ip } else { None },
             virtual_gateway: if connected { virtual_gateway } else { None },
             active_routes: if connected { active_routes } else { Vec::new() },
+            takes_all: connected && takes_all,
             rx_bytes,
             tx_bytes,
             error_reason,
@@ -954,9 +961,11 @@ fn parse_tunnel_metadata(log: &str) -> (Option<String>, Option<String>, Option<S
 /// Skips the two halves of `redirect-gateway def1` (`0.0.0.0/1`
 /// and `128.0.0.0/1`) — they're not actual destinations the
 /// operator added, just openvpn's mechanism for stealing the
-/// default route. Showing them would just be noise.
-fn parse_active_routes(log: &str) -> Vec<String> {
+/// default route. Showing them would just be noise. The second value
+/// says whether both were added: the tunnel took the default route.
+fn parse_active_routes(log: &str) -> (Vec<String>, bool) {
     let mut out: Vec<String> = Vec::new();
+    let (mut low_half, mut high_half) = (false, false);
     for line in log.lines() {
         let Some(rest) = line.split("/sbin/route add -net ").nth(1) else {
             continue;
@@ -972,9 +981,11 @@ fn parse_active_routes(log: &str) -> Vec<String> {
         };
         // Drop the redirect-gateway halves — they're noise.
         if dest == "0.0.0.0" && prefix == 1 {
+            low_half = true;
             continue;
         }
         if dest == "128.0.0.0" && prefix == 1 {
+            high_half = true;
             continue;
         }
         let cidr = format!("{dest}/{prefix}");
@@ -982,7 +993,7 @@ fn parse_active_routes(log: &str) -> Vec<String> {
             out.push(cidr);
         }
     }
-    out
+    (out, low_half && high_half)
 }
 
 /// `255.255.255.0` → `Some(24)`. Returns `None` for non-contiguous
@@ -1419,6 +1430,28 @@ async fn find_openvpn_pid_for(safe: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_route_halves_say_the_tunnel_takes_all() {
+        let split = "/sbin/route add -net 10.134.0.0 -netmask 255.255.254.0 10.134.2.1\n";
+        assert_eq!(
+            parse_active_routes(split),
+            (vec!["10.134.0.0/23".to_owned()], false)
+        );
+
+        let full = format!(
+            "{split}/sbin/route add -net 0.0.0.0 -netmask 128.0.0.0 10.134.2.1\n\
+             /sbin/route add -net 128.0.0.0 -netmask 128.0.0.0 10.134.2.1\n"
+        );
+        assert_eq!(
+            parse_active_routes(&full),
+            (vec!["10.134.0.0/23".to_owned()], true)
+        );
+
+        // One half is not the default route.
+        let half = "/sbin/route add -net 0.0.0.0 -netmask 128.0.0.0 10.134.2.1\n";
+        assert_eq!(parse_active_routes(half), (Vec::new(), false));
+    }
 
     #[test]
     fn azure_never_falls_back_to_openvpn2() {
