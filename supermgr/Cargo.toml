@@ -43,5 +43,8 @@ rand        = { workspace = true }
 base64      = { workspace = true }
 tempfile    = "3"
 
+# The updater dialog's pseudo-terminal (see update.rs)
+nix         = { version = "0.31", features = ["term", "fs"] }
+
 [lints]
 workspace = true

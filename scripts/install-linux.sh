@@ -471,7 +471,11 @@ done
 #
 # Asked as a real `sudo test -r` rather than by parsing mount options, because
 # the only question that matters is whether root can read the file.
+#
+# sudo is asked for the password first, on its own. The probe used to be the
+# first sudo, so a mistyped password came out as "root cannot read … FUSE".
 # ---------------------------------------------------------------------------
+sudo -v || die "sudo did not accept the password, so nothing was installed."
 readable_probe="contrib/systemd/supermgrd.service"
 if ! sudo test -r "$readable_probe"; then
     die "root cannot read $readable_probe in this checkout.

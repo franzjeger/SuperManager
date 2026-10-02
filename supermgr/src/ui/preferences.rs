@@ -834,10 +834,9 @@ pub fn show_settings_dialog(
     }
 
     {
-        let rt = rt.clone();
         let window = window.clone();
         install_btn.connect_clicked(move |_| {
-            show_update_dialog(&window, &rt);
+            show_update_dialog(&window);
         });
     }
 
@@ -992,11 +991,12 @@ pub fn show_settings_dialog(
 /// Modal dialog that runs `supermgr-update --yes` and streams its output.
 ///
 /// The updater is a child process, not in-process logic: the same script a
-/// terminal user runs, so the two paths cannot drift. Closing is blocked
-/// while it runs — half an update with no output on screen is exactly the
-/// "install looks broken" state the installer scripts go out of their way
-/// to avoid.
-fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Handle) {
+/// terminal user runs, so the two paths cannot drift. It runs on a terminal
+/// of its own, so its install phase asks `sudo` for the password, and the
+/// dialog shows a password field when it does. Closing is blocked while it
+/// runs — half an update with no output on screen is exactly the "install
+/// looks broken" state the installer scripts go out of their way to avoid.
+fn show_update_dialog(window: &adw::ApplicationWindow) {
     use crate::update::UpdaterEvent;
 
     let dialog = adw::Dialog::builder()
@@ -1030,15 +1030,81 @@ fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Hand
         .margin_bottom(12)
         .build();
 
+    // Shown only while sudo waits for the password on the updater's terminal.
+    let password_card = crate::ui::design::card("");
+    let password_row = adw::PasswordEntryRow::builder()
+        .title("Your password (sudo)")
+        .build();
+    password_card.add(&password_row);
+    let cancel_btn = gtk4::Button::builder()
+        .label("Cancel")
+        .css_classes(["flat"])
+        .build();
+    let install_btn = gtk4::Button::builder()
+        .label("Install")
+        .css_classes(["suggested-action", "pill"])
+        .build();
+    let password_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    password_actions.set_halign(gtk4::Align::End);
+    password_actions.append(&cancel_btn);
+    password_actions.append(&install_btn);
+    let password_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .margin_start(12)
+        .margin_end(12)
+        .visible(false)
+        .build();
+    password_box.append(&password_card);
+    password_box.append(&password_actions);
+
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     content.append(&adw::HeaderBar::new());
     content.append(&scroll);
+    content.append(&password_box);
     content.append(&status);
     dialog.set_child(Some(&content));
     dialog.present(Some(window));
 
     let (utx, urx) = mpsc::channel();
-    crate::update::run_updater(rt, utx);
+    let input = std::rc::Rc::new(crate::update::run_updater(utx));
+
+    let submit = {
+        let input = input.clone();
+        let password_row = password_row.clone();
+        let password_box = password_box.clone();
+        let status = status.clone();
+        move || {
+            let Some(input) = input.as_ref() else { return };
+            let password = password_row.text();
+            password_row.set_text("");
+            password_box.set_visible(false);
+            if input.send_password(&password).is_err() {
+                status.set_label("The updater is no longer listening.");
+                return;
+            }
+            status.set_label("Installing\u{2026}");
+        }
+    };
+    {
+        let submit = submit.clone();
+        install_btn.connect_clicked(move |_| submit());
+    }
+    password_row.connect_entry_activated(move |_| submit());
+    {
+        let input = input.clone();
+        let password_row = password_row.clone();
+        let password_box = password_box.clone();
+        let status = status.clone();
+        cancel_btn.connect_clicked(move |_| {
+            password_row.set_text("");
+            password_box.set_visible(false);
+            status.set_label("Cancelling\u{2026}");
+            if let Some(input) = input.as_ref() {
+                let _ = input.interrupt();
+            }
+        });
+    }
 
     let buffer = view.buffer();
     gtk4::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
@@ -1054,7 +1120,13 @@ fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Hand
                     view.scroll_to_mark(&mark, 0.0, false, 0.0, 1.0);
                     buffer.delete_mark(&mark);
                 }
+                Ok(UpdaterEvent::PasswordPrompt) => {
+                    status.set_label("Built. Enter your password to install it.");
+                    password_box.set_visible(true);
+                    password_row.grab_focus();
+                }
                 Ok(UpdaterEvent::Done(ok)) => {
+                    password_box.set_visible(false);
                     dialog.set_can_close(true);
                     status.set_label(if ok {
                         "Done. The daemon is already running the new version \u{2014} \
@@ -1066,6 +1138,7 @@ fn show_update_dialog(window: &adw::ApplicationWindow, rt: &tokio::runtime::Hand
                 }
                 Err(mpsc::TryRecvError::Empty) => return gtk4::glib::ControlFlow::Continue,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    password_box.set_visible(false);
                     dialog.set_can_close(true);
                     status.set_label("The updater stopped unexpectedly.");
                     return gtk4::glib::ControlFlow::Break;
