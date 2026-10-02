@@ -115,6 +115,11 @@ jobs:
               echo "an unknown option must not succeed"; exit 1; }
           rc=0; bash scripts/install-linux.sh --bogus >/dev/null 2>&1 || rc=$?
           [ "$rc" = 2 ] || { echo "expected exit 2 for a bad option, got $rc"; exit 1; }
+          # supermgr-update runs it from the user's directory and pkexec from
+          # /home/<user>, never from the checkout. The target-dir lookup once
+          # asked cargo there, got exit 101, and ended every update silently.
+          (cd / && bash "$GITHUB_WORKSPACE/scripts/install-linux.sh" --print-deps >/dev/null) \
+              || { echo "install-linux.sh must run from outside the checkout"; exit 1; }
 
       # The `guards` stop point is only a gate if it comes before the network.
       # The mac job runs `SUPERMGR_INSTALL_DRY_RUN=guards`; if a future edit

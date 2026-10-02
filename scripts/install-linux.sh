@@ -60,6 +60,9 @@ say()  { printf '\n\033[1m→ %s\033[0m\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
 warn() { printf '\033[33m  ! %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
+# set -e exits without a word. Under supermgr-update's GUI dialog that leaves
+# "see the output above" pointing at nothing, so name what failed.
+trap 'printf "\033[31merror: line %s: \`%s\` failed (exit %s)\033[0m\n" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 
 # ---------------------------------------------------------------------------
 # Where cargo puts the binaries.
@@ -81,12 +84,21 @@ die()  { printf '\033[31merror: %s\033[0m\n' "$*" >&2; exit 1; }
 # ~20ms and needs no network.
 #
 # The fallback chain matters for the `--no-build` path, which is allowed to run
-# without a usable cargo: env var first, then plain `target`.
+# without a usable cargo: env var first, then plain `target`. "On PATH" is not
+# "usable": as root under supermgr-update's pkexec, /usr/bin/cargo is rustup's
+# shim with no toolchain behind it, and under pipefail its failure used to end
+# the script right here, silently.
+#
+# --manifest-path because this runs before the `cd "$REPO_ROOT"` below, from
+# wherever the script was started. supermgr-update starts it from the user's
+# directory, and pkexec from /home/<user>; cargo found no Cargo.toml there and
+# exited 101, ending the script the same silent way.
 # ---------------------------------------------------------------------------
 BUILD_DIR=""
 if command -v cargo >/dev/null 2>&1; then
-    BUILD_DIR=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
-        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+    BUILD_DIR=$(cargo metadata --manifest-path "$REPO_ROOT/Cargo.toml" \
+        --format-version 1 --no-deps 2>/dev/null \
+        | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p') || BUILD_DIR=""
 fi
 [ -n "$BUILD_DIR" ] || BUILD_DIR="${CARGO_TARGET_DIR:-${CARGO_BUILD_TARGET_DIR:-target}}"
 
@@ -373,27 +385,33 @@ fi
 # Package names drift between distro releases; pkg-config asks the
 # question that matters. Catching it here turns a wall of C linker errors
 # ten minutes into a build into one line before the build starts.
+#
+# Only when building. `--no-build` installs what is already built, and it is
+# how supermgr-update's GUI path arrives here: as root under pkexec, where
+# cargo is not on PATH at all when rustup lives in the user's home.
 # ---------------------------------------------------------------------------
 
-say "Checking build prerequisites"
-command -v cargo >/dev/null || die "cargo not found. Install Rust via your package manager or https://rustup.rs"
+if [ "$DO_BUILD" = 1 ]; then
+    say "Checking build prerequisites"
+    command -v cargo >/dev/null || die "cargo not found. Install Rust via your package manager or https://rustup.rs"
 
-MISSING_LIBS=()
-if command -v pkg-config >/dev/null; then
-    for lib in gtk4 libadwaita-1 vte-2.91-gtk4 openssl dbus-1 glib-2.0; do
-        pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS+=("$lib")
-    done
-else
-    warn "pkg-config not found — skipping the library check; the build will tell you"
-fi
+    MISSING_LIBS=()
+    if command -v pkg-config >/dev/null; then
+        for lib in gtk4 libadwaita-1 vte-2.91-gtk4 openssl dbus-1 glib-2.0; do
+            pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS+=("$lib")
+        done
+    else
+        warn "pkg-config not found — skipping the library check; the build will tell you"
+    fi
 
-if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
-    die "development libraries missing: ${MISSING_LIBS[*]}
+    if [ ${#MISSING_LIBS[@]} -gt 0 ]; then
+        die "development libraries missing: ${MISSING_LIBS[*]}
        The GUI cannot build without them. Install your distro's -dev/-devel
        packages for those, then re-run. (Re-running with --no-deps skips
        straight to the build once you have.)"
+    fi
+    note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
 fi
-note "cargo $(cargo --version | awk '{print $2}'), all GUI libraries present"
 
 # Package installation succeeding does not guarantee that every runtime CLI
 # exists (transitional and split packages are common).  Fail here with the

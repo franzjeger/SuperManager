@@ -62,6 +62,19 @@ class UpdateLinuxFetchTests(unittest.TestCase):
             git(self.seed, "rev-parse", "v1.0^{commit}"),
         )
 
+    def test_more_than_ten_new_commits_lists_ten_and_carries_on(self):
+        # The list was `git log | head -10`: head closed the pipe, git log died
+        # of SIGPIPE, and pipefail ended the script with 141, silently.
+        for i in range(40):
+            git(self.seed, "commit", "-q", "--allow-empty", "-m", f"new {i}")
+        git(self.seed, "push", "-q", "origin", "main")
+
+        result = self.check()
+
+        self.assertEqual(result.returncode, 10, result.stderr)
+        self.assertIn("40 new commit(s)", result.stdout)
+        self.assertIn("and 30 more", result.stdout)
+
     def test_a_fetch_that_fails_says_why_instead_of_guessing(self):
         git(self.checkout, "remote", "set-url", "origin", f"{self.origin}-missing")
 
