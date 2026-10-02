@@ -7655,6 +7655,7 @@ dependencies = [
  "gtk4",
  "ksni",
  "libadwaita",
+ "nix 0.31.3",
  "rand 0.10.3",
  "reqwest",
  "serde",

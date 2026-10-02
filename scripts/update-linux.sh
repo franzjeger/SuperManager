@@ -13,8 +13,10 @@
 #      binaries and restarts the daemon.
 #
 # Elevation: in a terminal the install phase asks via sudo, per step, the
-# same way install-linux.sh does. Without a terminal — launched from the
-# GUI's Settings → Updates page — it asks through polkit (pkexec) instead.
+# same way install-linux.sh does. The GUI's Settings → Updates page runs this
+# on a terminal of its own and answers sudo from its dialog. With no terminal
+# at all (GUIs from before that) it asks through polkit (pkexec), which needs
+# a polkit authentication agent running in the session.
 #
 #   --check       Only report. Exit 0 = up to date, 10 = update available.
 #   --force       Rebuild + reinstall even when already up to date.
@@ -43,7 +45,7 @@ while [ $# -gt 0 ]; do
             INSTALLED_COMMIT="$2"
             shift
             ;;
-        -h|--help) sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)         echo "unknown option: $1 (try --help)" >&2; exit 2 ;;
     esac
     shift
@@ -231,6 +233,14 @@ else
     # pkexec's own 126: the password prompt was dismissed.
     [ "$rc" != 126 ] || die "authentication was cancelled, so nothing was installed.
        The build is done; running the update again only installs it."
+    # 127: pkexec found nobody to ask. With no polkit agent in the session it
+    # falls back to a text prompt, which fails without a terminal ("/dev/tty"
+    # above). Seen in a COSMIC session started from a tty, and over xrdp.
+    [ "$rc" != 127 ] || die "pkexec could not ask for your password: no polkit authentication
+       agent is answering in this session, so nothing was installed.
+       The build is done. Install it from a terminal:
+
+           supermgr-update --force"
 fi
 [ "$rc" = 0 ] || die "the install step failed (exit $rc) — the new build is not installed"
 
