@@ -70,6 +70,7 @@ mod route_table;
 mod signed_file;
 mod strongswan;
 mod tailscale;
+mod tailscale_routes;
 mod tailscale_state;
 mod vpn_runtime;
 mod wg_native;
@@ -289,6 +290,13 @@ async fn main() -> anyhow::Result<()> {
     // route works). This watchdog catches that specifically.
     if let Err(e) = dns_health_watchdog::spawn_watchdog() {
         tracing::warn!("could not spawn dns health watchdog: {e:#}");
+    }
+
+    // Tailscale's subnet routes: macOS takes one away when the Mac joins a
+    // network with the same prefix, and tailscaled does not add it back
+    // until its prefs change.
+    if let Err(e) = tailscale_routes::spawn() {
+        tracing::warn!("could not spawn the Tailscale route keeper: {e:#}");
     }
 
     // (IOKit power monitor disabled in dev/ad-hoc builds — see `mod power`
