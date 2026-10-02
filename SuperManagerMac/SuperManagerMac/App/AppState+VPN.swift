@@ -12,6 +12,8 @@ struct VpnPollSample {
     let bytes: (UInt64, UInt64)?
     let lastHandshakeUnix: Int64?
     let peerEndpoint: String?
+    /// What the tunnel routes, when its status says.
+    var routing: VpnLiveRouting?
 
     static func disconnected(profileId: String) -> VpnPollSample {
         VpnPollSample(
@@ -20,6 +22,26 @@ struct VpnPollSample {
             bytes: nil,
             lastHandshakeUnix: nil,
             peerEndpoint: nil
+        )
+    }
+}
+
+/// What a connected tunnel routes, as its backend's status reports it.
+struct VpnLiveRouting: Equatable {
+    /// Whether it took the default route. nil: the status does not say, and
+    /// the profile's own setting stands.
+    let takesAll: Bool?
+    /// The networks it carries besides.
+    let routes: [String]
+
+    /// IKEv2 reports the selectors the gateway granted: everything, or the
+    /// networks it narrowed a full tunnel to.
+    static func ikev2(selectors: [String]) -> VpnLiveRouting? {
+        guard !selectors.isEmpty else { return nil }
+        let everything: Set = ["0.0.0.0/0", "::/0"]
+        return VpnLiveRouting(
+            takesAll: selectors.contains("0.0.0.0/0"),
+            routes: selectors.filter { !everything.contains($0) }
         )
     }
 }
@@ -130,9 +152,13 @@ extension AppState {
                     if let ep = sample.peerEndpoint {
                         vpnPeerEndpoints[id] = ep
                     }
+                    if let routing = sample.routing {
+                        vpnLiveRouting[id] = routing
+                    }
                 } else {
                     vpnLastHandshakeUnix.removeValue(forKey: id)
                     vpnPeerEndpoints.removeValue(forKey: id)
+                    vpnLiveRouting.removeValue(forKey: id)
                 }
             }
         }
@@ -223,7 +249,8 @@ extension AppState {
                     state: (r["state"] as? String) ?? "disconnected",
                     bytes: bytes,
                     lastHandshakeUnix: nil,
-                    peerEndpoint: nil
+                    peerEndpoint: nil,
+                    routing: Self.ovpnRouting(r)
                 )
             }
             // Azure VPN tunnels are spawned via the same OpenVPN
@@ -242,7 +269,8 @@ extension AppState {
                     state: (r["state"] as? String) ?? "disconnected",
                     bytes: bytes,
                     lastHandshakeUnix: nil,
-                    peerEndpoint: nil
+                    peerEndpoint: nil,
+                    routing: Self.ovpnRouting(r)
                 )
             }
             if backend.contains("fortigate") || backend.contains("forti_gate") || backend.contains("ikev2") || backend.contains("ipsec") {
@@ -269,7 +297,8 @@ extension AppState {
                     state: state,
                     bytes: bytes,
                     lastHandshakeUnix: nil,
-                    peerEndpoint: nil
+                    peerEndpoint: nil,
+                    routing: VpnLiveRouting.ikev2(selectors: (r["active_routes"] as? [String]) ?? [])
                 )
             }
             DebugLog.write("fetchProfileStatus: unknown backend \(summary.backend) for \(summary.id)")
@@ -287,6 +316,16 @@ extension AppState {
                 peerEndpoint: nil
             )
         }
+    }
+
+    /// `ovpn_status`'s pushed routes, and whether the gateway's
+    /// `redirect-gateway` took the default route. A helper too old to say
+    /// leaves `takesAll` nil.
+    fileprivate static func ovpnRouting(_ status: [String: Any]) -> VpnLiveRouting {
+        VpnLiveRouting(
+            takesAll: status["takes_all"] as? Bool,
+            routes: (status["active_routes"] as? [String]) ?? []
+        )
     }
 
     /// Like `toUInt64` but for signed Unix timestamps. JSONSerialization
@@ -977,4 +1016,78 @@ extension AppState {
         UserDefaults.standard.set(Array(pinnedVpnIds), forKey: Self.pinnedVpnDefaultsKey)
     }
 
+}
+
+// MARK: - Tunnels in each other's way
+
+extension AppState {
+    /// A tunnel in one of these is up, or about to be.
+    private static let tunnelUpStates: Set<String> = ["connected", "connecting", "reconnecting"]
+
+    /// What the tunnels already up would do to `profile`'s, and it to them.
+    func tunnelConflicts(connecting profile: VpnProfile) -> [TunnelConflict] {
+        TunnelConflicts.between(Self.askedRouting(profile), and: tunnelsUp(except: profile.id))
+    }
+
+    /// What gets in the way of `profileId`'s tunnel while it is up.
+    func tunnelConflicts(ofConnected profileId: String) -> [TunnelConflict] {
+        guard let summary = vpnProfiles.first(where: { $0.id == profileId }) else { return [] }
+        return TunnelConflicts.between(routing(of: summary), and: tunnelsUp(except: profileId))
+    }
+
+    /// The tunnels up now: VPN profiles, and Tailscale while it sends
+    /// everything through an exit node.
+    private func tunnelsUp(except profileId: String) -> [TunnelRouting] {
+        var up = vpnProfiles
+            .filter { $0.id != profileId && Self.tunnelUpStates.contains(vpnConnectionStates[$0.id] ?? "") }
+            .map(routing(of:))
+        if tailscaleStatus?.backendState == "Running", let exit = currentExitNodeName() {
+            up.append(TunnelRouting(name: "Tailscale (exit node \(exit))", takesAll: true, routes: []))
+        }
+        return up
+    }
+
+    /// What `summary`'s tunnel routes: what its status reports while it is
+    /// up, else what the profile asks for.
+    private func routing(of summary: VpnProfileSummary) -> TunnelRouting {
+        let asked = Self.askedRouting(summary)
+        guard let live = vpnLiveRouting[summary.id] else { return asked }
+        return TunnelRouting(
+            name: summary.name,
+            takesAll: live.takesAll ?? asked.takesAll,
+            routes: live.routes
+        )
+    }
+
+    /// What a profile asks for. A plain OpenVPN profile does not choose: its
+    /// server pushes the default route or not, and the status says which
+    /// once it is up. An Azure one does, through `redirect-gateway`.
+    static func askedRouting(_ summary: VpnProfileSummary) -> TunnelRouting {
+        let backend = summary.backend.lowercased()
+        if backend.contains("openvpn") {
+            return TunnelRouting(name: summary.name, takesAll: false, routes: [])
+        }
+        return TunnelRouting(
+            name: summary.name,
+            takesAll: summary.fullTunnel,
+            routes: summary.fullTunnel ? [] : summary.splitRoutes
+        )
+    }
+
+    /// The same for a full profile, which also has an Azure profile's routes.
+    static func askedRouting(_ profile: VpnProfile) -> TunnelRouting {
+        let routes: [String]
+        switch profile.config {
+        case .ikev2(let cfg): routes = cfg.routes
+        case .wireguard(let wg): routes = wg.splitRoutes
+        case .azure(let az): routes = az.routes
+        case .openvpn, .unsupported:
+            return TunnelRouting(name: profile.name, takesAll: false, routes: [])
+        }
+        return TunnelRouting(
+            name: profile.name,
+            takesAll: profile.fullTunnel,
+            routes: profile.fullTunnel ? [] : routes
+        )
+    }
 }
