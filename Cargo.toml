@@ -83,7 +83,7 @@ rsa         = { version = "0.9",  features = ["std"] }
 # separate russh-keys crate, is `russh::keys`.
 russh       = "0.62"
 # SFTP over russh
-russh-sftp  = "2.0"
+russh-sftp  = "3.0"
 # Random number generation
 rand        = "0.10"
 # Template engine for FortiGate / UniFi configuration generation.
