@@ -289,22 +289,101 @@ fn find_tailscaled_pid() -> Option<u32> {
     None
 }
 
-/// Detect the LOCAL (pre-tailscale) default gateway. Reads `route
-/// -n get default` and pulls out the gateway IP. Used as the
-/// next-hop for tailscaled's underlay-endpoint pin routes.
-fn detect_local_gateway() -> Option<String> {
-    let out = Command::new("/sbin/route")
-        .args(["-n", "get", "default"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for line in stdout.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("gateway: ") {
-            return Some(rest.trim().to_string());
+/// The physical default route: the table's own `default` entry. Not
+/// `route -n get default`, which answers with the exit node's 0/1 through
+/// utun once that is installed, and has no gateway to give.
+fn physical_default(v6: bool) -> Option<crate::route_table::DefaultRoute> {
+    crate::route_table::primary_default(v6)
+        .filter(|route| !route.interface.starts_with("utun") && !route.is_stray_loopback())
+}
+
+/// The physical default route's gateway: the next hop for the exemptions.
+fn physical_gateway() -> Result<String> {
+    Ok(physical_default(false)
+        .context("could not find the physical default route")?
+        .gateway)
+}
+
+/// Scoped default routes this exit-node session added, one per line as
+/// `<family> <interface>`. Only these are deleted again: a scoped default
+/// macOS keeps for another interface is not ours.
+const SCOPED_DEFAULT_STATE_FILE: &str = "/var/run/supermanager-tailscale-scoped-defaults";
+
+/// `route` arguments for a default route scoped to `route`'s interface.
+///
+/// tailscaled binds its sockets to the physical interface, so the kernel
+/// looks their routes up scoped to it. With the exit node's 0/1 and 128/1
+/// through utun, the only matches were that interface's own subnet and the
+/// exemption host routes, and everything else failed with "network is
+/// unreachable". That included the exit node's own WireGuard endpoint,
+/// which `lsof` never lists because the UDP socket is not connected. The
+/// direct path died as the exit node came up, and all traffic went through
+/// a DERP relay at a fraction of the speed. A scoped default gives bound
+/// sockets their way out and changes nothing for anything else.
+fn scoped_default_args(v6: bool, route: &crate::route_table::DefaultRoute) -> Vec<String> {
+    let mut args: Vec<String> = vec!["-n".into(), "add".into()];
+    if v6 {
+        args.push("-inet6".into());
+    }
+    args.extend(["-ifscope".into(), route.interface.clone(), "default".into()]);
+    if route.gateway.starts_with("link#") {
+        args.extend(["-interface".into(), route.interface.clone()]);
+    } else {
+        args.push(route.gateway.clone());
+    }
+    args
+}
+
+/// Give tailscaled's bound sockets a default route on the physical
+/// interface, for each family that has one: see `scoped_default_args`. A
+/// previous session's go first, since they point at the network the Mac was
+/// on then.
+fn refresh_scoped_defaults() {
+    remove_scoped_defaults();
+    let mut added = Vec::new();
+    for v6 in [false, true] {
+        let Some(route) = physical_default(v6) else {
+            continue;
+        };
+        let family = if v6 { "-inet6" } else { "-inet" };
+        match Command::new("/sbin/route")
+            .args(scoped_default_args(v6, &route))
+            .output()
+        {
+            Ok(o) if o.status.success() => added.push(format!("{family} {}", route.interface)),
+            // One already there is macOS's, and it does the same job.
+            Ok(o) => tracing::warn!(
+                "scoped default {family} on {} not added: {}",
+                route.interface,
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => tracing::warn!("scoped default {family} spawn error: {e}"),
         }
     }
-    None
+    let _ = fs::write(SCOPED_DEFAULT_STATE_FILE, added.join("\n"));
+}
+
+/// Delete the scoped defaults `refresh_scoped_defaults` recorded.
+fn remove_scoped_defaults() -> usize {
+    let recorded = fs::read_to_string(SCOPED_DEFAULT_STATE_FILE).unwrap_or_default();
+    let mut removed = 0;
+    for line in recorded.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(family), Some(iface)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if !matches!(family, "-inet" | "-inet6")
+            || !iface.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        let _ = Command::new("/sbin/route")
+            .args(["-n", "delete", family, "-ifscope", iface, "default"])
+            .output();
+        removed += 1;
+    }
+    let _ = fs::remove_file(SCOPED_DEFAULT_STATE_FILE);
+    removed
 }
 
 /// Snapshot tailscaled's currently-connected external endpoints
@@ -479,7 +558,7 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     let utun = detect_tailscale_utun()
         .context("could not find Tailscale utun interface — is tailscaled running?")?;
     tracing::info!(utun = %utun, "install_exit_routes: detected utun");
-    let local_gateway = detect_local_gateway().context("could not detect local default gateway")?;
+    let local_gateway = physical_gateway()?;
 
     // 1. **Exemption snapshot** — read tailscaled's currently
     // active underlay endpoints (UDP/TCP to public IPs) BEFORE we
@@ -511,27 +590,7 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     // the local default gateway. These are MORE SPECIFIC than the
     // /1 routes we'll add next, so they win in the routing
     // longest-prefix match.
-    let mut installed_exemptions = Vec::new();
-    for ip in &exempt_ips {
-        // Pre-clean any stale entry.
-        let _ = Command::new("/sbin/route")
-            .args(["delete", "-host", ip])
-            .output();
-        let r = Command::new("/sbin/route")
-            .args(["-q", "add", "-host", ip, &local_gateway])
-            .output();
-        match r {
-            Ok(o) if o.status.success() => installed_exemptions.push(ip.clone()),
-            Ok(o) => {
-                tracing::warn!(
-                    "exemption add {ip} via {local_gateway} failed: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-            }
-            Err(e) => tracing::warn!("exemption add {ip} spawn error: {e}"),
-        }
-    }
-    write_exemption_state(&installed_exemptions);
+    let installed_exemptions = install_exemptions(&exempt_ips, &local_gateway);
 
     // 2.5 OWNERSHIP GATE — never steal the shared split-default from a live
     // FOREIGN full tunnel. Azure VPN (rendered as an OpenVPN redirect-gateway
@@ -551,6 +610,9 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
              tailscale exit node."
         );
     }
+
+    // 2.75 tailscaled's own way out past the routes below.
+    refresh_scoped_defaults();
 
     // 3. Idempotent: nuke any existing split routes before adding.
     let _ = Command::new("/sbin/route")
@@ -617,8 +679,36 @@ pub fn install_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     })
 }
 
-/// Roll back exemption host-routes when split-route install fails.
-/// We don't return errors for individual deletions — best-effort.
+/// Pin each of `ips` to `gateway` with a host route, and record the ones
+/// that took.
+fn install_exemptions(ips: &[String], gateway: &str) -> Vec<String> {
+    let mut installed = Vec::new();
+    for ip in ips {
+        // Pre-clean any stale entry.
+        let _ = Command::new("/sbin/route")
+            .args(["delete", "-host", ip])
+            .output();
+        let r = Command::new("/sbin/route")
+            .args(["-q", "add", "-host", ip, gateway])
+            .output();
+        match r {
+            Ok(o) if o.status.success() => installed.push(ip.clone()),
+            Ok(o) => {
+                tracing::warn!(
+                    "exemption add {ip} via {gateway} failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+            }
+            Err(e) => tracing::warn!("exemption add {ip} spawn error: {e}"),
+        }
+    }
+    write_exemption_state(&installed);
+    installed
+}
+
+/// Roll back exemption host-routes and scoped defaults when split-route
+/// install fails. We don't return errors for individual deletions —
+/// best-effort.
 fn rollback_exemptions(ips: &[String]) {
     for ip in ips {
         let _ = Command::new("/sbin/route")
@@ -626,6 +716,7 @@ fn rollback_exemptions(ips: &[String]) {
             .output();
     }
     let _ = fs::remove_file(EXEMPTION_STATE_FILE);
+    remove_scoped_defaults();
 }
 
 /// Forcibly write the LIVE DNS state via `scutil`, bypassing
@@ -953,10 +1044,13 @@ pub fn remove_exit_routes(_: ExitRoutesArgs) -> Result<InstallResult> {
     }
     let _ = fs::remove_file(EXEMPTION_STATE_FILE);
 
+    // 3. And the scoped defaults that let tailscaled's own sockets past them.
+    let scoped = remove_scoped_defaults();
+
     Ok(InstallResult {
         success: true,
         message: format!(
-            "Removed split-default + {} underlay exemptions (best-effort)",
+            "Removed split-default + {} underlay exemptions + {scoped} scoped defaults (best-effort)",
             exempt.len()
         ),
     })
@@ -1883,6 +1977,48 @@ fn reload_daemon() {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn default_route(gateway: &str, interface: &str) -> crate::route_table::DefaultRoute {
+        crate::route_table::DefaultRoute {
+            gateway: gateway.into(),
+            interface: interface.into(),
+            flags: "UGScg".into(),
+        }
+    }
+
+    /// This Mac on 2026-10-11, with an exit node on: both families' defaults,
+    /// and a link-only one as a PPP uplink would have.
+    #[test]
+    fn the_scoped_default_goes_out_the_physical_interface() {
+        assert_eq!(
+            scoped_default_args(false, &default_route("172.16.0.1", "en0")),
+            ["-n", "add", "-ifscope", "en0", "default", "172.16.0.1"]
+        );
+        assert_eq!(
+            scoped_default_args(true, &default_route("fe80::5c13:ccff:fec4:5164%en0", "en0")),
+            [
+                "-n",
+                "add",
+                "-inet6",
+                "-ifscope",
+                "en0",
+                "default",
+                "fe80::5c13:ccff:fec4:5164%en0"
+            ]
+        );
+        assert_eq!(
+            scoped_default_args(false, &default_route("link#21", "ppp0")),
+            [
+                "-n",
+                "add",
+                "-ifscope",
+                "ppp0",
+                "default",
+                "-interface",
+                "ppp0"
+            ]
+        );
+    }
 
     fn scratch_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("supermanager-tsd-{}", uuid::Uuid::new_v4()));
