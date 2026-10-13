@@ -55,7 +55,7 @@ tempfile = "3"
 # would fail to compile off-Windows. The binary itself is also gated at
 # `main.rs` so a Linux build produces a stub `fn main()` that errors out.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-service = "0.7"
+windows-service = "0.8"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
