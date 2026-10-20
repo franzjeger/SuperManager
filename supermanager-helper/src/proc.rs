@@ -397,6 +397,48 @@ fn kill(child: &mut Child, scope: Scope) {
     }
 }
 
+/// The command name the kernel keeps for `pid`, as `ps -c` shows it. Unlike
+/// the path [`process_is`] reads, it is still there after the executable has
+/// been deleted.
+pub fn process_name(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut buf = [0u8; 64];
+    // SAFETY: `buf` is writable for the length passed.
+    let len = unsafe {
+        libc::proc_name(
+            pid,
+            buf.as_mut_ptr().cast(),
+            u32::try_from(buf.len()).unwrap_or(0),
+        )
+    };
+    let len = usize::try_from(len).ok().filter(|&len| len > 0)?;
+    Some(String::from_utf8_lossy(&buf[..len]).into_owned())
+}
+
+/// The effective user `pid` runs as.
+pub fn process_uid(pid: i32) -> Option<libc::uid_t> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `info` is writable for `size` bytes, and proc_pidinfo writes at
+    // most that.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: a full-size answer initialised all of it; zeroed covers the rest.
+    (written == size).then(|| unsafe { info.assume_init() }.pbi_uid)
+}
+
 /// Whether process `pid` runs the executable at `path`. A pid written down
 /// can outlive its process, and the pid be reused by something else.
 pub fn process_is(pid: i32, path: &std::path::Path) -> bool {

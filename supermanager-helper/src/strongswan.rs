@@ -337,7 +337,7 @@ impl Strongswan {
         let running = self
             .adopted_charon
             .or_else(|| running_charon(&self.pid_file, &charon));
-        if let Some(pid) = running.filter(|&pid| crate::proc::process_is(pid, &charon)) {
+        if let Some(pid) = running.filter(|&pid| is_charon(pid, &charon)) {
             if answers(&swanctl).await {
                 if self.adopted_charon.replace(pid).is_none() {
                     tracing::info!(pid, "took over the charon an earlier helper started");
@@ -415,7 +415,7 @@ impl Strongswan {
             if self
                 .charon
                 .as_deref()
-                .is_some_and(|charon| crate::proc::process_is(pid, charon))
+                .is_some_and(|charon| is_charon(pid, charon))
             {
                 stop_process(pid).await;
             }
@@ -986,14 +986,36 @@ fn utun_for_address(addr: &str) -> Option<(String, String)> {
     None
 }
 
-/// The pid in charon's pid file, if a process with it runs `charon`.
+/// The pid in charon's pid file, if that process is a charon.
 fn running_charon(pid_file: &Path, charon: &Path) -> Option<i32> {
     let pid = std::fs::read_to_string(pid_file)
         .ok()?
         .trim()
         .parse()
         .ok()?;
-    crate::proc::process_is(pid, charon).then_some(pid)
+    is_charon(pid, charon).then_some(pid)
+}
+
+/// Whether `pid` is a charon of ours: one running `charon`, or one of the
+/// helper's user with its name.
+///
+/// Homebrew installs each strongSwan version in a directory of its own and
+/// deletes the old one on upgrade. A charon started from it keeps running,
+/// with its tunnels and the IKE ports, and the kernel then has no path for
+/// its executable, only its name. Requiring the current binary left such a
+/// charon neither taken over nor stopped, so every new one failed to bind
+/// and gave up with "charon already running". That happened on 2026-10-20,
+/// a week after strongSwan `6.1.0` was upgraded to `6.1.0_1`.
+fn is_charon(pid: i32, charon: &Path) -> bool {
+    if crate::proc::process_is(pid, charon) {
+        return true;
+    }
+    let Some(name) = charon.file_name().and_then(std::ffi::OsStr::to_str) else {
+        return false;
+    };
+    crate::proc::process_name(pid).as_deref() == Some(name)
+        // SAFETY: geteuid has no preconditions.
+        && crate::proc::process_uid(pid) == Some(unsafe { libc::geteuid() })
 }
 
 /// Whether charon answers on its control socket.
@@ -2199,6 +2221,50 @@ mod tests {
         // Here it is the test's own child, so the test reaps it; a real
         // adopted charon belongs to launchd, which does.
         assert_eq!(earlier.wait().await.unwrap().signal(), Some(libc::SIGKILL));
+    }
+
+    /// What `a_charon_from_a_deleted_version_is_taken_over_and_stopped` runs as
+    /// its charon: this test binary under charon's name, sleeping.
+    #[test]
+    #[ignore = "run by another test as a stand-in charon"]
+    fn stand_in_charon() {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+    }
+
+    /// Homebrew deleted the strongSwan version a running charon was started
+    /// from. That charon is still charon: taken over while it answers, and
+    /// stopped before a new one starts.
+    #[tokio::test]
+    async fn a_charon_from_a_deleted_version_is_taken_over_and_stopped() {
+        let fixture = StartupFixture::new();
+        let old = fixture.0.join("6.1.0/libexec/ipsec");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::copy(std::env::current_exe().unwrap(), old.join("charon")).unwrap();
+        let mut running = Command::new(old.join("charon"))
+            .args([
+                "--ignored",
+                "--exact",
+                "strongswan::tests::stand_in_charon",
+                "--quiet",
+            ])
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = i32::try_from(running.id().unwrap()).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::fs::remove_dir_all(fixture.0.join("6.1.0")).unwrap();
+        std::fs::write(fixture.0.join("charon.pid"), format!("{pid}\n")).unwrap();
+
+        let current = fixture.0.join("6.1.0_1/libexec/ipsec/charon");
+        let swanctl = fixture.script("swanctl", "exit 0");
+        let mut engine = fixture.engine(current, swanctl);
+        engine.ensure_charon().await.unwrap();
+        assert_eq!(engine.adopted_charon, Some(pid));
+        assert!(engine.charon_child.is_none(), "a second charon was started");
+
+        engine.stop_charon().await;
+        assert_eq!(running.wait().await.unwrap().signal(), Some(libc::SIGKILL));
     }
 
     /// A pid file can outlive charon, and the pid be reused. Only a process
