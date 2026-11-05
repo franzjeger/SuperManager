@@ -43,6 +43,19 @@
 //! reconfigs (e.g. DHCP lease change between two networks): we
 //! debounce one poll and only restore if our snapshot's interface
 //! is still `UP`. If the interface dropped, we let DHCP own it.
+//!
+//! ## IPv6
+//!
+//! An IPv6 default route goes through a link-local address, and the kernel
+//! takes any of those, on any network. Restoring a remembered one after a
+//! move left a static route to a router that was not there. macOS never
+//! clears a static route, and while it stood the kernel could not install
+//! the router it had learned, so the guardian read the dead gateway back as
+//! known-good. One Mac carried a router's address over six networks in two
+//! days, with no IPv6 on any of them.
+//!
+//! So IPv6 is put back only through a router the kernel knows on the link
+//! now (`ndp -r`), and a default through any other is replaced by one.
 
 use anyhow::{anyhow, Result};
 use std::process::Command;
@@ -59,6 +72,10 @@ static SNAPSHOT_V6: OnceLock<Mutex<Option<RouteSnapshot>>> = OnceLock::new();
 /// Track whether the guardian is already running so multiple
 /// `spawn` calls collapse to a no-op.
 static SPAWNED: Mutex<bool> = Mutex::new(false);
+
+/// How many 500 ms ticks pass between checks that the IPv6 default goes
+/// through a router on the link. Each costs an `ndp` run.
+const IPV6_ROUTER_CHECK_TICKS: u32 = 20;
 
 #[derive(Clone, Debug, PartialEq)]
 struct RouteSnapshot {
@@ -164,30 +181,21 @@ pub fn force_restore_now() -> Result<()> {
         .and_then(|s| s.clone());
 
     let mut any_done = false;
-    if let Some(snap) = v4 {
-        if interface_is_up(&snap.interface) {
-            if restore_default(&snap, Af::V4).is_ok() {
-                tracing::warn!(
-                    af = %Af::V4.label(),
-                    gw = %snap.gateway,
-                    iface = %snap.interface,
-                    "force_restore_now: default asserted"
-                );
-                any_done = true;
-            }
-        }
-    }
-    if let Some(snap) = v6 {
-        if interface_is_up(&snap.interface) {
-            if restore_default(&snap, Af::V6).is_ok() {
-                tracing::warn!(
-                    af = %Af::V6.label(),
-                    gw = %snap.gateway,
-                    iface = %snap.interface,
-                    "force_restore_now: default asserted"
-                );
-                any_done = true;
-            }
+    for (snap, af) in [(v4, Af::V4), (v6, Af::V6)] {
+        let Some(snap) = snap.filter(|snap| interface_is_up(&snap.interface)) else {
+            continue;
+        };
+        let Some(gateway) = restore_gateway(&snap, af) else {
+            continue;
+        };
+        if restore_default(&gateway, af).is_ok() {
+            tracing::warn!(
+                af = %af.label(),
+                gw = %gateway,
+                iface = %snap.interface,
+                "force_restore_now: default asserted"
+            );
+            any_done = true;
         }
     }
     if any_done {
@@ -200,10 +208,15 @@ pub fn force_restore_now() -> Result<()> {
 fn guardian_loop() {
     let mut missing_v4 = 0u32;
     let mut missing_v6 = 0u32;
+    let mut ticks = 0u32;
     loop {
         thread::sleep(Duration::from_millis(500));
         tick_one(Af::V4, &mut missing_v4);
         tick_one(Af::V6, &mut missing_v6);
+        ticks = ticks.wrapping_add(1);
+        if ticks.is_multiple_of(IPV6_ROUTER_CHECK_TICKS) {
+            repair_ipv6_default();
+        }
     }
 }
 
@@ -264,13 +277,27 @@ fn tick_one(af: Af, missing: &mut u32) {
                 );
                 return;
             }
-            match restore_default(&snap, af) {
+            let Some(gateway) = restore_gateway(&snap, af) else {
+                // No router on this link. The kernel installs the default
+                // itself when one advertises.
+                tracing::info!(
+                    af = %af.label(),
+                    iface = %snap.interface,
+                    "default route is gone, and no router here to put it back through"
+                );
+                if let Ok(mut guard) = cell.lock() {
+                    *guard = None;
+                }
+                *missing = 0;
+                return;
+            };
+            match restore_default(&gateway, af) {
                 Ok(()) => {
                     tracing::warn!(
                         af = %af.label(),
-                        gw = %snap.gateway,
+                        gw = %gateway,
                         iface = %snap.interface,
-                        "default route was missing — restored from snapshot"
+                        "default route was missing — restored"
                     );
                     *missing = 0;
                 }
@@ -354,10 +381,80 @@ fn remove_stray_loopback_default(af: Af) {
     }
 }
 
+/// The gateway to put a default route back through. For IPv4, the one in
+/// use: the kernel refuses one that is not on this network. For IPv6, a
+/// router the kernel knows on the link now: see the module docs. None
+/// when there is none.
+fn restore_gateway(snap: &RouteSnapshot, af: Af) -> Option<String> {
+    match af {
+        Af::V4 => Some(snap.gateway.clone()),
+        Af::V6 => crate::route_table::ipv6_routers(&snap.interface)
+            .into_iter()
+            .next(),
+    }
+}
+
+/// The router to replace an IPv6 default through `gateway` with: the
+/// preferred of `routers` when `gateway` is not one of them. When the kernel
+/// knows no router there is nothing better, and a router set by hand stands.
+fn better_router<'a>(gateway: &str, routers: &'a [String]) -> Option<&'a str> {
+    if routers.iter().any(|router| router == gateway) {
+        return None;
+    }
+    routers.first().map(String::as_str)
+}
+
+/// Replace an IPv6 default route through a router that is not on the link.
+/// Nothing else does: it is static, so macOS leaves it, and it keeps the
+/// kernel from installing the router it learned.
+fn repair_ipv6_default() {
+    let Some(current) = read_default_route(Af::V6) else {
+        return;
+    };
+    let routers = crate::route_table::ipv6_routers(&current.interface);
+    let Some(router) = better_router(&current.gateway, &routers) else {
+        return;
+    };
+    let args = [
+        "-n",
+        "delete",
+        "-inet6",
+        "default",
+        current.gateway.as_str(),
+    ];
+    match crate::proc::bounded(Command::new("/sbin/route").args(args), crate::proc::MUTATE) {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            tracing::warn!(
+                gw = %current.gateway,
+                "could not remove an IPv6 default through a router not on the link: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                gw = %current.gateway,
+                "could not remove an IPv6 default through a router not on the link: {e}"
+            );
+            return;
+        }
+    }
+    match restore_default(router, Af::V6) {
+        Ok(()) => tracing::warn!(
+            old = %current.gateway,
+            gw = %router,
+            iface = %current.interface,
+            "replaced an IPv6 default through a router not on the link"
+        ),
+        Err(e) => tracing::warn!(gw = %router, "could not set the IPv6 default: {e}"),
+    }
+}
+
 /// Re-add the default route via `route -q add [-inet6] default <gw>`.
 /// `-q` keeps stderr silent on the duplicate-add path.
-fn restore_default(snap: &RouteSnapshot, af: Af) -> Result<()> {
-    let args: Vec<String> = af.route_add_args(&snap.gateway);
+fn restore_default(gateway: &str, af: Af) -> Result<()> {
+    let args: Vec<String> = af.route_add_args(gateway);
     let out = crate::proc::bounded(Command::new("/sbin/route").args(&args), crate::proc::MUTATE)?;
     if out.status.success() {
         return Ok(());
@@ -404,6 +501,49 @@ mod tests {
             interface: interface.into(),
             flags: "UGScg".into(),
         })
+    }
+
+    /// On 2026-11-05 the default on a Mac at home still went through a
+    /// router from another network, with the home router known and unused.
+    #[test]
+    fn a_default_through_a_router_not_on_the_link_gets_a_better_one() {
+        let dead = "fe80::683b:9ff:fe0f:ad64%en0";
+        let home = "fe80::aa9c:6cff:fe8c:4bd%en0".to_owned();
+        let other = "fe80::10d1:1e98:4933:5bf0%en0".to_owned();
+        let routers = [home.clone(), other.clone()];
+
+        assert_eq!(better_router(dead, &routers), Some(home.as_str()));
+        // Any router the kernel knows will do, not only its first choice.
+        assert_eq!(better_router(&other, &routers), None);
+        // No router known, as with IPv6 set by hand: it stands.
+        assert_eq!(better_router(dead, &[]), None);
+    }
+
+    /// Against this Mac's routing table and routers. Reads only:
+    /// `cargo test -p supermanager-helper live_ipv6_default -- --ignored --nocapture`
+    #[test]
+    #[ignore = "reads the live routing table"]
+    fn live_ipv6_default() {
+        let current = read_default_route(Af::V6).expect("an IPv6 default");
+        let routers = crate::route_table::ipv6_routers(&current.interface);
+        println!("default: {} on {}", current.gateway, current.interface);
+        println!("routers: {routers:?}");
+        println!(
+            "replace with: {:?}",
+            better_router(&current.gateway, &routers)
+        );
+    }
+
+    #[test]
+    fn ipv4_is_put_back_through_the_gateway_in_use() {
+        let snap = RouteSnapshot {
+            gateway: "192.168.2.55".into(),
+            interface: "en0".into(),
+        };
+        assert_eq!(
+            restore_gateway(&snap, Af::V4).as_deref(),
+            Some("192.168.2.55")
+        );
     }
 
     #[test]
