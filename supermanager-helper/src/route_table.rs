@@ -78,6 +78,48 @@ fn parse_primary_default(table: &str) -> Option<DefaultRoute> {
     None
 }
 
+/// The IPv6 routers the kernel knows on `interface`, the preferred first.
+/// It learns them from router advertisements on the link, so they are
+/// routers that are there now. Empty when it knows none, or ndp fails.
+pub fn ipv6_routers(interface: &str) -> Vec<String> {
+    let Ok(out) =
+        crate::proc::bounded(Command::new("/usr/sbin/ndp").arg("-rn"), crate::proc::PROBE)
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    parse_ipv6_routers(&String::from_utf8_lossy(&out.stdout), interface)
+}
+
+/// `ndp -rn` lists one router a line, like
+/// `fe80::1%en0 if=en0, flags=, pref=high, expire=29m59s`.
+fn parse_ipv6_routers(list: &str, interface: &str) -> Vec<String> {
+    let mut routers: Vec<(u8, &str)> = list
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let router = fields.next()?;
+            let (mut here, mut rank) = (false, 1);
+            for field in fields.map(|field| field.trim_end_matches(',')) {
+                here |= field.strip_prefix("if=") == Some(interface);
+                match field.strip_prefix("pref=") {
+                    Some("high") => rank = 0,
+                    Some("low") => rank = 2,
+                    _ => {}
+                }
+            }
+            here.then_some((rank, router))
+        })
+        .collect();
+    routers.sort_by_key(|&(rank, _)| rank);
+    routers
+        .into_iter()
+        .map(|(_, router)| router.to_owned())
+        .collect()
+}
+
 /// The interface of the route for exactly `net`, if the table has one.
 ///
 /// Not `route -n get <prefix>`: macOS answers that with any route that
@@ -291,6 +333,27 @@ fe80::%utun4/64                         fe80::1%utun4                           
             iface_for_net(table6, net("fe80::/64")).as_deref(),
             Some("utun4")
         );
+    }
+
+    /// This Mac on 2026-11-05, at home: the router, a second one on the LAN,
+    /// and the entries macOS keeps for each tunnel.
+    #[test]
+    fn the_routers_are_the_interfaces_own_the_preferred_first() {
+        let list = "fe80::10d1:1e98:4933:5bf0%en0 if=en0, flags=, pref=medium, expire=1h59m1s\n\
+                    fe80::aa9c:6cff:fe8c:4bd%en0 if=en0, flags=, pref=high, expire=29m59s\n\
+                    fe80::%utun1 if=utun1, flags=IST, pref=medium, expire=Never\n\
+                    fe80::2%en0 if=en0, flags=, pref=low, expire=10m\n";
+        assert_eq!(
+            parse_ipv6_routers(list, "en0"),
+            [
+                "fe80::aa9c:6cff:fe8c:4bd%en0",
+                "fe80::10d1:1e98:4933:5bf0%en0",
+                "fe80::2%en0"
+            ]
+        );
+        assert_eq!(parse_ipv6_routers(list, "utun1"), ["fe80::%utun1"]);
+        assert_eq!(parse_ipv6_routers(list, "en9"), Vec::<String>::new());
+        assert_eq!(parse_ipv6_routers("", "en0"), Vec::<String>::new());
     }
 
     fn route(gateway: &str, interface: &str, flags: &str) -> DefaultRoute {
