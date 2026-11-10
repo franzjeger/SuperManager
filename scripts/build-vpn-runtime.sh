@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assemble the VPN runtime the root helper runs WireGuard with.
+# Assemble the WireGuard and Azure/OpenVPN 3 runtime for the root helper.
 #
 #   scripts/build-vpn-runtime.sh OUT_DIR
 #
@@ -13,23 +13,22 @@
 #                 it loads system libraries only. wg-quick needs bash 4 or
 #                 later; macOS ships 3.2, and Homebrew's loads libraries
 #                 from Homebrew.
-#   wg            from Homebrew's wireguard-tools
-#   wg-quick      from Homebrew's wireguard-tools, which in its default
-#                 prefix installs upstream's src/wg-quick/darwin.bash as is
+#   wg            pinned wireguard-tools, compiled for macOS 14.0
+#   wg-quick      the same source's darwin.bash, with the existing Homebrew
+#                 configuration search path; exact helper-pinned digest
 #   wireguard-go  from Homebrew's wireguard-go
+#   openvpn3      pinned ovpncli with file-based credentials, built with
+#                 static dependencies by build-openvpn3-runtime.sh
 #   licenses/     their licenses, and where their source is
 #
-# The helper checks bash, wg and wireguard-go by the signature the caller
+# The helper checks bash, wg, wireguard-go and openvpn3 by the signature the caller
 # gives them; nothing is signed here. wg-quick is a script, so the helper
 # checks it by content instead, against supermanager-helper/src/wg-quick.sha256,
-# and this refuses to bundle any other. When Homebrew's wireguard-tools
-# brings a new wg-quick, review what changed in it, then pin it:
+# and this refuses to bundle any other. Review changes to wg-quick and update
+# its source adaptation and helper pin together when updating wireguard-tools.
 #
-#   shasum -a 256 "$(brew --prefix wireguard-tools)/bin/wg-quick" \
-#       | cut -d' ' -f1 > supermanager-helper/src/wg-quick.sha256
-#
-# Exits 2 and writes nothing when Homebrew's WireGuard tools are not
-# installed: the caller decides whether that is fatal.
+# Exits 2 and writes nothing when Homebrew's wireguard-go is not installed:
+# the caller decides whether that is fatal.
 
 set -euo pipefail
 
@@ -96,24 +95,51 @@ brew_bin() {
     return 1
 }
 
-if ! wg="$(brew_bin wg)" || ! wireguard_go="$(brew_bin wireguard-go)"; then
-    echo "note: Homebrew's wireguard-tools / wireguard-go not installed; no VPN runtime." >&2
+if ! wireguard_go="$(brew_bin wireguard-go)"; then
+    echo "note: Homebrew's wireguard-go is not installed; no VPN runtime." >&2
     exit 2
 fi
-# The Homebrew kegs, e.g. /opt/homebrew/Cellar/wireguard-tools/1.0.20260223:
-# wg and wg-quick come from the same one.
-tools_keg="$(dirname "$(dirname "$(realpath "$wg")")")"
 go_keg="$(dirname "$(dirname "$(realpath "$wireguard_go")")")"
 
+# Homebrew's wg can be built for a newer OS than the app supports. Build the
+# small C client from source instead, keeping the exact reviewed script pin.
+WG_REVISION=49ce333da02056ae7b22ee2aeb6afe8aaed79b19
+WG_SHA256=2b901ba5c3957b7bb310e1c6b7ced1cc3fc9c8f6d58d59bcbdbeebd053232ef0
+WG_URL="https://codeload.github.com/WireGuard/wireguard-tools/tar.gz/$WG_REVISION"
+wg_source="$cache/wireguard-tools-$WG_REVISION"
+wg_stamp="$WG_SHA256 $(uname -m) $(xcrun --show-sdk-path) $(xcrun clang --version) macOS14.0"
+if [ ! -x "$wg_source/src/wg" ] || [ "$(cat "$wg_source/.stamp" 2>/dev/null)" != "$wg_stamp" ]; then
+    mkdir -p "$cache"
+    fetch "$WG_URL" "$WG_SHA256" "$cache/wireguard-tools-$WG_REVISION.tar.gz"
+    rm -rf "$wg_source"
+    mkdir -p "$wg_source"
+    tar -xzf "$cache/wireguard-tools-$WG_REVISION.tar.gz" -C "$wg_source" --strip-components 1
+    env CC="$(xcrun --find clang)" SDKROOT="$(xcrun --show-sdk-path)" \
+        MACOSX_DEPLOYMENT_TARGET=14.0 CFLAGS="-O2 -mmacosx-version-min=14.0" \
+        LDFLAGS="-mmacosx-version-min=14.0" \
+        make -C "$wg_source/src" -j"$(sysctl -n hw.ncpu)" wg \
+        >"$wg_source/make.log" 2>&1 || { tail -60 "$wg_source/make.log" >&2; exit 1; }
+    printf '%s\n' "$wg_stamp" >"$wg_source/.stamp"
+fi
+# Match the script that existing helpers already pin: Homebrew's macOS
+# configuration search path adds /opt/homebrew/etc/wireguard. No other code
+# is changed, and the complete resulting script must match the helper hash.
+sed 's|CONFIG_SEARCH_PATHS=( /etc/wireguard /usr/local/etc/wireguard )|CONFIG_SEARCH_PATHS=( /etc/wireguard /usr/local/etc/wireguard /opt/homebrew/etc/wireguard )|' \
+    "$wg_source/src/wg-quick/darwin.bash" >"$wg_source/wg-quick"
 pinned="$(tr -d '[:space:]' <"$repo/supermanager-helper/src/wg-quick.sha256")"
-if [ "$(shasum -a 256 <"$tools_keg/bin/wg-quick" | cut -d' ' -f1)" != "$pinned" ]; then
-    echo "error: $tools_keg/bin/wg-quick is not the wg-quick the helper pins;" \
-         "see the top of scripts/build-vpn-runtime.sh" >&2
+if [ "$(shasum -a 256 <"$wg_source/wg-quick" | cut -d' ' -f1)" != "$pinned" ]; then
+    echo "error: adapted wireguard-tools script does not match the helper's wg-quick pin" >&2
+    exit 1
+fi
+python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
+    "$wg_source/src/wg" "$wireguard_go"
+if otool -L "$wg_source/src/wg" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+    echo "error: wg loads libraries outside the system" >&2
     exit 1
 fi
 
 # bash, built once per source and configuration, then reused.
-stamp="$BASH_SHA256 ${BASH_PATCHES[*]} ${BASH_CONFIGURE[*]} $(sw_vers -productVersion | cut -d. -f1)"
+stamp="$BASH_SHA256 ${BASH_PATCHES[*]} ${BASH_CONFIGURE[*]} macOS14.0 $(uname -m) $(xcrun --show-sdk-path) $(xcrun clang --version)"
 built="$cache/bash-build"
 if [ ! -x "$built/bash" ] || [ "$(cat "$built/.stamp" 2>/dev/null)" != "$stamp" ]; then
     mkdir -p "$cache"
@@ -141,15 +167,16 @@ if otool -L "$built/bash" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System
     echo "error: the built bash loads the libraries above from outside the system" >&2
     exit 1
 fi
+python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 "$built/bash"
 
 mkdir -p "$out/licenses"
 install -m 0755 "$built/bash" "$out/bash"
-install -m 0755 "$tools_keg/bin/wg" "$out/wg"
-install -m 0755 "$tools_keg/bin/wg-quick" "$out/wg-quick"
+install -m 0755 "$wg_source/src/wg" "$out/wg"
+install -m 0755 "$wg_source/wg-quick" "$out/wg-quick"
 install -m 0755 "$go_keg/bin/wireguard-go" "$out/wireguard-go"
 
 install -m 0644 "$built/COPYING" "$out/licenses/bash.COPYING"
-install -m 0644 "$tools_keg/COPYING" "$out/licenses/wireguard-tools.COPYING"
+install -m 0644 "$wg_source/COPYING" "$out/licenses/wireguard-tools.COPYING"
 install -m 0644 "$go_keg/LICENSE" "$out/licenses/wireguard-go.LICENSE"
 cat >"$out/licenses/SOURCES" <<EOF
 The programs in vpn-runtime, and where their source is:
@@ -160,8 +187,16 @@ bash          GNU bash 5.3 with its official patches up to $(printf 'bash53-%03d
               built by scripts/build-vpn-runtime.sh in
               https://github.com/franzjeger/SuperManager, which pins their
               SHA-256 digests and the options bash is configured with
-wg, wg-quick  wireguard-tools $(basename "$tools_keg"), as Homebrew builds it:
+wg, wg-quick  wireguard-tools v1.0.20260223, commit $WG_REVISION:
+              $WG_URL
+              archive SHA-256: $WG_SHA256
+              wg built for macOS 14.0; wg-quick includes the existing
+              /opt/homebrew/etc/wireguard search path and matches the helper pin
               https://git.zx2c4.com/wireguard-tools
 wireguard-go  wireguard-go $(basename "$go_keg"), as Homebrew builds it:
               https://git.zx2c4.com/wireguard-go
 EOF
+
+# Azure VPN must have a protected OpenVPN 3 as well. Keeping this in the
+# normal bundle build prevents a release from requiring a runtime it omits.
+"$repo/scripts/build-openvpn3-runtime.sh" "$out"

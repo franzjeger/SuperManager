@@ -74,12 +74,58 @@ pub struct InstallResult {
 /// already installed with the same content is left alone; one that fails
 /// its check is not installed, and the one before it stays.
 pub fn install(args: &InstallArgs) -> Result<InstallResult> {
+    prepare_runtime_directory(Path::new(RUNTIME_DIR))?;
     let result = install_into(Path::new(&args.bundled_dir), Path::new(RUNTIME_DIR))
         .inspect_err(|e| tracing::warn!("VPN runtime not installed: {e:#}"))?;
     if !result.installed.is_empty() {
         tracing::info!(installed = ?result.installed, "VPN runtime installed in {RUNTIME_DIR}");
     }
     Ok(result)
+}
+
+/// Protect the destination before staging any executable in it. An old
+/// manual installation may have left the runtime directory user-owned or
+/// writable. Its parent must already be protected; a symlink is never a
+/// runtime directory. Repair through the opened directory, not its path.
+fn prepare_runtime_directory(dir: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("the VPN runtime must be installed by the root helper");
+    }
+    let parent = dir
+        .parent()
+        .context("VPN runtime has no parent directory")?;
+    ensure_root_owned(parent, "VPN runtime parent")?;
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if !meta.is_dir() || meta.file_type().is_symlink() => {
+            bail!("VPN runtime {} is not a regular directory", dir.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(dir).context("create VPN runtime directory")?;
+        }
+        Err(error) => return Err(error).context("inspect VPN runtime directory"),
+    }
+    let directory = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(dir)
+        .context("open VPN runtime directory")?;
+    let metadata = directory.metadata()?;
+    if metadata.uid() != 0 || metadata.gid() != 0 || metadata.mode() & 0o7777 != 0o755 {
+        let fd = directory.as_raw_fd();
+        // Remove write access before changing ownership, then grant the
+        // normal read/execute access after root owns the directory.
+        if unsafe { libc::fchmod(fd, 0o700) } != 0
+            || unsafe { libc::fchown(fd, 0, 0) } != 0
+            || unsafe { libc::fchmod(fd, 0o755) } != 0
+        {
+            return Err(std::io::Error::last_os_error()).context("protect VPN runtime directory");
+        }
+    }
+    ensure_root_owned(dir, "VPN runtime directory")
 }
 
 fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
@@ -124,12 +170,23 @@ fn install_one(
 ) -> Result<bool> {
     let source = bundled.join(name);
     let target = dir.join(name);
-    if same_content(&source, &target) {
+    // Equal bytes are not enough: a user-owned/writable file or a symlink
+    // would still be refused at execution time. Reinstall it through the
+    // verified atomic-copy path so clicking Install can repair it.
+    if installed_file_is_protected(&target, unsafe { libc::geteuid() })
+        && same_content(&source, &target)
+    {
         return Ok(false);
     }
     crate::signed_file::install(&source, &target, check)
         .with_context(|| format!("install {name}"))?;
     Ok(true)
+}
+
+fn installed_file_is_protected(path: &Path, expected_uid: u32) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.uid() == expected_uid && metadata.mode() & 0o7777 == 0o755
+    })
 }
 
 fn same_content(a: &Path, b: &Path) -> bool {
@@ -392,6 +449,82 @@ mod tests {
     }
 
     #[test]
+    fn identical_writable_files_are_verified_and_reinstalled() {
+        use std::cell::Cell;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let bundled = scratch_dir();
+        let dir = scratch_dir();
+        let source = bundled.join("openvpn3");
+        let target = dir.join("openvpn3");
+        std::fs::write(&source, "same executable").unwrap();
+        std::fs::write(&target, "same executable").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+        // A repair must still verify the staged executable. Refusing it
+        // leaves the installed file and its permissions untouched.
+        assert!(install_one(&bundled, &dir, "openvpn3", |_| bail!("unsigned")).is_err());
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o775);
+        let checked = Cell::new(false);
+        assert!(install_one(&bundled, &dir, "openvpn3", |copy| {
+            checked.set(true);
+            assert_eq!(std::fs::read(copy)?, b"same executable");
+            Ok(())
+        })
+        .unwrap());
+        assert!(checked.get());
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o755);
+        // Once repaired, another request is a true no-op.
+        assert!(!install_one(&bundled, &dir, "openvpn3", |_| bail!(
+            "must not verify again"
+        ))
+        .unwrap());
+        std::fs::remove_dir_all(bundled).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn identical_symlink_targets_are_replaced_without_changing_the_link_destination() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let bundled = scratch_dir();
+        let dir = scratch_dir();
+        let source = bundled.join("openvpn3");
+        let outside = bundled.join("other-program");
+        let target = dir.join("openvpn3");
+        std::fs::write(&source, "same executable").unwrap();
+        std::fs::write(&outside, "same executable").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let original_inode = std::fs::metadata(&outside).unwrap().ino();
+        symlink(&outside, &target).unwrap();
+
+        assert!(install_one(&bundled, &dir, "openvpn3", |_| Ok(())).unwrap());
+        assert!(std::fs::symlink_metadata(&target).unwrap().is_file());
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o755);
+        assert_eq!(std::fs::metadata(&outside).unwrap().ino(), original_inode);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"same executable");
+        std::fs::remove_dir_all(bundled).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_identical_file_with_the_wrong_owner_needs_reinstallation() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch_dir();
+        let target = dir.join("openvpn3");
+        std::fs::write(&target, "executable").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let uid = unsafe { libc::geteuid() };
+        assert!(installed_file_is_protected(&target, uid));
+        assert!(!installed_file_is_protected(
+            &target,
+            if uid == 0 { 501 } else { 0 }
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_script_that_is_not_the_bundled_wg_quick_is_refused() {
         let dir = scratch_dir();
         let script = dir.join("wg-quick");
@@ -416,6 +549,33 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn an_unsigned_optional_openvpn3_does_not_replace_the_installed_runtime() {
+        let bundled = scratch_dir();
+        let dir = scratch_dir();
+        let target = dir.join("openvpn3");
+        std::fs::write(&target, b"previously installed runtime").unwrap();
+        std::fs::copy("/usr/bin/true", bundled.join("openvpn3")).unwrap();
+        let (_, identifier) = OPTIONAL_SIGNED
+            .iter()
+            .find(|(name, _)| *name == "openvpn3")
+            .unwrap();
+
+        let err = install_one(&bundled, &dir, "openvpn3", |copy| {
+            crate::signed_file::signed_by_supermanager(copy, identifier)
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains(identifier), "{err:#}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"previously installed runtime"
+        );
+        // No unverified program or staged file is left behind.
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(bundled).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The runtime a signed build bundles installs. Run with the path of a
     /// signed build:
     ///
@@ -428,13 +588,54 @@ mod tests {
     fn the_bundled_vpn_runtime_of_a_signed_build_installs() {
         let app = std::env::var("SUPERMANAGER_APP").unwrap();
         let bundled = Path::new(&app).join("Contents/Resources/vpn-runtime");
+        let expected: Vec<String> = SIGNED
+            .iter()
+            .map(|(name, _)| *name)
+            .chain(["wg-quick"])
+            .chain(
+                OPTIONAL_SIGNED
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .filter(|name| bundled.join(name).exists()),
+            )
+            .map(str::to_owned)
+            .collect();
         let dir = scratch_dir();
         let first = install_into(&bundled, &dir).unwrap();
-        assert_eq!(first.installed.len(), 4, "{first:?}");
+        assert_eq!(first.installed, expected, "{first:?}");
+        assert!(first.unchanged.is_empty(), "{first:?}");
         assert!(installed(&dir));
+        for name in &expected {
+            assert!(same_content(&bundled.join(name), &dir.join(name)), "{name}");
+        }
         // A second install finds everything in place.
         let again = install_into(&bundled, &dir).unwrap();
-        assert_eq!(again.unchanged.len(), 4, "{again:?}");
+        assert_eq!(again.unchanged, expected, "{again:?}");
+        assert!(again.installed.is_empty(), "{again:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Unlike the compatibility test above, this requires a build carrying
+    /// OpenVPN 3 and verifies its signature through the real installer.
+    #[test]
+    #[ignore = "needs a signed SuperManager build with OpenVPN 3"]
+    fn the_bundled_openvpn3_of_a_signed_build_installs_and_is_unchanged() {
+        let app = std::env::var("SUPERMANAGER_APP").unwrap();
+        let bundled = Path::new(&app).join("Contents/Resources/vpn-runtime");
+        assert!(
+            bundled.join("openvpn3").is_file(),
+            "no bundled OpenVPN 3 in {app}"
+        );
+        let dir = scratch_dir();
+        let first = install_into(&bundled, &dir).unwrap();
+        assert!(first.installed.iter().any(|name| name == "openvpn3"));
+        assert!(same_content(
+            &bundled.join("openvpn3"),
+            &dir.join("openvpn3")
+        ));
+        let again = install_into(&bundled, &dir).unwrap();
+        assert!(again.unchanged.iter().any(|name| name == "openvpn3"));
+        assert!(again.installed.is_empty(), "{again:?}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -452,10 +653,7 @@ mod tests {
         // Non-matching owner (e.g. unprivileged user when root uid=0 is required) is refused.
         let other_uid = if my_uid == 0 { 501 } else { 0 };
         let err = ensure_owned_by(&bin, other_uid, "VPN binary").unwrap_err();
-        assert!(
-            err.to_string().contains("vpn_runtime_install"),
-            "{err:#}"
-        );
+        assert!(err.to_string().contains("vpn_runtime_install"), "{err:#}");
 
         // Group-writable binary is refused even when uid matches; note `/tmp` itself is
         // world-writable (01777), so even a 0755 file inside `/tmp` is refused via its

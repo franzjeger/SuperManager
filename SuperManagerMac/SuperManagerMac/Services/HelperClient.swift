@@ -153,9 +153,9 @@ final class HelperClient {
             native: native))
     }
 
-    /// The programs WireGuard runs with, as this app bundles them, in
-    /// `Contents/Resources/vpn-runtime`. Nil when the build bundles none;
-    /// the helper then runs Homebrew's WireGuard.
+    /// The VPN programs this app bundles, in
+    /// `Contents/Resources/vpn-runtime`. Nil when a development build bundles
+    /// none. Release helpers require protected, installed programs.
     static var bundledVPNRuntime: String? {
         guard let dir = Bundle.main.resourceURL?.appendingPathComponent("vpn-runtime"),
               ["bash", "wg", "wg-quick", "wireguard-go"].allSatisfy({
@@ -170,6 +170,16 @@ final class HelperClient {
     @discardableResult
     func vpnRuntimeInstall(bundledDir: String) async throws -> [String: Any] {
         try await call("vpn_runtime_install", params: ["bundled_dir": bundledDir])
+    }
+
+    /// Install before connecting so an app update also updates the programs
+    /// the helper runs. Installation failures must reach the connection UI.
+    func installBundledVPNRuntime() async throws {
+        guard let dir = Self.bundledVPNRuntime else { return }
+        let result = try await vpnRuntimeInstall(bundledDir: dir)
+        if let installed = result["installed"] as? [String], !installed.isEmpty {
+            DebugLog.write("[vpn-runtime] installed \(installed)")
+        }
     }
 
     @discardableResult
@@ -198,6 +208,7 @@ final class HelperClient {
         password: String? = nil,
         requireOpenVPN3: Bool = false
     ) async throws -> [String: Any] {
+        try await installBundledVPNRuntime()
         var params: [String: Any] = [
             "profile_id": profileId,
             "config": config,

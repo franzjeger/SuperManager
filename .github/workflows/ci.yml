@@ -61,6 +61,8 @@ jobs:
         run: python3 -m unittest scripts/tests/test_app_version.py -v
       - name: Test that launchd jobs run the installed helper
         run: python3 -m unittest scripts/tests/test_launchd_paths.py -v
+      - name: Test protected OpenVPN 3 repair over a Homebrew installation
+        run: python3 -m unittest scripts/tests/test_openvpn3_install.py -v
       - name: Test polkit operator rule and installer coverage
         run: node scripts/test-polkit-rule.mjs
 
@@ -353,7 +355,10 @@ jobs:
       - name: Install build deps
         run: |
           brew update
-          brew install xcodegen pandoc xcbeautify
+          brew install xcodegen pandoc xcbeautify cmake
+
+      - name: Build and test managed OpenVPN 3 runtime
+        run: scripts/build-openvpn3-runtime.sh "$RUNNER_TEMP/openvpn3-runtime"
 
       # Build the Mac stack explicitly. We can't use `--workspace`
       # because that would also pull in `supermgr` (the Linux GTK

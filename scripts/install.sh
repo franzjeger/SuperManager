@@ -19,16 +19,16 @@
 #   --yes, -y          Don't ask before installing anything.
 #   --no-deps          App only. You manage the VPN clients yourself.
 #   --deps-only        VPN clients only, don't touch /Applications.
-#   --with-openvpn3    Also build OpenVPN 3 from source (~5 min). Needed
-#                      only for Azure VPN (Entra ID) and openvpn3-driven
-#                      OpenVPN profiles. No Homebrew formula exists.
+#   --with-openvpn3    Build and install protected OpenVPN 3 (~5 min).
+#                      Repair for app versions without it, including
+#                      1.8.25. New builds bundle it for Azure VPN (Entra ID).
 #   --help, -h         This text.
 #
 # The zip is Developer ID-signed, notarized and stapled, so Gatekeeper
 # accepts it without any quarantine dance. The privileged parts — the
 # root helper, the Tailscale daemon — are still installed BY THE APP with
-# proper admin prompts on first use. This script never runs as root, and
-# Homebrew refuses to.
+# proper admin prompts on first use. An explicit --with-openvpn3 repair
+# asks for sudo after building. This script never runs as root.
 
 # Refuse to run under anything but bash, and say how to fix it.
 #
@@ -109,7 +109,7 @@ ask() {
 [ "$(uname -s)" = Darwin ] || die "this is the macOS installer. On Linux use scripts/install-linux.sh;
        on Windows use SuperManager-Setup-<version>.exe from the releases page."
 [ "$(id -u)" != 0 ] || die "don't run this with sudo. Homebrew refuses to install as root,
-       and nothing here needs elevation — the app asks for it itself on first launch."
+       and privileged installation asks for elevation separately."
 command -v curl >/dev/null || die "curl not found"
 
 # ---------------------------------------------------------------------------
@@ -181,28 +181,41 @@ if [ "$DO_DEPS" = 1 ]; then
         fi
     fi
 
-    # OpenVPN 3 has no Homebrew formula, so it is a source build and
-    # opt-in: several minutes, and it matters only for Azure VPN with
-    # Entra ID, whose gateway rejects OpenVPN 2.x outright.
+    # An explicit source-build repair for app versions without the runtime.
+    # New builds bundle OpenVPN 3 and install it through the helper.
     if [ "$WITH_OPENVPN3" = 1 ]; then
-        if have openvpn3; then
-            say "OpenVPN 3 already installed"
+        # A Homebrew executable alone is unusable by the Release helper.
+        # Explicitly requested repairs rebuild the managed runtime even
+        # when the old unprivileged openvpn3 is still on PATH.
+        say "Building the protected OpenVPN 3 runtime"
+        "$BREW" install cmake
+        # Use the in-tree script when this is a checkout, otherwise
+        # fetch it: the documented install path is a curl pipe, which
+        # has no repository to run it from.
+        # A piped installer has no source path. Never look for a builder
+        # relative to the caller's working directory in that case.
+        LOCAL_BUILD=""
+        installer_source="${BASH_SOURCE[0]:-}"
+        if [ -n "$installer_source" ]; then
+            installer_dir="$(cd "$(dirname "$installer_source")" && pwd)"
+            LOCAL_BUILD="$installer_dir/../contrib/build-openvpn3-mac.sh"
+        fi
+        if [ -n "$LOCAL_BUILD" ] && [ -f "$LOCAL_BUILD" ]; then
+            bash "$LOCAL_BUILD"
         else
-            say "Building OpenVPN 3 from source"
-            "$BREW" install cmake asio jsoncpp openssl@3 lz4 fmt
-            # Use the in-tree script when this is a checkout, otherwise
-            # fetch it: the documented install path is a curl pipe, which
-            # has no repository to run it from.
-            # Guarded for the same reason as --help above: piped in, there is
-            # no BASH_SOURCE, and the unguarded expansion aborted here under
-            # `set -u` — before reaching the curl fallback three lines down
-            # that exists precisely for that case. Empty resolves to `.`, the
-            # path does not exist, and the fallback runs as intended.
-            LOCAL_BUILD="$(dirname "${BASH_SOURCE[0]:-}")/../contrib/build-openvpn3-mac.sh"
-            if [ -f "$LOCAL_BUILD" ]; then
-                bash "$LOCAL_BUILD"
-            else
-                curl -fsSL "$RAW/contrib/build-openvpn3-mac.sh" | bash
+            # The builder includes pinned source and adapter files. Fetch
+            # a complete checkout before executing it, including when
+            # this installer itself arrived through a pipe.
+            openvpn3_checkout="$(mktemp -d "${TMPDIR:-/tmp}/supermanager-openvpn3-source.XXXXXX")"
+            if ! (
+                trap 'rm -rf "$openvpn3_checkout"' EXIT
+                curl -fsSL --proto '=https' --tlsv1.2 \
+                    "https://api.github.com/repos/$REPO/tarball/main" \
+                    -o "$openvpn3_checkout/source.tar.gz" || exit 1
+                tar -xzf "$openvpn3_checkout/source.tar.gz" -C "$openvpn3_checkout" --strip-components 1 || exit 1
+                bash "$openvpn3_checkout/contrib/build-openvpn3-mac.sh"
+            ); then
+                die "OpenVPN 3 runtime installation failed"
             fi
         fi
     fi
@@ -316,10 +329,12 @@ if [ "$DO_DEPS" = 1 ]; then
         warn "these did not install — those profile types will not connect:"
         printf '%b\n' "$STILL_MISSING"
     fi
-    if [ "$WITH_OPENVPN3" != 1 ] && ! have openvpn3; then
+    if [ "$WITH_OPENVPN3" != 1 ] \
+       && [ ! -x "$DEST/Contents/Resources/vpn-runtime/openvpn3" ] \
+       && [ ! -x /Library/PrivilegedHelperTools/SuperManagerVPN/openvpn3 ]; then
         note ""
-        note "OpenVPN 3 not installed. Needed only for Azure VPN (Entra ID),"
-        note "whose gateway rejects OpenVPN 2.x. Add it later with:"
+        note "The protected OpenVPN 3 runtime is missing. Azure VPN (Entra ID)"
+        note "requires it even if a Homebrew copy is present. Install it with:"
         note "  curl -fsSL $RAW/scripts/install.sh | bash -s -- --deps-only --with-openvpn3"
     fi
 fi

@@ -230,10 +230,10 @@ for ts_bin in tailscale tailscaled; do
         "$ts_path"
 done
 
-# The VPN runtime the helper installs and runs WireGuard with. It checks
+# The VPN runtime the helper installs for WireGuard and Azure VPN. It checks
 # these signatures (team and identifier) before it runs them as root;
 # wg-quick is a script it checks by content instead.
-for rt_bin in bash wg wireguard-go; do
+for rt_bin in bash wg wireguard-go openvpn3; do
     rt_path="$APP/Contents/Resources/vpn-runtime/$rt_bin"
     [ -f "$rt_path" ] || continue
     codesign --force --options runtime --timestamp \
@@ -348,18 +348,17 @@ for ts_bin in tailscale tailscaled; do
 done
 echo "  tailscale + tailscaled bundled and Developer ID-signed"
 
-# Without the VPN runtime the helper would run Homebrew's WireGuard. A
-# release carries its own, which the helper installs where only root can
-# write.
+# Release helpers require protected VPN programs. The app carries its own,
+# which the helper verifies and installs where only root can write.
 echo "→ Verifying bundled VPN runtime"
-for rt_file in bash wg wg-quick wireguard-go; do
+for rt_file in bash wg wg-quick wireguard-go openvpn3; do
     if [ ! -x "$APP/Contents/Resources/vpn-runtime/$rt_file" ]; then
         echo "error: vpn-runtime/$rt_file missing from the bundle." >&2
-        echo "       Run 'brew install wireguard-tools wireguard-go' and rebuild." >&2
+        echo "       Install the VPN build dependencies from .github/workflows/release.yml and rebuild." >&2
         exit 1
     fi
 done
-for rt_bin in bash wg wireguard-go; do
+for rt_bin in bash wg wireguard-go openvpn3; do
     rt_sig="$(codesign -dvv "$APP/Contents/Resources/vpn-runtime/$rt_bin" 2>&1 || true)"
     case "$rt_sig" in
         *"Authority=Developer ID Application"*"Identifier=com.sybr.supermanager.vpn.$rt_bin"* \
@@ -370,6 +369,20 @@ for rt_bin in bash wg wireguard-go; do
             ;;
     esac
 done
+# Check the final bundled executables as well as their build inputs.
+python3 "$REPO_ROOT/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
+    "$APP/Contents/Resources/vpn-runtime/bash" \
+    "$APP/Contents/Resources/vpn-runtime/wg" \
+    "$APP/Contents/Resources/vpn-runtime/wireguard-go" \
+    "$APP/Contents/Resources/vpn-runtime/openvpn3"
+# A root-owned executable must also load code only from protected paths.
+# The OpenVPN 3 builder links its dependencies statically; check the final
+# signed artifact so a build cannot accidentally reintroduce Homebrew dylibs.
+if otool -L "$APP/Contents/Resources/vpn-runtime/openvpn3" | tail -n +2 \
+    | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+    echo "error: bundled OpenVPN 3 loads libraries outside the system" >&2
+    exit 1
+fi
 echo "  VPN runtime bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------

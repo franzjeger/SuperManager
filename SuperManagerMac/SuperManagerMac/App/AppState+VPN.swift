@@ -519,6 +519,7 @@ extension AppState {
                     native: AppSettings.shared.wireguardNativeSetup)
             } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
                 backendStr = "openvpn"
+                try await HelperClient.shared.installBundledVPNRuntime()
                 // The same arguments a manual connect sends: the
                 // configuration itself, and the stored credentials.
                 let profile: VpnProfile = try await client.call(

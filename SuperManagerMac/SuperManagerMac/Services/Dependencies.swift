@@ -8,9 +8,8 @@ import Foundation
 /// paste a `brew install` line into Terminal is a support burden and a
 /// bad first run — the app knows exactly what is missing and can do it.
 ///
-/// Nothing here is privileged. Homebrew refuses to run as root by
-/// design, so these run as the logged-in user, exactly as if typed into
-/// Terminal. The one thing we will NOT do silently is install Homebrew
+/// Homebrew runs as the logged-in user. The privileged helper verifies
+/// and installs bundled runtime programs. We do not silently install Homebrew
 /// itself: that is a large third-party install that the user should
 /// initiate knowingly, so we link to brew.sh instead.
 @MainActor
@@ -29,19 +28,86 @@ enum Dependencies {
         /// Set when installation is not a brew formula.
         let manualNote: String?
 
-        var isInstalled: Bool { binaries.contains(where: Dependencies.isPresent) }
+        @MainActor var isInstalled: Bool { binaries.contains { Dependencies.isPresent($0) } }
     }
 
     /// Search paths. Homebrew differs by architecture, and MacPorts
     /// shows up on some machines; `/usr/local/sbin` is where the app's
     /// own bundled tailscaled lands.
-    static let searchPaths = [
+    nonisolated static let searchPaths = [
         "/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/opt/local/bin", "/opt/local/sbin",
         "/usr/local/sbin", "/usr/bin", "/bin", "/usr/sbin", "/sbin",
     ]
 
     static func isPresent(_ binary: String) -> Bool {
-        searchPaths.contains { FileManager.default.isExecutableFile(atPath: "\($0)/\(binary)") }
+        if binary == "openvpn" || binary == "openvpn3" {
+            if hasProtectedOpenVPN(requireOpenVPN3: binary == "openvpn3", available: isRootOwnedExecutable) {
+                return true
+            }
+            // Release helpers refuse executables in user-owned prefixes.
+            // Merely finding Homebrew's binary must leave Install available.
+            #if !DEBUG
+            return false
+            #endif
+        }
+        let binaries = binary == "openvpn" ? ["openvpn", "openvpn-patched", "openvpn3"] : [binary]
+        return searchPaths.contains { directory in
+            binaries.contains { FileManager.default.isExecutableFile(atPath: "\(directory)/\($0)") }
+        }
+    }
+
+    /// Ordinary profiles can use the helper's protected OpenVPN 3 fallback;
+    /// Azure profiles specifically require it and must never accept version 2.
+    static func hasProtectedOpenVPN(requireOpenVPN3: Bool, available: (String) -> Bool) -> Bool {
+        let runtime = "/Library/PrivilegedHelperTools/SuperManagerVPN"
+        let v3 = ["openvpn3", "bin/openvpn3"]
+        let programs = requireOpenVPN3 ? v3 : ["openvpn", "sbin/openvpn", "bin/openvpn"] + v3
+        return programs.contains { available("\(runtime)/\($0)") }
+    }
+
+    /// The helper validates the canonical executable and every parent.
+    /// Repeat the ownership check here so the dependency UI reflects what
+    /// Release can use; the helper remains responsible for enforcement.
+    static func isRootOwnedExecutable(_ path: String) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let owner = attrs[.ownerAccountID] as? NSNumber,
+              owner.uint32Value == 0 else { return false }
+        // attributesOfItem describes the link itself. The helper also
+        // rejects a user-owned symlink even when its target is protected.
+        return hasRootOwnedParents(URL(fileURLWithPath: path).resolvingSymlinksInPath().path) {
+            try FileManager.default.attributesOfItem(atPath: $0)
+        }
+    }
+
+    static func hasRootOwnedParents(
+        _ canonicalPath: String,
+        attributes: (String) throws -> [FileAttributeKey: Any]
+    ) -> Bool {
+        var path = canonicalPath
+        while true {
+            guard let attrs = try? attributes(path),
+                  let owner = attrs[.ownerAccountID] as? NSNumber,
+                  let mode = attrs[.posixPermissions] as? NSNumber,
+                  owner.uint32Value == 0, mode.uint16Value & 0o022 == 0 else { return false }
+            if path == "/" { return true }
+            path = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        }
+    }
+
+    static func hasBundledRuntime(for id: String) -> Bool {
+        guard let dir = HelperClient.bundledVPNRuntime else { return false }
+        return hasBundledRuntime(for: id, directory: dir)
+    }
+
+    static func hasBundledRuntime(for id: String, directory: String) -> Bool {
+        let programs: [String]
+        switch id {
+        case "openvpn": programs = ["openvpn", "openvpn3"]
+        case "openvpn3": programs = ["openvpn3"]
+        default: return false
+        }
+        return programs.contains { FileManager.default.isExecutableFile(atPath: "\(directory)/\($0)") }
     }
 
     /// Homebrew itself — everything else depends on it.
@@ -62,7 +128,7 @@ enum Dependencies {
              formula: "strongswan",
              manualNote: nil),
         Tool(id: "openvpn",
-             feature: "OpenVPN 2.x profiles",
+             feature: "OpenVPN profiles",
              binaries: ["openvpn"],
              formula: "openvpn",
              manualNote: nil),
@@ -72,8 +138,8 @@ enum Dependencies {
              formula: nil,
              // Microsoft's gateway rejects OpenVPN 2.x in the Entra
              // flow, and upstream ships no bottle — it has to be built.
-             manualNote: "Build OpenVPN 3 in Terminal. This takes several minutes "
-                 + "and asks for your password to finish installation."),
+             manualNote: "Install or repair OpenVPN 3 for Azure VPN. A Homebrew copy alone "
+                 + "does not meet the privileged helper's requirements."),
     ]
 
     static var missing: [Tool] { all.filter { !$0.isInstalled } }
@@ -126,12 +192,17 @@ enum Dependencies {
         }
     }
 
-    /// Run `brew install <formula>`, returning its combined output.
+    /// Install a bundled runtime through the helper, or run
+    /// `brew install <formula>`, returning its combined output.
     ///
-    /// Deliberately NOT run through the privileged helper: Homebrew
-    /// refuses to run as root, and there is no reason to elevate — this
-    /// is the same command the user would type themselves.
+    /// The helper verifies and installs bundled programs. Homebrew runs
+    /// as the logged-in user because it refuses to run as root.
     nonisolated static func install(_ tool: Tool) async throws -> String {
+        if await hasBundledRuntime(for: tool.id) {
+            try await HelperInstaller.install()
+            try await HelperClient.shared.installBundledVPNRuntime()
+            return "VPN runtime installed."
+        }
         guard let note = tool.formula else {
             throw InstallError.notBrewInstallable(tool.manualNote ?? "Not installable automatically.")
         }

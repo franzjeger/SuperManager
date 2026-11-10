@@ -33,9 +33,13 @@ present is left alone.
 --with-openvpn3   # also build OpenVPN 3 from source (~5 min)
 ```
 
-`openvpn3` is opt-in because it has no Homebrew formula and has to be
-built from source. It matters only for **Azure VPN (Entra ID)**, whose
-gateway rejects OpenVPN 2.x outright.
+The macOS build bundles OpenVPN 3 for **Azure VPN (Entra ID)**. The app asks
+the helper to install its signed runtime into
+`/Library/PrivilegedHelperTools/SuperManagerVPN` before connecting. The
+`--with-openvpn3` option builds and installs that protected runtime separately
+to repair a release without it, including 1.8.25; a Homebrew `openvpn3` alone cannot be run
+by the Release helper. The source build uses pinned OpenVPN 3, a credential-file
+adapter and static dependencies, keeping tokens out of process arguments.
 
 Or grab `SuperManager-<version>.zip` (drag-and-drop) from the
 [releases page](https://github.com/franzjeger/SuperManager/releases)
@@ -115,7 +119,7 @@ machine by hand or wondering why one profile type won't connect.
 | IKEv2 / FortiGate IPsec | `strongswan` (Linux/macOS) / native Windows RAS (Windows) |
 | FortiGate SSL VPN | **Windows only** — `openfortivpn.exe`, which you supply (no upstream Windows release). Linux and macOS have no backend for it; use the IPsec/IKEv2 profile type instead |
 | Standard `.ovpn` profiles | macOS & Windows: `openvpn` (2.x); Linux: `openvpn3` (AUR on Arch, upstream repo elsewhere) |
-| Azure VPN (Entra ID) | Linux & Windows: `openvpn` (2.7+); macOS: `openvpn3` (`--with-openvpn3` in `install.sh`) |
+| Azure VPN (Entra ID) | Linux & Windows: `openvpn` (2.7+); macOS: bundled, protected `openvpn3` runtime |
 | Reading stored credentials (Linux) | `polkit` — the daemon fails closed without it |
 
 The app tells you again if you try to connect a profile whose tool isn't

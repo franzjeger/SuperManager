@@ -32,7 +32,8 @@ struct DependencyCard: View {
     var body: some View {
         if !tools.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                if Dependencies.brewPath == nil {
+                if Dependencies.brewPath == nil,
+                   tools.contains(where: { !Dependencies.hasBundledRuntime(for: $0.id) }) {
                     // We never install Homebrew silently — it is a large
                     // third-party install the user should start knowingly.
                     Label {
@@ -94,6 +95,10 @@ struct DependencyCard: View {
             Spacer()
             if installing == tool.id {
                 ProgressView().controlSize(.small)
+            } else if Dependencies.hasBundledRuntime(for: tool.id) {
+                Button("Install") { install(tool) }
+                    .controlSize(.small)
+                    .disabled(installing != nil)
             } else if tool.formula != nil {
                 Button("Install") { install(tool) }
                     .controlSize(.small)

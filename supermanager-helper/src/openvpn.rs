@@ -94,10 +94,7 @@ impl fmt::Debug for OvpnConnectArgs {
             .field("config_file", &self.config_file)
             .field("require_openvpn3", &self.require_openvpn3)
             .field("username", &self.username)
-            .field(
-                "password",
-                &self.password.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -297,6 +294,7 @@ impl OpenVpn {
             if args.username.is_some() || args.password.is_some() {
                 let u = args.username.as_deref().unwrap_or("AzureAD");
                 let p = args.password.as_deref().unwrap_or("");
+                validate_v3_credentials(u, p)?;
                 tracing::info!(
                     "ovpn_connect: writing 0600 auth file for openvpn3 (username={}, password={} chars)",
                     u,
@@ -325,11 +323,11 @@ impl OpenVpn {
         //        and then poll the log for "Initialization Sequence
         //        Completed".)
         //
-        //   3.x: `openvpn3 [--no-cert] [-a AUTH_FILE] CONFIG`
-        //        (the upstream `ovpncli` client; runs in FOREGROUND.
+        //   3.x: `openvpn3 [--no-cert] [--auth-user-pass AUTH_FILE] CONFIG`
+        //        (our `ovpncli` build; runs in FOREGROUND.
         //        Credentials travel via a mode-0600 root-only file in
-        //        `PRIVATE_DIR` via `-a` rather than `--password` on
-        //        `argv`, keeping tokens out of `ps aux` / `KERN_PROCARGS2`.)
+        //        `PRIVATE_DIR` via its `--auth-user-pass` adapter, keeping
+        //        tokens out of `ps aux` / `KERN_PROCARGS2`.)
         tracing::info!(
             "ovpn_connect: spawning {} (v3={})",
             openvpn.display(),
@@ -368,7 +366,8 @@ impl OpenVpn {
                         let _ = std::fs::remove_file(auth);
                     }
                     let _ = std::fs::remove_file(&config_path);
-                    return Err(e).with_context(|| format!("spawn {} (ovpncli)", openvpn.display()));
+                    return Err(e)
+                        .with_context(|| format!("spawn {} (ovpncli)", openvpn.display()));
                 }
             };
             let pid = child
@@ -509,8 +508,8 @@ impl OpenVpn {
         // For OpenVPN 2.x, the auth file was loaded before daemonisation,
         // so unlink its dirent now while the child keeps its open fd.
         // For OpenVPN 3 (`ovpncli`), the child was spawned asynchronously
-        // and reads `-a` during startup; its auth file is cleaned up on
-        // process exit and on disconnect/sleep.
+        // and reads `--auth-user-pass` during startup; its auth file is
+        // cleaned up on process exit and on disconnect/sleep.
         if !is_v3 {
             if let Some(ref auth) = auth_path {
                 let _ = std::fs::remove_file(auth);
@@ -1185,7 +1184,8 @@ fn select_openvpn(
 
 /// Build `openvpn3` (`ovpncli`) argv without exposing credentials on the
 /// command line (`ps aux` / `KERN_PROCARGS2`). Credentials travel in `auth_path`
-/// (mode 0600 in `PRIVATE_DIR`) via `-a`.
+/// (mode 0600 in `PRIVATE_DIR`) through the bundled client's `--auth-user-pass`
+/// adapter. Upstream's `-a` means `--auto-sess` and does not read credentials.
 fn build_v3_cli_args(
     config_body: &str,
     config_path: &Path,
@@ -1199,7 +1199,7 @@ fn build_v3_cli_args(
         args.push(OsString::from("--no-cert"));
     }
     if let Some(auth) = auth_path {
-        args.push(OsString::from("-a"));
+        args.push(OsString::from("--auth-user-pass"));
         args.push(auth.as_os_str().to_owned());
     }
     args.push(config_path.as_os_str().to_owned());
@@ -1457,10 +1457,33 @@ pub fn sweep_legacy_logs() {
     }
 }
 
+/// Validate the managed OpenVPN 3 client's private credential-file format.
+fn validate_v3_credentials(user: &str, password: &str) -> anyhow::Result<()> {
+    // Match the managed client's file parser before writing a file or
+    // starting a child, so malformed input gets a direct RPC error.
+    if user.is_empty() || password.is_empty() {
+        bail!("invalid OpenVPN 3 credentials: username and password are required");
+    }
+    if user
+        .bytes()
+        .chain(password.bytes())
+        .any(|byte| byte < 32 || byte == 127)
+    {
+        bail!("invalid OpenVPN 3 credentials: control characters are not permitted");
+    }
+    if user.len().saturating_add(password.len()).saturating_add(2) > 1024 * 1024 {
+        bail!("invalid OpenVPN 3 credentials: authentication file exceeds 1 MiB");
+    }
+    Ok(())
+}
+
 /// Write user/password to a root-only file in `PRIVATE_DIR`.
 /// Returns the path; caller deletes after openvpn has consumed it.
 fn write_auth_file(safe: &str, user: &str, password: &str) -> anyhow::Result<PathBuf> {
-    if user.contains('\n') || user.contains('\r') || password.contains('\n') || password.contains('\r')
+    if user.contains('\n')
+        || user.contains('\r')
+        || password.contains('\n')
+        || password.contains('\r')
     {
         bail!("invalid OpenVPN credentials: newline characters are not permitted");
     }
@@ -1707,13 +1730,13 @@ mod tests {
                412 /usr/bin/vim /var/run/supermanager-ovpn/{id}.ovpn\n\
                513 /opt/homebrew/sbin/openvpn --config /tmp/{id}.ovpn\n\
                614 /Library/PrivilegedHelperTools/SuperManagerVPN/openvpn --config /var/run/supermanager-ovpn/{id}.ovpn --daemon supermgr-ovpn-{id}\n\
-               715 /Library/PrivilegedHelperTools/SuperManagerVPN/openvpn3 --no-cert -a /var/run/supermanager-ovpn/{id}.auth /var/run/supermanager-ovpn/{id}.ovpn\n"
+               715 /Library/PrivilegedHelperTools/SuperManagerVPN/openvpn3 --no-cert --auth-user-pass /var/run/supermanager-ovpn/{id}.auth /var/run/supermanager-ovpn/{id}.ovpn\n"
         );
         assert_eq!(matching_openvpn_pids(&ps, id), vec![614, 715]);
     }
 
     #[test]
-    fn openvpn3_cli_args_pass_auth_file_never_plaintext_password() {
+    fn openvpn3_cli_args_use_the_credentials_file_adapter_not_auto_session() {
         let cfg_path = Path::new("/var/run/supermanager-ovpn/test.ovpn");
         let auth_path = Path::new("/var/run/supermanager-ovpn/test.auth");
         let args = build_v3_cli_args("client\nauth-user-pass\n", cfg_path, Some(auth_path));
@@ -1725,12 +1748,70 @@ mod tests {
             rendered,
             vec![
                 "--no-cert",
-                "-a",
+                "--auth-user-pass",
                 "/var/run/supermanager-ovpn/test.auth",
                 "/var/run/supermanager-ovpn/test.ovpn",
             ]
         );
-        assert!(!rendered.iter().any(|a| a.contains("password")));
+        for forbidden in ["-a", "--auto-sess", "--password", "-p", "--username", "-u"] {
+            assert!(!rendered.iter().any(|a| a == forbidden), "{rendered:?}");
+        }
+    }
+
+    #[test]
+    fn openvpn3_certificate_profiles_keep_certificate_authentication() {
+        let cfg_path = Path::new("/var/run/supermanager-ovpn/client.ovpn");
+        let config = "client\n<cert>\nclient certificate\n</cert>\n";
+        assert_eq!(
+            build_v3_cli_args(config, cfg_path, None),
+            [cfg_path.as_os_str()]
+        );
+
+        // A certificate profile may also require a password. Paths are
+        // individual argv entries, including when a development path has spaces.
+        let auth_path = Path::new("/tmp/private vpn/client.auth");
+        assert_eq!(
+            build_v3_cli_args(config, cfg_path, Some(auth_path)),
+            [
+                OsString::from("--auth-user-pass"),
+                auth_path.as_os_str().to_owned(),
+                cfg_path.as_os_str().to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn credential_lines_cannot_change_the_authentication_file_structure() {
+        for (user, password) in [
+            ("AzureAD\nother-user", "token"),
+            ("AzureAD\r", "token"),
+            ("AzureAD", "token\nextra-line"),
+            ("AzureAD", "token\r"),
+        ] {
+            let err = write_auth_file("unused", user, password).unwrap_err();
+            assert!(err.to_string().contains("newline characters"));
+        }
+    }
+
+    #[test]
+    fn openvpn3_credentials_match_the_managed_client_boundary() {
+        for (user, password) in [
+            ("", "token"),
+            ("AzureAD", ""),
+            ("AzureAD\t", "token"),
+            ("AzureAD", "token\0tail"),
+            ("AzureAD", "token\u{7f}"),
+        ] {
+            let error = validate_v3_credentials(user, password).unwrap_err();
+            assert!(error
+                .to_string()
+                .starts_with("invalid OpenVPN 3 credentials:"));
+            assert!(!error.to_string().contains("token"));
+        }
+        let maximum_password = "x".repeat(1024 * 1024 - "AzureAD".len() - 2);
+        validate_v3_credentials("AzureAD", &maximum_password).unwrap();
+        assert!(validate_v3_credentials("AzureAD", &(maximum_password + "x")).is_err());
+        validate_v3_credentials("brüker", "valid-token").unwrap();
     }
 
     #[test]
@@ -1742,7 +1823,10 @@ mod tests {
             |path, _| Err(anyhow!("{} owned by uid 501", path.display())),
         )
         .unwrap_err();
-        assert!(format!("{err:#}").contains("vpn_runtime_install"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("vpn_runtime_install"),
+            "{err:#}"
+        );
 
         let root_bin = Path::new(crate::vpn_runtime::RUNTIME_DIR).join("openvpn3");
         let chosen = select_openvpn_for_policy(
