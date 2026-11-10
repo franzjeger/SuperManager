@@ -204,6 +204,12 @@ EOF
 # IKEv2 must ship with Release too. A Homebrew strongSwan executable loads
 # user-writable dylibs/plugins; build monolithically and link OpenSSL statically
 # from the macOS 14.0 static dependency prefix.
+#
+# Unset Xcode's GCC_TREAT_WARNINGS_AS_ERRORS=NO before running autoconf:
+# when exported by an Xcode Run Script Build Phase, /usr/bin/gcc downgrades
+# -Werror to a warning, causing strongSwan's configure to misdetect GNU-style
+# qsort_r on Darwin (BSD qsort_r) and segfault on startup in array_sort().
+unset GCC_TREAT_WARNINGS_AS_ERRORS
 ss_url=https://download.strongswan.org/strongswan-6.0.7.tar.bz2
 ss_sha=e518e34e159514f4c6ba80d1f926cb151e0dd4e3a1d94213171234b8b9ae6f55
 ss="$cache/strongswan-build"
@@ -211,11 +217,16 @@ ssl="$("$repo/contrib/openvpn3/build_dependencies.sh" "${SUPERMANAGER_OPENVPN3_C
 prefix=/Library/PrivilegedHelperTools/SuperManagerVPN
 ss_options=(--prefix="$prefix" --sysconfdir="$prefix/etc" --with-piddir=/var/run
     --disable-defaults --enable-static --disable-shared --enable-monolithic
-    --enable-ikev2 --enable-charon --enable-swanctl --enable-vici --enable-openssl
-    --enable-random --enable-nonce --enable-x509 --enable-pubkey --enable-pem
-    --enable-pkcs1 --enable-kernel-pfroute --enable-kernel-pfkey --enable-socket-default
-    --enable-eap-identity --enable-eap-mschapv2 --enable-md4 --enable-des)
-ss_stamp="$ss_sha ${ss_options[*]} macOS14.0 $(uname -m) $(shasum -a 256 "$ssl/lib/libcrypto.a")"
+    --enable-ikev1 --enable-ikev2 --enable-charon --enable-swanctl --enable-vici
+    --enable-openssl --enable-random --enable-nonce --enable-x509
+    --enable-revocation --enable-constraints --enable-pubkey --enable-pem
+    --enable-pkcs1 --enable-pkcs8 --enable-pgp --enable-sshkey
+    --enable-curve25519 --enable-kdf --enable-kernel-pfroute
+    --enable-kernel-pfkey --enable-socket-default --enable-osx-attr
+    --enable-updown --enable-eap-identity --enable-eap-mschapv2
+    --enable-eap-md5 --enable-eap-gtc --enable-eap-peap
+    --enable-xauth-generic --enable-md4 --enable-des)
+ss_stamp="$ss_sha ${ss_options[*]} HAVE_QSORT_R_BSD macOS14.0 $(uname -m) $(shasum -a 256 "$ssl/lib/libcrypto.a")"
 if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != "$ss_stamp" ]; then
     fetch "$ss_url" "$ss_sha" "$cache/strongswan.tar.bz2"
     rm -rf "$ss"
@@ -223,12 +234,17 @@ if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != 
     tar -xjf "$cache/strongswan.tar.bz2" -C "$ss" --strip-components 1
     (
         cd "$ss"
-        env MACOSX_DEPLOYMENT_TARGET=14.0 \
+        env CC=/usr/bin/clang \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
             CPPFLAGS="-I$ssl/include" \
             CFLAGS="-O2 -mmacosx-version-min=14.0" \
-            LDFLAGS="-L$ssl/lib -mmacosx-version-min=14.0" \
+            LDFLAGS="-L$ssl/lib -mmacosx-version-min=14.0 -framework SystemConfiguration -framework CoreFoundation" \
             ./configure "${ss_options[@]}" >configure.log 2>&1 \
             || { tail -40 configure.log >&2; exit 1; }
+        if ! grep -q '^#define HAVE_QSORT_R_BSD' config.h; then
+            echo "error: strongSwan did not select BSD qsort_r on macOS" >&2
+            exit 1
+        fi
         make -j"$(sysctl -n hw.ncpu)" >make.log 2>&1 \
             || { tail -40 make.log >&2; exit 1; }
     )
@@ -236,6 +252,10 @@ if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != 
 fi
 python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
     "$ss/src/charon/charon" "$ss/src/swanctl/swanctl"
+ss_smoke_conf="$(mktemp)"
+printf 'charon {\n  load_modular = no\n}\n' >"$ss_smoke_conf"
+STRONGSWAN_CONF="$ss_smoke_conf" "$ss/src/charon/charon" --version >/dev/null
+rm -f "$ss_smoke_conf"
 for entry in charon swanctl; do
     binary="$ss/src/$entry/$entry"
     if otool -L "$binary" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then

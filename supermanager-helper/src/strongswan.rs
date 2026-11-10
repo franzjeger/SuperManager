@@ -465,6 +465,10 @@ impl Strongswan {
             stop_process(pid, &charon).await;
         }
         self.adopted_charon = None;
+        // Clear any leftover pidfile before spawning: charon's check_pidfile()
+        // only checks `kill(pid, 0) == 0`, so a dead charon whose PID was
+        // recycled by an unrelated process would otherwise block startup.
+        let _ = std::fs::remove_file(&self.pid_file);
         self.start_charon(&charon, &swanctl).await
     }
 

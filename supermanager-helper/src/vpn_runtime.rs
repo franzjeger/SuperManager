@@ -164,27 +164,40 @@ fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
 }
 
 fn install_strongswan_config(dir: &Path) -> Result<()> {
+    let check_path = |path: &Path| -> Result<()> {
+        if dir == Path::new(RUNTIME_DIR) {
+            ensure_root_owned(path, "strongSwan configuration")
+        } else {
+            let meta = std::fs::symlink_metadata(path)
+                .with_context(|| format!("stat {}", path.display()))?;
+            if meta.file_type().is_symlink() || meta.mode() & 0o022 != 0 {
+                bail!("unsafe strongSwan configuration path {}", path.display());
+            }
+            Ok(())
+        }
+    };
     let etc = dir.join("etc");
     for relative in ["swanctl", "swanctl/conf.d", "swanctl/swanctl.d"] {
         let path = etc.join(relative);
         std::fs::create_dir_all(&path)
             .with_context(|| format!("create {}", path.display()))?;
-        ensure_root_owned(&path, "strongSwan configuration")?;
+        check_path(&path)?;
     }
     for (name, content) in [
         ("strongswan.conf", "charon {\n  load_modular = no\n}\n"),
         ("swanctl/swanctl.conf", "include conf.d/*.conf\n"),
     ] {
         let path = etc.join(name);
-        use std::os::unix::fs::OpenOptionsExt as _;
-        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o644).open(&path) {
             Ok(mut file) => {
                 use std::io::Write as _;
                 file.write_all(content.as_bytes())?;
                 file.sync_all()?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                ensure_root_owned(&path, "strongSwan configuration")?;
+                check_path(&path)?;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
             }
             Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
         }

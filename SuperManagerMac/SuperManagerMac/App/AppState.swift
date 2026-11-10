@@ -221,8 +221,13 @@ class AppState {
     private func startVpnStatusPolling() {
         vpnStatusPollTask?.cancel()
         // First pass right now so the dots populate within a second
-        // of app start, not after the first 4 s sleep.
-        Task { @MainActor in await pollAllVpnStates() }
+        // of app start, not after the first 4 s sleep. Also ensure
+        // the bundled VPN runtime in /Library/PrivilegedHelperTools/SuperManagerVPN
+        // is refreshed immediately after an app update.
+        Task { @MainActor in
+            await installVPNRuntime()
+            await pollAllVpnStates()
+        }
         vpnStatusPollTask = Task { @MainActor in
             // Tailscale rides this loop on its own slower cadence. It used to be
             // polled only by TailscaleListView's `.task`, which SwiftUI cancels
