@@ -6,7 +6,7 @@
 # Invoked as a Run Script Build Phase in Xcode. Expects $TARGET_BUILD_DIR
 # and $PRODUCT_NAME (set by Xcode).
 #
-# Output: $APP/Contents/Resources/vpn-runtime/{bash,wg,wg-quick,wireguard-go,openvpn3,licenses}
+# Output: $APP/Contents/Resources/vpn-runtime/{bash,wg,wg-quick,wireguard-go,charon,swanctl,openvpn3,licenses}
 #
 # Development builds can skip when Homebrew's wireguard-go is absent.
 # scripts/release.sh requires the complete runtime before distribution.
@@ -40,7 +40,7 @@ fi
 
 rm -rf "$DEST_DIR"
 mkdir -p "$DEST_DIR"
-cp -R "$STAGED"/{bash,wg,wg-quick,wireguard-go,openvpn3,licenses} "$DEST_DIR/"
+cp -R "$STAGED"/{bash,wg,wg-quick,wireguard-go,charon,swanctl,openvpn3,licenses} "$DEST_DIR/"
 
 # The helper checks each Mach-O file's signature for SuperManager's team
 # and these identifiers before it runs it as root. wg-quick is a script;
@@ -51,7 +51,7 @@ if [ "${CODE_SIGNING_REQUIRED:-YES}" = "NO" ] \
     echo "note: code signing disabled — the VPN runtime is left unsigned, and the helper will refuse it."
     exit 0
 fi
-for name in bash wg wireguard-go openvpn3; do
+for name in bash wg wireguard-go charon swanctl openvpn3; do
     codesign --force \
         --options runtime \
         --sign "${EXPANDED_CODE_SIGN_IDENTITY}" \

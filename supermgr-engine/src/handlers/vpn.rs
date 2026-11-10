@@ -19,6 +19,29 @@ use tracing::warn;
 use crate::protocol::{self, Response};
 use crate::server::{parse_ip_list, parse_ipnet_list, EngineServer};
 
+/// Write a secret-bearing config file (`.ovpn`, `.azurevpnconfig`) with mode
+/// `0600` from creation on Unix so it is never briefly world-readable.
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        opts.mode(0o600);
+        let mut f = opts.open(path)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(contents)?;
+        f.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = opts.open(path)?;
+        f.write_all(contents)?;
+        f.sync_all()
+    }
+}
+
 impl EngineServer {
     pub(crate) async fn handle_list_profiles(&self, id: u64) -> Response {
         let state = self.state.lock().await;
@@ -483,14 +506,9 @@ impl EngineServer {
         }
         let mut xml_path = xml_dir;
         xml_path.push(format!("{new_id}.azurevpnconfig"));
-        if let Err(e) = std::fs::write(&xml_path, content.as_bytes()) {
+        // 0600 from creation — the XML embeds the gateway's tls-crypt key.
+        if let Err(e) = write_private_file(&xml_path, content.as_bytes()) {
             return Response::err(id, protocol::INTERNAL_ERROR, format!("write xml: {e}"));
-        }
-        // 0600 — the XML embeds the gateway's tls-crypt key.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&xml_path, std::fs::Permissions::from_mode(0o600));
         }
 
         let profile = Profile {
@@ -533,12 +551,6 @@ impl EngineServer {
         }
     }
 
-    // These two are implemented but not reachable: no RPC method name
-    // dispatches to them and the macOS app never asks for one, so the
-    // Entra ID device-code flow is dead on that platform. Left in place
-    // rather than deleted — the work is done, only the wiring is missing.
-    // See the follow-up issue.
-    #[allow(dead_code)]
     /// Start the Entra ID device-code flow for an Azure VPN
     /// profile. Returns the `user_code` + `verification_uri` so the
     /// GUI can show them and open the browser, plus the `device_code`
@@ -600,7 +612,6 @@ impl EngineServer {
     /// returns the rendered `.ovpn` body + a temp file path the
     /// helper can `--config` against, so the GUI just needs one
     /// last RPC to the helper to bring the tunnel up.
-    #[allow(dead_code)]
     pub(crate) async fn handle_vpn_azure_device_code_poll(
         &self,
         id: u64,
@@ -674,14 +685,9 @@ impl EngineServer {
                 // Mac). full_tunnel=false => no redirect-gateway; pushed routes give
                 // internal access while public traffic stays on the local uplink.
                 let body = crate::azure_vpn::render_azure_ovpn(&cfg, false);
-                if let Err(e) = std::fs::write(&path, body.as_bytes()) {
+                // 0600 from creation — the file holds the tls-crypt key.
+                if let Err(e) = write_private_file(&path, body.as_bytes()) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("write ovpn: {e}"));
-                }
-                // 0600 — the file holds the tls-crypt key.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
                 Response::ok(
                     id,
@@ -840,7 +846,7 @@ impl EngineServer {
         let priv_key_label = wg.private_key.label();
         let priv_key = match self.secrets.retrieve(priv_key_label).await {
             Ok(zs) => match std::str::from_utf8(&zs) {
-                Ok(s) => s.to_owned(),
+                Ok(s) => zeroize::Zeroizing::new(s.to_owned()),
                 Err(_) => {
                     return Response::err(
                         id,
@@ -860,7 +866,7 @@ impl EngineServer {
 
         let mut out = String::new();
         let _ = writeln!(out, "[Interface]");
-        let _ = writeln!(out, "PrivateKey = {priv_key}");
+        let _ = writeln!(out, "PrivateKey = {}", priv_key.as_str());
         if !wg.addresses.is_empty() {
             let addrs = wg
                 .addresses
@@ -1286,7 +1292,13 @@ impl EngineServer {
                 }
                 let mut new_path = new_dir;
                 new_path.push(format!("{new_id}.ovpn"));
-                if let Err(e) = std::fs::copy(&ov.config_file, &new_path) {
+                let ovpn_bytes = match std::fs::read(&ov.config_file) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return Response::err(id, protocol::INTERNAL_ERROR, format!("read ovpn: {e}"))
+                    }
+                };
+                if let Err(e) = write_private_file(&new_path, &ovpn_bytes) {
                     return Response::err(id, protocol::INTERNAL_ERROR, format!("copy ovpn: {e}"));
                 }
                 ov.config_file = new_path.to_string_lossy().into_owned();

@@ -413,6 +413,9 @@ impl SshSession {
                 reason: format!("exec failed: {e}"),
             })?;
 
+        // Cap buffered stdout/stderr at 8 MiB per stream so a runaway remote
+        // command cannot exhaust daemon memory before the RPC frame limit (10 MiB).
+        const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_status: Option<u32> = None;
@@ -420,11 +423,17 @@ impl SshSession {
         loop {
             match channel.wait().await {
                 Some(russh::ChannelMsg::Data { data }) => {
-                    stdout.extend_from_slice(&data);
+                    let remaining = MAX_STREAM_BYTES.saturating_sub(stdout.len());
+                    if remaining > 0 {
+                        stdout.extend_from_slice(&data[..data.len().min(remaining)]);
+                    }
                 }
                 Some(russh::ChannelMsg::ExtendedData { data, ext }) if ext == 1 => {
                     // ext == 1 is stderr
-                    stderr.extend_from_slice(&data);
+                    let remaining = MAX_STREAM_BYTES.saturating_sub(stderr.len());
+                    if remaining > 0 {
+                        stderr.extend_from_slice(&data[..data.len().min(remaining)]);
+                    }
                 }
                 Some(russh::ChannelMsg::ExitStatus { exit_status: code }) => {
                     exit_status = Some(code);

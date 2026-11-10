@@ -144,17 +144,6 @@ fn arg_u64(args: &Value, name: &str) -> Result<u64, RpcError> {
         .ok_or_else(|| RpcError::Protocol(format!("missing integer arg: {name}")))
 }
 
-/// Standard response for methods that aren't ported yet. Lets the GUI/MCP
-/// fail with a clear message instead of "unknown method". Currently
-/// unused — every dispatch arm has a real implementation — but kept
-/// available for future RPC methods that land before their handlers.
-#[allow(dead_code)]
-fn stub(method: &'static str) -> Result<Value, RpcError> {
-    Err(RpcError::Other(format!(
-        "{method} is not yet implemented in supermgrd-win — see TODO in dispatch.rs"
-    )))
-}
-
 // ---------------------------------------------------------------------------
 // VPN handlers. Connecting and disconnecting go through the session
 // (`vpn::session`), which owns the tunnel's state and runs the backends;

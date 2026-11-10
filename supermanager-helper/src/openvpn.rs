@@ -378,7 +378,9 @@ impl OpenVpn {
                 pid,
                 log_path.display()
             );
-            let _ = std::fs::write(&pid_path, format!("{pid}\n"));
+            if let Err(e) = crate::private_file::write(&pid_path, format!("{pid}\n").as_bytes()) {
+                tracing::warn!("ovpn_connect: failed to write pid file {}: {e}", pid_path.display());
+            }
             // Reap the child asynchronously so it doesn't become a zombie,
             // and wipe its 0600 credentials file as soon as the process exits.
             let auth_for_exit = auth_path.clone();

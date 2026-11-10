@@ -401,11 +401,20 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("could not spawn auto-reconnect watchdog: {e:#}");
     }
 
+    // Bound concurrent active client connections so a flood of sockets cannot
+    // exhaust the helper's file-descriptor limit (SoftResourceLimits = 2048).
+    let conn_semaphore = Arc::new(tokio::sync::Semaphore::new(64));
+
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let Ok(permit) = conn_semaphore.clone().try_acquire_owned() else {
+                    warn!("rejecting connection: max concurrent helper clients (64) reached");
+                    continue;
+                };
                 let ctrls = controllers.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
                     if let Err(refusal) = client_auth::authorize(&stream, client_policy).await {
                         warn!("refused a client: {refusal}");
                         refuse(stream, &refusal).await;
@@ -486,13 +495,22 @@ async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> 
 
     loop {
         let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.read_exact(&mut len_buf),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 debug!("client disconnected");
                 return Ok(());
             }
-            Err(e) => return Err(e.into()),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                debug!("client idle read timed out");
+                return Ok(());
+            }
         }
         let msg_len = u32::from_be_bytes(len_buf) as usize;
         if msg_len > MAX_MESSAGE_SIZE {
@@ -501,7 +519,12 @@ async fn handle_connection(mut stream: UnixStream, controllers: Controllers) -> 
         }
 
         let mut buf = vec![0u8; msg_len];
-        stream.read_exact(&mut buf).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.read_exact(&mut buf),
+        )
+        .await
+        .context("client frame body read timed out")??;
 
         let response = match serde_json::from_slice::<Request>(&buf) {
             Ok(req) if is_read_only(&req.method) => {

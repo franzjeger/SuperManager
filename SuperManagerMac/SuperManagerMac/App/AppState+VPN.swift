@@ -535,6 +535,7 @@ extension AppState {
                 if let p = password { args["password"] = p }
             } else if backendLower.contains("fortigate") || backendLower.contains("forti_gate") || backendLower.contains("ikev2") || backendLower.contains("ipsec") {
                 backendStr = "ikev2"
+                try await HelperClient.shared.installBundledVPNRuntime()
                 // IKEv2 connect args are richer; for the always-on
                 // capture, we rely on the helper having stored args
                 // from a recent successful connect. If user hasn't

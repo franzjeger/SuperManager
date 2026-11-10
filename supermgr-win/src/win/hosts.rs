@@ -450,13 +450,13 @@ fn submit_add(ctx: &Ctx) {
         return;
     };
     let h = w.global::<Hosts>();
-    let pick = |list: &[&str], i: i32| {
+    fn pick<'a>(list: &[&'a str], i: i32) -> &'a str {
         usize::try_from(i)
             .ok()
             .and_then(|i| list.get(i))
             .copied()
             .unwrap_or(list[0])
-    };
+    }
     let label = h.get_add_label().trim().to_owned();
     let hostname = h.get_add_hostname();
     let port_str = h.get_add_port();

@@ -215,7 +215,10 @@ fn guardian_loop() {
 }
 
 fn tick_one(af: Af, missing: &mut u32) {
-    let observed = read_default_route(af);
+    // Query the routing table once per tick and derive both the physical
+    // snapshot candidate and the raw default owner from the same dump.
+    let raw = crate::route_table::primary_default(af.is_v6());
+    let observed = snapshot_of(raw.clone());
     let cell = match af {
         Af::V4 => SNAPSHOT_V4.get(),
         Af::V6 => SNAPSHOT_V6.get(),
@@ -237,7 +240,7 @@ fn tick_one(af: Af, missing: &mut u32) {
             *guard = Some(snap);
         }
         None => {
-            // `read_default_route` filters out utun-bound defaults.
+            // `snapshot_of` filters out utun-bound defaults.
             // Before treating the route as "missing", check whether a
             // VPN tunnel has legitimately replaced the default via a
             // utun interface (strongSwan full tunnel, WireGuard, etc.).
@@ -247,7 +250,7 @@ fn tick_one(af: Af, missing: &mut u32) {
             // removes it again, repeat every 500 ms. Symptom: 90-second
             // connectivity outage in the helper log with ~100 "restored
             // from snapshot" messages, followed by the VPN silently dying.
-            if read_default_route_raw(af).map_or(false, |s| s.interface.starts_with("utun")) {
+            if raw.is_some_and(|s| s.interface.starts_with("utun")) {
                 // VPN tunnel owns the default route. Reset the miss
                 // counter so we don't act on accumulated misses when
                 // the tunnel eventually tears down.
@@ -324,16 +327,6 @@ fn snapshot_of(route: Option<crate::route_table::DefaultRoute>) -> Option<RouteS
         return None;
     }
     Some(RouteSnapshot {
-        gateway: route.gateway,
-        interface: route.interface,
-    })
-}
-
-/// The primary default route, whoever's it is: `tick_one` uses it to see a
-/// VPN's tunnel has taken the default route over. Never a snapshot, which
-/// would put back a tunnel's route after the tunnel is gone.
-fn read_default_route_raw(af: Af) -> Option<RouteSnapshot> {
-    crate::route_table::primary_default(af.is_v6()).map(|route| RouteSnapshot {
         gateway: route.gateway,
         interface: route.interface,
     })

@@ -103,7 +103,8 @@ pub fn set_fallbacks(list: Vec<String>) -> Result<()> {
         fs::create_dir_all(parent).context("creating fallback dir")?;
     }
     let json = serde_json::to_string(&list).context("encoding json")?;
-    fs::write(FALLBACK_PATH, json).context("writing fallback file")?;
+    crate::private_file::write(Path::new(FALLBACK_PATH), json.as_bytes())
+        .context("writing fallback file")?;
     *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = list;
     Ok(())
 }
@@ -151,6 +152,24 @@ fn watchdog_loop() {
         }
         let primary = resolvers.join(", ");
 
+        // If we previously installed the supplemental fallback DNS, check
+        // whether the primary service's own resolver (Setup/DHCP) is answering
+        // again; if so, remove our supplemental override so split-horizon /
+        // local LAN names return to the native resolver.
+        if already_forced {
+            let own = crate::dns::system_resolvers();
+            if !own.is_empty() && own.iter().any(|ip| probe_resolver(ip)) {
+                tracing::info!(
+                    own_resolvers = ?own,
+                    "primary network service DNS is healthy again — clearing supplemental fallback"
+                );
+                crate::dns::clear_vpn_dns();
+                already_forced = false;
+                consecutive_failures = 0;
+                continue;
+            }
+        }
+
         // Healthy if ANY configured resolver answers, not just the
         // first. macOS falls through the list, so a dead primary with
         // a live secondary is a working configuration — treating it
@@ -164,7 +183,6 @@ fn watchdog_loop() {
                 );
             }
             consecutive_failures = 0;
-            already_forced = false;
             continue;
         }
 
@@ -215,16 +233,12 @@ fn watchdog_loop() {
             tracing::error!(
                 resolver = %primary,
                 fallbacks = ?fallbacks,
-                "DNS unhealthy 30s — forcing State to fallback list"
+                "DNS unhealthy 30s — installing supplemental fallback DNS via scutil"
             );
-            match crate::tailscale::force_dns_state(crate::tailscale::SetDnsArgs {
-                servers: fallbacks,
-            }) {
-                Ok(_) => {
-                    already_forced = true;
-                }
-                Err(e) => tracing::error!("force_dns_state failed: {e}"),
-            }
+            // Install under SuperManager's own ephemeral State key rather than
+            // overwriting the primary network service's DHCP State:/.../DNS entry.
+            crate::dns::set_vpn_dns(&fallbacks);
+            already_forced = true;
         }
     }
 }

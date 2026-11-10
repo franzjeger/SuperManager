@@ -157,7 +157,39 @@ fn install_into(bundled: &Path, dir: &Path) -> Result<InstallResult> {
             record(name, changed);
         }
     }
+    if bundled.join("charon").is_file() && bundled.join("swanctl").is_file() {
+        install_strongswan_config(dir)?;
+    }
     Ok(result)
+}
+
+fn install_strongswan_config(dir: &Path) -> Result<()> {
+    let etc = dir.join("etc");
+    for relative in ["swanctl", "swanctl/conf.d", "swanctl/swanctl.d"] {
+        let path = etc.join(relative);
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("create {}", path.display()))?;
+        ensure_root_owned(&path, "strongSwan configuration")?;
+    }
+    for (name, content) in [
+        ("strongswan.conf", "charon {\n  load_modular = no\n}\n"),
+        ("swanctl/swanctl.conf", "include conf.d/*.conf\n"),
+    ] {
+        let path = etc.join(name);
+        use std::os::unix::fs::OpenOptionsExt as _;
+        match std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                ensure_root_owned(&path, "strongSwan configuration")?;
+            }
+            Err(error) => return Err(error).with_context(|| format!("create {}", path.display())),
+        }
+    }
+    Ok(())
 }
 
 /// Install `name` unless the installed file has the same content: that

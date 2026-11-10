@@ -233,7 +233,7 @@ done
 # The VPN runtime the helper installs for WireGuard and Azure VPN. It checks
 # these signatures (team and identifier) before it runs them as root;
 # wg-quick is a script it checks by content instead.
-for rt_bin in bash wg wireguard-go openvpn3; do
+for rt_bin in bash wg wireguard-go charon swanctl openvpn3; do
     rt_path="$APP/Contents/Resources/vpn-runtime/$rt_bin"
     [ -f "$rt_path" ] || continue
     codesign --force --options runtime --timestamp \
@@ -351,14 +351,14 @@ echo "  tailscale + tailscaled bundled and Developer ID-signed"
 # Release helpers require protected VPN programs. The app carries its own,
 # which the helper verifies and installs where only root can write.
 echo "→ Verifying bundled VPN runtime"
-for rt_file in bash wg wg-quick wireguard-go openvpn3; do
+for rt_file in bash wg wg-quick wireguard-go charon swanctl openvpn3; do
     if [ ! -x "$APP/Contents/Resources/vpn-runtime/$rt_file" ]; then
         echo "error: vpn-runtime/$rt_file missing from the bundle." >&2
         echo "       Install the VPN build dependencies from .github/workflows/release.yml and rebuild." >&2
         exit 1
     fi
 done
-for rt_bin in bash wg wireguard-go openvpn3; do
+for rt_bin in bash wg wireguard-go charon swanctl openvpn3; do
     rt_sig="$(codesign -dvv "$APP/Contents/Resources/vpn-runtime/$rt_bin" 2>&1 || true)"
     case "$rt_sig" in
         *"Authority=Developer ID Application"*"Identifier=com.sybr.supermanager.vpn.$rt_bin"* \
@@ -374,15 +374,20 @@ python3 "$REPO_ROOT/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
     "$APP/Contents/Resources/vpn-runtime/bash" \
     "$APP/Contents/Resources/vpn-runtime/wg" \
     "$APP/Contents/Resources/vpn-runtime/wireguard-go" \
+    "$APP/Contents/Resources/vpn-runtime/charon" \
+    "$APP/Contents/Resources/vpn-runtime/swanctl" \
     "$APP/Contents/Resources/vpn-runtime/openvpn3"
 # A root-owned executable must also load code only from protected paths.
-# The OpenVPN 3 builder links its dependencies statically; check the final
-# signed artifact so a build cannot accidentally reintroduce Homebrew dylibs.
-if otool -L "$APP/Contents/Resources/vpn-runtime/openvpn3" | tail -n +2 \
-    | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
-    echo "error: bundled OpenVPN 3 loads libraries outside the system" >&2
-    exit 1
-fi
+# The OpenVPN 3 and strongSwan builders link their dependencies statically;
+# check the final signed artifacts so a build cannot accidentally reintroduce
+# Homebrew dylibs.
+for rt_bin in charon swanctl openvpn3; do
+    if otool -L "$APP/Contents/Resources/vpn-runtime/$rt_bin" | tail -n +2 \
+        | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+        echo "error: bundled $rt_bin loads libraries outside the system" >&2
+        exit 1
+    fi
+done
 echo "  VPN runtime bundled and Developer ID-signed"
 
 # ---- 4b. Build the .pkg installer ------------------------------------------

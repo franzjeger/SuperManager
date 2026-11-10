@@ -50,6 +50,18 @@ enum Dependencies {
             return false
             #endif
         }
+        if binary == "swanctl" {
+            let runtime = "/Library/PrivilegedHelperTools/SuperManagerVPN"
+            if isRootOwnedExecutable("\(runtime)/charon") && isRootOwnedExecutable("\(runtime)/swanctl") {
+                return true
+            }
+        }
+        if binary == "wg-quick" {
+            let runtime = "/Library/PrivilegedHelperTools/SuperManagerVPN"
+            if isRootOwnedExecutable("\(runtime)/wg-quick") {
+                return true
+            }
+        }
         let binaries = binary == "openvpn" ? ["openvpn", "openvpn-patched", "openvpn3"] : [binary]
         return searchPaths.contains { directory in
             binaries.contains { FileManager.default.isExecutableFile(atPath: "\(directory)/\($0)") }

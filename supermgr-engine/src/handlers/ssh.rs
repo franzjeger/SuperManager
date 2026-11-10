@@ -188,7 +188,9 @@ impl EngineServer {
             let mut state = self.state.lock().await;
             match state.ssh_keys.remove(&key_id) {
                 Some(k) => {
-                    let _ = state.delete_ssh_key_file(key_id);
+                    if let Err(e) = state.delete_ssh_key_file(key_id) {
+                        tracing::warn!("deleting key {key_id}: key file not removed: {e}");
+                    }
                     Some(k)
                 }
                 None => None,
@@ -510,7 +512,9 @@ impl EngineServer {
         let mut state = self.state.lock().await;
         let removed = state.ssh_hosts.remove(&host_id);
         if removed.is_some() {
-            let _ = state.delete_ssh_host_file(host_id);
+            if let Err(e) = state.delete_ssh_host_file(host_id) {
+                tracing::warn!("deleting host {host_id}: host file not removed: {e}");
+            }
         }
         drop(state);
 
@@ -542,7 +546,9 @@ impl EngineServer {
             host.pinned = !host.pinned;
             host.updated_at = chrono::Utc::now();
             let host_clone = host.clone();
-            let _ = state.save_ssh_host(&host_clone);
+            if let Err(e) = state.save_ssh_host(&host_clone) {
+                return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
+            }
         }
         let summaries: Vec<HostSummary> = state.ssh_hosts.values().map(HostSummary::from).collect();
         match serde_json::to_value(&summaries) {
@@ -575,7 +581,9 @@ impl EngineServer {
             host.auth_password_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             host.updated_at = chrono::Utc::now();
             let host_clone = host.clone();
-            let _ = state.save_ssh_host(&host_clone);
+            if let Err(e) = state.save_ssh_host(&host_clone) {
+                return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
+            }
         }
 
         Response::ok(id, serde_json::json!(null))
@@ -631,7 +639,9 @@ impl EngineServer {
             host.auth_cert_ref = Some(supermgr_core::vpn::profile::SecretRef(secret_label));
             host.updated_at = chrono::Utc::now();
             let host_clone = host.clone();
-            let _ = state.save_ssh_host(&host_clone);
+            if let Err(e) = state.save_ssh_host(&host_clone) {
+                return Response::err(id, protocol::INTERNAL_ERROR, format!("save host: {e}"));
+            }
         }
 
         Response::ok(id, serde_json::json!(null))
@@ -1040,7 +1050,9 @@ impl EngineServer {
                 }
                 key.updated_at = chrono::Utc::now();
                 let key_clone = key.clone();
-                let _ = state.save_ssh_key(&key_clone);
+                if let Err(e) = state.save_ssh_key(&key_clone) {
+                    tracing::warn!("saving deployed_to for key {key_id}: {e}");
+                }
             }
         }
 

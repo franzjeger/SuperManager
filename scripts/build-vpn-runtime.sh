@@ -200,3 +200,50 @@ EOF
 # Azure VPN must have a protected OpenVPN 3 as well. Keeping this in the
 # normal bundle build prevents a release from requiring a runtime it omits.
 "$repo/scripts/build-openvpn3-runtime.sh" "$out"
+
+# IKEv2 must ship with Release too. A Homebrew strongSwan executable loads
+# user-writable dylibs/plugins; build monolithically and link OpenSSL statically
+# from the macOS 14.0 static dependency prefix.
+ss_url=https://download.strongswan.org/strongswan-6.0.7.tar.bz2
+ss_sha=e518e34e159514f4c6ba80d1f926cb151e0dd4e3a1d94213171234b8b9ae6f55
+ss="$cache/strongswan-build"
+ssl="$("$repo/contrib/openvpn3/build_dependencies.sh" "${SUPERMANAGER_OPENVPN3_CACHE_DIR:-$repo/target/openvpn3-runtime}/dependencies")"
+prefix=/Library/PrivilegedHelperTools/SuperManagerVPN
+ss_options=(--prefix="$prefix" --sysconfdir="$prefix/etc" --with-piddir=/var/run
+    --disable-defaults --enable-static --disable-shared --enable-monolithic
+    --enable-ikev2 --enable-charon --enable-swanctl --enable-vici --enable-openssl
+    --enable-random --enable-nonce --enable-x509 --enable-pubkey --enable-pem
+    --enable-pkcs1 --enable-kernel-pfroute --enable-kernel-pfkey --enable-socket-default
+    --enable-eap-identity --enable-eap-mschapv2 --enable-md4 --enable-des)
+ss_stamp="$ss_sha ${ss_options[*]} macOS14.0 $(uname -m) $(shasum -a 256 "$ssl/lib/libcrypto.a")"
+if [ ! -x "$ss/src/swanctl/swanctl" ] || [ "$(cat "$ss/.stamp" 2>/dev/null)" != "$ss_stamp" ]; then
+    fetch "$ss_url" "$ss_sha" "$cache/strongswan.tar.bz2"
+    rm -rf "$ss"
+    mkdir -p "$ss"
+    tar -xjf "$cache/strongswan.tar.bz2" -C "$ss" --strip-components 1
+    (
+        cd "$ss"
+        env MACOSX_DEPLOYMENT_TARGET=14.0 \
+            CPPFLAGS="-I$ssl/include" \
+            CFLAGS="-O2 -mmacosx-version-min=14.0" \
+            LDFLAGS="-L$ssl/lib -mmacosx-version-min=14.0" \
+            ./configure "${ss_options[@]}" >configure.log 2>&1 \
+            || { tail -40 configure.log >&2; exit 1; }
+        make -j"$(sysctl -n hw.ncpu)" >make.log 2>&1 \
+            || { tail -40 make.log >&2; exit 1; }
+    )
+    printf '%s\n' "$ss_stamp" >"$ss/.stamp"
+fi
+python3 "$repo/contrib/openvpn3/check_deployment.py" --maximum 14.0 \
+    "$ss/src/charon/charon" "$ss/src/swanctl/swanctl"
+for entry in charon swanctl; do
+    binary="$ss/src/$entry/$entry"
+    if otool -L "$binary" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/' >&2; then
+        echo "error: $entry loads non-system libraries" >&2
+        exit 1
+    fi
+    install -m 0755 "$binary" "$out/$entry"
+done
+install -m 0644 "$ss/COPYING" "$out/licenses/strongswan.COPYING"
+printf '\nstrongSwan 6.0.7: %s (SHA-256 %s); static OpenSSL: %s\n' \
+    "$ss_url" "$ss_sha" "$ss_stamp" >>"$out/licenses/SOURCES"

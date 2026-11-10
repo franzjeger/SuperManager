@@ -142,16 +142,13 @@ fn reap_orphaned_full_tunnel_routes(streak: &mut [u8; 4]) {
         ("::/1", "-inet6"),
         ("8000::/1", "-inet6"),
     ];
-    for (i, (net, fam)) in NETS.into_iter().enumerate() {
+    let prefixes: [ipnet::IpNet; 4] = NETS.map(|(net, _)| net.parse().expect("static valid CIDR"));
+    let owners = crate::route_table::exact_routes_in_dump(&prefixes);
+
+    for (i, ((net, fam), owner)) in NETS.into_iter().zip(owners).enumerate() {
         // Read the routing-table dump, not `route -n get`: RTM_GET blocks on a
         // route whose utun is gone — precisely the orphan this exists to reap.
-        // Probing that way cost a 5 s timeout per net per cycle and then read
-        // the timeout as "no route", so the orphan was never reaped and
-        // escalation slowed from ~6 s to ~40 s.
-        let Ok(prefix) = net.parse::<ipnet::IpNet>() else {
-            continue;
-        };
-        let orphaned = match crate::route_table::exact_route_in_dump(&prefix) {
+        let orphaned = match owner {
             // Only a utun-borne split-default can be a dead-tunnel orphan (a
             // physical iface or the lo0 IPv6 leak-block is handled elsewhere),
             // and only if no live VPN backend owns that utun.
@@ -347,23 +344,12 @@ fn watchdog_loop() {
 /// genuinely dead peer still fails at 8s and escalates, so this never hides a
 /// real outage.
 fn probe_internet() -> bool {
-    let budget = if crate::tailscale_state::load().desired {
-        "8"
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+    let secs = if crate::tailscale_state::load().desired {
+        8
     } else {
-        "1"
+        1
     };
-    // nc's own -G/-w budget is the intended bound, but it applies to the
-    // connect and the transfer, not to nc getting stuck elsewhere. Wrap it
-    // anyway: this is the watchdog's own thread, and if the probe never
-    // returns the watchdog is gone — the single most expensive thread in the
-    // helper to lose, since it carries the no-brick route reaper.
-    let hard_cap = budget.parse::<u64>().unwrap_or(8) + 4;
-    let out = crate::proc::bounded(
-        Command::new("/usr/bin/nc").args(["-z", "-G", budget, "-w", budget, "1.1.1.1", "443"]),
-        hard_cap,
-    );
-    match out {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
-    }
+    let target = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 443);
+    TcpStream::connect_timeout(&target, Duration::from_secs(secs)).is_ok()
 }

@@ -99,7 +99,8 @@ final class HelperClient {
         dnsServers: [String] = [],
         localId: String = ""
     ) async throws -> [String: Any] {
-        try await call("vpn_connect", params: [
+        try await installBundledVPNRuntime()
+        return try await call("vpn_connect", params: [
             "profile_id": profileId,
             "name": name,
             "host": host,

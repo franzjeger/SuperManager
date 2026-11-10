@@ -205,6 +205,35 @@ pub fn exact_route_in_dump(want: &IpNet) -> Option<String> {
     } else {
         "inet6"
     };
+    let table = dump_table(af)?;
+    iface_for_net(&table, want)
+}
+
+/// Look up multiple prefixes in at most one `inet` and one `inet6` routing
+/// table dump, avoiding repeated `netstat -rn` subprocess spawns when checking
+/// the four full-tunnel split-default halves (`0.0.0.0/1`, `128.0.0.0/1`,
+/// `::/1`, `8000::/1`).
+pub fn exact_routes_in_dump(wants: &[IpNet]) -> Vec<Option<String>> {
+    let need_v4 = wants.iter().any(|w| w.addr().is_ipv4());
+    let need_v6 = wants.iter().any(|w| w.addr().is_ipv6());
+    let v4_table = if need_v4 { dump_table("inet") } else { None };
+    let v6_table = if need_v6 { dump_table("inet6") } else { None };
+
+    wants
+        .iter()
+        .map(|want| {
+            let trunc = want.trunc();
+            let table = if trunc.addr().is_ipv4() {
+                v4_table.as_deref()?
+            } else {
+                v6_table.as_deref()?
+            };
+            iface_for_net(table, trunc)
+        })
+        .collect()
+}
+
+fn dump_table(af: &str) -> Option<String> {
     let out = crate::proc::bounded(
         std::process::Command::new("/usr/sbin/netstat").args(["-rn", "-f", af]),
         crate::proc::PROBE,
@@ -213,7 +242,7 @@ pub fn exact_route_in_dump(want: &IpNet) -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    iface_for_net(&String::from_utf8_lossy(&out.stdout), want)
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Find `want` in `netstat -rn` output (Destination Gateway Flags Netif …).

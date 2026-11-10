@@ -172,6 +172,12 @@ impl EngineServer {
             }
             "vpn_render_azure_ovpn" => self.handle_vpn_render_azure_ovpn(id, req.params).await,
             "vpn_check_azure_runtime" => self.handle_vpn_check_azure_runtime(id).await,
+            "vpn_azure_device_code_start" => {
+                self.handle_vpn_azure_device_code_start(id, req.params).await
+            }
+            "vpn_azure_device_code_poll" => {
+                self.handle_vpn_azure_device_code_poll(id, req.params).await
+            }
             "vpn_set_routing" => self.handle_vpn_set_routing(id, req.params).await,
             "vpn_set_kill_switch" => self.handle_vpn_set_kill_switch(id, req.params).await,
             "vpn_set_push_dns" => self.handle_vpn_set_push_dns(id, req.params).await,
@@ -434,7 +440,9 @@ pub async fn connect_to_host_owned_typed(
                 .retrieve(&password_ref.0)
                 .await
                 .map_err(|e| EngineError::Other(anyhow::anyhow!("retrieve password: {e}")))?;
-            let password = String::from_utf8_lossy(&password_bytes).to_string();
+            let password = zeroize::Zeroizing::new(
+                String::from_utf8_lossy(&password_bytes).into_owned(),
+            );
             SshSession::connect_password(
                 &host.hostname,
                 host.port,
@@ -464,7 +472,9 @@ pub async fn connect_to_host_owned_typed(
                 let privkey_bytes = secrets.retrieve(&priv_ref).await.map_err(|e| {
                     EngineError::Other(anyhow::anyhow!("retrieve private key: {e}"))
                 })?;
-                String::from_utf8_lossy(&privkey_bytes).to_string()
+                zeroize::Zeroizing::new(
+                    String::from_utf8_lossy(&privkey_bytes).into_owned(),
+                )
             };
             match cert_pem_for_host(&host, secrets).await {
                 Some(cert_pem) => SshSession::connect_certificate(
@@ -521,95 +531,16 @@ fn ssh_error_to_engine(
 /// Free-function variant of `EngineServer::connect_to_host` that takes the
 /// daemon state and secret store as `Arc`s. Spawned tasks (e.g. inside
 /// `handle_ssh_fanout_key_op`) own clones of these handles, so they can
-/// call this without holding `&self`. The body is identical to what
-/// `connect_to_host` used to inline.
+/// call this without holding `&self`. Delegates directly to
+/// [`connect_to_host_owned_typed`] so the two paths can never drift.
 pub async fn connect_to_host_owned(
     state: &Arc<Mutex<DaemonState>>,
     secrets: &Arc<dyn SecretStore>,
     host_id: uuid::Uuid,
 ) -> Result<(Host, SshSession), String> {
-    // Snapshot the host AND the known-hosts handle in one lock pass. The
-    // handle is cheap (`Arc::clone`) and lets us drop the state mutex
-    // before we make the (potentially slow) network call.
-    let (host, known_hosts) = {
-        let st = state.lock().await;
-        let host = st
-            .ssh_hosts
-            .get(&host_id)
-            .cloned()
-            .ok_or_else(|| format!("host not found: {host_id}"))?;
-        (host, Arc::clone(&st.known_hosts))
-    };
-
-    let session = match host.auth_method {
-        AuthMethod::Password => {
-            let password_ref = host
-                .auth_password_ref
-                .as_ref()
-                .ok_or_else(|| "no password configured".to_string())?;
-            let password_bytes = secrets
-                .retrieve(&password_ref.0)
-                .await
-                .map_err(|e| format!("retrieve password: {e}"))?;
-            let password = String::from_utf8_lossy(&password_bytes).to_string();
-            SshSession::connect_password(
-                &host.hostname,
-                host.port,
-                &host.username,
-                &password,
-                10,
-                known_hosts,
-            )
-            .await
-            .map_err(|e| e.to_string())?
-        }
-        // See the typed variant above — same key fetch, same
-        // cert-degrades-to-key rule.
-        AuthMethod::Key | AuthMethod::Certificate => {
-            let key_id = host
-                .auth_key_id
-                .ok_or_else(|| "no SSH key configured".to_string())?;
-            let privkey_pem = {
-                let st = state.lock().await;
-                let ssh_key = st
-                    .ssh_keys
-                    .get(&key_id)
-                    .ok_or_else(|| format!("SSH key not found: {key_id}"))?;
-                let priv_ref = ssh_key.private_key_ref.0.clone();
-                drop(st);
-                let privkey_bytes = secrets
-                    .retrieve(&priv_ref)
-                    .await
-                    .map_err(|e| format!("retrieve private key: {e}"))?;
-                String::from_utf8_lossy(&privkey_bytes).to_string()
-            };
-            match cert_pem_for_host(&host, secrets).await {
-                Some(cert_pem) => SshSession::connect_certificate(
-                    &host.hostname,
-                    host.port,
-                    &host.username,
-                    &privkey_pem,
-                    &cert_pem,
-                    10,
-                    known_hosts,
-                )
-                .await
-                .map_err(|e| e.to_string())?,
-                None => SshSession::connect_key(
-                    &host.hostname,
-                    host.port,
-                    &host.username,
-                    &privkey_pem,
-                    10,
-                    known_hosts,
-                )
-                .await
-                .map_err(|e| e.to_string())?,
-            }
-        }
-    };
-
-    Ok((host, session))
+    connect_to_host_owned_typed(state, secrets, host_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Extract a UUID parameter from JSON-RPC params.

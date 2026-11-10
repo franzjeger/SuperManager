@@ -144,12 +144,20 @@ pub async fn spawn_watchdog(
 ) -> Result<()> {
     let state = STATE
         .get_or_init(|| async {
-            let map = match fs::read_to_string(STATE_PATH) {
+            let mut map = match fs::read_to_string(STATE_PATH) {
                 Ok(s) => {
                     serde_json::from_str::<HashMap<String, WatchedProfile>>(&s).unwrap_or_default()
                 }
                 Err(_) => HashMap::new(),
             };
+            // Purge any legacy RouteGuard entries that an older helper persisted
+            // to disk: manual connections do not survive restarts and their
+            // credentials must never linger on disk.
+            let before = map.len();
+            map.retain(|_, w| w.mode == WatchMode::AlwaysOn);
+            if map.len() != before {
+                let _ = persist(&map);
+            }
             // A file an earlier helper wrote gets the same mode.
             if let Err(e) = fs::set_permissions(STATE_PATH, fs::Permissions::from_mode(0o600)) {
                 if e.kind() != std::io::ErrorKind::NotFound {
@@ -214,7 +222,14 @@ pub async fn list_watched() -> Vec<String> {
     let Some(state) = STATE.get() else {
         return Vec::new();
     };
-    state.lock().await.watched.keys().cloned().collect()
+    state
+        .lock()
+        .await
+        .watched
+        .values()
+        .filter(|w| w.mode == WatchMode::AlwaysOn)
+        .map(|w| w.profile_id.clone())
+        .collect()
 }
 
 /// Watched profiles whose stored args cannot be replayed — enrolled but not
@@ -228,7 +243,7 @@ pub async fn list_unarmed() -> Vec<String> {
         .await
         .watched
         .values()
-        .filter(|w| !w.is_armed())
+        .filter(|w| w.mode == WatchMode::AlwaysOn && !w.is_armed())
         .map(|w| w.profile_id.clone())
         .collect()
 }
@@ -267,8 +282,9 @@ pub async fn refresh_args(
 /// Register a manually-connected full-tunnel profile for route-only healing.
 /// No-op if the profile is already watched — an explicit Always-on entry has
 /// strictly stronger semantics and must win. Called from `vpn_connect` on a
-/// successful full-tunnel connect. The stored args are the same bytes the GUI
-/// passed, so the route-less healer can replay the exact connection.
+/// successful full-tunnel connect. Held in memory only: manual connections do
+/// not outlive the daemon or reboot, and their credentials must never be
+/// written to `/var/lib/supermanager/auto_reconnect.json`.
 pub async fn guard_routes(
     profile_id: String,
     backend: String,
@@ -288,8 +304,7 @@ pub async fn guard_routes(
             mode: WatchMode::RouteGuard,
         },
     );
-    persist(&g.watched)?;
-    tracing::info!(profile_id = %profile_id, "route-guard enabled (manual full-tunnel connect)");
+    tracing::info!(profile_id = %profile_id, "route-guard enabled in memory (manual full-tunnel connect)");
     Ok(())
 }
 
@@ -306,10 +321,19 @@ pub async fn unguard_routes(profile_id: &str) -> Result<()> {
         Some(WatchMode::RouteGuard)
     ) {
         g.watched.remove(profile_id);
-        persist(&g.watched)?;
         tracing::info!(profile_id = %profile_id, "route-guard removed (manual disconnect)");
     }
     Ok(())
+}
+
+/// Only `WatchMode::AlwaysOn` entries are persisted to disk. `RouteGuard`
+/// entries belong to transient manual sessions and are never written out.
+fn persistable_entries(
+    map: &HashMap<String, WatchedProfile>,
+) -> HashMap<&String, &WatchedProfile> {
+    map.iter()
+        .filter(|(_, w)| w.mode == WatchMode::AlwaysOn)
+        .collect()
 }
 
 /// The connect arguments hold the profiles' credentials, so the file is
@@ -318,7 +342,8 @@ fn persist(map: &HashMap<String, WatchedProfile>) -> Result<()> {
     if let Some(parent) = Path::new(STATE_PATH).parent() {
         fs::create_dir_all(parent).context("creating state dir")?;
     }
-    let json = serde_json::to_string_pretty(map).context("encoding json")?;
+    let filtered = persistable_entries(map);
+    let json = serde_json::to_string_pretty(&filtered).context("encoding json")?;
     crate::private_file::write(Path::new(STATE_PATH), json.as_bytes())
         .context("writing state file")?;
     Ok(())
@@ -331,6 +356,7 @@ async fn watchdog_loop(
     sw: Arc<Mutex<Strongswan>>,
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(POLL_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // First tick fires immediately — skip it so we don't probe
     // before the helper has fully started.
     ticker.tick().await;
@@ -341,10 +367,8 @@ async fn watchdog_loop(
         // enrolled always-on VPN profile (so it must come before the
         // empty-snapshot `continue` below). spawn_blocking because the
         // reconcile does synchronous route/CLI/curl work (up to an ~8s
-        // reachability probe) and must not block the async runtime. It is
-        // no-brick: it only (re)installs the exit-node split routes behind a
-        // live reachability gate, and stays on the local uplink otherwise.
-        tokio::task::spawn_blocking(crate::tailscale::reconcile_exit_node);
+        // reachability probe) and must not block the async runtime.
+        let _ = tokio::task::spawn_blocking(crate::tailscale::reconcile_exit_node).await;
 
         let snapshot: Vec<WatchedProfile> = {
             let g = state.lock().await;
@@ -353,14 +377,10 @@ async fn watchdog_loop(
         if snapshot.is_empty() {
             continue;
         }
+        // Run sequentially so a slow reconnect (>30s) never overlaps with the
+        // next tick and tears down a tunnel that just finished connecting.
         for p in snapshot {
-            let state = state.clone();
-            let wg = wg.clone();
-            let ov = ov.clone();
-            let sw = sw.clone();
-            tokio::spawn(async move {
-                check_and_reconnect(&p, &state, wg, ov, sw).await;
-            });
+            check_and_reconnect(&p, &state, wg.clone(), ov.clone(), sw.clone()).await;
         }
     }
 }
@@ -396,6 +416,19 @@ async fn check_and_reconnect(
     if p.mode == WatchMode::RouteGuard {
         let sa_up = p.backend == "ikev2" && sw_sa_established(p, sw.clone()).await;
         if !sa_up {
+            // SA is gone: prune the transient RouteGuard entry from memory so
+            // its credentials do not linger after the tunnel has closed.
+            let mut g = state.lock().await;
+            if matches!(
+                g.watched.get(&p.profile_id).map(|w| w.mode),
+                Some(WatchMode::RouteGuard)
+            ) {
+                g.watched.remove(&p.profile_id);
+                tracing::info!(
+                    profile_id = %p.profile_id,
+                    "route-guard: SA down — pruned in-memory guard entry"
+                );
+            }
             return;
         }
         tracing::warn!(
@@ -666,5 +699,32 @@ mod tests {
             let s = serde_json::to_string(&m).unwrap();
             assert_eq!(serde_json::from_str::<WatchMode>(&s).unwrap(), m);
         }
+    }
+
+    #[test]
+    fn route_guard_entries_are_never_persisted_to_disk() {
+        let mut map = HashMap::new();
+        map.insert(
+            "manual-1".to_owned(),
+            WatchedProfile {
+                profile_id: "manual-1".into(),
+                backend: "ikev2".into(),
+                last_connect_args: serde_json::json!({ "password": "secret" }),
+                mode: WatchMode::RouteGuard,
+            },
+        );
+        map.insert(
+            "always-1".to_owned(),
+            WatchedProfile {
+                profile_id: "always-1".into(),
+                backend: "wireguard".into(),
+                last_connect_args: armed_args(),
+                mode: WatchMode::AlwaysOn,
+            },
+        );
+        let filtered = persistable_entries(&map);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key(&"always-1".to_owned()));
+        assert!(!filtered.contains_key(&"manual-1".to_owned()));
     }
 }

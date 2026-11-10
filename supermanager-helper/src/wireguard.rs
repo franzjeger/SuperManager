@@ -269,14 +269,9 @@ impl WireGuard {
         )
         .with_context(|| format!("chmod 700 {WG_CONF_DIR}"))?;
 
-        // Write the conf with mode 0600 + root:wheel ownership.
-        std::fs::write(&conf_path, &args.conf_content)
+        // Write the conf with mode 0600 + O_NOFOLLOW from creation.
+        crate::private_file::write(&conf_path, args.conf_content.as_bytes())
             .with_context(|| format!("write {}", conf_path.display()))?;
-        std::fs::set_permissions(
-            &conf_path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )
-        .with_context(|| format!("chmod 600 {}", conf_path.display()))?;
 
         // Run `wg-quick up /etc/wireguard/<name>.conf` — absolute path,
         // not `wg-quick up <name>`. wg-quick on Mac (brew build) has

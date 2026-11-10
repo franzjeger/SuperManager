@@ -360,7 +360,12 @@ fn refresh_scoped_defaults() {
             Err(e) => tracing::warn!("scoped default {family} spawn error: {e}"),
         }
     }
-    let _ = fs::write(SCOPED_DEFAULT_STATE_FILE, added.join("\n"));
+    if let Err(e) = crate::private_file::write(
+        Path::new(SCOPED_DEFAULT_STATE_FILE),
+        added.join("\n").as_bytes(),
+    ) {
+        tracing::warn!("failed to write {SCOPED_DEFAULT_STATE_FILE}: {e}");
+    }
 }
 
 /// Delete the scoped defaults `refresh_scoped_defaults` recorded.
@@ -460,7 +465,12 @@ fn is_routeable_public_ipv4(ip: &str) -> bool {
 const EXEMPTION_STATE_FILE: &str = "/var/run/supermanager-tailscale-exemptions";
 
 fn write_exemption_state(ips: &[String]) {
-    let _ = fs::write(EXEMPTION_STATE_FILE, ips.join("\n"));
+    if let Err(e) = crate::private_file::write(
+        Path::new(EXEMPTION_STATE_FILE),
+        ips.join("\n").as_bytes(),
+    ) {
+        tracing::warn!("failed to write {EXEMPTION_STATE_FILE}: {e}");
+    }
 }
 
 fn read_exemption_state() -> Vec<String> {
