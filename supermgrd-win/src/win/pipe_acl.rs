@@ -8,17 +8,18 @@
 //!
 //! This module builds an explicit security descriptor from an SDDL string
 //! and hands it back as raw pointers suitable for
-//! [`ServerOptions::create_with_security_attributes_raw`]. The string
-//! grants:
+//! [`ServerOptions::create_with_security_attributes_raw`]. The protected
+//! DACL + mandatory label grant:
 //!
-//! | SID | Permissions |
-//! |-----|-------------|
-//! | `NT AUTHORITY\SYSTEM`    | Generic All — the daemon process itself |
-//! | `BUILTIN\Administrators` | Generic All — service control & debug |
-//! | `NT AUTHORITY\Authenticated Users` | Generic Read + Generic Write — the GUI/MCP client |
+//! | Principal / Label | Permissions |
+//! |-------------------|-------------|
+//! | `NT AUTHORITY\SYSTEM` (`SY`)       | Generic All — the daemon process itself |
+//! | `BUILTIN\Administrators` (`BA`)    | Generic All — service control, debug & elevated CI |
+//! | `NT AUTHORITY\INTERACTIVE` (`IU`)  | Generic Read + Generic Write — interactive desktop GUI/MCP client |
+//! | Mandatory Label Medium (`ME`)      | `No-Write-Up` (`NW`) — blocks Low/Untrusted-integrity sandboxed processes |
 //!
-//! Anonymous/network-logon principals are excluded by omission — SDDL
-//! deny-by-default for unenumerated SIDs.
+//! Non-interactive service accounts, network logons, and anonymous principals
+//! are excluded by omission (protected DACL deny-by-default for unenumerated SIDs).
 //!
 //! # Lifetime contract
 //!
@@ -34,14 +35,15 @@ use windows_sys::Win32::Security::{
     SECURITY_ATTRIBUTES,
 };
 
-/// SDDL granting:
-/// - SY (SYSTEM)             → GA (Generic All)
-/// - BA (Builtin Admins)     → GA
-/// - AU (Authenticated Users)→ GR | GW  (read + write data only)
+/// Protected DACL (`D:P`) + Medium Mandatory Integrity Label (`S:(ML;;NW;;;ME)`) granting:
+/// - `SY` (`SYSTEM`)              → `GA` (Generic All)
+/// - `BA` (`Builtin Admins`)      → `GA` (Generic All, including elevated CI runners)
+/// - `IU` (`Interactive` users)   → `GR | GW` (read + write data only; excludes non-interactive services & network logons)
+/// - `ME` (Medium Integrity SACL) → `NW` (`No-Write-Up`; blocks Low/Untrusted-integrity sandboxed processes)
 ///
-/// We don't grant FILE_WRITE_DAC / FILE_WRITE_OWNER to AU so a logged-in
-/// user can't re-permission the pipe after open.
-const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+/// `FILE_WRITE_DAC` / `FILE_WRITE_OWNER` are withheld from `IU` so a logged-in
+/// user cannot re-permission the pipe after opening it.
+const PIPE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)S:(ML;;NW;;;ME)";
 
 /// Owns the heap allocation behind a SECURITY_DESCRIPTOR + attributes
 /// pair. Hand `attrs_ptr()` to tokio's pipe ServerOptions and keep the

@@ -1668,7 +1668,10 @@ pub fn show_batch_command_dialog(
                                 let (subtitle, icon) = match &result {
                                     Ok(output) => {
                                         let short = if output.len() > 300 {
-                                            format!("{}\u{2026}", &output[..300])
+                                            format!(
+                                                "{}\u{2026}",
+                                                supermgr_core::sanitize::truncate_utf8(output, 300)
+                                            )
                                         } else {
                                             output.clone()
                                         };

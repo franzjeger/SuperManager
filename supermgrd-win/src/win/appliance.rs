@@ -9,13 +9,11 @@
 //!
 //! # TLS verification
 //!
-//! All clients are built with `danger_accept_invalid_certs(true)`. That
-//! matches the Linux daemon, which has the same default for the same
-//! reason: most FortiGate / UniFi / OPNsense deployments ship with a
-//! self-signed certificate during initial provisioning, and forcing the
-//! user to import the CA into the Windows trust store before any
-//! management action is hostile. A future flag on the `Host` JSON
-//! (`api_verify_tls`) will let the user opt back into strict verification.
+//! Each host record carries `api_verify_tls` (defaulting to `false`, matching
+//! [`supermgr_core::host::Host`]) because most FortiGate / UniFi / OPNsense /
+//! Sophos deployments present a self-signed certificate during initial
+//! provisioning. Setting `"api_verify_tls": true` on a host opts into strict
+//! CA verification via the Windows system trust store.
 
 use std::{path::Path, sync::Arc, time::Duration};
 
@@ -25,6 +23,9 @@ use tracing::{info, warn};
 
 use supermgr_core::keyring::SecretStore;
 use supermgr_core::protocol::RpcError;
+use supermgr_core::sanitize::{
+    posix_shell_quote, truncate_utf8, validate_inform_url, validate_safe_ident,
+};
 
 use super::known_hosts::KnownHostsStore;
 use super::ssh_exec;
@@ -52,11 +53,19 @@ fn read_key(root: &Path, key_id: &str) -> Result<Value, RpcError> {
         .map_err(|e| RpcError::Other(format!("parse key json: {e}")))
 }
 
-/// Build a reqwest client with our standard settings (self-signed TLS,
-/// generous timeout, optional cookie jar for session-based APIs).
-fn http_client(timeout: Duration, cookies: bool) -> Result<Client, RpcError> {
+/// Extract `api_verify_tls` from the host record, defaulting to `false` to
+/// match [`supermgr_core::host::Host`].
+fn host_verify_tls(meta: &Value) -> bool {
+    meta.get("api_verify_tls")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Build a reqwest client honoring the host's `api_verify_tls` flag,
+/// timeout, and optional cookie jar for session-based APIs.
+fn http_client(timeout: Duration, cookies: bool, verify_tls: bool) -> Result<Client, RpcError> {
     let mut builder = Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .timeout(timeout);
     if cookies {
         builder = builder.cookie_store(true);
@@ -87,9 +96,16 @@ pub async fn fortigate_api(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
     let api_port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let verify_tls = host_verify_tls(&meta);
+    let token_label = meta
+        .get("api_token_ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::rpc_args::host_api_token_label(host_id));
 
     let token_bytes = secret_store
-        .retrieve(&format!("supermgr/host/{host_id}/api-token"))
+        .retrieve(&token_label)
         .await
         .map_err(|e| RpcError::Secret(format!("FortiGate API token: {e}")))?;
     let token = std::str::from_utf8(&token_bytes)
@@ -100,7 +116,7 @@ pub async fn fortigate_api(
     let url = format!("https://{hostname}:{api_port}{path}");
     info!("fortigate_api: {method} {url}");
 
-    let client = http_client(API_TIMEOUT_SHORT, false)?;
+    let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let mut req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
@@ -152,9 +168,9 @@ fn map_fortigate_status(status: u16, body: &str) -> String {
         403 => "permission denied: API token lacks required privileges".into(),
         404 => "API endpoint not found (check FortiOS version and path)".into(),
         405 => "method not allowed for this endpoint".into(),
-        424 => format!("failed dependency: {}", &body[..body.len().min(200)]),
+        424 => format!("failed dependency: {}", truncate_utf8(body, 200)),
         s if s >= 500 => format!("FortiGate internal error ({s}): try again later"),
-        _ => format!("HTTP {status}: {}", &body[..body.len().min(300)]),
+        _ => format!("HTTP {status}: {}", truncate_utf8(body, 300)),
     }
 }
 
@@ -167,6 +183,7 @@ pub async fn fortigate_push_ssh_key(
     key_id: &str,
     admin_user: &str,
 ) -> Result<String, RpcError> {
+    validate_safe_ident(admin_user, "admin_user").map_err(RpcError::Protocol)?;
     let key_meta = read_key(root, key_id)?;
     let public_key = key_meta
         .get("public_key")
@@ -192,9 +209,16 @@ pub async fn fortigate_backup_config(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
     let api_port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let verify_tls = host_verify_tls(&meta);
+    let token_label = meta
+        .get("api_token_ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::rpc_args::host_api_token_label(host_id));
 
     let token_bytes = secret_store
-        .retrieve(&format!("supermgr/host/{host_id}/api-token"))
+        .retrieve(&token_label)
         .await
         .map_err(|e| RpcError::Secret(format!("FortiGate API token: {e}")))?;
     let token = std::str::from_utf8(&token_bytes)
@@ -204,13 +228,12 @@ pub async fn fortigate_backup_config(
 
     let url =
         format!("https://{hostname}:{api_port}/api/v2/monitor/system/config/backup?scope=global");
-    info!("fortigate_backup_config: POST {url}");
+    info!("fortigate_backup_config: GET {url}");
 
-    let client = http_client(API_TIMEOUT_LONG, false)?;
+    let client = http_client(API_TIMEOUT_LONG, false, verify_tls)?;
     let resp = client
-        .post(&url)
+        .get(&url)
         .header("Authorization", format!("Bearer {token}"))
-        .header("Content-Length", "0")
         .send()
         .await
         .map_err(|e| {
@@ -272,6 +295,50 @@ pub async fn fortigate_backup_config(
 // UniFi
 // ===========================================================================
 
+/// Store UniFi controller URL and credentials on `host_id`, recording both
+/// `unifi_controller_url` and `unifi_api_token_ref` in `hosts/<id>.json`.
+pub async fn unifi_set_controller(
+    root: &Path,
+    secret_store: Arc<dyn SecretStore>,
+    host_id: &str,
+    controller_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<(), RpcError> {
+    let url = controller_url.trim().trim_end_matches('/');
+    if !(url.starts_with("https://") || url.starts_with("http://"))
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(RpcError::Protocol(
+            "controller_url must be an http:// or https:// URL".into(),
+        ));
+    }
+    let host_path = root.join("hosts").join(format!("{host_id}.json"));
+    let host_bytes =
+        std::fs::read(&host_path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+
+    let label = crate::rpc_args::host_unifi_creds_label(host_id);
+    let creds_blob = json!({
+        "username": username,
+        "password": password,
+    })
+    .to_string();
+    secret_store
+        .store(&label, creds_blob.as_bytes())
+        .await
+        .map_err(|e| RpcError::Secret(format!("store UniFi credentials: {e}")))?;
+
+    let updated = crate::rpc_args::mutate_host_json(&host_bytes, |obj| {
+        obj.insert("unifi_controller_url".into(), Value::String(url.to_owned()));
+        obj.insert("unifi_api_token_ref".into(), Value::String(label.clone()));
+    })?;
+    if let Err(e) = std::fs::write(&host_path, updated) {
+        let _ = secret_store.delete(&label).await;
+        return Err(RpcError::Other(format!("write host json: {e}")));
+    }
+    Ok(())
+}
+
 /// Proxy a call to a UniFi controller's REST API. The controller URL +
 /// credentials live on the host JSON; we authenticate with
 /// `POST /api/auth/login` (cookies persist on the client) before issuing
@@ -285,14 +352,21 @@ pub async fn unifi_api(
     body: &str,
 ) -> Result<String, RpcError> {
     let meta = read_host(root, host_id)?;
+    let verify_tls = host_verify_tls(&meta);
     let controller_url = meta
         .get("unifi_controller_url")
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("no UniFi controller URL configured".into()))?
         .trim_end_matches('/');
+    let creds_label = meta
+        .get("unifi_api_token_ref")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::rpc_args::host_unifi_creds_label(host_id));
 
     let creds_bytes = secret_store
-        .retrieve(&format!("supermgr/host/{host_id}/unifi-credentials"))
+        .retrieve(&creds_label)
         .await
         .map_err(|e| RpcError::Secret(format!("UniFi credentials: {e}")))?;
     let creds: Value = serde_json::from_slice(&creds_bytes)
@@ -307,7 +381,7 @@ pub async fn unifi_api(
         .ok_or_else(|| RpcError::Other("missing password in UniFi credentials".into()))?;
 
     info!("unifi_api: {method} {controller_url}{path}");
-    let client = http_client(API_TIMEOUT_SHORT, true)?;
+    let client = http_client(API_TIMEOUT_SHORT, true, verify_tls)?;
 
     // Authenticate first — the cookie store inside `client` captures the
     // session cookie for the follow-up call automatically.
@@ -324,7 +398,7 @@ pub async fn unifi_api(
         let text = login_resp.text().await.unwrap_or_default();
         return Err(RpcError::Backend(format!(
             "UniFi login failed ({login_status}): {}",
-            &text[..text.len().min(200)]
+            truncate_utf8(&text, 200)
         )));
     }
 
@@ -353,7 +427,7 @@ pub async fn unifi_api(
     if status >= 400 {
         return Err(RpcError::Backend(format!(
             "UniFi API {status}: {}",
-            &resp_body[..resp_body.len().min(300)]
+            truncate_utf8(&resp_body, 300)
         )));
     }
     Ok(resp_body)
@@ -391,6 +465,7 @@ async fn opnsense_request(
     host_id: &str,
     hostname: &str,
     port: u16,
+    verify_tls: bool,
     method: &str,
     path: &str,
     body: &str,
@@ -398,7 +473,7 @@ async fn opnsense_request(
     let creds = load_opnsense_creds(secret_store, host_id).await?;
     let url = format!("https://{hostname}:{port}{path}");
     info!("opnsense::request {method} {url}");
-    let client = http_client(API_TIMEOUT_SHORT, false)?;
+    let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let mut req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(&url),
         "POST" => client.post(&url),
@@ -448,12 +523,22 @@ pub async fn opnsense_api(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
     let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
-    let (status, body) =
-        opnsense_request(&secret_store, host_id, hostname, port, method, path, body).await?;
+    let verify_tls = host_verify_tls(&meta);
+    let (status, body) = opnsense_request(
+        &secret_store,
+        host_id,
+        hostname,
+        port,
+        verify_tls,
+        method,
+        path,
+        body,
+    )
+    .await?;
     if status >= 400 {
         return Err(RpcError::Backend(format!(
             "OPNsense API HTTP {status}: {}",
-            &body[..body.len().min(300)]
+            truncate_utf8(&body, 300)
         )));
     }
     Ok(body)
@@ -474,11 +559,13 @@ pub async fn opnsense_backup_config(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
     let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(443) as u16;
+    let verify_tls = host_verify_tls(&meta);
     let (status, body) = opnsense_request(
         &secret_store,
         host_id,
         hostname,
         port,
+        verify_tls,
         "GET",
         "/api/core/backup/download/this",
         "",
@@ -487,7 +574,7 @@ pub async fn opnsense_backup_config(
     if status != 200 {
         return Err(RpcError::Backend(format!(
             "OPNsense backup HTTP {status}: {}",
-            &body[..body.len().min(300)]
+            truncate_utf8(&body, 300)
         )));
     }
     let backup_dir = root.join("backups");
@@ -564,6 +651,7 @@ pub async fn sophos_xml_api(
         .and_then(Value::as_str)
         .ok_or_else(|| RpcError::Other("host missing 'hostname'".into()))?;
     let port = meta.get("api_port").and_then(Value::as_u64).unwrap_or(4444) as u16;
+    let verify_tls = host_verify_tls(&meta);
 
     let creds_bytes = secret_store
         .retrieve(&format!("supermgr/host/{host_id}/sophos-credentials"))
@@ -587,7 +675,7 @@ pub async fn sophos_xml_api(
 
     let url = format!("https://{hostname}:{port}/webconsole/APIController");
     info!("sophos_xml_api -> {url}");
-    let client = http_client(API_TIMEOUT_SHORT, false)?;
+    let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let password_clone = creds.password.clone();
     let resp = client
         .post(&url)
@@ -614,7 +702,7 @@ pub async fn sophos_xml_api(
     if status >= 400 {
         return Err(RpcError::Backend(format!(
             "Sophos HTTP {status}: {}",
-            &body[..body.len().min(300)]
+            truncate_utf8(&body, 300)
         )));
     }
     Ok(body)
@@ -630,15 +718,154 @@ pub async fn unifi_set_inform(
     host_id: &str,
     inform_url: &str,
 ) -> Result<String, RpcError> {
+    let trimmed_url = inform_url.trim();
+    validate_inform_url(trimmed_url).map_err(RpcError::Protocol)?;
     let meta = read_host(root, host_id)?;
     let device_type = meta
         .get("device_type")
         .and_then(Value::as_str)
         .unwrap_or("");
-    if !device_type.eq_ignore_ascii_case("UniFi") && !device_type.eq_ignore_ascii_case("unifi") {
+    if !device_type.eq_ignore_ascii_case("unifi") {
         warn!("unifi_set_inform on non-UniFi device_type {device_type:?}");
     }
-    let cmd = format!("set-inform {inform_url}");
+    let q = posix_shell_quote(trimmed_url);
+    let cmd = format!("mca-cli-op set-inform {q} 2>/dev/null || set-inform {q}");
     let value = ssh_exec::execute(root, secret_store, known_hosts, host_id, &cmd).await?;
     Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use supermgr_core::{keyring::ZeroizingSecret, SecretError};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct MemStore(Mutex<HashMap<String, Vec<u8>>>);
+
+    #[async_trait::async_trait]
+    impl SecretStore for MemStore {
+        async fn store(&self, label: &str, secret: &[u8]) -> Result<(), SecretError> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(label.to_owned(), secret.to_vec());
+            Ok(())
+        }
+
+        async fn retrieve(&self, label: &str) -> Result<ZeroizingSecret, SecretError> {
+            self.0
+                .lock()
+                .unwrap()
+                .get(label)
+                .cloned()
+                .map(ZeroizingSecret::from_vec)
+                .ok_or_else(|| SecretError::NotFound {
+                    label: label.to_owned(),
+                })
+        }
+
+        async fn delete(&self, label: &str) -> Result<(), SecretError> {
+            self.0.lock().unwrap().remove(label);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn fortigate_status_truncates_multibyte_utf8_cleanly() {
+        // Place 3-byte '€' across both 200-byte and 300-byte boundaries.
+        let body = "€".repeat(150);
+        let msg424 = map_fortigate_status(424, &body);
+        assert!(msg424.starts_with("failed dependency: "));
+        let msg418 = map_fortigate_status(418, &body);
+        assert!(msg418.starts_with("HTTP 418: "));
+    }
+
+    #[test]
+    fn host_verify_tls_matches_core_host_default() {
+        assert!(!host_verify_tls(&json!({})));
+        assert!(!host_verify_tls(&json!({ "api_verify_tls": false })));
+        assert!(host_verify_tls(&json!({ "api_verify_tls": true })));
+    }
+
+    #[tokio::test]
+    async fn fortigate_push_ssh_key_rejects_unsafe_admin_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SecretStore> = Arc::new(MemStore::default());
+        for bad in ["../system", "admin/../../ global", "admin?vdom=root", ""] {
+            let err = fortigate_push_ssh_key(dir.path(), store.clone(), "h1", "k1", bad)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, RpcError::Protocol(_)), "accepted {bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unifi_set_inform_rejects_shell_injection_before_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn SecretStore> = Arc::new(MemStore::default());
+        let kh = KnownHostsStore::load_from(dir.path()).unwrap();
+        for bad in [
+            "http://10.0.0.1:8080/inform; reboot",
+            "ftp://10.0.0.1:8080/inform",
+            "",
+        ] {
+            let err = unifi_set_inform(dir.path(), store.clone(), kh.clone(), "h1", bad)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, RpcError::Protocol(_)), "accepted {bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unifi_set_controller_records_secret_ref_on_host() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("hosts")).unwrap();
+        let host_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let host_path = dir.path().join("hosts").join(format!("{host_id}.json"));
+        std::fs::write(
+            &host_path,
+            json!({
+                "id": host_id,
+                "label": "ap-01",
+                "hostname": "10.0.0.10",
+                "port": 22,
+                "username": "ubnt",
+                "device_type": "unifi",
+                "auth_method": "password",
+                "created_at": "2026-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let store = Arc::new(MemStore::default());
+        unifi_set_controller(
+            dir.path(),
+            store.clone(),
+            host_id,
+            "https://unifi.example.com:8443/",
+            "admin",
+            "s3cret",
+        )
+        .await
+        .unwrap();
+
+        let updated: Value = serde_json::from_slice(&std::fs::read(&host_path).unwrap()).unwrap();
+        assert_eq!(
+            updated["unifi_controller_url"],
+            "https://unifi.example.com:8443"
+        );
+        assert_eq!(
+            updated["unifi_api_token_ref"],
+            format!("supermgr/host/{host_id}/unifi-credentials")
+        );
+        assert!(store
+            .retrieve(&format!("supermgr/host/{host_id}/unifi-credentials"))
+            .await
+            .is_ok());
+    }
 }

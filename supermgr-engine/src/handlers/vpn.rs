@@ -353,6 +353,10 @@ impl EngineServer {
             _ => return Response::err(id, protocol::INVALID_PARAMS, "missing content".to_owned()),
         };
 
+        if let Err(e) = supermgr_core::vpn::import::validate_ovpn_config(&content) {
+            return Response::err(id, protocol::INVALID_PARAMS, format!("parse: {e}"));
+        }
+
         // Sniff a `remote <host> <port>` line. First match wins; many
         // .ovpn files list multiple remotes for failover. We only need
         // one for display.

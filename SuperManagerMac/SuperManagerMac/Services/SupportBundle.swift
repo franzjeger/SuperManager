@@ -7,7 +7,7 @@ import Foundation
 /// contains:
 ///
 ///   - helper log tail (last 256 KiB of /var/log/supermanager-helper.log)
-///   - daemon debug log (whole /tmp/supermanager-debug.log)
+///   - app debug log (~/Library/Logs/SuperManager/debug.log)
 ///   - tailscaled log tail
 ///   - tailscale state snapshot (status + prefs JSON)
 ///   - helper version + capability list
@@ -65,7 +65,7 @@ enum SupportBundle {
         Generated: \(Date())
 
         Contents:
-          - app-debug.log         GUI-side log (/tmp/supermanager-debug.log)
+          - app-debug.log         GUI-side log (~/Library/Logs/SuperManager/debug.log)
           - helper.log            Helper LaunchDaemon log (last 256 KiB)
           - tailscaled.log        Bundled tailscaled log (last 256 KiB)
           - tailscale-status.json `tailscale status --json` snapshot
@@ -94,8 +94,7 @@ enum SupportBundle {
         }
 
         // 2. App debug log
-        let debugLog = "/tmp/supermanager-debug.log"
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: debugLog)) {
+        if let data = try? Data(contentsOf: DebugLog.logURL) {
             try data.write(to: staging.appendingPathComponent("app-debug.log"))
         }
 

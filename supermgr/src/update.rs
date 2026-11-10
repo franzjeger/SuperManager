@@ -68,10 +68,14 @@ pub async fn check() -> CheckOutcome {
 
     let url =
         format!("https://api.github.com/repos/franzjeger/SuperManager/compare/{GIT_COMMIT}...main");
-    let resp = match reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_default()
+    {
+        Ok(c) => c,
+        Err(e) => return CheckOutcome::Unknown(format!("could not build HTTP client: {e}")),
+    };
+    let resp = match client
         .get(&url)
         .header("User-Agent", "SuperManager-Update-Check")
         .header("Accept", "application/vnd.github+json")
@@ -132,22 +136,61 @@ pub enum UpdaterEvent {
     Done(bool),
 }
 
-/// sudo's prompt in the updater's terminal, set through `SUDO_PROMPT` so the
-/// dialog recognises it whatever the locale or sudoers say.
-const SUDO_PROMPT: &str = "[supermgr-update] password: ";
+/// Generate a fresh per-run 128-bit hex nonce for `SUDO_PROMPT` so untrusted
+/// build or git output cannot spoof a static password prompt marker.
+fn make_sudo_prompt() -> String {
+    format!(
+        "[supermgr-update-{}] password: ",
+        uuid::Uuid::new_v4().simple()
+    )
+}
+
+fn resolve_updater_program() -> &'static Path {
+    let installed = Path::new("/usr/bin/supermgr-update");
+    if installed.exists() {
+        installed
+    } else {
+        Path::new("supermgr-update")
+    }
+}
+
+fn resolve_setsid_program() -> &'static Path {
+    let installed = Path::new("/usr/bin/setsid");
+    if installed.exists() {
+        installed
+    } else {
+        Path::new("setsid")
+    }
+}
 
 /// The writing end of the updater's terminal: what the user types, sent the
 /// way a terminal sends keystrokes.
 pub struct UpdaterInput(std::fs::File);
 
 impl UpdaterInput {
-    /// Answer sudo's prompt. Echo is off on the terminal while sudo reads,
-    /// so the password never comes back as output.
+    /// Answer sudo's prompt after verifying that terminal `ECHO` is disabled.
+    ///
+    /// If `sudo` timed out or exited before the operator submitted the dialog,
+    /// the shell or line discipline re-enables `ECHO`; refusing in that state
+    /// guarantees the password can never be echoed into the GUI build log.
     pub fn send_password(&self, password: &str) -> std::io::Result<()> {
+        use nix::sys::termios::{tcgetattr, LocalFlags};
+
+        let termios = tcgetattr(&self.0).map_err(std::io::Error::from)?;
+        if termios.local_flags.contains(LocalFlags::ECHO) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "terminal echo is enabled; refusing to write password",
+            ));
+        }
+
         let mut line = Vec::with_capacity(password.len() + 1);
         line.extend_from_slice(password.as_bytes());
         line.push(b'\n');
-        (&self.0).write_all(&line)
+        let result = (&self.0).write_all(&line);
+        line.fill(0);
+        std::hint::black_box(&mut line);
+        result
     }
 
     /// Ctrl-C on the terminal: the line discipline turns it into SIGINT for
@@ -172,7 +215,7 @@ pub fn run_updater(tx: Sender<UpdaterEvent>) -> Option<UpdaterInput> {
         // and install that pending rebuild.
         args.extend(["--installed-commit".to_owned(), GIT_COMMIT.to_owned()]);
     }
-    match spawn_on_pty(Path::new("supermgr-update"), &args, tx.clone()) {
+    match spawn_on_pty(resolve_updater_program(), &args, tx.clone()) {
         Ok(input) => Some(input),
         Err(e) => {
             let _ = tx.send(UpdaterEvent::Line(format!(
@@ -209,7 +252,9 @@ fn spawn_on_pty(
         .custom_flags(OFlag::O_NOCTTY.bits())
         .open(&slave_path)?;
 
-    let mut command = std::process::Command::new("setsid");
+    let sudo_prompt = make_sudo_prompt();
+
+    let mut command = std::process::Command::new(resolve_setsid_program());
     command
         .args(["--ctty", "--wait"])
         .arg(program)
@@ -224,7 +269,7 @@ fn spawn_on_pty(
         .env("CARGO_TERM_PROGRESS_WHEN", "never")
         .env("GIT_PAGER", "cat")
         .env("PAGER", "cat")
-        .env("SUDO_PROMPT", SUDO_PROMPT);
+        .env("SUDO_PROMPT", &sudo_prompt);
     let mut child = command.spawn()?;
     // The command held the parent's copies of the slave. Once they are gone
     // the child's are the last, so reading the master ends (EIO) exactly
@@ -241,7 +286,7 @@ fn spawn_on_pty(
                 Ok(0) => break,
                 Ok(n) => {
                     pending.extend_from_slice(&chunk[..n]);
-                    for event in drain_terminal_output(&mut pending) {
+                    for event in drain_terminal_output(&mut pending, &sudo_prompt) {
                         let _ = tx.send(event);
                     }
                 }
@@ -263,13 +308,13 @@ fn spawn_on_pty(
 /// Take the complete lines out of `pending`, and sudo's prompt if that is
 /// what the unfinished rest is. Anything else unfinished stays for the next
 /// read: a prompt is the only output that waits without a newline.
-fn drain_terminal_output(pending: &mut Vec<u8>) -> Vec<UpdaterEvent> {
+fn drain_terminal_output(pending: &mut Vec<u8>, sudo_prompt: &str) -> Vec<UpdaterEvent> {
     let mut events = Vec::new();
     while let Some(end) = pending.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = pending.drain(..=end).collect();
         events.push(UpdaterEvent::Line(terminal_line(&line[..end])));
     }
-    if pending.ends_with(SUDO_PROMPT.as_bytes()) {
+    if pending.ends_with(sudo_prompt.as_bytes()) {
         pending.clear();
         events.push(UpdaterEvent::PasswordPrompt);
     }
@@ -293,9 +338,10 @@ mod tests {
 
     #[test]
     fn complete_lines_come_out_and_partial_ones_wait() {
+        let sudo_prompt = make_sudo_prompt();
         let mut pending = b"one\r\ntwo\r\nthr".to_vec();
         assert_eq!(
-            drain_terminal_output(&mut pending),
+            drain_terminal_output(&mut pending, &sudo_prompt),
             [
                 UpdaterEvent::Line("one".into()),
                 UpdaterEvent::Line("two".into())
@@ -305,16 +351,58 @@ mod tests {
     }
 
     #[test]
-    fn sudos_prompt_is_recognised_without_a_newline() {
-        let mut pending = format!("Installing\r\n{SUDO_PROMPT}").into_bytes();
+    fn sudos_prompt_is_recognised_only_with_matching_per_run_nonce() {
+        let sudo_prompt = make_sudo_prompt();
+        let other_prompt = make_sudo_prompt();
+        assert_ne!(sudo_prompt, other_prompt);
+
+        let mut spoofed = b"Installing\r\n[supermgr-update] password: ".to_vec();
         assert_eq!(
-            drain_terminal_output(&mut pending),
+            drain_terminal_output(&mut spoofed, &sudo_prompt),
+            [UpdaterEvent::Line("Installing".into())]
+        );
+        assert_eq!(spoofed, b"[supermgr-update] password: ");
+
+        let mut wrong_nonce = format!("Installing\r\n{other_prompt}").into_bytes();
+        assert_eq!(
+            drain_terminal_output(&mut wrong_nonce, &sudo_prompt),
+            [UpdaterEvent::Line("Installing".into())]
+        );
+
+        let mut valid = format!("Installing\r\n{sudo_prompt}").into_bytes();
+        assert_eq!(
+            drain_terminal_output(&mut valid, &sudo_prompt),
             [
                 UpdaterEvent::Line("Installing".into()),
                 UpdaterEvent::PasswordPrompt
             ]
         );
-        assert!(pending.is_empty());
+        assert!(valid.is_empty());
+    }
+
+    #[test]
+    fn send_password_refuses_when_terminal_echo_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("echo-on");
+        std::fs::write(
+            &script,
+            "#!/bin/bash\n\
+             set -euo pipefail\n\
+             stty echo </dev/tty\n\
+             printf '%s' \"$SUDO_PROMPT\" >/dev/tty\n\
+             IFS= read -r pw </dev/tty || true\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let input = spawn_on_pty(&script, &[], tx).unwrap();
+        assert_eq!(next(&rx), UpdaterEvent::PasswordPrompt);
+
+        let err = input.send_password("hunter2").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        input.interrupt().unwrap();
     }
 
     #[test]

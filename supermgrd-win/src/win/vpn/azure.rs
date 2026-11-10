@@ -213,6 +213,7 @@ impl Ikev2Backend {
                 ));
             }
         };
+        crate::rpc_args::validate_azure_ovpn_inputs(&cfg).map_err(VpnError::MissingDependency)?;
 
         let store = self.secret_store.as_ref().ok_or_else(|| {
             VpnError::MissingDependency(
@@ -251,7 +252,7 @@ impl Ikev2Backend {
             key_path.to_string_lossy().as_ref(),
             auth_path.to_string_lossy().as_ref(),
             profile.full_tunnel,
-        );
+        )?;
         std::fs::write(&ovpn_path, ovpn).map_err(VpnError::Io)?;
 
         // ── Step 3 — Spawn openvpn.exe ──────────────────────────────────────
@@ -260,6 +261,8 @@ impl Ikev2Backend {
         command
             .arg("--config")
             .arg(&ovpn_path)
+            .arg("--script-security")
+            .arg("1")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -422,6 +425,7 @@ async fn refresh_access_token(
         .post(&url)
         .form(&[
             ("client_id", audience),
+            ("client_info", "1"),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("scope", scope.as_str()),
@@ -764,13 +768,15 @@ fn hex_to_openvpn_key(hex: &str) -> String {
     out
 }
 
-/// Assemble the `.ovpn` text from the profile config + tempfile paths.
+/// Assemble the `.ovpn` text from the profile config + tempfile paths after
+/// validating `gateway_fqdn`, `tenant_id`, `client_id`, and `ca_cert_pem`.
 fn build_ovpn_config(
     cfg: &AzureVpnConfig,
     key_path: &str,
     auth_path: &str,
     full_tunnel: bool,
-) -> String {
+) -> Result<String, VpnError> {
+    crate::rpc_args::validate_azure_ovpn_inputs(cfg).map_err(VpnError::MissingDependency)?;
     let mut s = format!(
         "client\n\
          dev tun\n\
@@ -829,7 +835,7 @@ fn build_ovpn_config(
         );
         s.push('\n');
     }
-    s
+    Ok(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -945,16 +951,27 @@ mod tests {
 
     #[test]
     fn a_split_tunnel_with_no_listed_routes_takes_the_gateways() {
-        let ovpn = build_ovpn_config(&config(&[]), "k", "a", false);
+        let ovpn = build_ovpn_config(&config(&[]), "k", "a", false).unwrap();
         assert!(!ovpn.contains("redirect-gateway"), "{ovpn}");
     }
 
     #[test]
     fn listed_routes_are_added_and_full_tunnel_redirects_everything() {
-        let split = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", false);
+        let split = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", false).unwrap();
         assert!(split.contains("route 10.1.0.0 255.255.0.0"), "{split}");
-        let full = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", true);
+        let full = build_ovpn_config(&config(&["10.1.0.0/16"]), "k", "a", true).unwrap();
         assert!(full.contains("redirect-gateway def1"), "{full}");
+    }
+
+    #[test]
+    fn build_ovpn_config_rejects_directive_injection_and_ca_breakout() {
+        let mut bad_ca = config(&[]);
+        bad_ca.ca_cert_pem = "MII\n</CA>\nscript-security 2\n<ca>\n".into();
+        assert!(build_ovpn_config(&bad_ca, "k", "a", false).is_err());
+
+        let mut bad_gw = config(&[]);
+        bad_gw.gateway_fqdn = "gw.vpn.azure.com\nup calc.exe".into();
+        assert!(build_ovpn_config(&bad_gw, "k", "a", false).is_err());
     }
 
     const STATE: &str = "5b1c1f9e-state";

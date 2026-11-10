@@ -91,9 +91,21 @@ impl EngineServer {
             _ => SshKeyType::Ed25519,
         };
 
-        let generated = match keygen::generate_key(key_type, name) {
-            Ok(g) => g,
-            Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+        let name_for_keygen = name.to_owned();
+        let generated = match tokio::task::spawn_blocking(move || {
+            keygen::generate_key(key_type, &name_for_keygen)
+        })
+        .await
+        {
+            Ok(Ok(g)) => g,
+            Ok(Err(e)) => return Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
+            Err(e) => {
+                return Response::err(
+                    id,
+                    protocol::INTERNAL_ERROR,
+                    format!("keygen task failed: {e}"),
+                )
+            }
         };
 
         // Store private key in secret store.
@@ -312,44 +324,37 @@ impl EngineServer {
     }
 
     pub(crate) async fn handle_ssh_add_host(&self, id: u64, params: serde_json::Value) -> Response {
-        let host_json = match params.get("host_json").and_then(|v| v.as_str()) {
-            Some(j) => j,
-            None => {
-                // Try parsing params directly as a host.
-                match serde_json::from_value::<Host>(params.clone()) {
-                    Ok(mut host) => {
-                        host.id = uuid::Uuid::new_v4();
-                        host.created_at = chrono::Utc::now();
-                        host.updated_at = chrono::Utc::now();
-                        let mut state = self.state.lock().await;
-                        if let Err(e) = state.save_ssh_host(&host) {
-                            return Response::err(
-                                id,
-                                protocol::INTERNAL_ERROR,
-                                format!("save host: {e}"),
-                            );
-                        }
-                        let host_id = host.id;
-                        state.ssh_hosts.insert(host.id, host);
-                        return Response::ok(id, serde_json::json!(host_id.to_string()));
-                    }
-                    Err(_) => {
-                        return Response::err(id, protocol::INVALID_PARAMS, "missing host_json")
-                    }
+        let mut host: Host = match params.get("host_json").and_then(|v| v.as_str()) {
+            Some(host_json) => match serde_json::from_str(host_json) {
+                Ok(h) => h,
+                Err(e) => {
+                    return Response::err(
+                        id,
+                        protocol::INVALID_PARAMS,
+                        format!("invalid host JSON: {e}"),
+                    )
                 }
-            }
+            },
+            None => match serde_json::from_value::<Host>(params.clone()) {
+                Ok(h) => h,
+                Err(_) => return Response::err(id, protocol::INVALID_PARAMS, "missing host_json"),
+            },
         };
 
-        let mut host: Host = match serde_json::from_str(host_json) {
-            Ok(h) => h,
-            Err(e) => {
-                return Response::err(
-                    id,
-                    protocol::INVALID_PARAMS,
-                    format!("invalid host JSON: {e}"),
-                )
-            }
-        };
+        if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(&host.hostname) {
+            return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
+        }
+        if let Err(e) = supermgr_core::sanitize::validate_ssh_username(&host.username) {
+            return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
+        }
+
+        // Secret labels are minted exclusively by the engine. Strip any
+        // wire-supplied SecretRef values so a caller cannot point a new
+        // host at an arbitrary keychain entry.
+        host.auth_password_ref = None;
+        host.auth_cert_ref = None;
+        host.api_token_ref = None;
+        host.unifi_api_token_ref = None;
 
         host.id = uuid::Uuid::new_v4();
         host.created_at = chrono::Utc::now();
@@ -449,6 +454,12 @@ impl EngineServer {
         };
 
         merge_host_update(&mut host, &incoming);
+        if let Err(e) = supermgr_core::sanitize::validate_host_or_ip(&host.hostname) {
+            return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
+        }
+        if let Err(e) = supermgr_core::sanitize::validate_ssh_username(&host.username) {
+            return Response::err(id, protocol::INVALID_PARAMS, e.to_string());
+        }
         host.updated_at = chrono::Utc::now();
 
         if let Err(e) = state.save_ssh_host(&host) {
@@ -997,21 +1008,33 @@ impl EngineServer {
         }
 
         // Update deployed_to on the key. Push appends, revoke removes.
+        let mut parsed_success_hids = Vec::new();
+        for r in &results {
+            if r.success {
+                match uuid::Uuid::parse_str(&r.host_id) {
+                    Ok(hid) => parsed_success_hids.push(hid),
+                    Err(e) => {
+                        return Response::err(
+                            id,
+                            protocol::INVALID_PARAMS,
+                            format!("invalid host_id '{}': {e}", r.host_id),
+                        );
+                    }
+                }
+            }
+        }
         {
             let mut state = self.state.lock().await;
             if let Some(key) = state.ssh_keys.get_mut(&key_id) {
-                for r in &results {
-                    if r.success {
-                        let hid = uuid::Uuid::parse_str(&r.host_id).unwrap_or_default();
-                        match op {
-                            FanoutOp::Push => {
-                                if !key.deployed_to.contains(&hid) {
-                                    key.deployed_to.push(hid);
-                                }
+                for hid in parsed_success_hids {
+                    match op {
+                        FanoutOp::Push => {
+                            if !key.deployed_to.contains(&hid) {
+                                key.deployed_to.push(hid);
                             }
-                            FanoutOp::Revoke => {
-                                key.deployed_to.retain(|d| *d != hid);
-                            }
+                        }
+                        FanoutOp::Revoke => {
+                            key.deployed_to.retain(|d| *d != hid);
                         }
                     }
                 }

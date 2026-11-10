@@ -685,14 +685,13 @@ pub fn populate_port_forwards_list(
 
         // Start/Stop button.
         if let (Some(rt), Some(tx)) = (rt, tx) {
-            if is_active {
+            if let Some(fwd_id) = active_fwd_id.cloned() {
                 let stop_btn = gtk4::Button::builder()
                     .icon_name("media-playback-stop-symbolic")
                     .tooltip_text("Stop tunnel")
                     .css_classes(["flat", "circular"])
                     .valign(gtk4::Align::Center)
                     .build();
-                let fwd_id = active_fwd_id.unwrap().clone();
                 let tx = tx.clone();
                 let rt = rt.clone();
                 stop_btn.connect_clicked(move |btn| {
@@ -1212,6 +1211,24 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
 // Terminal launch
 // ---------------------------------------------------------------------------
 
+fn ssh_terminal_shell_wrapper(ssh_cmd: &str) -> String {
+    format!(
+        "{ssh_cmd}; rc=$?; echo ''; echo \"SSH session ended (exit status: $rc)\"; echo 'Press Enter to close...'; read _"
+    )
+}
+
+const SSH_TERMINALS: &[(&str, &[&str])] = &[
+    ("konsole", &["--noclose", "-e", "/bin/sh", "-c"]),
+    ("gnome-terminal", &["--", "sh", "-c"]),
+    ("kgx", &["--", "sh", "-c"]),
+    ("xfce4-terminal", &["--hold", "-x", "sh", "-c"]),
+    ("alacritty", &["--hold", "-e", "sh", "-c"]),
+    ("kitty", &["sh", "-c"]),
+    ("foot", &["sh", "-c"]),
+    ("wezterm", &["start", "--", "sh", "-c"]),
+    ("xterm", &["-hold", "-e", "sh", "-c"]),
+];
+
 /// Detect available terminal emulator and spawn an SSH session.
 ///
 /// `ssh_cmd` is the complete `ssh …` invocation (including `-i` for key auth),
@@ -1221,29 +1238,10 @@ pub fn apply_fortigate_status(detail: &SshHostDetail, data: &Value) {
 /// fails or the user wants to reconnect — the shell prompt remains active.
 pub fn launch_ssh_terminal(ssh_cmd: &str) {
     // Wrap in a shell that keeps the terminal open after SSH exits.
-    // The user gets dropped into a shell and can re-run the command or
-    // inspect errors without the window vanishing.
-    let shell_wrapper = format!(
-        "{ssh_cmd}; echo ''; echo 'SSH session ended (exit status: '$?')'; echo 'Press Enter to close...'; read _"
-    );
+    // Capture `$?` immediately before `echo ''` overwrites the exit status.
+    let shell_wrapper = ssh_terminal_shell_wrapper(ssh_cmd);
 
-    // Each terminal needs its arguments in a specific order.
-    // konsole: `konsole -e /bin/sh -c "cmd"` — but `-e` only takes ONE
-    //          argument unless using `--` with recent versions.  The safest
-    //          is to pass a single shell invocation.
-    let terminals: &[(&str, &[&str])] = &[
-        ("konsole", &["--noclose", "-e", "/bin/sh", "-c"]),
-        ("gnome-terminal", &["--", "sh", "-c"]),
-        ("kgx", &["--", "sh", "-c"]),
-        ("xfce4-terminal", &["--hold", "-e", "sh -c"]),
-        ("alacritty", &["--hold", "-e", "sh", "-c"]),
-        ("kitty", &["sh", "-c"]),
-        ("foot", &["sh", "-c"]),
-        ("wezterm", &["start", "--", "sh", "-c"]),
-        ("xterm", &["-hold", "-e", "sh", "-c"]),
-    ];
-
-    for (term, prefix_args) in terminals {
+    for (term, prefix_args) in SSH_TERMINALS {
         if which_exists(term) {
             let mut cmd = std::process::Command::new(term);
             for arg in *prefix_args {
@@ -1266,87 +1264,203 @@ pub fn launch_ssh_terminal(ssh_cmd: &str) {
     error!("no suitable terminal emulator found for SSH session");
 }
 
+fn build_freerdp_args(
+    client: &str,
+    hostname: &str,
+    port: u16,
+    username: &str,
+    has_password: bool,
+) -> Vec<String> {
+    let cert_flag = if client == "xfreerdp3" {
+        "/cert:tofu"
+    } else {
+        "/cert-tofu"
+    };
+    let mut args = vec![
+        format!("/v:{hostname}:{port}"),
+        format!("/u:{username}"),
+        "/dynamic-resolution".into(),
+        "+clipboard".into(),
+        cert_flag.into(),
+    ];
+    if has_password {
+        args.push("/from-stdin".into());
+    }
+    args
+}
+
+fn rdp_private_dir() -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map(|p| p.join("supermgr-rdp"))
+        .or_else(|| {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|p| p.join("supermgr").join("rdp"))
+        })
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|p| p.join(".cache").join("supermgr").join("rdp"))
+        })
+        .ok_or_else(|| "cannot resolve private user runtime/cache directory for RDP".to_string())?;
+
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)
+        .map_err(|e| format!("create private RDP directory {}: {e}", base.display()))?;
+    let meta = std::fs::symlink_metadata(&base)
+        .map_err(|e| format!("stat private RDP directory {}: {e}", base.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!(
+            "refusing symlinked RDP directory {}",
+            base.display()
+        ));
+    }
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("chmod 0700 {}: {e}", base.display()))?;
+    Ok(base)
+}
+
+fn write_remmina_profile(
+    profile_dir: &std::path::Path,
+    hostname: &str,
+    port: u16,
+    username: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let profile_path = profile_dir.join(format!("rdp-{}.remmina", uuid::Uuid::new_v4().simple()));
+    // Never write plaintext `password=` to disk; Remmina prompts interactively if needed.
+    let profile = format!(
+        "[remmina]\n\
+         name={username}@{hostname}\n\
+         protocol=RDP\n\
+         server={hostname}:{port}\n\
+         username={username}\n\
+         resolution_mode=2\n\
+         colordepth=99\n\
+         quality=2\n\
+         shareclipboard=true\n\
+         disablepasswordstoring=1\n"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&profile_path)
+        .map_err(|e| format!("write remmina profile {}: {e}", profile_path.display()))?;
+    file.write_all(profile.as_bytes())
+        .map_err(|e| format!("write remmina profile {}: {e}", profile_path.display()))?;
+    Ok(profile_path)
+}
+
 /// Launch an RDP session to the given host.
 ///
-/// Tries common RDP clients: xfreerdp3, xfreerdp, remmina, gnome-connections.
+/// Tries common RDP clients: xfreerdp3, xfreerdp, remmina.
 pub fn launch_rdp(
     hostname: &str,
     port: u16,
     username: &str,
     password: Option<&str>,
 ) -> Result<String, String> {
+    supermgr_core::sanitize::validate_host_or_ip(hostname)
+        .map_err(|e| format!("Invalid RDP host: {e}"))?;
+    if username.chars().any(char::is_control) {
+        return Err("Invalid RDP username".into());
+    }
+
     let preferred = crate::settings::AppSettings::load().rdp_client;
-    let all_clients = [
-        ("remmina", {
-            let profile_dir = std::env::temp_dir().join("supermgr-rdp");
-            let _ = std::fs::create_dir_all(&profile_dir);
-            let profile_path = profile_dir.join(format!("{hostname}_{port}.remmina"));
-            let mut profile = format!(
-                "[remmina]\n\
-                 name={username}@{hostname}\n\
-                 protocol=RDP\n\
-                 server={hostname}:{port}\n\
-                 username={username}\n\
-                 resolution_mode=2\n\
-                 colordepth=99\n\
-                 quality=2\n\
-                 shareclipboard=true\n\
-                 disablepasswordstoring=1\n"
-            );
-            if let Some(pw) = password {
-                profile.push_str(&format!("password={pw}\n"));
-            }
-            let _ = std::fs::write(&profile_path, &profile);
-            vec!["-c".into(), profile_path.to_string_lossy().into_owned()]
-        }),
-        ("xfreerdp3", {
-            let mut args = vec![
-                format!("/v:{hostname}:{port}"),
-                format!("/u:{username}"),
-                "/dynamic-resolution".into(),
-                "+clipboard".into(),
-                "/cert:tofu".into(),
-            ];
-            if let Some(pw) = password {
-                args.push(format!("/p:{pw}"));
-            }
-            args
-        }),
-        ("xfreerdp", {
-            let mut args = vec![
-                format!("/v:{hostname}:{port}"),
-                format!("/u:{username}"),
-                "/dynamic-resolution".into(),
-                "+clipboard".into(),
-                "/cert-ignore".into(),
-            ];
-            if let Some(pw) = password {
-                args.push(format!("/p:{pw}"));
-            }
-            args
-        }),
-    ];
+    let all_clients = ["xfreerdp3", "xfreerdp", "remmina"];
 
     // If user selected a specific client, try only that one.
     // "auto" tries all in order.
-    let candidates: Vec<&(&str, Vec<String>)> = if preferred == "auto" {
-        all_clients.iter().collect()
+    let candidates: Vec<&str> = if preferred == "auto" {
+        all_clients.to_vec()
     } else {
         all_clients
-            .iter()
-            .filter(|(name, _)| *name == preferred)
+            .into_iter()
+            .filter(|name| *name == preferred)
             .collect()
     };
 
-    for (client, args) in candidates {
-        if which_exists(client) {
-            match std::process::Command::new(client)
-                .args(args)
+    let pw_non_empty = password.filter(|pw| !pw.is_empty());
+
+    for client in candidates {
+        if !which_exists(client) {
+            continue;
+        }
+        if client == "remmina" {
+            let dir = match rdp_private_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("failed to prepare private remmina directory: {e}");
+                    continue;
+                }
+            };
+            let profile_path = match write_remmina_profile(&dir, hostname, port, username) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("failed to write remmina profile: {e}");
+                    continue;
+                }
+            };
+            match std::process::Command::new("remmina")
+                .arg("-c")
+                .arg(&profile_path)
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
             {
                 Ok(_) => {
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let _ = std::fs::remove_file(profile_path);
+                    });
+                    info!("launched RDP via remmina to {hostname}:{port}");
+                    return Ok(format!("Launching RDP to {hostname}:{port} via remmina"));
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&profile_path);
+                    error!("failed to launch remmina: {e}");
+                    continue;
+                }
+            }
+        } else {
+            let args =
+                build_freerdp_args(client, hostname, port, username, pw_non_empty.is_some());
+            let mut cmd = std::process::Command::new(client);
+            cmd.args(&args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if pw_non_empty.is_some() {
+                cmd.stdin(std::process::Stdio::piped());
+            } else {
+                cmd.stdin(std::process::Stdio::null());
+            }
+            match cmd.spawn() {
+                Ok(mut child) => {
+                    if let (Some(pw), Some(mut stdin)) = (pw_non_empty, child.stdin.take()) {
+                        let mut secret = Vec::with_capacity(pw.len() + 1);
+                        secret.extend_from_slice(pw.as_bytes());
+                        secret.push(b'\n');
+                        std::thread::spawn(move || {
+                            use std::io::Write as _;
+                            let _ = stdin.write_all(&secret);
+                            let _ = stdin.flush();
+                            secret.fill(0);
+                            std::hint::black_box(&mut secret);
+                        });
+                    }
                     info!("launched RDP via {client} to {hostname}:{port}");
                     return Ok(format!("Launching RDP to {hostname}:{port} via {client}"));
                 }
@@ -1519,5 +1633,43 @@ mod configuration_tests {
         jump.proxy_jump = Some(target.id);
         let (_, message) = connection_issue(&target, &[target.clone(), jump], &[]).unwrap();
         assert!(message.contains("loop"));
+    }
+
+    #[test]
+    fn ssh_wrapper_captures_exit_status_before_echo_and_xfce_uses_x_flag() {
+        let wrapped = ssh_terminal_shell_wrapper("ssh host");
+        assert!(wrapped.starts_with("ssh host; rc=$?; echo '';"));
+        assert!(wrapped.contains("exit status: $rc"));
+
+        let xfce = SSH_TERMINALS
+            .iter()
+            .find(|(name, _)| *name == "xfce4-terminal")
+            .unwrap();
+        assert_eq!(xfce.1, &["--hold", "-x", "sh", "-c"]);
+    }
+
+    #[test]
+    fn freerdp_args_use_tofu_and_stdin_never_argv_password() {
+        let args3 = build_freerdp_args("xfreerdp3", "10.0.0.5", 3389, "admin", true);
+        assert!(args3.contains(&"/cert:tofu".to_string()));
+        assert!(args3.contains(&"/from-stdin".to_string()));
+        assert!(!args3.iter().any(|a| a.starts_with("/p:")));
+
+        let args2 = build_freerdp_args("xfreerdp", "10.0.0.5", 3389, "admin", true);
+        assert!(args2.contains(&"/cert-tofu".to_string()));
+        assert!(!args2.contains(&"/cert-ignore".to_string()));
+        assert!(args2.contains(&"/from-stdin".to_string()));
+        assert!(!args2.iter().any(|a| a.starts_with("/p:")));
+    }
+
+    #[test]
+    fn remmina_profile_is_0600_and_omits_plaintext_password() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_remmina_profile(dir.path(), "10.0.0.5", 3389, "admin").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("password="));
     }
 }

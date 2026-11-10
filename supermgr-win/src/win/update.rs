@@ -19,6 +19,7 @@
 //!    the same transaction.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use futures_util::StreamExt as _;
@@ -45,11 +46,13 @@ pub struct UpdateInfo {
     pub size: u64,
 }
 
-fn http() -> reqwest::Client {
+fn http() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent("SuperManager-Updater")
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(120))
         .build()
-        .expect("reqwest client")
+        .context("build HTTP client")
 }
 
 /// `"1.7.0"` → comparable numeric form; non-numeric fragments count as 0.
@@ -68,7 +71,8 @@ fn parse_version(v: &str) -> (u64, u64, u64) {
 
 /// Ask GitHub for the newest release. `Ok(None)` means up to date.
 pub async fn check() -> anyhow::Result<Option<UpdateInfo>> {
-    let release: serde_json::Value = http()
+    let client = http()?;
+    let release: serde_json::Value = client
         .get(RELEASES_LATEST)
         .header("Accept", "application/vnd.github+json")
         .send()
@@ -105,7 +109,10 @@ pub async fn check() -> anyhow::Result<Option<UpdateInfo>> {
         .or_else(|| find(&|n| n.starts_with("SuperManager-") && n.ends_with(".msi")))
         .with_context(|| format!("release v{latest} has no Windows installer asset"))?;
 
-    let name = installer["name"].as_str().unwrap_or_default().to_owned();
+    let raw_name = installer["name"].as_str().unwrap_or_default();
+    let name = crate::model::sanitize_installer_filename(raw_name)
+        .map_err(anyhow::Error::msg)?
+        .to_owned();
     let url = installer
         .get("browser_download_url")
         .and_then(|u| u.as_str())
@@ -143,7 +150,11 @@ pub async fn download(
 ) -> anyhow::Result<PathBuf> {
     use tokio::io::AsyncWriteExt as _;
 
-    let expected = http()
+    let safe_name =
+        crate::model::sanitize_installer_filename(&info.name).map_err(anyhow::Error::msg)?;
+    let client = http()?;
+
+    let expected = client
         .get(&info.sha256_url)
         .send()
         .await
@@ -158,8 +169,8 @@ pub async fn download(
         .context("empty .sha256 sidecar")?
         .to_ascii_lowercase();
 
-    let path = std::env::temp_dir().join(&info.name);
-    let resp = http()
+    let path = std::env::temp_dir().join(safe_name);
+    let resp = client
         .get(&info.url)
         .send()
         .await

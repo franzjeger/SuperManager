@@ -57,7 +57,7 @@ impl EngineServer {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            Err(e) => Response::err_engine(id, &crate::error::EngineError::from_findings_anyhow(e)),
         }
     }
 
@@ -78,7 +78,7 @@ impl EngineServer {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            Err(e) => Response::err_engine(id, &crate::error::EngineError::from_findings_anyhow(e)),
         }
     }
 
@@ -121,7 +121,7 @@ impl EngineServer {
                 Ok(v) => Response::ok(id, v),
                 Err(e) => Response::err(id, protocol::INTERNAL_ERROR, e.to_string()),
             },
-            Err(e) => Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            Err(e) => Response::err_engine(id, &crate::error::EngineError::from_findings_anyhow(e)),
         }
     }
 
@@ -140,7 +140,12 @@ impl EngineServer {
                 return r;
             }
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                return Response::err_engine(id, &crate::error::EngineError::from_findings_anyhow(e))
+            }
+        };
         // Pull host zones from the most recent inventory snapshot —
         // best-effort; missing inventory just means no exposure
         // multiplier (factor stays 1.0).

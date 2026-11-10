@@ -49,7 +49,9 @@ use crate::findings::Finding;
 fn scope_lock(scope: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("scope lock map poisoned");
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .entry(scope.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -353,12 +355,17 @@ fn reconcile_with_resolution(
     fresh: &[Finding],
     can_resolve: impl Fn(&Finding) -> bool,
 ) -> Result<ScanDiff> {
+    crate::findings::validate_slug(customer_slug)
+        .map_err(|reason| crate::error::FindingsError::InvalidScope { reason })?;
+
     // Acquire the per-customer reconcile lock for the entire
     // load→merge→save cycle. Two concurrent callers (manual scan
     // + scheduler) for the same customer will serialize here;
     // calls for different customers run in parallel.
     let lock = scope_lock(customer_slug);
-    let _guard = lock.lock().expect("scope lock poisoned");
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let mut store = load_store(customer_slug)?;
     let now = Utc::now();

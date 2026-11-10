@@ -76,7 +76,10 @@ if [[ -z "$BIN" ]]; then
     exit 1
 fi
 
-echo "→ Installing $BIN -> $INSTALL_PATH (will prompt for sudo)…"
+ROOT_RUNTIME_DIR="/Library/PrivilegedHelperTools/SuperManagerVPN"
+echo "→ Installing $BIN -> $ROOT_RUNTIME_DIR/openvpn3 and $INSTALL_PATH (will prompt for sudo)…"
+sudo install -d -m 0755 -o root -g wheel "$ROOT_RUNTIME_DIR"
+sudo install -m 0755 -o root -g wheel "$BIN" "$ROOT_RUNTIME_DIR/openvpn3"
 sudo install -m 0755 -o root -g wheel "$BIN" "$INSTALL_PATH"
 
 echo ""

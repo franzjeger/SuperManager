@@ -33,6 +33,7 @@ pub struct SnmpDetail {
 /// Try `public`, then `private`. First community that responds
 /// to sysDescr wins; we proceed with that community for the rest.
 pub async fn walk(host: &str) -> Option<SnmpDetail> {
+    supermgr_core::sanitize::validate_host_or_ip(host).ok()?;
     for community in &["public", "private"] {
         if let Some(descr) = snmpget(host, community, "1.3.6.1.2.1.1.1.0").await {
             let mut detail = SnmpDetail {
@@ -68,6 +69,7 @@ pub async fn walk(host: &str) -> Option<SnmpDetail> {
 }
 
 async fn snmpget(host: &str, community: &str, oid: &str) -> Option<String> {
+    supermgr_core::sanitize::validate_host_or_ip(host).ok()?;
     let res = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::process::Command::new("snmpget")
@@ -95,6 +97,9 @@ async fn snmpget(host: &str, community: &str, oid: &str) -> Option<String> {
 /// Walk ifDescr table (1.3.6.1.2.1.2.2.1.2). Returns interface
 /// names. Empty if walk fails.
 async fn snmpwalk_iface(host: &str, community: &str) -> Vec<String> {
+    if supermgr_core::sanitize::validate_host_or_ip(host).is_err() {
+        return Vec::new();
+    }
     let res = tokio::time::timeout(
         Duration::from_secs(5),
         tokio::process::Command::new("snmpwalk")

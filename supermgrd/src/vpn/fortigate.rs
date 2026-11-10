@@ -338,7 +338,20 @@ fn generate_swanctl_config(
     password: &str,
     psk: &str,
     full_tunnel: bool,
-) -> String {
+) -> Result<String, BackendError> {
+    supermgr_core::sanitize::validate_safe_ident(conn_name, "connection name")
+        .map_err(|e| BackendError::Config(format!("invalid swanctl connection name: {e}")))?;
+    supermgr_core::sanitize::validate_safe_ident(profile_id_simple, "profile ID")
+        .map_err(|e| BackendError::Config(format!("invalid swanctl profile ID: {e}")))?;
+    supermgr_core::sanitize::validate_host_or_ip(&fg_cfg.host)
+        .map_err(|e| BackendError::Config(format!("invalid FortiGate host: {e}")))?;
+    if fg_cfg.username.trim().is_empty() || fg_cfg.username.chars().any(char::is_control) {
+        return Err(BackendError::Config(
+            "invalid FortiGate username: must be non-empty and contain no control characters"
+                .into(),
+        ));
+    }
+
     // Split tunnel: the profile's routes plus a host prefix for any assigned
     // DNS server the routes don't cover. A gateway can hand out a resolver
     // outside its own split-include list; without the extra selector that
@@ -437,26 +450,26 @@ fn generate_swanctl_config(
     // parses. strongSwan auto-detects the ID type regardless of quoting.
     let local_id = fg_cfg.local_id.trim();
     let local_id_line = if local_id.is_empty() {
-        format!("id = {}", fg_cfg.username)
+        format!("id = \"{}\"", escape_swanctl(&fg_cfg.username))
     } else {
         format!("id = \"{}\"", escape_swanctl(local_id))
     };
 
-    format!(
+    Ok(format!(
         r#"connections {{
   {conn} {{
-    remote_addrs = {host}
+    remote_addrs = "{host}"
     vips = 0.0.0.0
     dpd_delay = 10s
     proposals = aes128-sha256-ecp384,aes256-sha256-ecp384,aes128gcm16-prfsha256-ecp384,aes256gcm16-prfsha384-ecp521,chacha20poly1305-prfsha256-ecp384,aes256-sha256-modp2048
     local {{
       auth = eap-mschapv2
       {local_id_line}
-      eap_id = {user}
+      eap_id = "{user}"
     }}
     remote {{
       auth = psk
-      id = {host}
+      id = "{host}"
     }}
     children {{
       {conn} {{
@@ -469,19 +482,19 @@ fn generate_swanctl_config(
 }}
 secrets {{
   ike-supermgr-{pid} {{
-    id-1 = {host}
+    id-1 = "{host}"
     id-2 = %any
     secret = "{psk}"
   }}
   eap-supermgr-{pid} {{
-    id = {user}
+    id = "{user}"
     secret = "{pw}"
   }}
 }}
 "#,
         conn = conn_name,
-        host = fg_cfg.host,
-        user = fg_cfg.username,
+        host = escape_swanctl(&fg_cfg.host),
+        user = escape_swanctl(&fg_cfg.username),
         local_id_line = local_id_line,
         // Escaped, not interpolated raw. swanctl values are double-quoted
         // strings, so a PSK or password containing `"` used to terminate the
@@ -492,7 +505,7 @@ secrets {{
         psk = escape_swanctl(psk),
         pw = escape_swanctl(password),
         pid = profile_id_simple,
-    )
+    ))
 }
 
 /// Escape a value for a double-quoted swanctl string.
@@ -978,7 +991,7 @@ impl VpnBackend for FortiGateBackend {
             &password,
             &psk,
             profile.full_tunnel,
-        );
+        )?;
         let config_path = PathBuf::from(swanctl_conf_dir()).join(format!("{conn_name}.conf"));
 
         info!("writing swanctl config to {}", config_path.display());
@@ -1689,13 +1702,30 @@ mod tests {
 
     // -- Remote identity and PSK lookup -----------------------------------
 
+    fn count_unescaped_quotes(line: &str) -> usize {
+        let mut count = 0;
+        let mut escaped = false;
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                count += 1;
+            }
+        }
+        count
+    }
+
     #[test]
     fn the_remote_identity_is_pinned_to_the_gateway() {
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         let remote_at = conf.find("remote {").expect("remote block");
         let children_at = conf.find("children").expect("children block");
         let id_at = conf[remote_at..children_at]
-            .find("id = fw.example.com")
+            .find(r#"id = "fw.example.com""#)
             .expect("remote.id must carry the gateway address");
         // Nesting, not mere presence: mis-nested into `local {}` this would be
         // our IDi rather than the peer's expected identity — the opposite
@@ -1710,10 +1740,10 @@ mod tests {
         // IP or FQDN a FortiGate sends as IDr; `%any` alone does not — a secret
         // keyed only to `%any` fails to match an IP-form IDr, which is the bug
         // the macOS helper shipped twice.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         let secrets_at = conf.find("secrets {").expect("secrets block");
         let tail = &conf[secrets_at..];
-        assert!(tail.contains("id-1 = fw.example.com"), "{conf}");
+        assert!(tail.contains(r#"id-1 = "fw.example.com""#), "{conf}");
         assert!(tail.contains("id-2 = %any"), "{conf}");
     }
 
@@ -1721,7 +1751,8 @@ mod tests {
     fn the_local_identity_is_not_confused_with_the_remote_one() {
         // Both blocks carry an `id`, and they mean opposite things. Pinning the
         // guard here so a future edit cannot quietly move one into the other.
-        let conf = generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true);
+        let conf =
+            generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true).unwrap();
         let local_at = conf.find("local {").expect("local block");
         let remote_at = conf.find("remote {").expect("remote block");
         let local_block = &conf[local_at..remote_at];
@@ -1730,7 +1761,7 @@ mod tests {
             "our IDi belongs in local:\n{conf}"
         );
         assert!(
-            !local_block.contains("id = fw.example.com"),
+            !local_block.contains(r#"id = "fw.example.com""#),
             "the gateway's identity must not land in local:\n{conf}"
         );
     }
@@ -1775,7 +1806,7 @@ mod tests {
         // stays ESTABLISHED, the full-tunnel default keeps sourcing packets
         // from a virtual IP the dead tunnel no longer owns, and the machine has
         // no internet while list-sas insists it is connected.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         assert!(
             conf.contains("dpd_delay"),
             "DPD off means a dead peer is never detected:\n{conf}"
@@ -1798,7 +1829,7 @@ mod tests {
         // finds nothing to reconcile, and the result is a black hole the GUI
         // reports as Connected. Worse than the bug being fixed, because it is
         // invisible.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         assert!(
             conf.contains("dpd_action = clear"),
             "a detected-dead peer must close the SA so the daemon can clean up:\n{conf}"
@@ -1817,7 +1848,7 @@ mod tests {
         // the ENTIRE connection, so one of these added to speed up DPD
         // detection stops the tunnel loading at all. Ported from the macOS
         // helper's guard, which exists because someone tried it.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         assert!(
             !conf.contains("retransmit_"),
             "retransmit_* are invalid here and break the whole connection:\n{conf}"
@@ -1831,7 +1862,7 @@ mod tests {
         // tunnel silently stops loading — the same failure mode as the
         // retransmit guard above, which is why this is pinned rather than
         // trusted to review.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
         let children_at = conf.find("children").expect("children block");
         let delay_at = conf.find("dpd_delay").expect("dpd_delay");
         let action_at = conf.find("dpd_action").expect("dpd_action");
@@ -1869,7 +1900,7 @@ mod tests {
             "10.20.21.0/24".parse().unwrap(),
         ];
         cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
-        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false).unwrap();
         assert!(
             conf.contains("remote_ts = 10.20.3.0/24,10.20.21.0/24,10.20.200.1/32"),
             "the DNS server needs a host selector in remote_ts:\n{conf}"
@@ -1881,7 +1912,7 @@ mod tests {
         let mut cfg = fg("");
         cfg.routes = vec!["10.20.200.0/24".parse().unwrap()];
         cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
-        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false);
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", false).unwrap();
         assert!(conf.contains("remote_ts = 10.20.200.0/24\n"), "{conf}");
         assert!(
             !conf.contains("10.20.200.1/32"),
@@ -1895,7 +1926,7 @@ mod tests {
         // churn the config for gateways that dislike extra selectors.
         let mut cfg = fg("");
         cfg.dns_servers = vec!["10.20.200.1".parse().unwrap()];
-        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true).unwrap();
         assert!(conf.contains("remote_ts = 0.0.0.0/0,::/0"), "{conf}");
         assert!(!conf.contains("10.20.200.1"), "{conf}");
     }
@@ -1905,13 +1936,14 @@ mod tests {
         // The bug this fixes: the field existed on the profile and in the macOS
         // app, and this backend never read it — so a gateway that routes by
         // peer ID before authentication could not be reached from Linux at all.
-        let conf = generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true);
+        let conf =
+            generate_swanctl_config("c", "p", &fg("sybr-porsgrunn"), "pw", "psk", true).unwrap();
         assert!(
             conf.contains(r#"id = "sybr-porsgrunn""#),
             "local_id must be emitted as the IKE identity:\n{conf}"
         );
         assert!(
-            conf.contains("eap_id = alice"),
+            conf.contains(r#"eap_id = "alice""#),
             "the EAP identity is separate and stays the username"
         );
     }
@@ -1922,8 +1954,8 @@ mod tests {
         // it makes strongSwan default IDi to the local IP, which would change
         // the identity every existing Linux profile connects with. Nobody's
         // working tunnel moves because we added a field.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true);
-        assert!(conf.contains("id = alice"), "{conf}");
+        let conf = generate_swanctl_config("c", "p", &fg(""), "pw", "psk", true).unwrap();
+        assert!(conf.contains(r#"id = "alice""#), "{conf}");
         assert!(
             !conf.contains(r#"id = """#),
             "must not emit an empty identity"
@@ -1932,8 +1964,8 @@ mod tests {
 
     #[test]
     fn a_whitespace_only_local_id_counts_as_unset() {
-        let conf = generate_swanctl_config("c", "p", &fg("   "), "pw", "psk", true);
-        assert!(conf.contains("id = alice"), "{conf}");
+        let conf = generate_swanctl_config("c", "p", &fg("   "), "pw", "psk", true).unwrap();
+        assert!(conf.contains(r#"id = "alice""#), "{conf}");
     }
 
     #[test]
@@ -1943,7 +1975,7 @@ mod tests {
         // string early and left the rest to be parsed as config, whereupon
         // strongSwan discards the whole connection and the tunnel fails to load
         // with nothing pointing at the password as the cause.
-        let conf = generate_swanctl_config("c", "p", &fg(""), r#"pa"ss"#, r#"p"sk"#, true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), r#"pa"ss"#, r#"p"sk"#, true).unwrap();
         assert!(
             conf.contains(r#"secret = "p\"sk""#),
             "PSK not escaped:\n{conf}"
@@ -1955,10 +1987,7 @@ mod tests {
 
         // Every quote in the rendered file is either a delimiter or escaped.
         for (i, line) in conf.lines().enumerate() {
-            let unescaped = line
-                .char_indices()
-                .filter(|(j, c)| *c == '"' && (*j == 0 || line.as_bytes()[j - 1] != b'\\'))
-                .count();
+            let unescaped = count_unescaped_quotes(line);
             assert!(
                 unescaped % 2 == 0,
                 "line {i} has an unbalanced quote: {line}"
@@ -1969,7 +1998,7 @@ mod tests {
     #[test]
     fn a_backslash_in_a_secret_is_escaped() {
         // A domain-qualified password like `CORP\alice` is entirely ordinary.
-        let conf = generate_swanctl_config("c", "p", &fg(""), r"CORP\alice", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), r"CORP\alice", "psk", true).unwrap();
         assert!(conf.contains(r#"secret = "CORP\\alice""#), "{conf}");
     }
 
@@ -1978,14 +2007,78 @@ mod tests {
         // A newline would end the value and let the remainder be read as
         // config directives. Dropping is defensive; the secret is already
         // broken if it contains one.
-        let conf = generate_swanctl_config("c", "p", &fg(""), "a\nb", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(""), "a\nb", "psk", true).unwrap();
         assert!(conf.contains(r#"secret = "ab""#), "{conf}");
     }
 
     #[test]
     fn a_local_id_with_a_quote_is_escaped_too() {
-        let conf = generate_swanctl_config("c", "p", &fg(r#"we"ird"#), "pw", "psk", true);
+        let conf = generate_swanctl_config("c", "p", &fg(r#"we"ird"#), "pw", "psk", true).unwrap();
         assert!(conf.contains(r#"id = "we\"ird""#), "{conf}");
+    }
+
+    #[test]
+    fn username_metacharacters_are_quoted_and_cannot_inject_swanctl_directives() {
+        for payload in [
+            "Alice Smith",
+            r"CORP\alice",
+            r#"alice" } children { evil { updown = /bin/sh } } {"#,
+            "updown = /bin/sh",
+            r#"u\ " { }"#,
+        ] {
+            let mut cfg = fg("");
+            cfg.username = payload.to_owned();
+            let conf = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true).unwrap();
+
+            for (i, line) in conf.lines().enumerate() {
+                let unescaped = count_unescaped_quotes(line);
+                assert!(
+                    unescaped % 2 == 0,
+                    "line {i} has unbalanced quotes for payload {payload:?}: {line}"
+                );
+                let trimmed = line.trim();
+                assert!(
+                    !trimmed.starts_with("updown"),
+                    "directive smuggled out of username {payload:?}:\n{conf}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn username_with_newlines_or_empty_is_rejected() {
+        for bad_user in [
+            "",
+            "   ",
+            "alice\n      updown = /bin/sh",
+            "alice\r\nbob",
+            "alice\0bob",
+        ] {
+            let mut cfg = fg("");
+            cfg.username = bad_user.to_owned();
+            let err = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true)
+                .expect_err("control/empty username must be rejected");
+            assert!(matches!(err, BackendError::Config(_)), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_fortigate_host_is_rejected() {
+        for bad_host in [
+            "",
+            "   ",
+            "-oProxyCommand=sh",
+            "fw.example.com\n    updown = /bin/sh",
+            r#"fw.example.com" } {"#,
+            "fw example.com",
+            "https://fw.example.com/path",
+        ] {
+            let mut cfg = fg("");
+            cfg.host = bad_host.to_owned();
+            let err = generate_swanctl_config("c", "p", &cfg, "pw", "psk", true)
+                .expect_err("invalid host must be rejected");
+            assert!(matches!(err, BackendError::Config(_)), "{err:?}");
+        }
     }
 
     /// Verbatim stderr from `swanctl --load-all` on a machine where

@@ -284,8 +284,9 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     // Search for `<tag>` (no attributes) and `<tag ...>` (with
     // attributes) — we don't try to be a real parser, just a
     // best-effort extractor good enough for Microsoft's stable schema.
-    let lower = xml.to_lowercase();
-    let needle = format!("<{}", tag.to_lowercase());
+    let lower = xml.to_ascii_lowercase();
+    let tag_lower = tag.to_ascii_lowercase();
+    let needle = format!("<{tag_lower}");
     let mut start = 0;
     while let Some(idx) = lower[start..].find(&needle) {
         let abs = start + idx;
@@ -306,17 +307,22 @@ fn extract_tag(xml: &str, tag: &str) -> Option<String> {
             None => return None,
         };
         // Locate the matching `</tag>` (any namespace prefix).
-        let close_lower = format!("</{}>", tag.to_lowercase());
-        let close_lower2 = format!(":{}>", tag.to_lowercase()); // namespaced close
+        let close_lower = format!("</{tag_lower}>");
+        let close_lower2 = format!(":{tag_lower}>"); // namespaced close
         if let Some(end_rel) = lower[after_open..].find(&close_lower) {
             let end = after_open + end_rel;
             return Some(xml[after_open..end].to_owned());
         }
         if let Some(end_rel) = lower[after_open..].find(&close_lower2) {
-            let end = after_open + end_rel - 1; // back up one for the `<` of `</`
-                                                // Walk back to the start of the `</`
-            if let Some(lt) = xml[..end].rfind("</") {
-                return Some(xml[after_open..lt].to_owned());
+            let raw_end = (after_open + end_rel).saturating_sub(1); // back up one for the `<` of `</`
+            if raw_end <= xml.len() {
+                let end = xml.floor_char_boundary(raw_end);
+                // Walk back to the start of the `</`
+                if let Some(lt) = xml[..end].rfind("</") {
+                    if lt >= after_open && !xml[lt + 2..after_open + end_rel].contains(['<', '>']) {
+                        return Some(xml[after_open..lt].to_owned());
+                    }
+                }
             }
         }
         return None;
@@ -354,10 +360,10 @@ fn wrap_base64_as_pem(b64: &str) -> String {
 /// stray hostname or comment in the file doesn't fail the whole import.
 fn extract_all_cidrs(xml: &str) -> Vec<IpNet> {
     let mut routes: Vec<IpNet> = Vec::new();
+    let lower = xml.to_ascii_lowercase();
 
     // Shape 1: tag bodies that already contain a CIDR.
     for needle in ["<destinationaddress>", "<address>", "<route>"] {
-        let lower = xml.to_lowercase();
         let mut start = 0;
         while let Some(rel) = lower[start..].find(needle) {
             let abs = start + rel + needle.len();
@@ -411,8 +417,8 @@ fn extract_all_cidrs(xml: &str) -> Vec<IpNet> {
 /// (case-insensitive, ignores attributes and namespace prefixes).
 fn extract_all_simple_tags(xml: &str, tag: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let lower = xml.to_lowercase();
-    let needle = format!("<{}", tag.to_lowercase());
+    let lower = xml.to_ascii_lowercase();
+    let needle = format!("<{}", tag.to_ascii_lowercase());
     let mut start = 0;
     while let Some(rel) = lower[start..].find(&needle) {
         let abs = start + rel + needle.len();
@@ -468,8 +474,8 @@ fn netmask_to_prefix(mask: &str) -> Option<u8> {
 /// nests these under `<dnsservers>` with no consistent prefix.
 fn extract_all_dns(xml: &str) -> Vec<IpAddr> {
     let mut out = Vec::new();
+    let lower = xml.to_ascii_lowercase();
     for needle in ["<dnsserver>", "<server>"] {
-        let lower = xml.to_lowercase();
         let mut start = 0;
         while let Some(rel) = lower[start..].find(needle) {
             let abs = start + rel + needle.len();
@@ -1063,6 +1069,30 @@ mod tests {
         for s in inputs {
             // Don't care if it errors — just shouldn't panic.
             let _ = parse_azure_vpn_config(s);
+        }
+    }
+
+    #[test]
+    fn unicode_dotted_i_and_malformed_earlier_close_tags_do_not_panic() {
+        let xml_with_unicode = format!("<!-- İİİ -->{SAMPLE_XML}");
+        let cfg = parse_azure_vpn_config(&xml_with_unicode).expect("unicode comment must parse");
+        assert_eq!(cfg.gateway_fqdn, "azuregateway-test.vpn.azure.com");
+        assert_eq!(cfg.routes.len(), 2);
+        assert_eq!(cfg.dns_servers.len(), 2);
+
+        // Malformed earlier `</` followed by unclosed `<tenant>` containing `"İ"`
+        // right before `:tenant>` — exercises `floor_char_boundary` and `lt >= after_open`.
+        for malformed in [
+            "</earlier><tenant>İ:tenant>",
+            "</earlier><tenant>:tenant>",
+            "<tenant>İ:tenant>",
+            "<!-- İ --><Route><destination>10.0.0.0</destination><mask>255.0.0.0</mask></Route>",
+        ] {
+            let _ = extract_tag(malformed, "tenant");
+            let _ = extract_all_cidrs(malformed);
+            let _ = extract_all_simple_tags(malformed, "destination");
+            let _ = extract_all_dns(malformed);
+            let _ = parse_azure_vpn_config(malformed);
         }
     }
 }

@@ -144,9 +144,14 @@ pub fn takes_all(text: &str) -> bool {
 
 /// Set up the tunnel `name` as `text`, a rendered config, says, with the
 /// DNS servers the profile pushes. Returns its utun and its supervisor.
-pub async fn up(name: &str, text: &str, dns: &[String]) -> Result<(String, Tunnel)> {
+pub async fn up(
+    name: &str,
+    text: &str,
+    dns: &[String],
+    policy: crate::client_auth::Policy,
+) -> Result<(String, Tunnel)> {
     let config = conf::parse(text).context("the WireGuard config")?;
-    let program = crate::vpn_runtime::wireguard_go()?;
+    let program = crate::vpn_runtime::wireguard_go(policy)?;
     let endpoints = resolve(&config).await?;
     let (interface, child) = start(name, &program).await?;
     let mut state = State {
@@ -755,7 +760,10 @@ mod tests {
             key(1),
             key(2)
         );
-        let (interface, tunnel) = up(name, &config, &[]).await.unwrap();
+        let (interface, tunnel) =
+            up(name, &config, &[], crate::client_auth::Policy::Development)
+                .await
+                .unwrap();
         assert!(net::exists(&interface));
         assert_eq!(read_name_file(name).as_deref(), Some(interface.as_str()));
         assert!(net::has_own_route(&"10.213.1.0/24".parse().unwrap(), &interface).await);

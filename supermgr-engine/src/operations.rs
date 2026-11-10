@@ -93,7 +93,10 @@ impl OperationRegistry {
             started_at: Utc::now(),
             cancel_requested: false,
         };
-        let mut g = self.inner.lock().expect("operations lock poisoned");
+        let mut g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.insert(
             id.clone(),
             Entry {
@@ -110,7 +113,10 @@ impl OperationRegistry {
 
     /// Snapshot of every running operation, in start-order.
     pub fn list(&self) -> Vec<OperationInfo> {
-        let g = self.inner.lock().expect("operations lock poisoned");
+        let g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out: Vec<OperationInfo> = g
             .values()
             .map(|e| {
@@ -127,7 +133,10 @@ impl OperationRegistry {
     /// the id was known. Cancellation is cooperative — workers
     /// only honour the flag at safe checkpoints.
     pub fn cancel(&self, id: &str) -> bool {
-        let g = self.inner.lock().expect("operations lock poisoned");
+        let g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match g.get(id) {
             Some(e) => {
                 e.cancel.store(true, Ordering::Release);
@@ -138,7 +147,10 @@ impl OperationRegistry {
     }
 
     fn unregister(&self, id: &str) {
-        let mut g = self.inner.lock().expect("operations lock poisoned");
+        let mut g = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         g.remove(id);
     }
 }

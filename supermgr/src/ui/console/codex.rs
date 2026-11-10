@@ -65,6 +65,13 @@ async fn run(
         "never",
     ]);
     if with_tools {
+        let tools_val = supermgr_mcp::available_tools(allow_changes);
+        let enabled_tools: Vec<_> = tools_val
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| t["name"].clone())
+            .collect();
         command
             .arg("-c")
             .arg(format!(
@@ -78,14 +85,13 @@ async fn run(
             .arg("-c")
             .arg(format!(
                 "mcp_servers.supermgr.enabled_tools={}",
-                json!(supermgr_mcp::available_tools(allow_changes)
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|t| t["name"].clone())
-                    .collect::<Vec<_>>())
+                json!(enabled_tools)
             ));
-        if !allow_changes {
+        if allow_changes {
+            command
+                .arg("-c")
+                .arg("mcp_servers.supermgr.env.SUPERMGR_MCP_ALLOW_WRITES=\"1\"");
+        } else {
             command
                 .arg("-c")
                 .arg("mcp_servers.supermgr.env.SUPERMGR_MCP_READ_ONLY=\"1\"");
@@ -98,10 +104,12 @@ async fn run(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
-    if !allow_changes {
-        command.env("SUPERMGR_MCP_READ_ONLY", "1");
-    } else {
+    if allow_changes {
+        command.env("SUPERMGR_MCP_ALLOW_WRITES", "1");
         command.env_remove("SUPERMGR_MCP_READ_ONLY");
+    } else {
+        command.env("SUPERMGR_MCP_READ_ONLY", "1");
+        command.env_remove("SUPERMGR_MCP_ALLOW_WRITES");
     }
     let mut child = command.spawn().context("Could not start Codex. Install the Codex CLI and run 'codex login' with your ChatGPT account.")?;
     let mut stdin = child.stdin.take().context("Codex input unavailable")?;

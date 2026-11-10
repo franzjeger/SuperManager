@@ -35,6 +35,9 @@ extension AppState {
     ///    host route. The next connect attempt fails with "unable to
     ///    determine source address". `system_wake` sweeps those.
     func startSleepWakeMonitor() {
+        guard !sleepWakeMonitorStarted else { return }
+        sleepWakeMonitorStarted = true
+
         let wc = NSWorkspace.shared.notificationCenter
 
         // willSleep fires while the system is still fully running —

@@ -93,12 +93,12 @@ pub struct InterfaceSummary {
 
 /// Build a reqwest client suitable for talking to OPNsense.
 ///
-/// Self-signed certs are common on home appliances, so verification is
-/// disabled by default. A 30 s connect+read timeout keeps the daemon from
+/// Honours the host's `verify_tls` setting (`!verify_tls` accepts self-signed
+/// appliance certificates). A 30 s connect+read timeout keeps the daemon from
 /// blocking forever if the box is unreachable.
-fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+fn http_client(verify_tls: bool) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .timeout(Duration::from_secs(30))
         .build()
 }
@@ -109,15 +109,17 @@ fn http_client() -> Result<reqwest::Client, reqwest::Error> {
 pub async fn request(
     hostname: &str,
     port: u16,
+    verify_tls: bool,
     creds: &Credentials,
     method: &str,
     path: &str,
     body: &str,
 ) -> Result<Response, String> {
+    supermgr_core::sanitize::validate_host_or_ip(hostname)?;
     let url = format!("https://{hostname}:{port}{path}");
     debug!("opnsense::request {method} {url}");
 
-    let client = http_client().map_err(|e| format!("HTTP client build failed: {e}"))?;
+    let client = http_client(verify_tls).map_err(|e| format!("HTTP client build failed: {e}"))?;
 
     let mut req = match method.to_ascii_uppercase().as_str() {
         "GET" => client.get(&url),
@@ -156,12 +158,18 @@ pub async fn request(
 
 /// Compose a dashboard-friendly status snapshot. Each underlying endpoint
 /// failure is logged as a warning but does not fail the whole call.
-pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSenseStatus {
+pub async fn get_status(
+    hostname: &str,
+    port: u16,
+    verify_tls: bool,
+    creds: &Credentials,
+) -> OpnSenseStatus {
     let mut s = OpnSenseStatus::default();
 
     if let Ok(resp) = request(
         hostname,
         port,
+        verify_tls,
         creds,
         "GET",
         "/api/diagnostics/system/system_information",
@@ -186,6 +194,7 @@ pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSe
     if let Ok(resp) = request(
         hostname,
         port,
+        verify_tls,
         creds,
         "GET",
         "/api/core/firmware/status",
@@ -221,6 +230,7 @@ pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSe
     if let Ok(resp) = request(
         hostname,
         port,
+        verify_tls,
         creds,
         "GET",
         "/api/diagnostics/system/system_resources",
@@ -242,6 +252,7 @@ pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSe
     if let Ok(resp) = request(
         hostname,
         port,
+        verify_tls,
         creds,
         "GET",
         "/api/diagnostics/interface/getInterfaceNames",
@@ -264,6 +275,7 @@ pub async fn get_status(hostname: &str, port: u16, creds: &Credentials) -> OpnSe
     if let Ok(resp) = request(
         hostname,
         port,
+        verify_tls,
         creds,
         "GET",
         "/api/wireguard/general/get",
@@ -338,7 +350,7 @@ mod tests {
         let secret = std::env::var("OPNSENSE_SECRET").expect("set OPNSENSE_SECRET");
         let creds = Credentials { key, secret };
 
-        let status = get_status(&host, port, &creds).await;
+        let status = get_status(&host, port, false, &creds).await;
         eprintln!("OPNsense live status: {status:#?}");
         assert!(
             status.opnsense_version.is_some() || status.hostname.is_some(),

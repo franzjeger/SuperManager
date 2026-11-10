@@ -119,7 +119,9 @@ fn customer_lock(slug: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::sync::{Arc, Mutex, OnceLock};
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("customer lock map poisoned");
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .entry(slug.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -131,7 +133,9 @@ fn customer_lock(slug: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
 pub fn save(customer: &Customer) -> Result<()> {
     validate_slug(&customer.slug).context("invalid customer slug")?;
     let lock = customer_lock(&customer.slug);
-    let _guard = lock.lock().expect("customer lock poisoned");
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let dir = customers_dir();
     std::fs::create_dir_all(&dir).context("create customers dir")?;

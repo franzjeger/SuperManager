@@ -22,9 +22,9 @@ members = [
 # exactly what it used to do.
 #
 # Per-host invocations:
-#   cargo build -p supermgrd -p supermgr -p supermgr-engine   # Linux
-#   cargo build --workspace                                   # macOS only
-#   cargo build -p supermgrd-win -p supermgr-win              # Windows
+#   cargo build -p supermgrd -p supermgr -p supermgr-mcp                                    # Linux
+#   cargo build -p supermgr-engine -p supermgrd-mac -p supermanager-helper -p supermgr-mcp  # macOS
+#   cargo build -p supermgrd-win -p supermgr-win -p supermgr-mcp                            # Windows
 default-members = [
     "supermgr-core",
     "supermgr-mcp",

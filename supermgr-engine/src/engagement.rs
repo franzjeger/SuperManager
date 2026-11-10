@@ -359,7 +359,9 @@ fn engagement_lock(id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::sync::{Arc, Mutex, OnceLock};
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("engagement lock map poisoned");
+    let mut guard = map
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .entry(id.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -373,7 +375,9 @@ pub fn save(engagement: &Engagement) -> Result<()> {
             .context("invalid customer_slug on engagement")?;
     }
     let lock = engagement_lock(&engagement.id);
-    let _guard = lock.lock().expect("engagement lock poisoned");
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let dir = engagements_dir();
     std::fs::create_dir_all(&dir).context("create engagements dir")?;
@@ -406,7 +410,9 @@ pub fn log_event(engagement_id: &str, event: EngagementEvent) -> Result<()> {
     // race: both load the same state, append different events,
     // and one of them overwrites the other on save.
     let lock = engagement_lock(engagement_id);
-    let _guard = lock.lock().expect("engagement lock poisoned");
+    let _guard = lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let mut e = load(engagement_id)?;
     e.log.push(event);

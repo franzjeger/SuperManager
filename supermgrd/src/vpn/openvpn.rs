@@ -183,84 +183,47 @@ impl VpnBackend for OpenVpnBackend {
         let run_dir = runtime_dir().join("openvpn");
         crate::secure_file::ensure_private_dir(&run_dir, 0o700).map_err(BackendError::Io)?;
 
-        // Build temp config file, applying full_tunnel override and credentials.
-        //
-        // full_tunnel=true  → ensure redirect-gateway def1 is present
-        // full_tunnel=false → strip any redirect-gateway directives (split-tunnel;
-        //                     routes defined in the .ovpn file are kept as-is)
-        let apply_full_tunnel_override = |base: &str| -> String {
-            let has_redirect = base.lines().any(|l| {
-                let l = l.trim();
-                l.starts_with("redirect-gateway") || l.starts_with("push redirect-gateway")
-            });
-            if profile.full_tunnel && !has_redirect {
-                format!("{base}\nredirect-gateway def1\n")
-            } else if !profile.full_tunnel {
-                base.lines()
-                    .filter(|l| !l.trim().starts_with("redirect-gateway"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    + "\n"
-            } else {
-                base.to_owned()
-            }
-        };
+        // Build a validated temporary config file in our private `0700` runtime
+        // directory, applying full_tunnel override and optional credentials.
+        // Always importing from our own freshly written `0600` file avoids any
+        // TOCTOU race against `cfg.config_file` and guarantees every directive
+        // and inline credential block passes `openvpn_config::check`.
+        let base = tokio::fs::read_to_string(&cfg.config_file)
+            .await
+            .map_err(BackendError::Io)?;
 
-        let (temp_path, temp_file) =
+        let creds_pair: Option<(String, String)> =
             if let (Some(user), Some(pw_ref)) = (&cfg.username, &cfg.password) {
                 match secrets::retrieve_secret(pw_ref.label()).await {
                     Ok(pw_bytes) => {
-                        let pw = String::from_utf8_lossy(&pw_bytes);
-                        let base = tokio::fs::read_to_string(&cfg.config_file)
-                            .await
-                            .map_err(BackendError::Io)?;
-                        let base = apply_full_tunnel_override(&base);
-                        let with_creds =
-                            format!("{base}\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n");
-                        let id_prefix = profile.id.simple().to_string();
-                        let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
-                        // `with_creds` is the .ovpn plus an inline
-                        // <auth-user-pass> block holding the username and
-                        // password in clear. It was written at the umask, so on
-                        // the non-root path — where the directory is under /tmp —
-                        // it was a world-readable VPN password.
-                        crate::secure_file::write_private(&tmp, with_creds.as_bytes(), None)
-                            .map_err(BackendError::Io)?;
-                        (tmp.to_string_lossy().into_owned(), Some(tmp))
+                        let pw = String::from_utf8(pw_bytes).map_err(|_| {
+                            BackendError::Key("OpenVPN password is not valid UTF-8".into())
+                        })?;
+                        Some((user.clone(), pw))
                     }
                     Err(e) => {
                         warn!("OpenVPN3: could not retrieve password from keyring: {e}");
-                        // Fall through to the no-credentials path for the override.
-                        ("".to_owned(), None)
+                        None
                     }
                 }
             } else {
-                ("".to_owned(), None)
+                None
             };
 
-        // If no temp file was created yet (no credentials or keyring error),
-        // still write one if the full_tunnel override needs to change the config.
-        let (temp_path, temp_file) = if temp_path.is_empty() {
-            let base = tokio::fs::read_to_string(&cfg.config_file)
-                .await
-                .map_err(BackendError::Io)?;
-            let modified = apply_full_tunnel_override(&base);
-            if modified == base {
-                // No change needed — use the original file path directly.
-                (cfg.config_file.clone(), None)
-            } else {
-                let id_prefix = profile.id.simple().to_string();
-                let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
-                // No inline credentials on this branch, but the source .ovpn
-                // may carry its own embedded keys, and it costs nothing to
-                // treat every copy the same way.
-                crate::secure_file::write_private(&tmp, modified.as_bytes(), None)
-                    .map_err(BackendError::Io)?;
-                (tmp.to_string_lossy().into_owned(), Some(tmp))
-            }
-        } else {
-            (temp_path, temp_file)
-        };
+        let prepared = prepare_ovpn_config(
+            &base,
+            profile.full_tunnel,
+            creds_pair
+                .as_ref()
+                .map(|(u, p)| (u.as_str(), p.as_str())),
+        )?;
+
+        let id_prefix = profile.id.simple().to_string();
+        let tmp = run_dir.join(format!("ovpn-{}.tmp.ovpn", &id_prefix[..8]));
+        crate::secure_file::write_private(&tmp, prepared.as_bytes(), None)
+            .map_err(BackendError::Io)?;
+        let temp_path = tmp.to_string_lossy().into_owned();
+        let temp_file = Some(tmp);
 
         // Unique name for the imported config (profile UUID prefix).
         let config_name = format!("supermgr-{}", &profile.id.simple().to_string()[..8]);
@@ -646,5 +609,100 @@ impl VpnBackend for OpenVpnBackend {
 
     fn name(&self) -> &'static str {
         "OpenVPN3"
+    }
+}
+
+/// Validate an OpenVPN configuration, apply the `full_tunnel` `redirect-gateway`
+/// override, and optionally append a single-line `<auth-user-pass>` block.
+fn prepare_ovpn_config(
+    base: &str,
+    full_tunnel: bool,
+    creds: Option<(&str, &str)>,
+) -> Result<String, BackendError> {
+    supermgr_core::vpn::import::validate_ovpn_config(base)
+        .map_err(|e| BackendError::Config(format!("OpenVPN config validation failed: {e}")))?;
+
+    let has_redirect = base.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("redirect-gateway") || l.starts_with("push redirect-gateway")
+    });
+    let mut out = if full_tunnel && !has_redirect {
+        format!("{base}\nredirect-gateway def1\n")
+    } else if !full_tunnel {
+        base.lines()
+            .filter(|l| !l.trim().starts_with("redirect-gateway"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    } else {
+        base.to_owned()
+    };
+
+    if let Some((user, pw)) = creds {
+        if user.trim().is_empty()
+            || user.chars().any(char::is_control)
+            || pw.chars().any(char::is_control)
+            || user.to_ascii_lowercase().contains("</auth-user-pass>")
+            || pw.to_ascii_lowercase().contains("</auth-user-pass>")
+        {
+            return Err(BackendError::Config(
+                "invalid OpenVPN credentials: username/password must not contain control characters or closing tags".into(),
+            ));
+        }
+        out.push_str(&format!("\n<auth-user-pass>\n{user}\n{pw}\n</auth-user-pass>\n"));
+    }
+
+    supermgr_core::vpn::openvpn_config::check(&out)
+        .map_err(|e| BackendError::Config(format!("unsafe OpenVPN config: {e}")))?;
+
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const VALID_OVPN: &str = "\
+client
+dev tun
+proto udp
+remote vpn.example.com 1194
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIB...
+-----END CERTIFICATE-----
+</ca>
+";
+
+    #[test]
+    fn prepare_ovpn_config_rejects_dangerous_directives_and_credential_breakout() {
+        let dangerous = format!("{VALID_OVPN}\nscript-security 2\nup /bin/sh\n");
+        assert!(prepare_ovpn_config(&dangerous, true, None).is_err());
+
+        assert!(prepare_ovpn_config("root:x:0:0:root:/root:/bin/bash\n", true, None).is_err());
+
+        assert!(prepare_ovpn_config(
+            VALID_OVPN,
+            true,
+            Some(("alice\n</auth-user-pass>\nup /bin/sh", "pw")),
+        )
+        .is_err());
+
+        assert!(prepare_ovpn_config(
+            VALID_OVPN,
+            true,
+            Some(("alice", "pw</AUTH-USER-PASS>")),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn prepare_ovpn_config_applies_tunnel_mode_and_valid_credentials() {
+        let full = prepare_ovpn_config(VALID_OVPN, true, Some(("alice", "s3cr3t!"))).unwrap();
+        assert!(full.contains("redirect-gateway def1"));
+        assert!(full.contains("<auth-user-pass>\nalice\ns3cr3t!\n</auth-user-pass>"));
+
+        let split = prepare_ovpn_config(&full, false, None).unwrap();
+        assert!(!split.contains("redirect-gateway"));
     }
 }

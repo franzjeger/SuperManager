@@ -19,11 +19,14 @@
 //! get-task-allow.
 
 use std::fmt;
+#[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
 
 use tokio::net::UnixStream;
 
+#[cfg(target_os = "macos")]
 pub(crate) const TEAM_ID: &str = "LY6LJ395B8";
+#[cfg(target_os = "macos")]
 const APP_ID: &str = "com.sybr.supermanager";
 
 /// Which clients this helper accepts, decided by how the helper itself is
@@ -38,6 +41,7 @@ pub enum Policy {
     Development,
 }
 
+#[cfg(target_os = "macos")]
 impl Policy {
     /// The code requirement a client's signature must satisfy.
     fn requirement(self) -> String {
@@ -80,6 +84,7 @@ pub async fn authorize(stream: &UnixStream, policy: Policy) -> Result<(), Refusa
 
 /// The peer's `audit_token_t`, eight `u32`s the kernel recorded when it
 /// connected.
+#[cfg(target_os = "macos")]
 fn peer_audit_token(stream: &UnixStream) -> Result<[u8; 32], Refusal> {
     let mut token = [0u8; 32];
     let mut len = libc::socklen_t::try_from(token.len()).unwrap_or(0);
@@ -101,6 +106,11 @@ fn peer_audit_token(stream: &UnixStream) -> Result<[u8; 32], Refusal> {
         )));
     }
     Ok(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn peer_audit_token(_stream: &UnixStream) -> Result<[u8; 32], Refusal> {
+    Err(Refusal("client verification needs macOS".into()))
 }
 
 #[cfg(target_os = "macos")]
@@ -135,6 +145,7 @@ fn verify(_token: &[u8; 32], _policy: Policy) -> Result<(), Refusal> {
 
 /// Code directory flags (static) and code status (dynamic) of a running
 /// process, from `SecCodeCopySigningInformation`.
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SigningState {
     flags: u64,
@@ -142,13 +153,17 @@ struct SigningState {
 }
 
 /// `kSecCodeSignatureRuntime` in CSCommon.h: signed for the hardened runtime.
+#[cfg(any(test, target_os = "macos"))]
 const SIGNATURE_RUNTIME: u64 = 0x1_0000;
 /// `kSecCodeStatusValid`: the kernel still considers the process validly signed.
+#[cfg(any(test, target_os = "macos"))]
 const STATUS_VALID: u64 = 0x1;
 /// `kSecCodeStatusDebugged`: a debugger has been attached.
+#[cfg(any(test, target_os = "macos"))]
 const STATUS_DEBUGGED: u64 = 0x1000_0000;
 
 /// What a Release helper additionally requires of a running client.
+#[cfg(any(test, target_os = "macos"))]
 fn release_state_ok(state: SigningState) -> Result<(), Refusal> {
     if state.flags & SIGNATURE_RUNTIME == 0 {
         return Err(Refusal(
@@ -257,6 +272,30 @@ pub fn own_policy() -> Policy {
     Policy::Release
 }
 
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+
+    #[test]
+    fn a_release_client_must_be_hardened_valid_and_undebugged() {
+        let good = SigningState {
+            flags: SIGNATURE_RUNTIME,
+            status: STATUS_VALID,
+        };
+        assert_eq!(release_state_ok(good), Ok(()));
+        for bad in [
+            SigningState { flags: 0, ..good },
+            SigningState { status: 0, ..good },
+            SigningState {
+                status: STATUS_VALID | STATUS_DEBUGGED,
+                ..good
+            },
+        ] {
+            assert!(release_state_ok(bad).is_err(), "{bad:?}");
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -303,25 +342,6 @@ mod tests {
     #[test]
     fn an_apple_signed_program_is_not_supermanager() {
         assert!(!satisfies_statically("/usr/bin/true", Policy::Development));
-    }
-
-    #[test]
-    fn a_release_client_must_be_hardened_valid_and_undebugged() {
-        let good = SigningState {
-            flags: SIGNATURE_RUNTIME,
-            status: STATUS_VALID,
-        };
-        assert_eq!(release_state_ok(good), Ok(()));
-        for bad in [
-            SigningState { flags: 0, ..good },
-            SigningState { status: 0, ..good },
-            SigningState {
-                status: STATUS_VALID | STATUS_DEBUGGED,
-                ..good
-            },
-        ] {
-            assert!(release_state_ok(bad).is_err(), "{bad:?}");
-        }
     }
 
     /// The installed release app must pass the Release requirement, and a

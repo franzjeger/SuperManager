@@ -123,7 +123,13 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                let eng = crate::error::EngineError::from_findings_anyhow(e);
+                return Response::err(id, eng.rpc_code(), eng.to_string());
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {
@@ -164,7 +170,13 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                let eng = crate::error::EngineError::from_findings_anyhow(e);
+                return Response::err(id, eng.rpc_code(), eng.to_string());
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {
@@ -205,7 +217,13 @@ impl EngineServer {
         } else {
             engagement.customer_slug.clone()
         };
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                let eng = crate::error::EngineError::from_findings_anyhow(e);
+                return Response::err(id, eng.rpc_code(), eng.to_string());
+            }
+        };
         let customer_slug = if engagement.customer_slug.is_empty() {
             None
         } else {

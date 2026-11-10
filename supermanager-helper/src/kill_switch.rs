@@ -101,8 +101,9 @@ block return in all
 "
     );
 
-    fs::create_dir_all(Path::new(ANCHOR_FILE).parent().unwrap())
-        .context("creating /etc/pf.anchors")?;
+    if let Some(parent) = Path::new(ANCHOR_FILE).parent() {
+        fs::create_dir_all(parent).context("creating /etc/pf.anchors")?;
+    }
     fs::write(ANCHOR_FILE, rules).context("writing anchor file")?;
 
     // Make sure pf is enabled. `pfctl -E` is idempotent — returns

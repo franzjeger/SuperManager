@@ -23,9 +23,20 @@ pub fn provider_name(provider: AiProvider) -> &'static str {
 }
 
 pub fn anthropic_tools(allow_changes: bool) -> Value {
-    Value::Array(supermgr_mcp::available_tools(allow_changes).as_array().unwrap().iter().map(|tool| json!({
-        "name":tool["name"], "description":tool["description"], "input_schema":tool["inputSchema"]
-    })).collect())
+    let tools = supermgr_mcp::available_tools(allow_changes);
+    let items = tools
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|tool| {
+            json!({
+                "name": tool["name"],
+                "description": tool["description"],
+                "input_schema": tool["inputSchema"],
+            })
+        })
+        .collect();
+    Value::Array(items)
 }
 
 pub async fn execute_tool(name: &str, args: &Value, allow_changes: bool) -> anyhow::Result<Value> {

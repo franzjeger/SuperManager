@@ -2,6 +2,7 @@ import AppKit
 import CryptoKit
 import Darwin
 import Foundation
+import Security
 
 /// Microsoft Entra ID PKCE auth-code flow for Azure VPN, ported
 /// from MSP-Toolkit-V2's `get_auth_url` + `exchange_code` pair.
@@ -255,7 +256,7 @@ enum AzureOAuth {
         // tenants), then `preferred_username` (consumer accounts),
         // then the `AzureAD` fallback the Azure VPN gateway accepts.
         let username = decodeJWTUsername(access) ?? "AzureAD"
-        DebugLog.write("[AzureOAuth] token OK: access_token=\(access.prefix(20))… (\(access.count) chars), refresh=\(refresh != nil ? "yes" : "no"), expires_in=\(Int(expiresIn))s, upn=\(username)")
+        DebugLog.write("[AzureOAuth] token OK: access_token=<redacted> (\(access.count) chars), refresh=\(refresh != nil ? "yes" : "no"), expires_in=\(Int(expiresIn))s, upn=\(username)")
         // Diagnostic: dump the JWT's `iss`, `aud`, `appid`, `tid`,
         // `ver` claims so we can compare against what the Azure VPN
         // gateway expects from the .azurevpnconfig (`<issuer>` /
@@ -356,27 +357,37 @@ enum AzureOAuth {
         keychainGet(account: keychainAccount(audience: audience, tenant: tenant, suffix: "hint"))
     }
 
-    private static func keychainSet(account: String, value: String) {
-        let attrs: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: account,
+    private static func keychainBaseQuery(account: String) -> [String: Any] {
+        [
+            kSecClass as String:                     kSecClassGenericPassword,
+            kSecAttrService as String:               keychainService,
+            kSecAttrAccount as String:               account,
+            kSecUseDataProtectionKeychain as String: true,
         ]
-        SecItemDelete(attrs as CFDictionary)
-        var add = attrs
-        add[kSecValueData] = Data(value.utf8)
-        _ = SecItemAdd(add as CFDictionary, nil)
+    }
+
+    private static func keychainSet(account: String, value: String) {
+        let data = Data(value.utf8)
+        let query = keychainBaseQuery(account: account)
+        let update: [String: Any] = [
+            kSecValueData as String:      data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+        ]
+        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
+        if status == errSecSuccess { return }
+        if status == errSecItemNotFound {
+            var add = query
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            _ = SecItemAdd(add as CFDictionary, nil)
+        }
     }
 
     private static func keychainGet(account: String) -> String? {
-        let q: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: keychainService,
-            kSecAttrAccount: account,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-        ]
-        var out: CFTypeRef?
+        var q = keychainBaseQuery(account: account)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: AnyObject?
         guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
               let data = out as? Data,
               let str = String(data: data, encoding: .utf8)
@@ -427,7 +438,8 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
     private let listenSocket: Int32
     private let expectedState: String
     private var continuation: CheckedContinuation<String, Error>?
-    /// Lock around `continuation` + `acceptedSocket` since the
+    private var pendingResult: Result<String, Error>?
+    /// Lock around `continuation` + `pendingResult` + `acceptedSocket` since the
     /// accept loop runs on a background queue.
     private let lock = NSLock()
     private var acceptedSocket: Int32 = -1
@@ -501,7 +513,7 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
             close(sock)
             throw AzureOAuth.AuthError.listenerFailed("bind(127.0.0.1:\(portNum)): \(msg)")
         }
-        if Darwin.listen(sock, 1) != 0 {
+        if Darwin.listen(sock, 8) != 0 {
             let msg = String(cString: strerror(errno))
             close(sock)
             throw AzureOAuth.AuthError.listenerFailed("listen(): \(msg)")
@@ -515,97 +527,123 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
     }
 
     /// Spin a background queue waiting for the OAuth redirect.
-    /// Resolves the awaiting `awaitCode()` Task on the first
-    /// well-formed connection.
+    /// Loops across speculative browser TCP preconnects and `/favicon.ico`
+    /// probes until the real callback arrives or `cancel()` closes `listenSocket`.
     private func startAcceptLoop() {
         let listenSock = self.listenSocket
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             DebugLog.write("[AzureOAuth.Listener] accept() blocking on fd=\(listenSock)")
-            // Block in accept(); the kernel hands us one client.
-            var clientAddr = sockaddr()
-            var clientLen = socklen_t(MemoryLayout<sockaddr>.size)
-            let conn = Darwin.accept(listenSock, &clientAddr, &clientLen)
-            DebugLog.write("[AzureOAuth.Listener] accept() returned fd=\(conn) errno=\(conn < 0 ? errno : 0)")
-            guard let self else {
-                DebugLog.write("[AzureOAuth.Listener] self deallocated, dropping connection")
-                if conn >= 0 { close(conn) }
-                return
-            }
-            self.lock.lock()
-            self.acceptedSocket = conn
-            let cancelled = self.cancelled
-            self.lock.unlock()
+            while true {
+                var clientAddr = sockaddr()
+                var clientLen = socklen_t(MemoryLayout<sockaddr>.size)
+                let conn = Darwin.accept(listenSock, &clientAddr, &clientLen)
+                let acceptErr = conn < 0 ? errno : 0
+                if acceptErr == EINTR {
+                    continue
+                }
+                DebugLog.write("[AzureOAuth.Listener] accept() returned fd=\(conn) errno=\(acceptErr)")
+                guard let self else {
+                    DebugLog.write("[AzureOAuth.Listener] self deallocated, dropping connection")
+                    if conn >= 0 { close(conn) }
+                    return
+                }
+                self.lock.lock()
+                self.acceptedSocket = conn
+                let cancelled = self.cancelled
+                self.lock.unlock()
 
-            if cancelled || conn < 0 {
-                if conn >= 0 { close(conn) }
-                return
-            }
+                if cancelled || conn < 0 {
+                    if conn >= 0 { close(conn) }
+                    return
+                }
 
-            // Read the request — a single `recv` of up to 8 KiB
-            // catches the full GET line + headers in practice.
-            // We only care about the request line.
-            var buffer = [UInt8](repeating: 0, count: 8192)
-            let n = buffer.withUnsafeMutableBufferPointer { ptr -> Int in
-                Darwin.recv(conn, ptr.baseAddress, 8192, 0)
-            }
-            guard n > 0 else {
+                // Read up to 8 KiB — ignores 0-byte speculative TCP preconnects.
+                var buffer = [UInt8](repeating: 0, count: 8192)
+                let n = buffer.withUnsafeMutableBufferPointer { ptr -> Int in
+                    Darwin.recv(conn, ptr.baseAddress, 8192, 0)
+                }
+                if n <= 0 {
+                    close(conn)
+                    self.lock.lock()
+                    self.acceptedSocket = -1
+                    let wasCancelled = self.cancelled
+                    self.lock.unlock()
+                    if wasCancelled { return }
+                    continue
+                }
+                let request = String(decoding: buffer[..<Int(n)], as: UTF8.self)
+
+                // Parse `GET /?code=…&state=… HTTP/1.1` — first line.
+                let firstLine = request.split(separator: "\r\n").first ?? ""
+                let parts = firstLine.split(separator: " ")
+                guard parts.count >= 2, parts[0] == "GET" else {
+                    close(conn)
+                    self.lock.lock()
+                    self.acceptedSocket = -1
+                    self.lock.unlock()
+                    continue
+                }
+                let path = String(parts[1])
+                guard let comps = URLComponents(string: "http://localhost\(path)") else {
+                    close(conn)
+                    self.lock.lock()
+                    self.acceptedSocket = -1
+                    self.lock.unlock()
+                    continue
+                }
+                if comps.path != "/" && !comps.path.isEmpty {
+                    let notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    notFound.withCString { cstr in
+                        _ = Darwin.send(conn, cstr, strlen(cstr), 0)
+                    }
+                    close(conn)
+                    self.lock.lock()
+                    self.acceptedSocket = -1
+                    self.lock.unlock()
+                    continue
+                }
+                let query = Dictionary(uniqueKeysWithValues:
+                    (comps.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+
+                // Always reply with the close-page so the browser
+                // shows a friendly result.
+                let body = self.htmlClosingPage(success: query["error"] == nil && query["state"] == self.expectedState)
+                let header = """
+                HTTP/1.1 200 OK\r
+                Content-Type: text/html; charset=utf-8\r
+                Content-Length: \(body.utf8.count)\r
+                Connection: close\r
+                \r
+
+                """
+                let response = (header + body)
+                response.withCString { cstr in
+                    _ = Darwin.send(conn, cstr, strlen(cstr), 0)
+                }
                 close(conn)
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.missingCode))
+                self.lock.lock()
+                self.acceptedSocket = -1
+                self.lock.unlock()
+
+                DebugLog.write("[AzureOAuth.Listener] received \(n) bytes; query keys: \(query.keys.sorted())")
+                // Now resolve the continuation with the parsed result.
+                if let err = query["error"] {
+                    let desc = query["error_description"] ?? err
+                    DebugLog.write("[AzureOAuth.Listener] AAD returned error: \(desc)")
+                    self.resolveContinuation(.failure(AzureOAuth.AuthError.authorizationDenied(desc)))
+                } else if query["state"] != self.expectedState {
+                    DebugLog.write("[AzureOAuth.Listener] state mismatch: got \(query["state"] ?? "nil"), expected \(self.expectedState.prefix(8))…")
+                    self.resolveContinuation(.failure(AzureOAuth.AuthError.authorizationDenied(
+                        "state mismatch — possible CSRF, refusing the response"
+                    )))
+                } else if let code = query["code"], !code.isEmpty {
+                    DebugLog.write("[AzureOAuth.Listener] resolving with auth code (\(code.count) chars)")
+                    self.resolveContinuation(.success(code))
+                } else {
+                    DebugLog.write("[AzureOAuth.Listener] no code in query; resolving with missingCode")
+                    self.resolveContinuation(.failure(AzureOAuth.AuthError.missingCode))
+                }
                 return
-            }
-            let request = String(decoding: buffer[..<Int(n)], as: UTF8.self)
-
-            // Parse `GET /?code=…&state=… HTTP/1.1` — first line.
-            let firstLine = request.split(separator: "\r\n").first ?? ""
-            let parts = firstLine.split(separator: " ")
-            guard parts.count >= 2, parts[0] == "GET" else {
-                close(conn)
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.missingCode))
-                return
-            }
-            let path = String(parts[1])
-            guard let comps = URLComponents(string: "http://localhost\(path)") else {
-                close(conn)
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.missingCode))
-                return
-            }
-            let query = Dictionary(uniqueKeysWithValues:
-                (comps.queryItems ?? []).map { ($0.name, $0.value ?? "") })
-
-            // Always reply with the close-page so the browser
-            // shows a friendly result.
-            let body = self.htmlClosingPage(success: query["error"] == nil)
-            let header = """
-            HTTP/1.1 200 OK\r
-            Content-Type: text/html; charset=utf-8\r
-            Content-Length: \(body.utf8.count)\r
-            Connection: close\r
-            \r
-
-            """
-            let response = (header + body)
-            response.withCString { cstr in
-                _ = Darwin.send(conn, cstr, strlen(cstr), 0)
-            }
-            close(conn)
-
-            DebugLog.write("[AzureOAuth.Listener] received \(n) bytes; query keys: \(query.keys.sorted())")
-            // Now resolve the continuation with the parsed result.
-            if let err = query["error"] {
-                let desc = query["error_description"] ?? err
-                DebugLog.write("[AzureOAuth.Listener] AAD returned error: \(desc)")
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.authorizationDenied(desc)))
-            } else if query["state"] != self.expectedState {
-                DebugLog.write("[AzureOAuth.Listener] state mismatch: got \(query["state"] ?? "nil"), expected \(self.expectedState.prefix(8))…")
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.authorizationDenied(
-                    "state mismatch — possible CSRF, refusing the response"
-                )))
-            } else if let code = query["code"], !code.isEmpty {
-                DebugLog.write("[AzureOAuth.Listener] resolving with auth code (\(code.count) chars)")
-                self.resolveContinuation(.success(code))
-            } else {
-                DebugLog.write("[AzureOAuth.Listener] no code in query; resolving with missingCode")
-                self.resolveContinuation(.failure(AzureOAuth.AuthError.missingCode))
             }
         }
     }
@@ -613,6 +651,17 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
     func awaitCode() async throws -> String {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<String, Error>) in
             self.lock.lock()
+            if let existing = self.pendingResult {
+                self.pendingResult = nil
+                self.lock.unlock()
+                cont.resume(with: existing)
+                return
+            }
+            if self.cancelled {
+                self.lock.unlock()
+                cont.resume(throwing: AzureOAuth.AuthError.userCancelled)
+                return
+            }
             self.continuation = cont
             self.lock.unlock()
         }
@@ -620,6 +669,7 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
 
     func cancel() {
         lock.lock()
+        let alreadyCancelled = cancelled
         cancelled = true
         let cont = continuation
         continuation = nil
@@ -627,9 +677,11 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
         acceptedSocket = -1
         lock.unlock()
 
-        // Closing the listening socket aborts any blocked
-        // `accept()` call with EBADF — the loop exits cleanly.
-        Darwin.close(listenSocket)
+        if !alreadyCancelled {
+            // Closing the listening socket aborts any blocked
+            // `accept()` call with EBADF — the loop exits cleanly.
+            Darwin.close(listenSocket)
+        }
         if accepted >= 0 {
             Darwin.close(accepted)
         }
@@ -638,12 +690,13 @@ private final class LoopbackOAuthListener: @unchecked Sendable {
 
     private func resolveContinuation(_ result: Result<String, Error>) {
         lock.lock()
-        let cont = continuation
-        continuation = nil
-        lock.unlock()
-        switch result {
-        case .success(let s): cont?.resume(returning: s)
-        case .failure(let e): cont?.resume(throwing: e)
+        if let cont = continuation {
+            continuation = nil
+            lock.unlock()
+            cont.resume(with: result)
+        } else {
+            pendingResult = result
+            lock.unlock()
         }
     }
 

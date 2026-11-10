@@ -247,12 +247,18 @@ pub fn is_sha256_fingerprint(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
 }
 
+fn parent_or_current_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
 /// Replace the file at `path` with `map`, all at once: a temporary file in
 /// the same directory, flushed to disk, then renamed over the old one.
 fn write_atomically(path: &Path, map: &HashMap<String, Known>) -> std::io::Result<()> {
     let bytes = serde_json::to_vec_pretty(map)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let directory = path.parent().expect("known-hosts path has a parent");
+    let directory = parent_or_current_dir(path);
     let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
     temporary.write_all(&bytes)?;
     temporary.as_file().sync_all()?;
@@ -456,5 +462,18 @@ mod tests {
             (HostKeyVerdict::FirstSeen(_), HostKeyVerdict::Changed { .. })
                 | (HostKeyVerdict::Changed { .. }, HostKeyVerdict::FirstSeen(_))
         ));
+    }
+
+    #[test]
+    fn bare_or_empty_paths_fall_back_to_current_dir_without_panicking() {
+        assert_eq!(
+            parent_or_current_dir(Path::new("known_hosts.json")),
+            Path::new(".")
+        );
+        assert_eq!(parent_or_current_dir(Path::new("")), Path::new("."));
+        assert_eq!(
+            parent_or_current_dir(Path::new("/var/lib/known_hosts.json")),
+            Path::new("/var/lib")
+        );
     }
 }

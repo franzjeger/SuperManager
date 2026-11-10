@@ -77,7 +77,7 @@ pub async fn api_request(
 ) -> Result<ApiResponse> {
     // Snapshot connection params under lock; never call out to the
     // network with the state mutex held.
-    let (hostname, api_port, _verify_tls, token_label) = {
+    let (hostname, api_port, verify_tls, token_label) = {
         let st = state.lock().await;
         let host = st
             .ssh_hosts
@@ -105,14 +105,11 @@ pub async fn api_request(
     let url = format!("https://{hostname}:{api_port}{path}");
     info!("fortigate_api: {method} {url}");
 
-    // FortiGate appliances ship a self-signed cert by default. Enabling
-    // `danger_accept_invalid_certs` is the operationally-correct choice
-    // for the LAN-attached small-business segment we target — verifying
-    // would require pinning a fingerprint per host (a feature we'll
-    // add in a later phase). The token-bearer auth in the header is
-    // what actually authenticates the request.
+    // FortiGate appliances ship a self-signed cert by default (`api_verify_tls`
+    // defaults to false), while still honouring `api_verify_tls = true` when
+    // the operator has installed a CA-signed certificate on the appliance.
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .timeout(HTTP_TIMEOUT)
         .build()
         .context("build HTTP client")?;
@@ -199,6 +196,9 @@ pub async fn generate_token(
     } else {
         None
     };
+
+    supermgr_core::sanitize::validate_safe_ident(api_user, "api_user")
+        .map_err(|e| anyhow!("{e}"))?;
 
     let api_user_owned = api_user.to_owned();
     let cmd_lines: Vec<String> = vec![

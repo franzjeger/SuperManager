@@ -61,6 +61,8 @@ jobs:
         run: python3 -m unittest scripts/tests/test_app_version.py -v
       - name: Test that launchd jobs run the installed helper
         run: python3 -m unittest scripts/tests/test_launchd_paths.py -v
+      - name: Test polkit operator rule and installer coverage
+        run: node scripts/test-polkit-rule.mjs
 
       # `shellcheck` parses; it does not prove bash agrees. Cheap second opinion.
       - name: Parse every tracked shell script
@@ -362,14 +364,29 @@ jobs:
           cargo build --release \
             -p supermgr-core \
             -p supermgr-engine \
+            -p supermgr-mcp \
             -p supermgrd-mac \
             -p supermanager-helper
+
+      - name: Clippy (Mac crates)
+        run: |
+          cargo clippy --all-targets \
+            -p supermgr-core \
+            -p supermgr-engine \
+            -p supermgr-mcp \
+            -p supermgrd-mac \
+            -p supermanager-helper \
+            -- -D warnings \
+               -A clippy::pedantic \
+               -A clippy::style \
+               -A clippy::complexity
 
       - name: Tests (Mac crates)
         run: |
           cargo test \
             -p supermgr-core \
             -p supermgr-engine \
+            -p supermgr-mcp \
             -p supermgrd-mac \
             -p supermanager-helper
 
@@ -430,6 +447,18 @@ jobs:
             -p supermgr-mcp `
             -p supermgrd-win `
             -p supermgr-win
+
+      - name: Clippy (Windows crates)
+        run: |
+          cargo clippy --all-targets `
+            -p supermgr-core `
+            -p supermgr-mcp `
+            -p supermgrd-win `
+            -p supermgr-win `
+            -- -D warnings `
+               -A clippy::pedantic `
+               -A clippy::style `
+               -A clippy::complexity
 
       # Runs the Windows crates' own tests — the daemon's host-key checks
       # against an in-process SSH server among them — and compiles their

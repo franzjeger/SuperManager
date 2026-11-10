@@ -31,6 +31,13 @@ extension ProcessInfo {
     }
 }
 
+@MainActor
+private enum AppRuntimeGuard {
+    static var didBootstrap = false
+    static var daemonStarted = false
+    static var localEventMonitor: Any?
+}
+
 @main
 struct SuperManagerApp: App {
     @State private var appState: AppState
@@ -116,7 +123,9 @@ struct SuperManagerApp: App {
                 // don't want to come back to a stale search filter from
                 // before they walked away.
                 RootView(appState: appState) {
-                    Task {
+                    Task { @MainActor in
+                        guard !AppRuntimeGuard.didBootstrap else { return }
+                        AppRuntimeGuard.didBootstrap = true
                         await startDaemon()
                         await appState.connectToDaemon()
                         startAutoLockTimer()
@@ -270,13 +279,8 @@ struct SuperManagerApp: App {
                     NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
                 Button("Reveal App Debug Log in Finder") {
-                    let dir = FileManager.default
-                        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-                        .first?
-                        .appendingPathComponent("SuperManager")
-                    if let dir {
-                        NSWorkspace.shared.activateFileViewerSelecting([dir])
-                    }
+                    let url = DebugLog.ensureFileExists()
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
                 }
                 Divider()
                 // Surface the support bundle from a top-level menu
@@ -329,7 +333,11 @@ struct SuperManagerApp: App {
     /// while the new daemon binds the socket. SSH state and VPN
     /// profiles are persisted on disk, so nothing is lost — the new
     /// daemon reads them right back during its `DaemonState::load_*`.
+    @MainActor
     private func startDaemon() async {
+        guard !AppRuntimeGuard.daemonStarted else { return }
+        AppRuntimeGuard.daemonStarted = true
+
         // 1. Kill any existing daemon — fire-and-forget, but wait for
         //    the process to actually exit before continuing so the
         //    socket file isn't held by a zombie.
@@ -387,8 +395,13 @@ struct SuperManagerApp: App {
     }
 
     /// Candidate locations for the daemon binary, in priority order.
+    /// Release builds ONLY launch the signed executable embedded inside the app bundle.
     private func daemonBinaryCandidates() -> [String] {
-        let bundleURL = URL(fileURLWithPath: Bundle.main.bundlePath)
+        let bundleURL = Bundle.main.bundleURL
+        let bundled = bundleURL.appendingPathComponent("Contents/MacOS/supermgrd-mac").path
+        #if !DEBUG
+        return [bundled]
+        #else
         // In dev the .app lives at <project>/SuperManagerMac/build/SuperManager.app,
         // so the cargo output is three directories above the bundle.
         let projectRoot = bundleURL
@@ -397,12 +410,13 @@ struct SuperManagerApp: App {
             .deletingLastPathComponent()
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return [
-            bundleURL.path + "/Contents/MacOS/supermgrd-mac",
+            bundled,
             projectRoot.appendingPathComponent("target/debug/supermgrd-mac").path,
             projectRoot.appendingPathComponent("target/release/supermgrd-mac").path,
             "\(home)/.cargo/bin/supermgrd-mac",
             "/usr/local/bin/supermgrd-mac",
         ]
+        #endif
     }
 
     /// Start the auto-lock timer + activity observer.
@@ -417,16 +431,20 @@ struct SuperManagerApp: App {
     /// Lock trigger: a 1-Hz polling task locks the app when
     /// (now - lastActivity) crosses the configured threshold. Cheap;
     /// short-circuits when auto-lock is off or no password is set.
+    @MainActor
     private func startAutoLockTimer() {
         // Activity observer — feed every relevant NSEvent into
         // `noteActivity()`. The closure must return the event so the
-        // app continues to receive it normally.
-        let _ = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .leftMouseDown, .rightMouseDown,
-                       .otherMouseDown, .scrollWheel, .mouseMoved]
-        ) { event in
-            LockState.shared.noteActivity()
-            return event
+        // app continues to receive it normally. Guarded so closing and
+        // reopening a window never stacks duplicate event monitors.
+        if AppRuntimeGuard.localEventMonitor == nil {
+            AppRuntimeGuard.localEventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.keyDown, .leftMouseDown, .rightMouseDown,
+                           .otherMouseDown, .scrollWheel, .mouseMoved]
+            ) { event in
+                LockState.shared.noteActivity()
+                return event
+            }
         }
 
         autoLockTask?.cancel()
@@ -502,9 +520,15 @@ struct SuperManagerApp: App {
         defer { close(sock) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
+        let pathBytes = Array(path.utf8)
+        let sunPathCap = MemoryLayout.size(ofValue: addr.sun_path)
+        guard pathBytes.count < sunPathCap else { return false }
         withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-            path.withCString { cstr in
-                _ = memcpy(ptr, cstr, min(path.utf8.count, 104))
+            ptr.withMemoryRebound(to: CChar.self, capacity: sunPathCap) { dst in
+                for (i, b) in pathBytes.enumerated() {
+                    dst[i] = CChar(bitPattern: b)
+                }
+                dst[pathBytes.count] = 0
             }
         }
         let result = withUnsafePointer(to: &addr) { ptr -> Int32 in

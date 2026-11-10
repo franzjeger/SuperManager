@@ -245,10 +245,12 @@ impl KnownHostsStore {
     }
 
     fn persist(&self, snapshot: &HashMap<String, String>) -> Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
-        }
-        let dir = self.path.parent().expect("known-hosts path has a parent");
+        let dir = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|e| io_error(dir, e))?;
         serde_json::to_writer_pretty(&mut tmp, snapshot).map_err(|source| {
             KnownHostsError::Corrupt {

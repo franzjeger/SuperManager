@@ -42,7 +42,7 @@ use std::fs;
 use std::path::Path;
 // Every command here is bounded: see `proc::Bounded`.
 use crate::proc::Bounded as Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -56,7 +56,7 @@ static FALLBACKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Spawn the watchdog. Idempotent.
 pub fn spawn_watchdog() -> Result<()> {
-    let mut spawned = SPAWNED.lock().unwrap();
+    let mut spawned = SPAWNED.lock().unwrap_or_else(PoisonError::into_inner);
     if *spawned {
         return Ok(());
     }
@@ -65,15 +65,19 @@ pub fn spawn_watchdog() -> Result<()> {
 
     // Load persisted fallbacks (if any).
     if let Ok(s) = fs::read_to_string(FALLBACK_PATH) {
-        *FALLBACKS.lock().unwrap() = stored_fallbacks(&s);
+        *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = stored_fallbacks(&s);
     }
-    if FALLBACKS.lock().unwrap().is_empty() {
+    if FALLBACKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_empty()
+    {
         // Sensible default — two well-known public resolvers.
         // The user can override at runtime via `set_fallbacks`
         // (e.g. to prepend an internal DNS for split-horizon
         // domains). Defaults must be reachable everywhere so
         // the watchdog works out of the box on any network.
-        *FALLBACKS.lock().unwrap() = vec![
+        *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = vec![
             "1.1.1.1".to_string(), // Cloudflare
             "9.9.9.9".to_string(), // Quad9
         ];
@@ -95,11 +99,12 @@ pub fn set_fallbacks(list: Vec<String>) -> Result<()> {
         .iter()
         .map(ToString::to_string)
         .collect();
-    let parent = Path::new(FALLBACK_PATH).parent().unwrap();
-    fs::create_dir_all(parent).context("creating fallback dir")?;
+    if let Some(parent) = Path::new(FALLBACK_PATH).parent() {
+        fs::create_dir_all(parent).context("creating fallback dir")?;
+    }
     let json = serde_json::to_string(&list).context("encoding json")?;
     fs::write(FALLBACK_PATH, json).context("writing fallback file")?;
-    *FALLBACKS.lock().unwrap() = list;
+    *FALLBACKS.lock().unwrap_or_else(PoisonError::into_inner) = list;
     Ok(())
 }
 
@@ -126,7 +131,10 @@ fn stored_fallbacks(json: &str) -> Vec<String> {
 }
 
 pub fn current_fallbacks() -> Vec<String> {
-    FALLBACKS.lock().unwrap().clone()
+    FALLBACKS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 fn watchdog_loop() {
@@ -169,7 +177,10 @@ fn watchdog_loop() {
         );
 
         if consecutive_failures >= 3 && !already_forced {
-            let configured = FALLBACKS.lock().unwrap().clone();
+            let configured = FALLBACKS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
 
             // Only install fallbacks that actually answer *here*.
             // The list is persisted across networks, so it happily

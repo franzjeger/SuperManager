@@ -38,10 +38,12 @@
 //! FTP credentials from 192.168.1.50") rather than 30.
 //!
 //! Why shell-out to tcpdump instead of a pure-Rust pcap parser?
-//! Same reason as `dns_axfr.rs`: tcpdump handles every edge case
-//! (8021Q VLAN tags, IPv6, IP fragmentation, TCP reassembly when
-//! `-A` is used) for free. Detection is substring-matching on
-//! ASCII payloads — exactly the format tcpdump emits.
+//! Same reason as `dns_axfr.rs`: tcpdump decodes L2/L3 framing
+//! (802.1Q VLAN tags, IPv6, link-layer variants) out of the box.
+//! Note that `tcpdump -A` inspects individual captured packets
+//! rather than reassembling IP fragments or multi-segment TCP
+//! streams; single-packet substring matching is sufficient for
+//! cleartext credential headers and login commands.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -519,7 +521,7 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
         || header.dst_port == 8000
         || header.dst_port == 8888
     {
-        let lc = payload.to_lowercase();
+        let lc = payload.to_ascii_lowercase();
         if let Some(idx) = lc.find("authorization: basic ") {
             // Pull the original-case line. The header value (base64
             // creds) is redacted to SHA-256 of the base64 string,
@@ -570,7 +572,7 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
 
     // IMAP: tag LOGIN user pass — e.g. "a001 LOGIN user pass"
     if header.dst_port == 143 || header.src_port == 143 {
-        let lc = payload.to_lowercase();
+        let lc = payload.to_ascii_lowercase();
         // Look for " LOGIN " (space before+after) to avoid matching
         // strings like "LOGIN PLAIN".
         if let Some(idx) = lc.find(" login ") {
@@ -592,7 +594,7 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
 
     // SMTP AUTH: client sends "AUTH PLAIN <base64>" or "AUTH LOGIN"
     if header.dst_port == 25 || header.dst_port == 587 || header.dst_port == 465 {
-        let lc = payload.to_lowercase();
+        let lc = payload.to_ascii_lowercase();
         if let Some(idx) = lc.find("auth plain ") {
             let line = extract_line_from(payload, idx);
             let redacted = redact_after_first_space_then_space(&line);
@@ -699,8 +701,7 @@ fn scan_packet_payload(header: &PacketHeader, payload: &str) -> Vec<Event> {
         // see the message type byte (1/2/3 = negotiate/challenge/
         // authenticate). tcpdump -A renders the type byte as
         // either a printable digit or a dot — fine for our purposes.
-        let snippet_end = (idx + 32).min(payload.len());
-        let snippet = &payload[idx..snippet_end];
+        let snippet = supermgr_core::sanitize::truncate_utf8(&payload[idx..], 32);
         let preview = snippet
             .chars()
             .map(|c| {
@@ -813,7 +814,7 @@ fn redact_imap_login(line: &str) -> String {
 /// "Authorization: Basic dXNlcjpwYXNz" →
 /// "Authorization: Basic sha256:abcd1234…"
 fn redact_basic_auth(line: &str) -> String {
-    let lc = line.to_lowercase();
+    let lc = line.to_ascii_lowercase();
     let needle = "authorization: basic ";
     if let Some(idx) = lc.find(needle) {
         let prefix = &line[..idx + needle.len()];
@@ -858,7 +859,7 @@ fn extract_snmp_community(payload: &str) -> Option<String> {
         }
     }
     // Pattern 2: `Community = "..."` (with or without spaces around =)
-    let lc = payload.to_lowercase();
+    let lc = payload.to_ascii_lowercase();
     if let Some(idx) = lc.find("community") {
         let rest = &payload[idx + "community".len()..];
         let trimmed = rest.trim_start_matches([' ', '=', ':', '\t']);
@@ -906,7 +907,7 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
     }
     // Must be form-urlencoded — JSON / multipart bodies aren't
     // simple key=value pairs and need a different parse.
-    let lc = payload.to_lowercase();
+    let lc = payload.to_ascii_lowercase();
     if !lc.contains("application/x-www-form-urlencoded") {
         return None;
     }
@@ -917,7 +918,7 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
         .or_else(|| payload.find("\n\n").map(|i| i + 2))?;
     let body = &payload[body_start..];
     // Look for password-bearing keys.
-    let body_lc = body.to_lowercase();
+    let body_lc = body.to_ascii_lowercase();
     let key = ["password=", "passwd=", "pwd=", "pass="]
         .iter()
         .find(|k| body_lc.contains(*k))
@@ -943,13 +944,14 @@ fn extract_http_form_password(payload: &str) -> Option<String> {
     redacted.push_str(&body[..idx + key_len]);
     redacted.push_str(&format!("sha256:{}", short_hash(password)));
     redacted.push_str(&body[value_end..]);
-    // Trim to first 200 chars so we don't paste huge form blobs
-    // into the finding detail.
-    if redacted.len() > 200 {
-        redacted.truncate(200);
-        redacted.push('…');
-    }
-    Some(format!("POST {path}  {redacted}"))
+    // Trim to first 200 bytes (at a valid UTF-8 char boundary) so we
+    // don't paste huge form blobs into the finding detail.
+    let summary = if redacted.len() > 200 {
+        format!("{}…", supermgr_core::sanitize::truncate_utf8(&redacted, 200))
+    } else {
+        redacted
+    };
+    Some(format!("POST {path}  {summary}"))
 }
 
 /// Helper to produce the engagement evidence directory path.
@@ -1450,5 +1452,38 @@ NTLMSSP....type-1 negotiate message bytes
         let pcap_path = tmp.path().join("nope.pcap");
         let result = analyse_pcap(&pcap_path, tmp.path()).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unicode_case_folding_and_utf8_truncation_do_not_panic() {
+        let header = PacketHeader {
+            timestamp: "2026-05-13 14:23:45.000000".into(),
+            src_ip: "192.168.1.50".into(),
+            src_port: 54321,
+            dst_ip: "192.168.1.100".into(),
+            dst_port: 80,
+        };
+        // 'İ' ('\u{0130}') expands byte length under `.to_lowercase()`, and
+        // multi-byte chars at byte 32 / byte 200 used to panic byte slicing.
+        let ntlm_and_basic = format!(
+            "GET / HTTP/1.1\r\nX-Note: İİİ\r\nAUTHORIZATION: BASIC dXNlcjpwYXNz\r\n\r\nNTLMSSP{}",
+            "İ".repeat(25)
+        );
+        let events = scan_packet_payload(&header, &ntlm_and_basic);
+        assert!(events.iter().any(|e| e.protocol.id == PROTO_HTTP_BASIC.id));
+        assert!(events
+            .iter()
+            .any(|e| e.protocol.id == PROTO_NTLM_HANDSHAKE.id));
+
+        let snmp = extract_snmp_community("İİİ Community = \"public\"");
+        assert_eq!(snmp.as_deref(), Some("public"));
+
+        let long_utf8_tail = "İ".repeat(150);
+        let post = format!(
+            "POST /login HTTP/1.1\r\nX-Note: İİİ\r\nContent-Type: APPLICATION/X-WWW-FORM-URLENCODED\r\n\r\nuser=İİ&PASSWORD=s3cr3t&pad={long_utf8_tail}"
+        );
+        let redacted = extract_http_form_password(&post).expect("form password extracted");
+        assert!(redacted.contains("sha256:"));
+        assert!(!redacted.contains("s3cr3t"));
     }
 }

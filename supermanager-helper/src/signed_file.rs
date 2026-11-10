@@ -79,8 +79,8 @@ pub fn signed_by_supermanager(path: &Path, identifier: &str) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn signed_by_supermanager(_: &Path, _: &str) -> Result<()> {
-    bail!("code signatures can only be checked on macOS")
+pub fn signed_by_supermanager(_: &Path, identifier: &str) -> Result<()> {
+    bail!("not {identifier} as SuperManager signs it (code signatures can only be checked on macOS)")
 }
 
 #[cfg(test)]

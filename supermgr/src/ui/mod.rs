@@ -475,6 +475,7 @@ pub fn build_ui(
         });
     }
     let (mut vpn_detail, vpn_content_page) = vpn::detail::build_vpn_detail();
+    let suppress_vpn_switch_signals = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let vpn_split = layout::split(&vpn_sidebar_page, &vpn_content_page, 320);
     layout::remember_split(&vpn_split, &app_settings, "vpn");
@@ -1159,12 +1160,26 @@ pub fn build_ui(
         });
     }
 
-    // Paint initial VPN state.
+    // Paint initial VPN state (adopting any live tunnel already active in supermgrd).
     {
         let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-        if s.selected_profile.is_some() {
-            vpn_detail.detail_stack.set_visible_child_name("detail");
-        }
+        sync_selected_vpn_profile_widgets(
+            &s,
+            &vpn_content_page,
+            &vpn_detail.detail_stack,
+            &vpn_detail.profile_name_label,
+            &vpn_detail.auto_connect_switch,
+            &vpn_detail.full_tunnel_row,
+            &vpn_detail.full_tunnel_switch,
+            &vpn_detail.kill_switch_switch,
+            &vpn_detail.edit_creds_btn,
+            &vpn_detail.rotate_key_btn,
+            &vpn_detail.export_btn,
+            &vpn_detail.duplicate_btn,
+            &vpn_detail.split_routes_row,
+            &vpn_detail.split_routes_value,
+            &suppress_vpn_switch_signals,
+        );
         apply_vpn_state(&vpn_detail.status, &s);
     }
 
@@ -1353,6 +1368,7 @@ pub fn build_ui(
     // --- VPN profile row activated (sidebar selection) -----------------------
     {
         let app_state = Arc::clone(&app_state);
+        let suppress_vpn_switch_signals = Arc::clone(&suppress_vpn_switch_signals);
         let vpn_status = vpn_detail.status.clone();
         let rename_btn = vpn_detail.rename_btn.clone();
         let edit_creds_btn = vpn_detail.edit_creds_btn.clone();
@@ -1370,76 +1386,38 @@ pub fn build_ui(
         let split_routes_value = vpn_detail.split_routes_value.clone();
         vpn_profile_list.connect_row_activated(move |list, row| {
             let row_id = row.widget_name().to_string();
-            let (
-                profile_name,
-                profile_exists,
-                ac,
-                ft,
-                ks,
-                supports_split,
-                split_routes,
-                is_editable,
-                is_wg,
-                azure,
-            ) = {
+            {
                 let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
-                let entry = s.profiles.iter().find(|p| p.id.to_string() == row_id);
-                let name = entry.map(|p| p.name.clone());
-                let exists = entry.is_some();
-                let ac = entry.is_some_and(|p| p.auto_connect);
-                let ft = entry.is_none_or(|p| p.full_tunnel);
-                let ks = entry.is_some_and(|p| p.kill_switch);
-                let supports = entry.is_some_and(|p| {
-                    p.backend == "WireGuard" || p.backend.starts_with("FortiGate")
-                });
-                let routes = entry.map(|p| p.split_routes.clone()).unwrap_or_default();
-                let editable = entry
-                    .is_some_and(|p| p.backend == "OpenVPN3" || p.backend.starts_with("FortiGate"));
-                let wg = entry.is_some_and(|p| p.backend == "WireGuard");
-                let azure = entry.is_some_and(|p| p.backend.starts_with("Azure"));
-                s.selected_profile = entry.map(|p| p.id.to_string());
+                let exists = s.profiles.iter().any(|p| p.id.to_string() == row_id);
+                s.selected_profile = exists.then_some(row_id);
                 if matches!(s.vpn_state, VpnState::Error { .. }) {
                     s.vpn_state = VpnState::Disconnected;
                 }
-                (
-                    name, exists, ac, ft, ks, supports, routes, editable, wg, azure,
-                )
-            };
-
-            if profile_exists {
-                if let Some(ref name) = profile_name {
-                    vpn_content_page.set_title(name);
-                    profile_name_label.set_label(name.as_str());
-                }
-                auto_connect_switch.set_active(ac);
-                auto_connect_switch.set_sensitive(true);
-                // Azure VPN routes are pushed by the gateway; full-tunnel toggle is meaningless.
-                full_tunnel_row.set_visible(!azure);
-                full_tunnel_switch.set_active(ft);
-                full_tunnel_switch.set_sensitive(true);
-                kill_switch_switch.set_active(ks);
-                kill_switch_switch.set_sensitive(true);
-                edit_creds_btn.set_visible(is_editable);
-                rotate_key_btn.set_visible(is_wg);
-                export_btn.set_sensitive(true);
-                duplicate_btn.set_sensitive(true);
-                let show_split = supports_split && !ft;
-                split_routes_row.set_visible(show_split);
-                if show_split {
-                    if split_routes.is_empty() {
-                        split_routes_value.set_label("None configured \u{2014} add CIDRs via Edit");
-                    } else {
-                        split_routes_value.set_label(&split_routes.join(", "));
-                    }
-                }
-                detail_stack.set_visible_child_name("detail");
             }
+
+            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+            sync_selected_vpn_profile_widgets(
+                &s,
+                &vpn_content_page,
+                &detail_stack,
+                &profile_name_label,
+                &auto_connect_switch,
+                &full_tunnel_row,
+                &full_tunnel_switch,
+                &kill_switch_switch,
+                &edit_creds_btn,
+                &rotate_key_btn,
+                &export_btn,
+                &duplicate_btn,
+                &split_routes_row,
+                &split_routes_value,
+                &suppress_vpn_switch_signals,
+            );
 
             if let Some(r) = list.row_at_index(row.index()) {
                 list.select_row(Some(&r));
             }
 
-            let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
             rename_btn.set_sensitive(s.selected_profile.is_some());
             apply_vpn_state(&vpn_status, &s);
         });
@@ -2083,11 +2061,17 @@ pub fn build_ui(
     // --- Auto-connect switch ------------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
+        let suppress_vpn_switch_signals = Arc::clone(&suppress_vpn_switch_signals);
         let tx = tx.clone();
         let rt = rt.clone();
         vpn_detail
             .auto_connect_switch
             .connect_state_set(move |_sw, new_state| {
+                // Relaxed ordering suffices: flag is written and read solely on
+                // the single GTK main thread during synchronous `.set_active(...)`.
+                if suppress_vpn_switch_signals.load(std::sync::atomic::Ordering::Relaxed) {
+                    return glib::Propagation::Proceed;
+                }
                 let profile_id = {
                     app_state
                         .lock()
@@ -2119,6 +2103,7 @@ pub fn build_ui(
     // --- Full-tunnel switch -------------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
+        let suppress_vpn_switch_signals = Arc::clone(&suppress_vpn_switch_signals);
         let tx = tx.clone();
         let rt = rt.clone();
         let split_routes_row = vpn_detail.split_routes_row.clone();
@@ -2126,6 +2111,11 @@ pub fn build_ui(
         vpn_detail
             .full_tunnel_switch
             .connect_state_set(move |_sw, new_state| {
+                // Relaxed ordering suffices: flag is written and read solely on
+                // the single GTK main thread during synchronous `.set_active(...)`.
+                if suppress_vpn_switch_signals.load(std::sync::atomic::Ordering::Relaxed) {
+                    return glib::Propagation::Proceed;
+                }
                 let (profile_id, supports_split, split_routes) = {
                     let s = app_state.lock().unwrap_or_else(|e| e.into_inner());
                     let pid = s.selected_profile.clone();
@@ -2175,11 +2165,17 @@ pub fn build_ui(
     // --- Kill-switch switch -------------------------------------------------
     {
         let app_state = Arc::clone(&app_state);
+        let suppress_vpn_switch_signals = Arc::clone(&suppress_vpn_switch_signals);
         let tx = tx.clone();
         let rt = rt.clone();
         vpn_detail
             .kill_switch_switch
             .connect_state_set(move |_sw, new_state| {
+                // Relaxed ordering suffices: flag is written and read solely on
+                // the single GTK main thread during synchronous `.set_active(...)`.
+                if suppress_vpn_switch_signals.load(std::sync::atomic::Ordering::Relaxed) {
+                    return glib::Propagation::Proceed;
+                }
                 let profile_id = {
                     app_state
                         .lock()
@@ -3005,6 +3001,18 @@ pub fn build_ui(
     let rx_stats_virtual_ip = vpn_detail.stats_virtual_ip.clone();
     let rx_stats_routes = vpn_detail.stats_routes.clone();
     let rx_vpn_detail_stack = vpn_detail.detail_stack.clone();
+    let rx_vpn_content_page = vpn_content_page.clone();
+    let rx_auto_connect_switch = vpn_detail.auto_connect_switch.clone();
+    let rx_full_tunnel_row = vpn_detail.full_tunnel_row.clone();
+    let rx_full_tunnel_switch = vpn_detail.full_tunnel_switch.clone();
+    let rx_kill_switch_switch = vpn_detail.kill_switch_switch.clone();
+    let rx_edit_creds_btn = vpn_detail.edit_creds_btn.clone();
+    let rx_rotate_key_btn = vpn_detail.rotate_key_btn.clone();
+    let rx_export_btn = vpn_detail.export_btn.clone();
+    let rx_duplicate_btn = vpn_detail.duplicate_btn.clone();
+    let rx_split_routes_row = vpn_detail.split_routes_row.clone();
+    let rx_split_routes_value = vpn_detail.split_routes_value.clone();
+    let rx_suppress_vpn_switch_signals = Arc::clone(&suppress_vpn_switch_signals);
     let rx_banner = banner.clone();
     let rx_tailscale_view = std::rc::Rc::clone(&tailscale_view);
     let rx_compliance_view = std::rc::Rc::clone(&compliance_view);
@@ -3053,6 +3061,9 @@ pub fn build_ui(
                 AppMsg::DaemonConnected { profiles, state } => {
                     {
                         let mut s = rx_app_state.lock().unwrap_or_else(|e| e.into_inner());
+                        if s.selected_profile.is_none() {
+                            s.selected_profile = state.profile_id().map(|id| id.to_string());
+                        }
                         s.profiles = profiles;
                         s.vpn_state = state;
                         s.daemon_available = true;
@@ -3068,6 +3079,23 @@ pub fn build_ui(
                         &rx_rt,
                         &rx_tx,
                         &s.vpn_filter,
+                    );
+                    sync_selected_vpn_profile_widgets(
+                        &s,
+                        &rx_vpn_content_page,
+                        &rx_vpn_detail_stack,
+                        &rx_profile_name_label,
+                        &rx_auto_connect_switch,
+                        &rx_full_tunnel_row,
+                        &rx_full_tunnel_switch,
+                        &rx_kill_switch_switch,
+                        &rx_edit_creds_btn,
+                        &rx_rotate_key_btn,
+                        &rx_export_btn,
+                        &rx_duplicate_btn,
+                        &rx_split_routes_row,
+                        &rx_split_routes_value,
+                        &rx_suppress_vpn_switch_signals,
                     );
                     apply_vpn_state(&rx_vpn_status, &s);
                     push_tray_update(
@@ -3096,6 +3124,23 @@ pub fn build_ui(
                         &rx_rt,
                         &rx_tx,
                         &s.vpn_filter,
+                    );
+                    sync_selected_vpn_profile_widgets(
+                        &s,
+                        &rx_vpn_content_page,
+                        &rx_vpn_detail_stack,
+                        &rx_profile_name_label,
+                        &rx_auto_connect_switch,
+                        &rx_full_tunnel_row,
+                        &rx_full_tunnel_switch,
+                        &rx_kill_switch_switch,
+                        &rx_edit_creds_btn,
+                        &rx_rotate_key_btn,
+                        &rx_export_btn,
+                        &rx_duplicate_btn,
+                        &rx_split_routes_row,
+                        &rx_split_routes_value,
+                        &rx_suppress_vpn_switch_signals,
                     );
                     if let Some(msg) = toast {
                         rx_toast_overlay.add_toast(adw::Toast::new(msg));
@@ -4470,4 +4515,90 @@ fn lock_session(outer_stack: &gtk4::Stack, lock_page: &lock::LockPage) {
     lock_page.present(lock::AUTO_LOCKED);
     outer_stack.set_visible_child_name("lock");
     lock_page.password_row.grab_focus();
+}
+
+/// RAII guard suppressing `GtkSwitch::state-set` D-Bus echo while programmatic
+/// UI refreshes call `.set_active(...)`.
+struct SwitchSignalGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> SwitchSignalGuard<'a> {
+    fn suppress(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        // Relaxed ordering suffices: all GTK widget mutations and `state-set`
+        // signal callbacks run synchronously on the single GTK main thread, so
+        // program order establishes a total happens-before relation.
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self(flag)
+    }
+}
+
+impl Drop for SwitchSignalGuard<'_> {
+    fn drop(&mut self) {
+        // Relaxed ordering suffices: single-GTK-main-thread scope exit.
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_selected_vpn_profile_widgets(
+    state: &AppState,
+    vpn_content_page: &adw::NavigationPage,
+    detail_stack: &gtk4::Stack,
+    profile_name_label: &gtk4::Label,
+    auto_connect_switch: &gtk4::Switch,
+    full_tunnel_row: &adw::ActionRow,
+    full_tunnel_switch: &gtk4::Switch,
+    kill_switch_switch: &gtk4::Switch,
+    edit_creds_btn: &gtk4::Button,
+    rotate_key_btn: &gtk4::Button,
+    export_btn: &gtk4::Button,
+    duplicate_btn: &gtk4::Button,
+    split_routes_row: &adw::ActionRow,
+    split_routes_value: &gtk4::Label,
+    suppress_vpn_switch_signals: &std::sync::atomic::AtomicBool,
+) {
+    let Some(ref selected_id) = state.selected_profile else {
+        return;
+    };
+    let Some(entry) = state
+        .profiles
+        .iter()
+        .find(|p| p.id.to_string() == *selected_id)
+    else {
+        return;
+    };
+
+    vpn_content_page.set_title(&entry.name);
+    profile_name_label.set_label(&entry.name);
+
+    let azure = entry.backend.starts_with("Azure");
+    let supports_split = entry.backend == "WireGuard" || entry.backend.starts_with("FortiGate");
+    let is_editable = entry.backend == "OpenVPN3" || entry.backend.starts_with("FortiGate");
+    let is_wg = entry.backend == "WireGuard";
+
+    {
+        let _guard = SwitchSignalGuard::suppress(suppress_vpn_switch_signals);
+        auto_connect_switch.set_active(entry.auto_connect);
+        full_tunnel_switch.set_active(entry.full_tunnel);
+        kill_switch_switch.set_active(entry.kill_switch);
+    }
+    auto_connect_switch.set_sensitive(true);
+    // Azure VPN routes are pushed by the gateway; full-tunnel toggle is meaningless.
+    full_tunnel_row.set_visible(!azure);
+    full_tunnel_switch.set_sensitive(true);
+    kill_switch_switch.set_sensitive(true);
+    edit_creds_btn.set_visible(is_editable);
+    rotate_key_btn.set_visible(is_wg);
+    export_btn.set_sensitive(true);
+    duplicate_btn.set_sensitive(true);
+
+    let show_split = supports_split && !entry.full_tunnel;
+    split_routes_row.set_visible(show_split);
+    if show_split {
+        if entry.split_routes.is_empty() {
+            split_routes_value.set_label("None configured \u{2014} add CIDRs via Edit");
+        } else {
+            split_routes_value.set_label(&entry.split_routes.join(", "));
+        }
+    }
+    detail_stack.set_visible_child_name("detail");
 }

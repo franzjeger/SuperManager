@@ -22,16 +22,26 @@
 //! }
 //! ```
 //!
-//! # Atomicity
+//! # Atomicity & Concurrency
 //!
-//! Writes go to a `.tmp` sibling file that is `chmod 600`d before being
-//! renamed over the target, so the main file is never partially written and
-//! is never world-readable.
+//! Read-modify-write cycles are serialised in-process via [`SECRETS_LOCK`], and
+//! writes go through an unguessable `0600` `O_CREAT | O_EXCL` temporary file in
+//! the target directory (`sync_all` + atomic `rename`) so the main file is never
+//! partially written, never world-readable, and immune to predictable `.tmp`
+//! sibling races.
 
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+/// In-process serialisation lock protecting read-modify-write updates on the
+/// secrets JSON file.
+static SECRETS_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn secrets_lock() -> &'static tokio::sync::Mutex<()> {
+    SECRETS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // Path resolution
@@ -82,52 +92,91 @@ async fn read_map() -> Result<HashMap<String, String>> {
     serde_json::from_str(&text).with_context(|| format!("parse secrets file {}", path.display()))
 }
 
+/// RAII temporary file created exclusively (`O_CREAT | O_EXCL`) at mode `0600`
+/// with 128 bits of randomness in `dir`, removed on drop unless persisted.
+struct PrivateTempFile {
+    file: Option<std::fs::File>,
+    path: PathBuf,
+}
+
+impl PrivateTempFile {
+    fn new_in(dir: &std::path::Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let name = format!(".secrets.{}.tmp", uuid::Uuid::new_v4().simple());
+        let path = dir.join(name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let file = opts.open(&path)?;
+        Ok(Self {
+            file: Some(file),
+            path,
+        })
+    }
+
+    fn write_and_sync(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let Some(ref mut file) = self.file else {
+            return Err(std::io::Error::other("temporary file already closed"));
+        };
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    fn persist(mut self, target: &std::path::Path) -> std::io::Result<()> {
+        // Drop the open descriptor before renaming.
+        self.file.take();
+        std::fs::rename(&self.path, target)?;
+        // Prevent Drop from unlinking the newly renamed file if target == self.path.
+        self.path.clear();
+        Ok(())
+    }
+}
+
+impl Drop for PrivateTempFile {
+    fn drop(&mut self) {
+        self.file.take();
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Write the map to disk atomically with mode `0600`.
 ///
 /// Sequence:
 /// 1. Ensure parent directory exists.
-/// 2. Serialise to a `.tmp` sibling.
-/// 3. `chmod 600` the tmp file (before rename so there is no readable window).
-/// 4. `rename` tmp -> target (atomic on Linux if on the same filesystem).
+/// 2. Create a unique `0600` temporary file via [`PrivateTempFile::new_in`].
+/// 3. Write serialised JSON and `sync_all`.
+/// 4. Atomically `persist` over the target path.
 async fn write_map(map: &HashMap<String, String>) -> Result<()> {
     let path = secrets_path();
-
-    // Ensure directory exists.
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir)
-            .await
-            .with_context(|| format!("create secrets directory {}", dir.display()))?;
-    }
-
-    let tmp = path.with_extension("tmp");
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
     let text = serde_json::to_string_pretty(map).context("serialise secrets map")?;
 
-    let mut open_options = tokio::fs::OpenOptions::new();
-    open_options.write(true).create(true).truncate(true);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create secrets directory {}", dir.display()))?;
 
-    #[cfg(unix)]
-    open_options.mode(0o600);
+        let mut tmp = PrivateTempFile::new_in(&dir)
+            .with_context(|| format!("create temporary secrets file in {}", dir.display()))?;
 
-    let mut file = open_options
-        .open(&tmp)
-        .await
-        .with_context(|| format!("create secrets tmp file {}", tmp.display()))?;
+        tmp.write_and_sync(text.as_bytes())
+            .with_context(|| format!("write/sync temporary secrets file in {}", dir.display()))?;
 
-    use tokio::io::AsyncWriteExt;
-    file.write_all(text.as_bytes())
-        .await
-        .with_context(|| format!("write secrets tmp file {}", tmp.display()))?;
+        tmp.persist(&path)
+            .with_context(|| format!("persist secrets file {}", path.display()))?;
 
-    // Ensure all data is flushed to disk before rename
-    file.sync_all()
-        .await
-        .with_context(|| format!("sync secrets tmp file {}", tmp.display()))?;
-
-    tokio::fs::rename(&tmp, &path)
-        .await
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-
-    Ok(())
+        Ok(())
+    })
+    .await
+    .context("join secrets write task")?
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +185,7 @@ async fn write_map(map: &HashMap<String, String>) -> Result<()> {
 
 /// Persist `value` bytes under `label`, replacing any existing entry.
 pub async fn store_secret(label: &str, value: &[u8]) -> Result<()> {
+    let _guard = secrets_lock().lock().await;
     let mut map = read_map().await?;
     map.insert(label.to_owned(), STANDARD.encode(value));
     write_map(&map).await
@@ -176,6 +226,7 @@ pub async fn import_secrets_raw(entries: &HashMap<String, String>) -> Result<()>
         return Ok(());
     }
 
+    let _guard = secrets_lock().lock().await;
     let mut map = read_map().await?;
     if let Some(label) = entries.keys().find(|label| map.contains_key(*label)) {
         anyhow::bail!("refusing to overwrite existing secret '{label}'");
@@ -186,6 +237,7 @@ pub async fn import_secrets_raw(entries: &HashMap<String, String>) -> Result<()>
 
 /// Remove the entry for `label`.  No-op if the label does not exist.
 pub async fn delete_secret(label: &str) -> Result<()> {
+    let _guard = secrets_lock().lock().await;
     let mut map = read_map().await?;
     if map.remove(label).is_some() {
         write_map(&map).await?;
@@ -321,5 +373,36 @@ mod tests {
         let invalid = HashMap::from([("bad".to_owned(), "not base64!".to_owned())]);
         assert!(import_secrets_raw(&invalid).await.is_err());
         assert!(retrieve_secret("bad").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_preserve_all_entries_and_keep_0600_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let path = tmp.path().join("secrets.json");
+        let _store = test_store(&path);
+
+        let futs = (0..16u32).map(|i| async move {
+            let label = format!("supermgr/test/concurrent/{i}");
+            let val = format!("secret-value-{i}");
+            store_secret(&label, val.as_bytes()).await.unwrap();
+        });
+        futures_util::future::join_all(futs).await;
+
+        let all = read_all_secrets().await.unwrap();
+        assert_eq!(all.len(), 16);
+        for i in 0..16u32 {
+            let label = format!("supermgr/test/concurrent/{i}");
+            let expected = format!("secret-value-{i}");
+            assert_eq!(retrieve_secret(&label).await.unwrap(), expected.as_bytes());
+        }
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secrets.json must stay 0600, got {mode:o}");
+        assert!(
+            !tmp.path().join("secrets.tmp").exists(),
+            "predictable secrets.tmp sibling must not be created"
+        );
     }
 }

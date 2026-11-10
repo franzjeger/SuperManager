@@ -239,6 +239,8 @@ fn template_body(template_id: &str) -> Result<String> {
             return Ok(body.to_owned());
         }
     }
+    supermgr_core::sanitize::validate_safe_ident(template_id, "template_id")
+        .map_err(|e| anyhow!("{e}"))?;
     // User?
     let mut path = templates_dir();
     path.push(format!("{template_id}.tera"));
@@ -580,37 +582,179 @@ fn unified_diff(old: &str, new: &str, path: &str) -> String {
     out
 }
 
-/// LCS via dynamic programming. O(n*m) which is fine for our
-/// section sizes (< 200 lines typically).
+/// Linear-space LCS via common prefix/suffix trimming + Hirschberg's
+/// divide-and-conquer algorithm on interned `u32` line IDs.
+///
+/// Diffing two 10,000-line `FortiOS` configurations used to allocate a
+/// dense `(n+1) × (m+1)` `usize` matrix (~800 MB). Trimming shared
+/// outer lines, interning + filtering unshared middle lines, and using
+/// two `Vec<u32>` DP rows keeps peak memory in the tens of kilobytes.
 fn longest_common_subsequence<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
-    let n = a.len();
-    let m = b.len();
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in 0..n {
-        for j in 0..m {
-            if a[i] == b[j] {
-                dp[i + 1][j + 1] = dp[i][j] + 1;
-            } else {
-                dp[i + 1][j + 1] = dp[i + 1][j].max(dp[i][j + 1]);
+    let mut prefix = 0usize;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < (a.len() - prefix)
+        && suffix < (b.len() - prefix)
+        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let a_mid = &a[prefix..a.len() - suffix];
+    let b_mid = &b[prefix..b.len() - suffix];
+    if a_mid.is_empty() || b_mid.is_empty() {
+        let mut out = Vec::with_capacity(prefix + suffix);
+        out.extend_from_slice(&a[..prefix]);
+        out.extend_from_slice(&a[a.len() - suffix..]);
+        return out;
+    }
+
+    // Intern lines appearing in `a_mid` and filter both sides down to lines
+    // that appear on BOTH sides — lines unique to one side can never belong
+    // to any common subsequence.
+    let mut str_to_id: std::collections::HashMap<&'a str, u32> =
+        std::collections::HashMap::with_capacity(a_mid.len());
+    let mut id_to_str: Vec<&'a str> = Vec::new();
+    let mut a_raw_ids: Vec<u32> = Vec::with_capacity(a_mid.len());
+    for &line in a_mid {
+        let id = match str_to_id.get(line) {
+            Some(&existing) => existing,
+            None => {
+                let next = id_to_str.len() as u32;
+                id_to_str.push(line);
+                str_to_id.insert(line, next);
+                next
             }
+        };
+        a_raw_ids.push(id);
+    }
+
+    let mut seen_in_b = vec![false; id_to_str.len()];
+    let mut b_ids: Vec<u32> = Vec::with_capacity(b_mid.len());
+    for &line in b_mid {
+        if let Some(&id) = str_to_id.get(line) {
+            seen_in_b[id as usize] = true;
+            b_ids.push(id);
         }
     }
-    let mut out = Vec::with_capacity(dp[n][m]);
-    let mut i = n;
-    let mut j = m;
-    while i > 0 && j > 0 {
-        if a[i - 1] == b[j - 1] {
-            out.push(a[i - 1]);
-            i -= 1;
-            j -= 1;
-        } else if dp[i - 1][j] >= dp[i][j - 1] {
-            i -= 1;
-        } else {
-            j -= 1;
-        }
+    let a_ids: Vec<u32> = a_raw_ids
+        .into_iter()
+        .filter(|&id| seen_in_b[id as usize])
+        .collect();
+
+    let mut mid_ids: Vec<u32> = Vec::new();
+    hirschberg_lcs(&a_ids, &b_ids, &mut mid_ids);
+
+    let mut out = Vec::with_capacity(prefix + mid_ids.len() + suffix);
+    out.extend_from_slice(&a[..prefix]);
+    for id in mid_ids {
+        out.push(id_to_str[id as usize]);
     }
-    out.reverse();
+    out.extend_from_slice(&a[a.len() - suffix..]);
     out
+}
+
+/// Two-row forward LCS length vector for `x` against `y`.
+fn lcs_row_forward(x: &[u32], y: &[u32]) -> Vec<u32> {
+    let mut prev = vec![0u32; y.len() + 1];
+    let mut curr = vec![0u32; y.len() + 1];
+    for &xi in x {
+        curr[0] = 0;
+        for (j, &yj) in y.iter().enumerate() {
+            curr[j + 1] = if xi == yj {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev
+}
+
+/// Two-row reverse LCS length vector for `x.rev()` against `y.rev()`.
+fn lcs_row_reverse(x: &[u32], y: &[u32]) -> Vec<u32> {
+    let mut prev = vec![0u32; y.len() + 1];
+    let mut curr = vec![0u32; y.len() + 1];
+    for &xi in x.iter().rev() {
+        curr[0] = 0;
+        for (j, &yj) in y.iter().rev().enumerate() {
+            curr[j + 1] = if xi == yj {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev
+}
+
+fn hirschberg_lcs(x: &[u32], y: &[u32], out: &mut Vec<u32>) {
+    // Cap adversarial O(n*m) CPU work on huge shuffled-duplicate inputs
+    // while keeping exact optimal LCS for all realistic config sections.
+    const MAX_CELLS: usize = 25_000_000;
+
+    let mut p = 0usize;
+    while p < x.len() && p < y.len() && x[p] == y[p] {
+        p += 1;
+    }
+    if p > 0 {
+        out.extend_from_slice(&x[..p]);
+    }
+    let mut s = 0usize;
+    while s < (x.len() - p) && s < (y.len() - p) && x[x.len() - 1 - s] == y[y.len() - 1 - s] {
+        s += 1;
+    }
+
+    let xm = &x[p..x.len() - s];
+    let ym = &y[p..y.len() - s];
+
+    if !xm.is_empty() && !ym.is_empty() {
+        if xm.len() == 1 {
+            if ym.contains(&xm[0]) {
+                out.push(xm[0]);
+            }
+        } else if ym.len() == 1 {
+            if xm.contains(&ym[0]) {
+                out.push(ym[0]);
+            }
+        } else if xm.len().saturating_mul(ym.len()) > MAX_CELLS {
+            // Bounded linear fallback for pathological inputs.
+            let mut j = 0usize;
+            for &xi in xm {
+                if let Some(rel) = ym[j..].iter().position(|&yj| yj == xi) {
+                    out.push(xi);
+                    j += rel + 1;
+                }
+            }
+        } else {
+            let mid = xm.len() / 2;
+            let split_y = {
+                let l1 = lcs_row_forward(&xm[..mid], ym);
+                let l2 = lcs_row_reverse(&xm[mid..], ym);
+                let m = ym.len();
+                let mut best_k = 0usize;
+                let mut best_score = 0u32;
+                for k in 0..=m {
+                    let score = l1[k] + l2[m - k];
+                    if score >= best_score {
+                        best_score = score;
+                        best_k = k;
+                    }
+                }
+                best_k
+            };
+            hirschberg_lcs(&xm[..mid], &ym[..split_y], out);
+            hirschberg_lcs(&xm[mid..], &ym[split_y..], out);
+        }
+    }
+
+    if s > 0 {
+        out.extend_from_slice(&x[x.len() - s..]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -652,15 +796,18 @@ pub enum DeploymentStatus {
     RolledBack,
 }
 
-fn deployments_dir(host_id: &str) -> PathBuf {
+fn deployments_dir(host_id: &str) -> Result<PathBuf> {
+    supermgr_core::sanitize::validate_safe_ident(host_id, "host_id").map_err(|e| anyhow!("{e}"))?;
     let mut p = crate::secrets::default_data_dir();
     p.push("deployments");
     p.push(host_id);
-    p
+    Ok(p)
 }
 
 fn save_deployment(record: &Deployment) -> Result<()> {
-    let dir = deployments_dir(&record.host_id);
+    supermgr_core::sanitize::validate_safe_ident(&record.id, "deployment_id")
+        .map_err(|e| anyhow!("{e}"))?;
+    let dir = deployments_dir(&record.host_id)?;
     std::fs::create_dir_all(&dir).context("create deployments dir")?;
     let mut path = dir;
     path.push(format!("{}.json", record.id));
@@ -670,7 +817,7 @@ fn save_deployment(record: &Deployment) -> Result<()> {
 }
 
 pub fn list_deployments(host_id: &str, limit: usize) -> Result<Vec<Deployment>> {
-    let dir = deployments_dir(host_id);
+    let dir = deployments_dir(host_id)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -694,7 +841,9 @@ pub fn list_deployments(host_id: &str, limit: usize) -> Result<Vec<Deployment>> 
 }
 
 pub fn load_deployment(host_id: &str, deployment_id: &str) -> Result<Deployment> {
-    let mut path = deployments_dir(host_id);
+    supermgr_core::sanitize::validate_safe_ident(deployment_id, "deployment_id")
+        .map_err(|e| anyhow!("{e}"))?;
+    let mut path = deployments_dir(host_id)?;
     path.push(format!("{deployment_id}.json"));
     let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
     Ok(serde_json::from_slice(&bytes)?)
@@ -707,11 +856,12 @@ pub fn load_deployment(host_id: &str, deployment_id: &str) -> Result<Deployment>
 /// Backup directory — separate from the deployment record JSONs
 /// because backups are large (.conf files can be 100s of KB) and
 /// we want them on a path the user can browse easily.
-fn backups_dir(host_id: &str) -> PathBuf {
+fn backups_dir(host_id: &str) -> Result<PathBuf> {
+    supermgr_core::sanitize::validate_safe_ident(host_id, "host_id").map_err(|e| anyhow!("{e}"))?;
     let mut p = crate::secrets::default_data_dir();
     p.push("backups");
     p.push(host_id);
-    p
+    Ok(p)
 }
 
 /// Pull `show full-configuration` over SSH, save to disk, return
@@ -726,7 +876,7 @@ pub async fn pre_deploy_backup(
     let cfg = fetch_full_config(&session).await?;
     let _ = session.disconnect().await;
 
-    let dir = backups_dir(&host_id.simple().to_string());
+    let dir = backups_dir(&host_id.simple().to_string())?;
     std::fs::create_dir_all(&dir).context("create backups dir")?;
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let mut path = dir;
@@ -1317,5 +1467,46 @@ mod backup_tests {
     fn output_cut_off_inside_a_block_is_not_a_configuration() {
         let cut = &CONFIG[..CONFIG.find("set mode").unwrap()];
         assert!(!is_full_config(cut));
+    }
+
+    #[test]
+    fn rejects_path_traversal_in_template_and_deployment_ids() {
+        assert!(super::template_body("../etc/passwd").is_err());
+        assert!(super::template_body("../../secrets").is_err());
+        assert!(super::list_deployments("../escape", 10).is_err());
+        assert!(super::load_deployment("../escape", "dep1").is_err());
+        assert!(super::load_deployment("validhost", "../escape").is_err());
+    }
+
+    #[test]
+    fn linear_space_lcs_diffs_10k_line_configs_accurately() {
+        use std::fmt::Write as _;
+        let mut dev = String::from("config firewall address\n");
+        let mut tmpl = String::from("config firewall address\n");
+        // Differ on the very first, middle, and very last entries so outer
+        // prefix/suffix trimming alone cannot bypass the inner LCS solver.
+        writeln!(dev, "    edit \"first-old\"").unwrap();
+        writeln!(tmpl, "    edit \"first-new\"").unwrap();
+        for i in 1..9_999 {
+            if i == 5_000 {
+                writeln!(dev, "    set subnet 10.0.0.0 255.255.255.0").unwrap();
+                writeln!(tmpl, "    set subnet 10.99.0.0 255.255.255.0").unwrap();
+            } else {
+                writeln!(dev, "    edit \"addr-{i}\"").unwrap();
+                writeln!(tmpl, "    edit \"addr-{i}\"").unwrap();
+            }
+        }
+        writeln!(dev, "    edit \"last-old\"\nend").unwrap();
+        writeln!(tmpl, "    edit \"last-new\"\nend").unwrap();
+
+        let diffs = super::diff_sections(&tmpl, &dev);
+        assert_eq!(diffs.len(), 1);
+        assert!(matches!(diffs[0].status, super::SectionStatus::Modified));
+        assert!(diffs[0].unified_diff.contains("-    edit \"first-old\""));
+        assert!(diffs[0].unified_diff.contains("+    edit \"first-new\""));
+        assert!(diffs[0].unified_diff.contains("-    set subnet 10.0.0.0 255.255.255.0"));
+        assert!(diffs[0].unified_diff.contains("+    set subnet 10.99.0.0 255.255.255.0"));
+        assert!(diffs[0].unified_diff.contains("-    edit \"last-old\""));
+        assert!(diffs[0].unified_diff.contains("+    edit \"last-new\""));
     }
 }

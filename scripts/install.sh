@@ -274,6 +274,18 @@ say "Unpacking"
 ditto -x -k "$TMP/app.zip" "$TMP/unpacked"
 [ -d "$TMP/unpacked/$APP_NAME" ] || die "zip did not contain $APP_NAME"
 
+# Verify Apple Developer ID signature before installing into /Applications
+# because `curl` does not attach `com.apple.quarantine` (so Gatekeeper will
+# not evaluate the bundle automatically on first launch).
+say "Verifying code signature"
+codesign --verify --deep --strict "$TMP/unpacked/$APP_NAME" \
+    || die "downloaded $APP_NAME failed code-signature verification"
+SIGN_INFO="$(codesign -dv --verbose=2 "$TMP/unpacked/$APP_NAME" 2>&1 || true)"
+case "$SIGN_INFO" in
+    *"TeamIdentifier=LY6LJ395B8"*) ;;
+    *) die "downloaded $APP_NAME is not signed by expected Apple Team LY6LJ395B8" ;;
+esac
+
 if [ -d "$DEST" ]; then
     note "replacing the existing $DEST"
     # Quit a running copy so the swap is clean; ignore if not running.

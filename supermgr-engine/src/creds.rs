@@ -231,7 +231,9 @@ async fn ssh_try_auth(
 /// HTTP basic-auth default-credential test. Probes the root
 /// of the web service with each credential pair, looks at the
 /// HTTP status. 200/302 = "auth accepted", 401 = "rejected".
-pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding> {
+pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> anyhow::Result<Vec<Finding>> {
+    use anyhow::Context as _;
+
     let mut findings = Vec::new();
     let scheme = if tls { "https" } else { "http" };
     let url = format!("{scheme}://{host}:{port}/");
@@ -240,7 +242,7 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
         .timeout(Duration::from_secs(4))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .expect("build client");
+        .context("build HTTP client")?;
     let creds = default_creds_for_service("http");
     for pair in creds {
         sleep(Duration::from_millis(800)).await;
@@ -289,7 +291,7 @@ pub async fn http_test_defaults(host: &str, port: u16, tls: bool) -> Vec<Finding
             }
         }
     }
-    findings
+    Ok(findings)
 }
 
 #[cfg(test)]

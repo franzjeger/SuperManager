@@ -311,7 +311,7 @@ Application event log.
 - **OPNsense REST API**: `opnsense_api`, `opnsense_backup_config`. HTTP Basic auth using the key/secret pair from Credential Manager; backups saved as `<host>_<timestamp>.opnsense.xml` so they don't collide with FortiGate `.conf` filenames.
 - **Sophos XG XML Configuration API**: `sophos_xml_api`. Wraps the caller's `<Get>/<Set>/<Remove>` body in the WebAdmin `<Request><Login>...</Login>` envelope; credentials come from Credential Manager.
 - **Persistent known_hosts**: SSH host keys recorded in `%PROGRAMDATA%\SuperManager\known_hosts.json` on first sight; subsequent connections require an exact match. A changed key stops the handshake before any credential is sent: `test_host_connection` reports `{"ssh":"host_key_changed","stored":…,"presented":…}`, and commands fail with `RpcError::PermissionDenied` naming both fingerprints. `ssh_list_known_hosts` lists what is on file, `ssh_trust_host_key` replaces a key with the one the operator checked, and `ssh_forget_host_key` (the Linux daemon's method) drops it.
-- **Named-pipe ACL hardening**: explicit SDDL grants `SYSTEM` + `Administrators` Generic All and `Authenticated Users` Read + Write (no DACL-modify). Built via `ConvertStringSecurityDescriptorToSecurityDescriptorW` and applied with `ServerOptions::create_with_security_attributes_raw`.
+- **Named-pipe ACL hardening**: explicit protected SDDL grants `SYSTEM` + `Administrators` Generic All and `Interactive` desktop users Read + Write (with a Medium-integrity mandatory label blocking low-integrity/sandboxed callers and non-interactive service/network logons). Built via `ConvertStringSecurityDescriptorToSecurityDescriptorW` and applied with `ServerOptions::create_with_security_attributes_raw`.
 - **Tray icon**: the app icon, a tooltip with the tunnel's state, and Open / Disconnect VPN / Check for updates / Quit.
 - **Windows Service** start/stop/restart via the SCM.
 
@@ -360,11 +360,15 @@ Application-log entries, adapters, routes, DNS, `wg show`, the OpenVPN
 server log — are in the `windows-installer-test-logs` artifact, under
 `vpn\`.
 
-## What is stubbed (intentionally)
+## Current GUI scope vs. daemon RPC surface
 
-The Windows port now covers every VPN backend SuperManager supports and
-every appliance API the Linux daemon exposes. Open items are MSI
-polishing and code-signing for distribution — see the roadmap below.
+`supermgrd-win` implements all core VPN backends and the FortiGate, UniFi,
+OPNsense, and Sophos appliance RPCs (available to `supermgr-mcp` and scripts).
+The Slint desktop GUI (`supermgr-win`) currently provides **VPN**, **Hosts**
+(with one-shot SSH command execution), **SSH keys**, and **Settings / Updates**;
+Fleet dashboard panels, interactive terminal launch, RDP/VNC launch, Tailscale,
+Compliance, Provisioning, and the AI Console are not yet exposed in the
+Windows GUI.
 
 ## Roadmap
 

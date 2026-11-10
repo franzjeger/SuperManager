@@ -71,8 +71,8 @@ const WG_CONF_DIR: &str = "/etc/wireguard";
 /// Lifetime-of-process WireGuard controller. `wg-quick` tracks the
 /// tunnels it set up itself; the ones the helper set up without it
 /// (`wg_native`) have their supervisors here.
-#[derive(Default)]
 pub struct WireGuard {
+    policy: crate::client_auth::Policy,
     native: HashMap<String, crate::wg_native::Tunnel>,
 }
 
@@ -163,8 +163,11 @@ pub enum WgState {
 }
 
 impl WireGuard {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(policy: crate::client_auth::Policy) -> Self {
+        Self {
+            policy,
+            native: HashMap::new(),
+        }
     }
 
     /// Supervise the tunnels an earlier helper set up without wg-quick.
@@ -185,7 +188,7 @@ impl WireGuard {
     async fn native_connect(&mut self, name: &str, args: &WgConnectArgs) -> WgConnectResult {
         // One an earlier wg-quick connect left has the private key in it.
         let _ = std::fs::remove_file(conf_path_for(name));
-        match crate::wg_native::up(name, &args.conf_content, &args.dns_servers).await {
+        match crate::wg_native::up(name, &args.conf_content, &args.dns_servers, self.policy).await {
             Ok((interface, tunnel)) => {
                 tracing::info!(tunnel = %name, %interface, "WireGuard tunnel up without wg-quick");
                 self.native.insert(name.to_owned(), tunnel);
@@ -233,7 +236,7 @@ impl WireGuard {
         if let Some(Err(e)) = self.native_down(&name).await {
             tracing::warn!("leftover WireGuard tunnel {name}: {e:#}");
         } else if read_name_mapping(&name).is_some() {
-            let wg_quick = crate::vpn_runtime::wg_quick()?;
+            let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
             let _ = crate::proc::bounded_async(
                 wg_quick.command().arg("down").arg(&conf_path),
                 WG_QUICK_BUDGET,
@@ -256,7 +259,7 @@ impl WireGuard {
         if args.native {
             return Ok(self.native_connect(&name, args).await);
         }
-        let wg_quick = crate::vpn_runtime::wg_quick()?;
+        let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
 
         // Make sure the parent dir exists with restrictive mode.
         std::fs::create_dir_all(WG_CONF_DIR).with_context(|| format!("create {WG_CONF_DIR}"))?;
@@ -370,7 +373,7 @@ impl WireGuard {
                 message: format!("WireGuard tunnel '{name}' was not up"),
             });
         }
-        let wg_quick = crate::vpn_runtime::wg_quick()?;
+        let wg_quick = crate::vpn_runtime::wg_quick(self.policy)?;
 
         // 2. Try the clean path. Pass the absolute conf path for the
         //    same reason as in `connect` — bypass wg-quick's
@@ -496,7 +499,7 @@ impl WireGuard {
             }
         };
 
-        let wg_bin = crate::vpn_runtime::wg()?;
+        let wg_bin = crate::vpn_runtime::wg(self.policy)?;
         // `wg show <if> dump` is the machine-readable kitchen sink:
         // one tab-separated line per peer with endpoint, allowed IPs,
         // last handshake (unix ts), rx/tx bytes, and keepalive.

@@ -77,7 +77,7 @@ pub fn default_openai_model() -> String {
 }
 
 /// Serialisable application settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub layout: LayoutSettings,
@@ -145,9 +145,65 @@ pub struct AppSettings {
     pub rdp_client: String,
 }
 
+fn redact_secret(value: &str) -> &'static str {
+    if value.is_empty() {
+        ""
+    } else {
+        "[REDACTED]"
+    }
+}
+
+impl std::fmt::Debug for AppSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppSettings")
+            .field("layout", &self.layout)
+            .field("ai_provider", &self.ai_provider)
+            .field("openai_api_key", &redact_secret(&self.openai_api_key))
+            .field("openai_model", &self.openai_model)
+            .field("anthropic_model", &self.anthropic_model)
+            .field("color_scheme", &self.color_scheme)
+            .field("opacity", &self.opacity)
+            .field("anthropic_api_key", &redact_secret(&self.anthropic_api_key))
+            .field("use_claude_subscription", &self.use_claude_subscription)
+            .field(
+                "legacy_password_hash",
+                &redact_secret(&self.legacy_password_hash),
+            )
+            .field("auto_lock_minutes", &self.auto_lock_minutes)
+            .field("webhook_url", &redact_secret(&self.webhook_url))
+            .field("webhook_on_host_down", &self.webhook_on_host_down)
+            .field("webhook_on_vpn_disconnect", &self.webhook_on_vpn_disconnect)
+            .field(
+                "unifi_cloud_api_key",
+                &redact_secret(&self.unifi_cloud_api_key),
+            )
+            .field("rdp_client", &self.rdp_client)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod model_tests {
     use super::*;
+
+    #[test]
+    fn debug_impl_redacts_all_secret_fields() {
+        let settings = AppSettings {
+            openai_api_key: "sk-openai-super-secret".into(),
+            anthropic_api_key: "sk-ant-super-secret".into(),
+            webhook_url: "https://hooks.slack.com/services/SECRET".into(),
+            unifi_cloud_api_key: "unifi-secret-token".into(),
+            legacy_password_hash: "$argon2id$secret".into(),
+            ..AppSettings::default()
+        };
+        let rendered = format!("{settings:?}");
+        assert!(!rendered.contains("sk-openai-super-secret"));
+        assert!(!rendered.contains("sk-ant-super-secret"));
+        assert!(!rendered.contains("hooks.slack.com"));
+        assert!(!rendered.contains("unifi-secret-token"));
+        assert!(!rendered.contains("$argon2id$secret"));
+        assert!(rendered.contains("[REDACTED]"));
+    }
 
     #[test]
     fn legacy_settings_recover_retired_or_empty_models_without_losing_other_settings() {

@@ -78,9 +78,10 @@ async fn main() -> anyhow::Result<()> {
     let secrets: Arc<dyn supermgr_core::keyring::SecretStore> =
         Arc::new(FileSecretStore::default_path());
 
-    // Start background scheduler — fires recurring active scans
-    // for engagements with a configured cadence.
-    supermgr_engine::scheduler::spawn();
+    // Background recon scheduler is intentionally disabled while the Recon /
+    // Engagement UI is inactive so the daemon never triggers unsolicited
+    // active scans or background CVE-feed network requests.
+    // supermgr_engine::scheduler::spawn();
 
     // Start the JSON-RPC server.
     let server = Arc::new(EngineServer::new(state, secrets));

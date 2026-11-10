@@ -21,8 +21,11 @@
 
 use anyhow::{anyhow, Context};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
+
+use crate::client_auth::Policy;
 
 /// Best-effort cleanup of `supermanager-*` swanctl configs and secrets
 /// left behind by a previous helper crash. Called once on helper startup.
@@ -38,7 +41,7 @@ use tokio::process::Command;
 /// pointing at the old gateway. A fresh connect attempt fails with
 /// "unable to determine source address" because charon tries to reach
 /// the server via the stale route (wrong gateway, wrong network).
-pub async fn sweep_stale_configs() {
+pub async fn sweep_stale_configs(policy: Policy) {
     // Wake-sweep race guard. This runs at startup AND on system_wake. If a
     // strongSwan tunnel is ESTABLISHED right now, this is almost certainly a
     // post-wake sweep racing auto_reconnect's replay: the tunnel was just
@@ -51,9 +54,19 @@ pub async fn sweep_stale_configs() {
         tracing::info!("sweep_stale_configs: live strongSwan SA present — skipping sweep to avoid racing auto_reconnect");
         return;
     }
-    for prefix in BREW_PATHS {
-        for subdir in ["etc/swanctl/conf.d", "etc/swanctl/swanctl.d"] {
-            let dir = std::path::Path::new(prefix).join(subdir);
+    for etc in candidate_etc_dirs() {
+        if policy == Policy::Release
+            && crate::vpn_runtime::ensure_root_owned(&etc, "strongSwan config directory").is_err()
+        {
+            continue;
+        }
+        for subdir in ["swanctl/conf.d", "swanctl/swanctl.d"] {
+            let dir = etc.join(subdir);
+            if policy == Policy::Release
+                && crate::vpn_runtime::ensure_root_owned(&dir, "swanctl directory").is_err()
+            {
+                continue;
+            }
             let Ok(mut entries) = tokio::fs::read_dir(&dir).await else {
                 continue;
             };
@@ -88,7 +101,7 @@ pub async fn sweep_stale_configs() {
 ///   `<prefix>/etc/swanctl/`     — per-connection conf.d / swanctl.d files
 const BREW_PATHS: &[&str] = &["/opt/homebrew", "/usr/local"];
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ConnectArgs {
     /// Stable profile identifier — used as the swanctl `connections.<id>`
     /// name so multiple profiles can coexist without name collisions.
@@ -137,6 +150,23 @@ pub struct ConnectArgs {
 
 fn default_full_tunnel() -> bool {
     true
+}
+
+impl fmt::Debug for ConnectArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectArgs")
+            .field("profile_id", &self.profile_id)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("shared_secret", &"[REDACTED]")
+            .field("full_tunnel", &self.full_tunnel)
+            .field("routes", &self.routes)
+            .field("dns_servers", &self.dns_servers)
+            .field("local_id", &self.local_id)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,13 +271,14 @@ const CHARON_PID_FILE: &str = "/var/run/charon.pid";
 /// and its tunnels outlive a helper restart or upgrade. A helper takes over
 /// the charon it finds answering instead of starting a second one.
 pub struct Strongswan {
-    /// `<brew>/sbin/charon-systemd` — the daemon we launch as a child.
+    policy: Policy,
+    /// `<prefix>/libexec/ipsec/charon` — the daemon we launch as a child.
     /// Resolved lazily on first use because the user might not have
     /// installed strongSwan yet at helper start time.
     charon: Option<PathBuf>,
-    /// `<brew>/sbin/swanctl` — the CLI we drive for config + control.
+    /// `<prefix>/bin/swanctl` — the CLI we drive for config + control.
     swanctl: Option<PathBuf>,
-    /// `<brew>/etc` — strongSwan's config root.
+    /// `<prefix>/etc` — strongSwan's config root.
     etc: Option<PathBuf>,
     /// The charon this helper started, kept so it can be reaped. None until
     /// first connect, or when the charon in use is an adopted one.
@@ -258,9 +289,114 @@ pub struct Strongswan {
     log_file: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StrongswanPaths {
+    charon: PathBuf,
+    swanctl: PathBuf,
+    etc: PathBuf,
+}
+
+fn candidate_etc_dirs() -> Vec<PathBuf> {
+    let runtime = Path::new(crate::vpn_runtime::RUNTIME_DIR);
+    let mut dirs = vec![runtime.join("etc"), PathBuf::from("/etc")];
+    for prefix in BREW_PATHS {
+        dirs.push(Path::new(prefix).join("etc"));
+        dirs.push(Path::new(prefix).join("opt/strongswan/etc"));
+    }
+    dirs
+}
+
+fn resolve_strongswan_from_roots(
+    roots: &[PathBuf],
+    policy: Policy,
+    check_owner: impl Fn(&Path, &str) -> anyhow::Result<()>,
+) -> anyhow::Result<StrongswanPaths> {
+    let mut last_refusal: Option<anyhow::Error> = None;
+
+    for root in roots {
+        let swanctl_candidates = [root.join("bin/swanctl"), root.join("swanctl")];
+        let charon_candidates = [
+            root.join("opt/strongswan/libexec/ipsec/charon"),
+            root.join("libexec/ipsec/charon"),
+            root.join("charon"),
+        ];
+        let mut etc_candidates = vec![root.join("etc"), root.join("opt/strongswan/etc")];
+        if root == Path::new(crate::vpn_runtime::RUNTIME_DIR) {
+            etc_candidates.push(PathBuf::from("/etc"));
+        }
+
+        let Some(swanctl) = swanctl_candidates.into_iter().find(|p| p.is_file()) else {
+            continue;
+        };
+        let Some(charon) = charon_candidates.into_iter().find(|p| p.is_file()) else {
+            continue;
+        };
+        let Some(etc) = etc_candidates.into_iter().find(|p| p.is_dir()) else {
+            continue;
+        };
+
+        if policy == Policy::Release {
+            if let Err(e) = check_owner(&swanctl, "swanctl binary")
+                .and_then(|()| check_owner(&charon, "charon binary"))
+                .and_then(|()| check_owner(&etc, "strongSwan config directory"))
+                .and_then(|()| {
+                    let swanctl_dir = etc.join("swanctl");
+                    if swanctl_dir.exists() {
+                        check_owner(&swanctl_dir, "swanctl config directory")
+                    } else {
+                        Ok(())
+                    }
+                })
+            {
+                last_refusal = Some(e);
+                continue;
+            }
+        }
+
+        return Ok(StrongswanPaths {
+            charon,
+            swanctl,
+            etc,
+        });
+    }
+
+    if let Some(refusal) = last_refusal {
+        return Err(refusal.context(format!(
+            "refusing unprivileged strongSwan installation in Release mode; install the \
+             root-owned VPN runtime in {} (`vpn_runtime_install`)",
+            crate::vpn_runtime::RUNTIME_DIR
+        )));
+    }
+    match policy {
+        Policy::Release => Err(anyhow!(
+            "root-owned strongSwan runtime not found in {}. Install the root-owned VPN runtime \
+             via `vpn_runtime_install`.",
+            crate::vpn_runtime::RUNTIME_DIR
+        )),
+        Policy::Development => Err(anyhow!(
+            "strongSwan not found. Install it with `brew install strongswan` \
+             (we probe /opt/homebrew and /usr/local)."
+        )),
+    }
+}
+
+fn locate_swanctl(policy: Policy) -> Option<PathBuf> {
+    let runtime = Path::new(crate::vpn_runtime::RUNTIME_DIR);
+    let mut candidates = vec![runtime.join("bin/swanctl"), runtime.join("swanctl")];
+    for prefix in BREW_PATHS {
+        candidates.push(Path::new(prefix).join("bin/swanctl"));
+    }
+    candidates.into_iter().find(|p| {
+        p.is_file()
+            && (policy == Policy::Development
+                || crate::vpn_runtime::ensure_root_owned(p, "swanctl binary").is_ok())
+    })
+}
+
 impl Strongswan {
-    pub fn new() -> Self {
+    pub fn new(policy: Policy) -> Self {
         Self {
+            policy,
             charon: None,
             swanctl: None,
             etc: None,
@@ -271,50 +407,25 @@ impl Strongswan {
         }
     }
 
-    /// Resolve the strongSwan install location lazily. Cached on success.
-    /// brew doesn't symlink the strongSwan-private `libexec/ipsec/` tree
-    /// into `<prefix>/libexec/`, so we probe the formula's `opt/strongswan/`
-    /// path which IS the canonical brew "give me the current version of
-    /// this formula" location.
+    /// Resolve the strongSwan install location lazily. Under `Policy::Release`
+    /// every binary and config directory must be root-owned and non-writable by
+    /// group/others; unprivileged Homebrew installs are only used in
+    /// `Policy::Development`.
     fn resolve(&mut self) -> anyhow::Result<()> {
-        if self.swanctl.is_some() {
+        if self.swanctl.is_some() && self.policy == Policy::Development {
             return Ok(());
         }
-        for prefix in BREW_PATHS {
-            let swanctl = Path::new(prefix).join("bin/swanctl");
-            // Try the canonical brew path first; fall back to a generic
-            // libexec path for non-brew installs (e.g. strongSwan compiled
-            // from source by the user).
-            let charon_candidates = [
-                Path::new(prefix).join("opt/strongswan/libexec/ipsec/charon"),
-                Path::new(prefix).join("libexec/ipsec/charon"),
-            ];
-            let charon = charon_candidates.iter().find(|p| p.exists()).cloned();
-
-            // Prefer the brew-shared `/opt/homebrew/etc` path; that's where
-            // swanctl reads from by default and where multiple strongSwan
-            // installs (or upgrades) write to. The formula-private
-            // `<prefix>/opt/strongswan/etc` is bottled and not what swanctl
-            // looks at.
-            let etc_candidates = [
-                Path::new(prefix).join("etc"),
-                Path::new(prefix).join("opt/strongswan/etc"),
-            ];
-            let etc = etc_candidates.iter().find(|p| p.exists()).cloned();
-
-            if swanctl.exists() {
-                if let (Some(charon), Some(etc)) = (charon, etc) {
-                    self.charon = Some(charon);
-                    self.swanctl = Some(swanctl);
-                    self.etc = Some(etc);
-                    return Ok(());
-                }
-            }
-        }
-        Err(anyhow!(
-            "strongSwan not found. Install it with `brew install strongswan` \
-             (we probe /opt/homebrew and /usr/local)."
-        ))
+        let mut roots = vec![PathBuf::from(crate::vpn_runtime::RUNTIME_DIR)];
+        roots.extend(BREW_PATHS.iter().map(PathBuf::from));
+        let paths = resolve_strongswan_from_roots(
+            &roots,
+            self.policy,
+            crate::vpn_runtime::ensure_root_owned,
+        )?;
+        self.charon = Some(paths.charon);
+        self.swanctl = Some(paths.swanctl);
+        self.etc = Some(paths.etc);
+        Ok(())
     }
 
     /// Make sure a charon is running and answering: the one this helper
@@ -332,8 +443,14 @@ impl Strongswan {
             }
             self.charon_child = None;
         }
-        let charon = self.charon.clone().expect("resolve() must run first");
-        let swanctl = self.swanctl.clone().expect("resolve() must run first");
+        let charon = self
+            .charon
+            .clone()
+            .context("strongSwan charon path not resolved")?;
+        let swanctl = self
+            .swanctl
+            .clone()
+            .context("strongSwan swanctl path not resolved")?;
         let running = self
             .adopted_charon
             .or_else(|| running_charon(&self.pid_file, &charon));
@@ -345,7 +462,7 @@ impl Strongswan {
                 return Ok(());
             }
             tracing::warn!(pid, "charon is not answering; starting a new one");
-            stop_process(pid).await;
+            stop_process(pid, &charon).await;
         }
         self.adopted_charon = None;
         self.start_charon(&charon, &swanctl).await
@@ -354,7 +471,10 @@ impl Strongswan {
     async fn start_charon(&mut self, charon: &Path, swanctl: &Path) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt as _;
         use std::os::unix::process::CommandExt as _;
-        let etc = self.etc.clone().expect("resolve() must run first");
+        let etc = self
+            .etc
+            .clone()
+            .context("strongSwan etc path not resolved")?;
         // Output goes to the helper's log rather than through a pipe to
         // this process, which would break when the helper exits.
         let log = std::fs::OpenOptions::new()
@@ -411,14 +531,8 @@ impl Strongswan {
                 .as_deref()
                 .and_then(|charon| running_charon(&self.pid_file, charon))
         });
-        if let Some(pid) = adopted {
-            if self
-                .charon
-                .as_deref()
-                .is_some_and(|charon| is_charon(pid, charon))
-            {
-                stop_process(pid).await;
-            }
+        if let (Some(pid), Some(charon)) = (adopted, self.charon.as_deref()) {
+            stop_process(pid, charon).await;
         }
     }
 
@@ -444,7 +558,16 @@ impl Strongswan {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.ensure_charon().await?;
 
-        let etc = self.etc.as_ref().unwrap().clone();
+        let etc = self
+            .etc
+            .as_ref()
+            .context("strongSwan etc path not resolved")?
+            .clone();
+        let swanctl = self
+            .swanctl
+            .as_ref()
+            .context("strongSwan swanctl path not resolved")?
+            .clone();
         let swanctl_dir = etc.join("swanctl");
         tokio::fs::create_dir_all(swanctl_dir.join("conf.d")).await?;
         tokio::fs::create_dir_all(swanctl_dir.join("swanctl.d")).await?;
@@ -471,13 +594,13 @@ impl Strongswan {
         let secrets = build_swanctl_secrets(args);
         write_private_config(&secrets_path, secrets.as_bytes()).await?;
 
-        run(self.swanctl.as_ref().unwrap(), &["--load-all"]).await?;
+        run(&swanctl, &["--load-all"]).await?;
 
         // --initiate is async — the call returns once the IKE handshake has
         // either succeeded or failed, but for fast networks ~1s is enough.
         // We give it 30s to allow for slow gateways.
         let out = run_with_timeout(
-            self.swanctl.as_ref().unwrap(),
+            &swanctl,
             &["--initiate", "--child", &args.profile_id],
             std::time::Duration::from_secs(30),
         )
@@ -568,7 +691,9 @@ impl Strongswan {
     /// SA. Empty when they cannot be read, which is not narrowing: the
     /// tunnel is then set up as asked.
     async fn granted_selectors(&self, profile_id: &str) -> Vec<String> {
-        let swanctl = self.swanctl.as_ref().expect("resolved before connect");
+        let Some(swanctl) = self.swanctl.as_ref() else {
+            return Vec::new();
+        };
         match tokio::time::timeout(
             std::time::Duration::from_secs(5),
             run(swanctl, &["--list-sas"]),
@@ -583,15 +708,23 @@ impl Strongswan {
     pub async fn disconnect(&mut self, args: &DisconnectArgs) -> anyhow::Result<DisconnectResult> {
         validate_profile_id(&args.profile_id)?;
         self.resolve()?;
-        let swanctl = self.swanctl.as_ref().unwrap();
+        let swanctl = self
+            .swanctl
+            .as_ref()
+            .context("strongSwan swanctl path not resolved")?
+            .clone();
         // best-effort: terminate the IKE SA. Even if it fails, also remove
         // the loaded config so a subsequent --load-all doesn't try to
         // re-initiate.
-        let out = run(swanctl, &["--terminate", "--ike", &args.profile_id])
+        let out = run(&swanctl, &["--terminate", "--ike", &args.profile_id])
             .await
             .unwrap_or_default();
 
-        let etc = self.etc.as_ref().unwrap().clone();
+        let etc = self
+            .etc
+            .as_ref()
+            .context("strongSwan etc path not resolved")?
+            .clone();
         let conf_path = etc.join(format!(
             "swanctl/conf.d/supermanager-{}.conf",
             args.profile_id
@@ -613,7 +746,7 @@ impl Strongswan {
 
         tokio::fs::remove_file(&conf_path).await.ok();
         tokio::fs::remove_file(&secrets_path).await.ok();
-        let _ = run(swanctl, &["--load-all"]).await;
+        let _ = run(&swanctl, &["--load-all"]).await;
 
         if let Some(host) = server_host {
             delete_server_host_route(&host);
@@ -647,14 +780,20 @@ impl Strongswan {
         // Run path resolution lazily so the GUI's first poll-tick after
         // helper install still reports the right state. resolve() is cheap
         // and idempotent.
-        if self.resolve().is_err() {
+        if let Err(e) = self.resolve() {
+            return Ok(StatusResult {
+                state: "disconnected".to_owned(),
+                detail: format!("{e:#}"),
+                ..Default::default()
+            });
+        }
+        let Some(swanctl) = self.swanctl.as_ref() else {
             return Ok(StatusResult {
                 state: "disconnected".to_owned(),
                 detail: "strongSwan not installed".to_owned(),
                 ..Default::default()
             });
-        }
-        let swanctl = self.swanctl.as_ref().expect("just resolved");
+        };
         // Bound the swanctl call. Without a timeout a wedged charon (vici
         // socket unresponsive) makes `--list-sas` hang FOREVER — and because
         // status() holds the strongSwan controller lock, that wedges EVERY
@@ -1025,13 +1164,21 @@ async fn answers(swanctl: &Path) -> bool {
         .is_ok()
 }
 
-/// Kill `pid` and wait, briefly, for it to be gone.
-async fn stop_process(pid: i32) {
+/// Kill `pid` after verifying it still belongs to `charon`, and wait briefly
+/// for it to be gone so a recycled pid can never be signalled.
+async fn stop_process(pid: i32, charon: &Path) {
+    if pid <= 1 || !is_charon(pid, charon) {
+        return;
+    }
+    // SAFETY: `pid > 1` was just verified by `is_charon` to be our `charon` process.
     unsafe {
         libc::kill(pid, libc::SIGKILL);
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(pid, 0) } == 0 && tokio::time::Instant::now() < deadline {
+    while is_charon(pid, charon)
+        && unsafe { libc::kill(pid, 0) } == 0
+        && tokio::time::Instant::now() < deadline
+    {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
@@ -1098,17 +1245,28 @@ async fn run(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
 
 async fn exec(bin: &Path, args: &[&str]) -> anyhow::Result<String> {
     let mut command = Command::new(bin);
-    // Use the same Homebrew configuration as the supervised charon process.
+    // Use the same configuration directory as the supervised charon process.
     // Environment inherited from launchd must not select a different socket.
-    if let Some(prefix) = bin.parent().and_then(Path::parent) {
-        let etc = [prefix.join("etc"), prefix.join("opt/strongswan/etc")]
-            .into_iter()
-            .find(|path| path.exists());
-        if let Some(etc) = etc {
-            command
-                .env("STRONGSWAN_CONF", etc.join("strongswan.conf"))
-                .env("SWANCTL_DIR", etc.join("swanctl"));
+    let policy = crate::vpn_runtime::current_policy();
+    let mut etc_candidates = Vec::new();
+    if let Some(bin_dir) = bin.parent() {
+        etc_candidates.push(bin_dir.join("etc"));
+        if let Some(prefix) = bin_dir.parent() {
+            etc_candidates.push(prefix.join("etc"));
+            etc_candidates.push(prefix.join("opt/strongswan/etc"));
         }
+    }
+    etc_candidates.push(PathBuf::from("/etc"));
+    let etc = etc_candidates.into_iter().find(|path| {
+        path.join("strongswan.conf").is_file()
+            && (policy == Policy::Development
+                || crate::vpn_runtime::ensure_root_owned(path, "strongSwan config directory")
+                    .is_ok())
+    });
+    if let Some(etc) = etc {
+        command
+            .env("STRONGSWAN_CONF", etc.join("strongswan.conf"))
+            .env("SWANCTL_DIR", etc.join("swanctl"));
     }
     // kill_on_drop: callers race this against a timeout (see `status`), and
     // dropping the future without it leaves the swanctl child alive forever,
@@ -1706,10 +1864,7 @@ pub(crate) fn has_established_strongswan_sa() -> bool {
 /// cleanly with none, `None` = the probe could not complete (missing binary,
 /// spawn error, or a wedged charon that timed out).
 fn swanctl_list_sas_established() -> Option<bool> {
-    let swanctl = BREW_PATHS
-        .iter()
-        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
-        .find(|p| p.exists())?;
+    let swanctl = locate_swanctl(crate::vpn_runtime::current_policy())?;
     // Via proc::bounded rather than a bare worker thread: on timeout that
     // SIGKILLs the wedged swanctl instead of abandoning it, so a 2s reaper
     // cycle can't accumulate one stuck child (and one stuck thread) per tick.
@@ -1900,7 +2055,7 @@ pub(crate) fn foreign_tunnel_ifaces() -> std::collections::HashSet<String> {
     // WireGuard: `wg show interfaces` prints a space-separated list of the
     // utun devices wireguard-go currently owns. The `wg` WireGuard runs
     // with, which need not be Homebrew's.
-    if let Ok(wg) = crate::vpn_runtime::wg() {
+    if let Ok(wg) = crate::vpn_runtime::wg(crate::vpn_runtime::current_policy()) {
         if let Ok(out) = crate::proc::bounded(
             std::process::Command::new(&wg).args(["show", "interfaces"]),
             crate::proc::PROBE,
@@ -1996,20 +2151,26 @@ async fn extract_remote_addr(path: impl AsRef<std::path::Path>) -> anyhow::Resul
 ///      c. Remove the conf file.
 ///   2. Sweep `supermanager-*-secrets.conf` files (belt-and-braces).
 ///   3. Run `swanctl --load-all` so charon sees the empty namespace.
-pub async fn terminate_and_sweep() {
-    // Find the first working swanctl binary. Return early if strongSwan
-    // isn't installed — nothing to clean up.
-    let swanctl_path = BREW_PATHS
-        .iter()
-        .map(|p| std::path::Path::new(p).join("bin/swanctl"))
-        .find(|p| p.exists());
-    let Some(swanctl) = swanctl_path else {
+pub async fn terminate_and_sweep(policy: Policy) {
+    // Find the first working swanctl binary permitted by policy. Return early
+    // if strongSwan isn't installed — nothing to clean up.
+    let Some(swanctl) = locate_swanctl(policy) else {
         tracing::debug!("terminate_and_sweep: swanctl not found, skipping");
         return;
     };
 
-    for prefix in BREW_PATHS {
-        let conf_dir = std::path::Path::new(prefix).join("etc/swanctl/conf.d");
+    for etc in candidate_etc_dirs() {
+        if policy == Policy::Release
+            && crate::vpn_runtime::ensure_root_owned(&etc, "strongSwan config directory").is_err()
+        {
+            continue;
+        }
+        let conf_dir = etc.join("swanctl/conf.d");
+        if policy == Policy::Release
+            && crate::vpn_runtime::ensure_root_owned(&conf_dir, "swanctl conf.d").is_err()
+        {
+            continue;
+        }
         let Ok(mut entries) = tokio::fs::read_dir(&conf_dir).await else {
             continue;
         };
@@ -2055,7 +2216,7 @@ pub async fn terminate_and_sweep() {
         // these when --terminate succeeds, but if a SA was already gone they
         // linger in the kernel and black-hole all internet traffic.
         delete_full_tunnel_routes();
-        break; // Found a valid brew prefix; done.
+        break; // Found a valid config dir; done.
     }
 }
 
@@ -2147,6 +2308,7 @@ mod tests {
         }
         fn engine(&self, charon: PathBuf, swanctl: PathBuf) -> Strongswan {
             Strongswan {
+                policy: Policy::Development,
                 charon: Some(charon),
                 swanctl: Some(swanctl),
                 etc: Some(self.0.clone()),
@@ -2815,6 +2977,54 @@ conn: #1, ESTABLISHED, IKEv2, a_i* b_r
         assert_eq!(escape_swanctl(r"a\b"), r"a\\b");
         assert_eq!(escape_swanctl("line1\nline2"), "line1line2");
         assert_eq!(escape_swanctl("with\rcarriage"), "withcarriage");
+    }
+
+    #[test]
+    fn connect_args_debug_redacts_secrets() {
+        let a = args("vpn.example.com", "alice", "top-secret-pw", "super-psk-value");
+        let debug = format!("{a:?}");
+        assert!(debug.contains("alice"), "{debug}");
+        assert!(!debug.contains("top-secret-pw"), "{debug}");
+        assert!(!debug.contains("super-psk-value"), "{debug}");
+        assert!(debug.contains("[REDACTED]"), "{debug}");
+    }
+
+    #[test]
+    fn release_policy_refuses_unprivileged_strongswan_but_development_allows_it() {
+        let fixture = StartupFixture::new();
+        let bin_dir = fixture.0.join("bin");
+        let etc_dir = fixture.0.join("etc");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&etc_dir).unwrap();
+        let swanctl = fixture.script("bin/swanctl", "exit 0");
+        let charon = fixture.script("charon", "exit 0");
+
+        let dev = resolve_strongswan_from_roots(
+            std::slice::from_ref(&fixture.0),
+            Policy::Development,
+            |_, _| Err(anyhow!("should not be checked in Development")),
+        )
+        .unwrap();
+        assert_eq!(dev.swanctl, swanctl);
+        assert_eq!(dev.charon, charon);
+        assert_eq!(dev.etc, etc_dir);
+
+        let err = resolve_strongswan_from_roots(
+            std::slice::from_ref(&fixture.0),
+            Policy::Release,
+            crate::vpn_runtime::ensure_root_owned,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("vpn_runtime_install"), "{msg}");
+
+        let ok = resolve_strongswan_from_roots(
+            std::slice::from_ref(&fixture.0),
+            Policy::Release,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(ok.swanctl, swanctl);
     }
 }
 

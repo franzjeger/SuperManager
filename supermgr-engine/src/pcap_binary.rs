@@ -273,9 +273,10 @@ fn parse_packet_for_clienthello(eth: &[u8]) -> Option<TlsClientHello> {
         return None;
     }
 
-    // Handshake message header: 4 bytes inside the record body.
-    // Type (1) + Length (3, big-endian).
-    if payload.len() < 9 {
+    // Handshake message header: 4 bytes inside the record body
+    // (Type (1) + Length (3, big-endian)), plus the 2-byte ClientHello
+    // legacy_version immediately following at payload[9..11].
+    if payload.len() < 11 {
         return None;
     }
     // Handshake type 1 = ClientHello.
@@ -462,6 +463,22 @@ mod tests {
 
         let hellos = parse_pcap_for_clienthellos(&pcap);
         assert!(hellos.is_empty());
+    }
+
+    #[test]
+    fn ignores_9_and_10_byte_truncated_clienthello_without_panic() {
+        // 9-byte and 10-byte TLS ClientHello headers reach past the 4-byte
+        // handshake header but stop short of the 2-byte legacy_version at
+        // payload[9..11]. Must return empty without panicking.
+        let payload_9 = [22u8, 0x03, 0x01, 0, 5, 1, 0, 0, 1];
+        let frame_9 =
+            build_eth_ipv4_tcp([192, 0, 2, 5], 43021, [203, 0, 113, 10], 443, &payload_9);
+        assert!(parse_pcap_for_clienthellos(&pcap_with_one_packet(&frame_9)).is_empty());
+
+        let payload_10 = [22u8, 0x03, 0x01, 0, 5, 1, 0, 0, 1, 0x03];
+        let frame_10 =
+            build_eth_ipv4_tcp([192, 0, 2, 5], 43021, [203, 0, 113, 10], 443, &payload_10);
+        assert!(parse_pcap_for_clienthellos(&pcap_with_one_packet(&frame_10)).is_empty());
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub mod paths;
 pub mod pipe;
 pub mod protocol;
 pub mod recon;
+pub mod sanitize;
 pub mod secret_lifecycle;
 pub mod severity;
 pub mod ssh;

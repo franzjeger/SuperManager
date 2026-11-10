@@ -27,8 +27,7 @@ pub async fn connect() -> Result<DaemonClient, String> {
     let conn = zbus::Connection::system()
         .await
         .map_err(|e| format!("D-Bus system connection failed (is supermgrd running?): {e}"))?;
-    let conn_static: &'static zbus::Connection = Box::leak(Box::new(conn));
-    crate::dbus::DaemonProxy::new(conn_static)
+    crate::dbus::DaemonProxy::new(&conn)
         .await
         .map_err(|e| format!("failed to create DaemonProxy: {e}"))
 }

@@ -596,6 +596,88 @@ pub fn name_from_file(file_name: &str) -> String {
     stem.trim().to_owned()
 }
 
+/// Display label for an SSH key in the Add Host key-selector dropdown.
+pub fn key_choice_label(k: &Key) -> String {
+    if k.key_type.is_empty() {
+        k.name.clone()
+    } else {
+        format!("{} ({})", k.name, k.key_type)
+    }
+}
+
+/// Form inputs collected from `AddHostSheet`.
+pub struct NewHostInput<'a> {
+    pub label: &'a str,
+    pub hostname: &'a str,
+    pub port_str: &'a str,
+    pub username: &'a str,
+    pub group: &'a str,
+    pub device_type: &'a str,
+    pub auth_method: &'a str,
+    pub selected_key_id: Option<&'a str>,
+}
+
+/// Validate `AddHostSheet` fields and build the `host_json` payload for `add_host`.
+pub fn build_add_host_json(input: &NewHostInput<'_>) -> Result<String, String> {
+    let port: u16 = match input.port_str.trim().parse() {
+        Ok(p) if p > 0 => p,
+        _ => return Err("The SSH port must be a number from 1 to 65535.".into()),
+    };
+    let mut obj = serde_json::json!({
+        "label": input.label.trim(),
+        "hostname": input.hostname.trim(),
+        "port": port,
+        "username": input.username.trim(),
+        "group": input.group.trim(),
+        "device_type": input.device_type,
+        "auth_method": input.auth_method,
+    });
+    if input.auth_method == "key" {
+        let key_id = input
+            .selected_key_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                "Select an SSH key, or generate one on the SSH keys page first.".to_owned()
+            })?;
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "auth_key_id".into(),
+                serde_json::Value::String(key_id.to_owned()),
+            );
+        }
+    }
+    Ok(obj.to_string())
+}
+
+/// Validate a GitHub release installer asset filename before writing to `%TEMP%`.
+///
+/// Uses [`std::path::Path::file_name`] while rejecting path traversal (`..\`,
+/// `../`), directory separators, drive/ADS colons, and non-installer extensions
+/// (anything other than `.msi` or `.exe`).
+pub fn sanitize_installer_filename(raw: &str) -> Result<&str, String> {
+    if raw.is_empty() || raw.contains(['/', '\\', ':', '\0']) || raw.contains("..") {
+        return Err(format!("refusing unsafe installer filename: {raw:?}"));
+    }
+    let path = std::path::Path::new(raw);
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return Err(format!("refusing invalid installer filename: {raw:?}"));
+    };
+    if file_name != raw {
+        return Err(format!("refusing non-basename installer filename: {raw:?}"));
+    }
+    let valid_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("msi") || e.eq_ignore_ascii_case("exe"));
+    if !valid_ext {
+        return Err(format!(
+            "refusing installer with unsupported extension (expected .exe or .msi): {raw:?}"
+        ));
+    }
+    Ok(file_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,5 +895,96 @@ mod tests {
             "nordvik"
         );
         assert_eq!(name_from_file("noext"), "noext");
+    }
+
+    #[test]
+    fn add_host_json_wires_auth_key_id_for_key_auth_and_rejects_missing_key() {
+        let key_id = "01234567-89ab-cdef-0123-456789abcdef";
+        let key = Key {
+            id: key_id.into(),
+            name: "frank@workstation".into(),
+            key_type: "ED25519".into(),
+            fingerprint: "SHA256:abc".into(),
+            created_at: None,
+        };
+        assert_eq!(key_choice_label(&key), "frank@workstation (ED25519)");
+
+        let json = build_add_host_json(&NewHostInput {
+            label: "web-01",
+            hostname: "10.0.1.42",
+            port_str: "22",
+            username: "ubuntu",
+            group: "prod",
+            device_type: "linux",
+            auth_method: "key",
+            selected_key_id: Some(key_id),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["auth_method"], "key");
+        assert_eq!(v["auth_key_id"], key_id);
+
+        assert!(build_add_host_json(&NewHostInput {
+            label: "web-01",
+            hostname: "10.0.1.42",
+            port_str: "22",
+            username: "ubuntu",
+            group: "prod",
+            device_type: "linux",
+            auth_method: "key",
+            selected_key_id: None,
+        })
+        .is_err());
+
+        let pw_json = build_add_host_json(&NewHostInput {
+            label: "web-01",
+            hostname: "10.0.1.42",
+            port_str: "22",
+            username: "ubuntu",
+            group: "",
+            device_type: "linux",
+            auth_method: "password",
+            selected_key_id: Some(key_id),
+        })
+        .unwrap();
+        let pw_v: Value = serde_json::from_str(&pw_json).unwrap();
+        assert!(pw_v.get("auth_key_id").is_none());
+    }
+
+    #[test]
+    fn installer_filename_sanitizer_blocks_traversal_and_bad_extensions() {
+        assert_eq!(
+            sanitize_installer_filename("SuperManager-Setup-1.8.0.exe").unwrap(),
+            "SuperManager-Setup-1.8.0.exe"
+        );
+        assert_eq!(
+            sanitize_installer_filename("SuperManager-1.8.0.msi").unwrap(),
+            "SuperManager-1.8.0.msi"
+        );
+        assert_eq!(
+            sanitize_installer_filename("SuperManager-1.8.0.MSI").unwrap(),
+            "SuperManager-1.8.0.MSI"
+        );
+        for bad in [
+            "",
+            ".",
+            "..",
+            r"..\evil.exe",
+            "../evil.exe",
+            r"sub\SuperManager.msi",
+            "sub/SuperManager.msi",
+            "C:SuperManager.exe",
+            "SuperManager.exe:zone",
+            "SuperManager..exe",
+            "SuperManager-1.8.0.bat",
+            "SuperManager-1.8.0.ps1",
+            "SuperManager-1.8.0.zip",
+            "SuperManager\0.exe",
+        ] {
+            assert!(
+                sanitize_installer_filename(bad).is_err(),
+                "accepted unsafe installer name {bad:?}"
+            );
+        }
     }
 }

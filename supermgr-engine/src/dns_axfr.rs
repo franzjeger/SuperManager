@@ -42,6 +42,9 @@ use crate::vuln::{Finding, Severity};
 /// nameservers. Returns one finding per nameserver that allowed
 /// the zone transfer.
 pub async fn check(domain: &str) -> Vec<Finding> {
+    if supermgr_core::sanitize::validate_host_or_ip(domain).is_err() {
+        return Vec::new();
+    }
     let nameservers = list_nameservers(domain).await;
     if nameservers.is_empty() {
         return Vec::new();
@@ -74,6 +77,8 @@ async fn list_nameservers(domain: &str) -> Vec<String> {
 ///   - `None` — the NS refused (typical), timed out, or
 ///     unreachable.
 async fn attempt_axfr(domain: &str, ns: &str) -> Option<AxfrTransfer> {
+    supermgr_core::sanitize::validate_host_or_ip(domain).ok()?;
+    supermgr_core::sanitize::validate_host_or_ip(ns).ok()?;
     let output = match tokio::time::timeout(
         Duration::from_secs(8),
         tokio::process::Command::new("dig")
@@ -193,6 +198,9 @@ fn build_finding(domain: &str, ns: &str, transfer: &AxfrTransfer) -> Finding {
 // ---------------------------------------------------------------------------
 
 async fn dig_short(name: &str, rrtype: &str) -> Vec<String> {
+    if supermgr_core::sanitize::validate_host_or_ip(name).is_err() {
+        return Vec::new();
+    }
     let res = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new("dig")

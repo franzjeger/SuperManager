@@ -70,7 +70,7 @@ const ANY_ARGUMENTS: &[&str] = &[
     // The process. The helper passes `--script-security 1` after the
     // configuration, and no directive that runs a script is allowed.
     "verb", "mute", "echo", "user", "group", "nice", "mlock", "suppress-timestamps",
-    "machine-readable-output", "ignore-unknown-option", "script-security", "up-delay",
+    "machine-readable-output", "ignore-unknown-option", "up-delay",
     "down-pre",
     // Windows-only; harmless where they are not understood.
     "block-outside-dns", "register-dns", "ip-win32", "route-method", "dhcp-renew",
@@ -252,18 +252,33 @@ fn directive(name: &str, args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "providers" => Err("`providers` loads a module that is not one of OpenSSL's own".into()),
+        "script-security" => match (arg(0), arg(1)) {
+            (Some("0" | "1"), None) => Ok(()),
+            _ => Err("`script-security` may only be 0 or 1".into()),
+        },
         // OpenVPN strips `setenv opt` and parses the rest as a directive.
         // Other variables go to the commands it runs, `route` and
-        // `ifconfig`, where the dynamic linker would act on its own.
+        // `ifconfig`, where dynamic linkers, TLS libraries, or shells would
+        // act on their own.
         "setenv" => match (arg(0), args.get(1..)) {
             (Some("opt"), Some([wrapped, rest @ ..])) => directive(wrapped, rest),
-            (Some(variable), _) if variable.starts_with("DYLD_") => Err(format!(
+            (Some(variable), _) if is_dangerous_env(variable) => Err(format!(
                 "`setenv {variable}` would reach the commands OpenVPN runs"
             )),
             _ => Ok(()),
         },
         _ => Err(format!("SuperManager does not pass `{name}` to OpenVPN")),
     }
+}
+
+fn is_dangerous_env(variable: &str) -> bool {
+    let name = variable.split('=').next().unwrap_or(variable);
+    let upper = name.to_ascii_uppercase();
+    upper.starts_with("DYLD_")
+        || upper.starts_with("LD_")
+        || upper.starts_with("OPENSSL_")
+        || upper.starts_with("SSL_")
+        || matches!(upper.as_str(), "PATH" | "IFS" | "BASH_ENV" | "ENV")
 }
 
 /// `tun`, `tap` or `utun`, for `dev` with a unit number or without.
@@ -416,11 +431,23 @@ mod tests {
             ("dev disk0\n", 1),
             ("dev ../disk0\n", 1),
             ("dev-type disk\n", 1),
+            ("script-security 2\n", 1),
+            ("script-security 3\n", 1),
+            ("script-security\n", 1),
+            ("script-security 1 extra\n", 1),
             ("setenv DYLD_INSERT_LIBRARIES /tmp/lib.dylib\n", 1),
+            ("setenv LD_PRELOAD /tmp/lib.so\n", 1),
+            ("setenv OPENSSL_CONF /tmp/openssl.cnf\n", 1),
+            ("setenv SSL_CERT_FILE /tmp/ca.pem\n", 1),
+            ("setenv PATH /tmp/bin\n", 1),
+            ("setenv IFS :\n", 1),
+            ("setenv BASH_ENV /tmp/rc.sh\n", 1),
+            ("setenv ENV /tmp/rc.sh\n", 1),
             ("<connection>\nremote a 1\nup hook\n</connection>\n", 3),
         ] {
             assert_eq!(refused(config).line, line, "{config:?}");
         }
+        assert_eq!(check("script-security 0\nscript-security 1\n"), Ok(()));
     }
 
     #[test]

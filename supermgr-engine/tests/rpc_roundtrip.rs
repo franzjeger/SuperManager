@@ -356,3 +356,124 @@ async fn mac_client_network_methods_reach_the_supported_engine_handlers() {
         }
     }
 }
+
+#[tokio::test]
+async fn ssh_add_and_update_host_strip_secret_refs_and_validate_inputs() {
+    let (_dir, socket) = spawn_server().await;
+
+    // Wire-supplied SecretRefs must be stripped when adding a host.
+    let add_resp = rpc_call(
+        &socket,
+        "ssh_add_host",
+        json!({
+            "host_json": json!({
+                "label": "hardened-host",
+                "hostname": "192.0.2.50",
+                "port": 22,
+                "username": "admin",
+                "auth_method": "password",
+                "device_type": "linux",
+                "auth_password_ref": "supermgr/ssh/host/victim/password",
+                "auth_cert_ref": "supermgr/ssh/host/victim/certificate",
+                "api_token_ref": "ssh/victim/fortigate-api-token",
+                "unifi_api_token_ref": "ssh/victim/unifi-credentials"
+            }).to_string()
+        }),
+        1,
+    )
+    .await;
+    let host_id = add_resp["result"].as_str().expect("host_id string");
+    let get_resp = rpc_call(&socket, "ssh_get_host", json!({ "host_id": host_id }), 2).await;
+    let stored = &get_resp["result"];
+    assert!(stored["auth_password_ref"].is_null());
+    assert!(stored["auth_cert_ref"].is_null());
+    assert!(stored["api_token_ref"].is_null());
+    assert!(stored["unifi_api_token_ref"].is_null());
+
+    // Option-injection hostname / invalid username rejected on add and update.
+    let bad_add = rpc_call(
+        &socket,
+        "ssh_add_host",
+        json!({
+            "host_json": json!({
+                "label": "bad",
+                "hostname": "-oProxyCommand=sh",
+                "username": "admin"
+            }).to_string()
+        }),
+        3,
+    )
+    .await;
+    assert_eq!(bad_add["error"]["code"], -32602);
+
+    let bad_update = rpc_call(
+        &socket,
+        "ssh_update_host",
+        json!({
+            "host_id": host_id,
+            "host_json": json!({ "hostname": "-oProxyCommand=sh" }).to_string()
+        }),
+        4,
+    )
+    .await;
+    assert_eq!(bad_update["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn vpn_import_openvpn_rejects_dangerous_directives() {
+    let (_dir, socket) = spawn_server().await;
+    let resp = rpc_call(
+        &socket,
+        "vpn_import_openvpn",
+        json!({
+            "name": "evil-ovpn",
+            "content": "client\nremote 198.51.100.1 1194\nscript-security 2\nup /tmp/pwn.sh\n"
+        }),
+        1,
+    )
+    .await;
+    assert_eq!(resp["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn findings_handlers_surface_structured_errors_instead_of_zero_vulns() {
+    let (_dir, socket) = spawn_server().await;
+
+    // Invalid scope slug -> -32022 (InvalidScope).
+    for (method, params) in [
+        ("findings_list", json!({ "scope": "../escape" })),
+        ("findings_summary", json!({ "scope": "../escape" })),
+        ("findings_risk_hosts", json!({ "scope": "../escape" })),
+        ("remediation_script", json!({ "scope": "../escape" })),
+    ] {
+        let resp = rpc_call(&socket, method, params, 1).await;
+        assert_eq!(
+            resp["error"]["code"], -32022,
+            "{method} should return -32022 on invalid scope, got {resp}"
+        );
+    }
+
+    // Corrupt findings JSON -> -32021 (FindingsParse) across findings & report RPCs.
+    let scope = format!("test-corrupt-{}", uuid::Uuid::new_v4().simple());
+    let mut store_dir = supermgr_engine::secrets::default_data_dir();
+    store_dir.push("findings_store");
+    store_dir.push(&scope);
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let store_file = store_dir.join("findings.json");
+    std::fs::write(&store_file, b"{ corrupt json").unwrap();
+
+    for (method, params) in [
+        ("findings_list", json!({ "scope": &scope })),
+        ("findings_summary", json!({ "scope": &scope })),
+        ("findings_risk_hosts", json!({ "scope": &scope })),
+        ("remediation_script", json!({ "scope": &scope })),
+    ] {
+        let resp = rpc_call(&socket, method, params, 2).await;
+        assert_eq!(
+            resp["error"]["code"], -32021,
+            "{method} must surface -32021 on corrupt findings store, got {resp}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&store_dir);
+}

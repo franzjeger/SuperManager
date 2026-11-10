@@ -315,8 +315,9 @@ pub async fn unguard_routes(profile_id: &str) -> Result<()> {
 /// The connect arguments hold the profiles' credentials, so the file is
 /// root's alone.
 fn persist(map: &HashMap<String, WatchedProfile>) -> Result<()> {
-    let parent = Path::new(STATE_PATH).parent().unwrap();
-    fs::create_dir_all(parent).context("creating state dir")?;
+    if let Some(parent) = Path::new(STATE_PATH).parent() {
+        fs::create_dir_all(parent).context("creating state dir")?;
+    }
     let json = serde_json::to_string_pretty(map).context("encoding json")?;
     crate::private_file::write(Path::new(STATE_PATH), json.as_bytes())
         .context("writing state file")?;
@@ -412,7 +413,10 @@ async fn check_and_reconnect(
         "wireguard" => replay_wg(p, wg).await,
         "openvpn" => replay_ov(p, ov).await,
         "ikev2" => replay_sw(p, sw).await,
-        _ => unreachable!(),
+        other => {
+            tracing::warn!(backend = %other, "unknown backend in watch list");
+            return;
+        }
     };
     match result {
         Ok(()) => {

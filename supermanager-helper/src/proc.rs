@@ -289,6 +289,7 @@ fn set_nonblocking(fd: &impl AsRawFd) -> io::Result<()> {
 }
 
 /// Wait until `child` exits or `deadline` passes, without reaping it.
+#[cfg(target_os = "macos")]
 fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
     let pid = child.id() as libc::pid_t;
     // SAFETY: kqueue() returns a new descriptor, owned from here on.
@@ -363,6 +364,43 @@ fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
     }
 }
 
+/// Wait until `child` exits or `deadline` passes, without reaping it.
+#[cfg(not(target_os = "macos"))]
+fn wait_for_exit(child: &Child, deadline: Instant) -> io::Result<bool> {
+    let pid = child.id() as libc::pid_t;
+    if exited_unreaped(pid)? {
+        return Ok(true);
+    }
+    // SAFETY: pidfd_open(pid, 0) returns a fresh fd or -1 without side effects on `child`.
+    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0 as libc::c_uint) };
+    if raw_fd >= 0 {
+        // SAFETY: `raw_fd` is a newly created file descriptor owned exclusively here.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_fd as libc::c_int) };
+        if exited_unreaped(pid)? {
+            return Ok(true);
+        }
+        let mut fds = [libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        return poll_until(&mut fds, deadline);
+    }
+    if io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return Ok(true);
+    }
+    loop {
+        if exited_unreaped(pid)? {
+            return Ok(true);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(left.min(Duration::from_millis(10)));
+    }
+}
+
 /// Whether our child `pid` has exited, leaving it waitable (WNOWAIT).
 fn exited_unreaped(pid: libc::pid_t) -> io::Result<bool> {
     // SAFETY: an all-zero siginfo_t is a valid value to be overwritten.
@@ -377,9 +415,21 @@ fn exited_unreaped(pid: libc::pid_t) -> io::Result<bool> {
         )
     };
     if rc < 0 {
-        return Err(io::Error::last_os_error());
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ECHILD) {
+            return Ok(true);
+        }
+        return Err(err);
     }
-    Ok(info.si_pid != 0)
+    #[cfg(target_os = "macos")]
+    {
+        Ok(info.si_pid != 0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: `waitid` zero-initialized or populated the `SIGCHLD` union variant.
+        Ok(unsafe { info.si_pid() } != 0)
+    }
 }
 
 /// SIGKILL, not SIGTERM: the commands that overrun are stuck in a kernel
@@ -400,6 +450,7 @@ fn kill(child: &mut Child, scope: Scope) {
 /// The command name the kernel keeps for `pid`, as `ps -c` shows it. Unlike
 /// the path [`process_is`] reads, it is still there after the executable has
 /// been deleted.
+#[cfg(target_os = "macos")]
 pub fn process_name(pid: i32) -> Option<String> {
     if pid <= 0 {
         return None;
@@ -417,7 +468,19 @@ pub fn process_name(pid: i32) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn process_name(pid: i32) -> Option<String> {
+    if pid <= 0 {
+        return None;
+    }
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .map(|s| s.trim_end_matches('\n').to_owned())
+        .filter(|s| !s.is_empty())
+}
+
 /// The effective user `pid` runs as.
+#[cfg(target_os = "macos")]
 pub fn process_uid(pid: i32) -> Option<libc::uid_t> {
     if pid <= 0 {
         return None;
@@ -439,10 +502,25 @@ pub fn process_uid(pid: i32) -> Option<libc::uid_t> {
     (written == size).then(|| unsafe { info.assume_init() }.pbi_uid)
 }
 
-/// Whether process `pid` runs the executable at `path`. A pid written down
-/// can outlive its process, and the pid be reused by something else.
-pub fn process_is(pid: i32, path: &std::path::Path) -> bool {
+#[cfg(not(target_os = "macos"))]
+pub fn process_uid(pid: i32) -> Option<libc::uid_t> {
+    use std::os::unix::fs::MetadataExt as _;
+    if pid <= 0 {
+        return None;
+    }
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|m| m.uid())
+}
+
+/// Executable path of running process `pid`, queried from the kernel rather
+/// than from spoofable `argv[0]`.
+#[cfg(target_os = "macos")]
+pub fn process_path(pid: i32) -> Option<std::path::PathBuf> {
     use std::os::unix::ffi::OsStrExt as _;
+    if pid <= 0 {
+        return None;
+    }
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     // SAFETY: `buf` is writable for the length passed.
     let len = unsafe {
@@ -452,14 +530,38 @@ pub fn process_is(pid: i32, path: &std::path::Path) -> bool {
             u32::try_from(buf.len()).unwrap_or(0),
         )
     };
-    let Ok(len) = usize::try_from(len) else {
+    let len = usize::try_from(len).ok().filter(|&n| n > 0)?;
+    Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+        &buf[..len],
+    )))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn process_path(pid: i32) -> Option<std::path::PathBuf> {
+    if pid <= 0 {
+        return None;
+    }
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// Whether process `pid` runs the executable at `path`. A pid written down
+/// can outlive its process, and the pid be reused by something else.
+pub fn process_is(pid: i32, path: &std::path::Path) -> bool {
+    let Some(running) = process_path(pid) else {
         return false;
     };
-    if len == 0 || pid <= 0 {
-        return false;
-    }
-    let running = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf[..len]));
     std::fs::canonicalize(path).is_ok_and(|expected| expected == running)
+}
+
+/// Whether process `pid`'s kernel executable basename is one of `names`.
+pub fn process_file_name_in(pid: i32, names: &[&str]) -> bool {
+    let Some(running) = process_path(pid) else {
+        return false;
+    };
+    running
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| names.contains(&name))
 }
 
 /// [`bounded`] for tokio commands on the async RPC paths. The child is

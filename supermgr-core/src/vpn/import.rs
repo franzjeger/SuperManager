@@ -68,9 +68,15 @@ pub fn validate_ovpn_config(text: &str) -> Result<(), String> {
     let has_ca_inline = text.contains("<ca>") && text.contains("</ca>");
     if !has_ca_directive && !has_ca_inline {
         return Err("not a valid OpenVPN client config: missing CA certificate \
-             ('ca <file>' directive or '<ca>...</ca>' inline block)"
+             ('ca [inline]' directive or '<ca>...</ca>' inline block)"
             .into());
     }
+
+    // Enforce the strict C-parser directive allowlist so imported profiles
+    // cannot execute scripts/plugins, load external modules, read/write
+    // arbitrary root/SYSTEM files, or inject dangerous environment variables.
+    crate::vpn::openvpn_config::check(text)
+        .map_err(|refusal| format!("unsafe or unsupported OpenVPN directive ({refusal})"))?;
 
     Ok(())
 }
@@ -119,16 +125,77 @@ fn xml_tags_all<'a>(xml: &'a str, tag: &str) -> Vec<&'a str> {
 }
 
 /// Wrap a raw base64 string (no headers) as a PEM certificate block,
-/// folding at 64 characters per line.
-fn base64_to_pem_cert(b64: &str) -> String {
+/// folding at 64 characters per line. Rejects non-base64 characters so
+/// untrusted XML cannot break out of `<ca>...</ca>`.
+fn base64_to_pem_cert(b64: &str) -> Result<String, String> {
+    let cleaned: String = b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    if cleaned.is_empty() {
+        return Err("empty certificate body".into());
+    }
+    if !cleaned
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        return Err("certificate in Azure VPN profile contains invalid base64 characters".into());
+    }
     let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-    for chunk in b64.as_bytes().chunks(64) {
+    for chunk in cleaned.as_bytes().chunks(64) {
         pem.push_str(std::str::from_utf8(chunk).unwrap_or(""));
         pem.push('\n');
     }
     pem.push_str("-----END CERTIFICATE-----\n");
-    pem
+    Ok(pem)
 }
+
+/// DigiCert Global Root G2 / Global Root CA bundle used by Azure VPN Gateways
+/// when `VpnSettings.xml` supplies only a `<Cert>` SHA-1 thumbprint rather than
+/// an inline base64 root certificate.
+const DIGICERT_GLOBAL_ROOT_CA_PEM: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD
+QTAeFw0wNjExMTAwMDAwMDBaFw0zMTExMTAwMDAwMDBaMGExCzAJBgNVBAYTAlVT
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IENBMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4jvhEXLeqKTTo1eqUKKPC3eQyaKl7hLOllsB
+CSDMAZOnTjC3U/dDxGkAV53ijSLdhwZAAIEJzs4bg7/fzTtxRuLWZscFs3YnFo97
+nh6Vfe63SKMI2tavegw5BmV/Sl0fvBf4q77uKNd0f3p4mVmFaG5cIzJLv07A6Fpt
+43C/dxC//AH2hdmoRBBYMql1GNXRor5H4idq9Joz+EkIYIvUX7Q6hL+hqkpMfT7P
+T19sdl6gSzeRntwi5m3OFBqOasv+zbMUZBfHWymeMr/y7vrTC0LUq7dBMtoM1O/4
+gdW7jVg/tRvoSSiicNoxBN33shbyTApOB6jtSj1etX+jkMOvJwIDAQABo2MwYTAO
+BgNVHQ8BAf8EBAMCAYYwDwYDVR0TAQH/BAUwAwEB/zAdBgNVHQ4EFgQUA95QNVbR
+TLtm8KPiGxvDl7I90VUwHwYDVR0jBBgwFoAUA95QNVbRTLtm8KPiGxvDl7I90VUw
+DQYJKoZIhvcNAQELBQADggEBAMucN6pIExIK+t1EnE9SsPTfrgT1eXkIoyQY/Esr
+hMAtudXH/vTBH1jLuG2cenTnmCmrEbXjcKChzUyImZOMkXDiqw8cvpOp/2PV5Adg
+06O/nVsJ8dWO41P0jmP6P6fbtGbfYmbW0W5BjfIttep3Sp+dWOIrWcBAI+0tKIJF
+PnlUkiaY4IBIqDfv8NZ5YBberOgOzW6sRBc4L0na4UU+Krk2U886UAb3LujEV0ls
+YSEY1QSteDwsOoBrp+uvFRTp2InBuThs4pFsiv9kuXclVzDAGySj4dzp30d8tbQk
+CAUw7C29C79Fv1C5qfPrmAESrciIxpg0X40KPMbp1ZWVbd4=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDjjCCAnagAwIBAgIQAzrx5qcRqaC7KGSxHQn65TANBgkqhkiG9w0BAQsFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBH
+MjAeFw0xMzA4MDExMjAwMDBaFw0zODAxMTUxMjAwMDBaMGExCzAJBgNVBAYTAlVT
+MRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5j
+b20xIDAeBgNVBAMTF0RpZ2lDZXJ0IEdsb2JhbCBSb290IEcyMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuzfNNNx7a8myaJCtSnX/RrohCgiN9RlUyfuI
+2/Ou8jqJkTx65qsGGmvPrC3oXgkkRLpimn7Wo6h+4FR1IAWsULecYxpsMNzaHxmx
+1x7e/dfgy5SDN67sH0NO3Xss0r0upS/kqbitOtSZpLYl6ZtrAGCSYP9PIUkY92eQ
+q2EGnI/yuum06ZIya7XzV+hdG82MHauVBJVJ8zUtluNJbd134/tJS7SsVQepj5Wz
+tCO7TG1F8PapspUwtP1MVYwnSlcUfIKdzXOS0xZKBgyMUNGPHgm+F6HmIcr9g+UQ
+vIOlCsRnKPZzFBQ9RnbDhxSJITRNrw9FDKZJobq7nMWxM4MphQIDAQABo0IwQDAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNVHQ4EFgQUTiJUIBiV
+5uNu5g/6+rkS7QYXjzkwDQYJKoZIhvcNAQELBQADggEBAGBnKJRvDkhj6zHd6mcY
+1Yl9PMWLSn/pvtsrF9+wX3N3KjITOYFnQoQj8kVnNeyIv/iPsGEMNKSuIEyExtv4
+NeF22d+mQrvHRAiGfzZ0JFrabA0UWTW98kndth/Jsw1HKj2ZL7tcu7XUIOGZX1NG
+Fdtom/DzMNU+MeKNhJ7jitralj41E6Vf8PlwUHBHQRFXGU7Aj64GxJUTFy8bJZ91
+8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe
+pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl
+MrY=
+-----END CERTIFICATE-----
+";
 
 /// Parse `azurevpnconfig.xml` and `VpnSettings.xml` into an [`AzureVpnConfig`].
 pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureVpnConfig, String> {
@@ -139,6 +206,7 @@ pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureV
     let client_id = xml_tag(azure_xml, "audience")
         .ok_or("missing <audience> in azurevpnconfig.xml")?
         .to_owned();
+    crate::sanitize::validate_safe_ident(&client_id, "Azure <audience>")?;
 
     let tenant_url = xml_tag(azure_xml, "tenant")
         .or_else(|| xml_tag(azure_xml, "issuer"))
@@ -150,15 +218,22 @@ pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureV
         .filter(|s| !s.is_empty())
         .ok_or("cannot extract tenant ID from tenant URL")?
         .to_owned();
+    crate::sanitize::validate_safe_ident(&tenant_id, "Azure tenant ID")?;
 
     let gateway_fqdn = xml_tag(azure_xml, "fqdn")
+        .or_else(|| xml_tag(azure_xml, "FQDN"))
         .or_else(|| xml_tag(vpn_settings_xml, "VpnServer"))
         .ok_or("missing <fqdn> / <VpnServer>")?
         .to_owned();
+    crate::sanitize::validate_host_or_ip(&gateway_fqdn)
+        .map_err(|e| format!("invalid Azure gateway FQDN: {e}"))?;
 
-    let server_secret_hex = xml_tag(azure_xml, "serversecret")
-        .ok_or("missing <serversecret> in azurevpnconfig.xml")?
-        .to_owned();
+    let server_secret_raw = xml_tag(azure_xml, "serversecret")
+        .ok_or("missing <serversecret> in azurevpnconfig.xml")?;
+    let server_secret_hex: String = server_secret_raw
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
 
     // DNS servers: prefer VpnSettings comma list, fall back to individual tags.
     let dns_servers: Vec<IpAddr> = {
@@ -180,12 +255,15 @@ pub fn parse_azure_xml(azure_xml: &str, vpn_settings_xml: &str) -> Result<AzureV
         servers
     };
 
-    // -- CA certificate from VpnSettings.xml --
-    let ca_cert_pem = xml_tags_all(vpn_settings_xml, "string")
+    // -- CA certificate from VpnSettings.xml or azurevpnconfig.xml --
+    let ca_cert_pem = match xml_tags_all(vpn_settings_xml, "string")
         .into_iter()
-        .find(|s| s.len() > 100) // all actual certs are long base64 blobs
-        .map(base64_to_pem_cert)
-        .unwrap_or_default();
+        .chain(xml_tags_all(azure_xml, "cert"))
+        .find(|s| s.len() > 100)
+    {
+        Some(raw_b64) => base64_to_pem_cert(raw_b64)?,
+        None => DIGICERT_GLOBAL_ROOT_CA_PEM.to_owned(),
+    };
 
     // -- Split-tunnel routes from VpnSettings.xml --
     let routes: Vec<ipnet::IpNet> = xml_tag(vpn_settings_xml, "Routes")
@@ -239,9 +317,15 @@ MIIB
     }
 
     #[test]
-    fn a_ca_by_file_reference_counts_as_a_ca() {
-        let text = "client\ndev tun\nremote vpn.example.com 1194\nca ca.crt\n";
-        assert_eq!(validate_ovpn_config(text), Ok(()));
+    fn a_ca_inline_directive_counts_as_a_ca_while_external_file_paths_are_refused() {
+        let ok_text = "client\ndev tun\nremote vpn.example.com 1194\nca [inline]\n<ca>\nMIIB\n</ca>\n";
+        assert_eq!(validate_ovpn_config(ok_text), Ok(()));
+
+        let path_text = "client\ndev tun\nremote vpn.example.com 1194\nca ca.crt\n";
+        assert!(validate_ovpn_config(path_text).is_err());
+
+        let rce_text = "client\ndev tun\nremote vpn.example.com 1194\nscript-security 2\nup /bin/sh\n<ca>\nMIIB\n</ca>\n";
+        assert!(validate_ovpn_config(rce_text).is_err());
     }
 
     #[test]

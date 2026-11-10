@@ -2,7 +2,7 @@
 
 use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 
-use super::{copy_to_clipboard, local, App, AppWindow, Ctx, KeyItem, Keys, Overlay};
+use super::{copy_to_clipboard, local, App, AppWindow, Ctx, Hosts, KeyItem, Keys, Overlay};
 use crate::model;
 
 /// The key types the generate form offers, in the order of its combo box.
@@ -110,6 +110,10 @@ pub(super) fn bind(window: &AppWindow, ctx: &Ctx) {
 pub(super) fn show_keys(ctx: &Ctx, keys: Vec<model::Key>) {
     ctx.ui(move |w| {
         let now = chrono::Local::now();
+        let labels: Vec<SharedString> = keys
+            .iter()
+            .map(|k| model::key_choice_label(k).into())
+            .collect();
         let items: Vec<KeyItem> = keys
             .iter()
             .map(|k| KeyItem {
@@ -124,7 +128,13 @@ pub(super) fn show_keys(ctx: &Ctx, keys: Vec<model::Key>) {
                     .into(),
             })
             .collect();
-        w.global::<Keys>()
-            .set_items(ModelRc::new(VecModel::from(items)));
+        let count = i32::try_from(items.len()).unwrap_or(i32::MAX);
+        let keys_global = w.global::<Keys>();
+        keys_global.set_labels(ModelRc::new(VecModel::from(labels)));
+        keys_global.set_items(ModelRc::new(VecModel::from(items)));
+        let hosts_global = w.global::<Hosts>();
+        if hosts_global.get_add_key_index() >= count {
+            hosts_global.set_add_key_index(0);
+        }
     });
 }

@@ -117,10 +117,11 @@ pub async fn render_pdf(input: &ReportInput<'_>) -> Result<Vec<u8>> {
     let mut cmd = tokio::process::Command::new("pandoc");
     cmd.kill_on_drop(true);
     cmd.args([
-        "--from=gfm",
+        "--sandbox",
+        "--from=gfm-raw_html-raw_tex",
         "--standalone",
         "--metadata",
-        &format!("title={}", input.engagement.title),
+        &format!("title={}", escape_md_inline(&input.engagement.title)),
         "-V",
         "geometry:margin=2cm",
         "-V",
@@ -217,12 +218,12 @@ pub async fn render_html(input: &ReportInput<'_>) -> Result<String> {
         tokio::process::Command::new("pandoc")
             .kill_on_drop(true)
             .args([
-                "--from=gfm",
+                "--sandbox",
+                "--from=gfm-raw_html-raw_tex",
                 "--to=html5",
                 "--standalone",
-                "--embed-resources",
                 "--metadata",
-                &format!("title={}", input.engagement.title),
+                &format!("title={}", escape_md_inline(&input.engagement.title)),
                 "--css=data:text/css;base64,",
             ])
             .arg(&in_path)
@@ -266,16 +267,97 @@ hr{border:0;border-top:1px solid #d2d2d7;margin:2em 0}
     }
 }
 
+/// Neutralize any case-insensitive `file:` scheme inside link/resource targets.
+fn neutralize_file_scheme(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    if !lower.contains("file:") {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut cursor = 0;
+    while let Some(rel) = lower[cursor..].find("file:") {
+        let abs = cursor + rel;
+        out.push_str(&s[cursor..abs]);
+        out.push_str("blocked-file:");
+        cursor = abs + "file:".len();
+    }
+    out.push_str(&s[cursor..]);
+    out
+}
+
+/// Escape untrusted multi-line scan text rendered into GFM Markdown so raw
+/// HTML (`<script>`), Markdown images (`![...]`), and `file:` resource links
+/// cannot execute or exfiltrate local files.
+fn escape_md_block(s: &str, escape_backticks: bool) -> String {
+    let neutralized = neutralize_file_scheme(s);
+    let mut out = String::with_capacity(neutralized.len() + 16);
+    let mut chars = neutralized.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '!' if chars.peek() == Some(&'[') => {
+                out.push_str("\\!\\[");
+                let _ = chars.next();
+            }
+            '[' => out.push_str("\\["),
+            ']' => out.push_str("\\]"),
+            '`' if escape_backticks => out.push_str("\\`"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Escape single-line / heading / GFM table-cell text.
+fn escape_md_inline(s: &str) -> String {
+    let block = escape_md_block(s, true);
+    let mut out = String::with_capacity(block.len());
+    for ch in block.chars() {
+        match ch {
+            '\r' | '\n' => out.push(' '),
+            '|' => out.push_str("\\|"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Sanitize a value interpolated inside single backticks (`` `{val}` ``) so it
+/// cannot close the code span, break a table row, or carry raw HTML / `file:`
+/// image links.
+fn escape_md_code(s: &str) -> String {
+    let neutralized = neutralize_file_scheme(s);
+    let mut out = String::with_capacity(neutralized.len());
+    let mut chars = neutralized.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '`' => out.push('\''),
+            '\r' | '\n' | '|' => out.push(' '),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '!' if chars.peek() == Some(&'[') => {
+                out.push_str("! [");
+                let _ = chars.next();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn title_block(out: &mut String, input: &ReportInput<'_>) {
     let e = input.engagement;
-    out.push_str(&format!("# {}\n\n", e.title));
+    out.push_str(&format!("# {}\n\n", escape_md_inline(&e.title)));
     out.push_str("| | |\n|---|---|\n");
     if let Some(slug) = input.customer_slug {
         if !slug.is_empty() {
-            out.push_str(&format!("| Customer | `{slug}` |\n"));
+            out.push_str(&format!("| Customer | `{}` |\n", escape_md_code(slug)));
         }
     }
-    out.push_str(&format!("| Engagement ID | `{}` |\n", e.id));
+    out.push_str(&format!("| Engagement ID | `{}` |\n", escape_md_code(&e.id)));
     out.push_str(&format!(
         "| Started | {} |\n",
         e.started_at.format("%Y-%m-%d")
@@ -285,16 +367,22 @@ fn title_block(out: &mut String, input: &ReportInput<'_>) {
         e.expires_at.format("%Y-%m-%d")
     ));
     if !e.authorized_by.is_empty() {
-        out.push_str(&format!("| Authorized by | {} |\n", e.authorized_by));
+        out.push_str(&format!(
+            "| Authorized by | {} |\n",
+            escape_md_inline(&e.authorized_by)
+        ));
     }
     if !e.scope_cidrs.is_empty() {
-        out.push_str(&format!("| Scope CIDRs | {} |\n", e.scope_cidrs.join(", ")));
+        let cidrs: Vec<String> = e.scope_cidrs.iter().map(|s| escape_md_inline(s)).collect();
+        out.push_str(&format!("| Scope CIDRs | {} |\n", cidrs.join(", ")));
     }
     if !e.scope_hosts.is_empty() {
-        out.push_str(&format!("| Scope hosts | {} |\n", e.scope_hosts.join(", ")));
+        let hosts: Vec<String> = e.scope_hosts.iter().map(|s| escape_md_inline(s)).collect();
+        out.push_str(&format!("| Scope hosts | {} |\n", hosts.join(", ")));
     }
     if !e.exclusions.is_empty() {
-        out.push_str(&format!("| Exclusions | {} |\n", e.exclusions.join(", ")));
+        let excl: Vec<String> = e.exclusions.iter().map(|s| escape_md_inline(s)).collect();
+        out.push_str(&format!("| Exclusions | {} |\n", excl.join(", ")));
     }
     out.push('\n');
 }
@@ -426,13 +514,14 @@ fn findings_section(out: &mut String, input: &ReportInput<'_>) {
             if let Disposition::AcceptedRisk { reason, until } = &f.disposition {
                 out.push_str(&format!(
                     "- **{}** on `{}`",
-                    f.finding.title, f.finding.host_ip
+                    escape_md_inline(&f.finding.title),
+                    escape_md_code(&f.finding.host_ip)
                 ));
                 if let Some(u) = until {
                     out.push_str(&format!(" — until {}", u.format("%Y-%m-%d")));
                 }
                 if !reason.is_empty() {
-                    out.push_str(&format!(" — _{reason}_"));
+                    out.push_str(&format!(" — _{}_", escape_md_inline(reason)));
                 }
                 out.push('\n');
             }
@@ -446,17 +535,22 @@ fn render_finding(out: &mut String, f: &PersistedFinding) {
         .finding
         .cve
         .as_deref()
-        .map(|c| format!(" `{c}`"))
+        .map(|c| format!(" `{}`", escape_md_code(c)))
         .unwrap_or_default();
     let cvss = f
         .finding
         .cvss
         .map(|c| format!(" (CVSS {c:.1})"))
         .unwrap_or_default();
-    out.push_str(&format!("#### {}{}{}\n\n", f.finding.title, cve, cvss));
+    out.push_str(&format!(
+        "#### {}{}{}\n\n",
+        escape_md_inline(&f.finding.title),
+        cve,
+        cvss
+    ));
     out.push_str(&format!(
         "- Host: `{}`{}\n",
-        f.finding.host_ip,
+        escape_md_code(&f.finding.host_ip),
         f.finding
             .port
             .map(|p| format!(" — port {p}"))
@@ -476,13 +570,16 @@ fn render_finding(out: &mut String, f: &PersistedFinding) {
         out.push_str(&format!("- Open for: {age_days} days\n"));
     }
     out.push('\n');
-    out.push_str(&format!("**Detail.** {}\n\n", f.finding.detail));
+    out.push_str(&format!(
+        "**Detail.** {}\n\n",
+        escape_md_block(&f.finding.detail, true)
+    ));
     out.push_str(&format!(
         "**Recommendation.** {}\n\n",
-        f.finding.recommendation
+        escape_md_block(&f.finding.recommendation, false)
     ));
     if !f.note.is_empty() {
-        out.push_str(&format!("**Note.** {}\n\n", f.note));
+        out.push_str(&format!("**Note.** {}\n\n", escape_md_block(&f.note, true)));
     }
 }
 
@@ -506,8 +603,8 @@ fn resolved_section(out: &mut String, input: &ReportInput<'_>) {
         out.push_str(&format!(
             "| {} | {} | `{}` | {} |\n",
             sev_label(&f.finding.severity),
-            f.finding.title,
-            f.finding.host_ip,
+            escape_md_inline(&f.finding.title),
+            escape_md_code(&f.finding.host_ip),
             f.last_seen.format("%Y-%m-%d"),
         ));
     }
@@ -527,9 +624,9 @@ fn audit_log(out: &mut String, input: &ReportInput<'_>) {
             "| {} | {} | {} | {} | {} |\n",
             ev.at.format("%Y-%m-%d %H:%M"),
             technique_label(&ev.technique),
-            ev.action,
+            escape_md_inline(&ev.action),
             ev.findings,
-            ev.notes,
+            escape_md_inline(&ev.notes),
         ));
     }
     out.push('\n');
@@ -569,5 +666,85 @@ fn sev_heading(rank: u8) -> &'static str {
         2 => "Medium",
         3 => "Low",
         _ => "Informational",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engagement::{Engagement, EngagementEvent, Technique};
+    use crate::vuln::Finding;
+
+    #[test]
+    fn escapes_xss_and_pandoc_file_links_in_findings_and_audit_log() {
+        let now = Utc::now();
+        let engagement = Engagement {
+            id: "eng-1".into(),
+            customer_slug: "acme".into(),
+            title: "Audit <script>alert('title')</script> ![](file:///etc/passwd)".into(),
+            scope_cidrs: vec!["10.0.0.0/24".into()],
+            scope_hosts: vec!["host<img src=x onerror=alert(1)>".into()],
+            exclusions: vec![],
+            allowed_techniques: vec![Technique::Discovery],
+            started_at: now,
+            expires_at: now,
+            authorized_by: "Alice & Bob <cto@example.com>".into(),
+            authorization_doc_path: None,
+            log: vec![EngagementEvent {
+                at: now,
+                technique: Technique::Discovery,
+                target: "10.0.0.1".into(),
+                action: "scan|<script>alert(2)</script>".into(),
+                findings: 1,
+                notes: "![exfil](file:///Users/frank/secrets.json) [lnk](FILE:///etc/shadow)"
+                    .into(),
+            }],
+            notes: String::new(),
+            schedule: None,
+            strict_scope: false,
+        };
+
+        let finding = PersistedFinding {
+            key: "test-key".into(),
+            finding: Finding {
+                id: "http.xss-banner".into(),
+                host_ip: "10.0.0.1`<script>alert(3)</script>![](file:///etc/hosts)".into(),
+                port: Some(80),
+                service: Some("http".into()),
+                severity: Severity::Critical,
+                title: "Banner <script>alert(1)</script> & ![](file:///tmp/secrets.json)".into(),
+                detail: "Evidence:\n<script>fetch('http://evil')</script>\n![](file:///etc/passwd)\n[doc](file:///etc/passwd)".into(),
+                recommendation: "Upgrade server <now> & verify ![](file:///etc/passwd).".into(),
+                cve: Some("CVE-2026-0001`<script>".into()),
+                cvss: Some(9.8),
+            },
+            disposition: Disposition::Open,
+            first_seen: now,
+            last_seen: now,
+            scan_count: 1,
+            note: "Operator note <img src=x onerror=alert(4)> ![](file:///private/var/db)".into(),
+            history: vec![],
+        };
+
+        let input = ReportInput {
+            engagement: &engagement,
+            customer_slug: Some("acme"),
+            findings: vec![finding],
+        };
+
+        let md = render_markdown(&input).expect("render markdown");
+        assert!(!md.contains("<script>"), "raw <script> leaked into markdown:\n{md}");
+        assert!(!md.contains("</script>"), "raw </script> leaked into markdown:\n{md}");
+        assert!(!md.contains("<img"), "raw <img leaked into markdown:\n{md}");
+        assert!(
+            !md.contains("![](file://"),
+            "unescaped ![](file://...) leaked into markdown:\n{md}"
+        );
+        assert!(
+            !md.to_ascii_lowercase().contains("](file:"),
+            "unescaped ](file:...) leaked into markdown:\n{md}"
+        );
+        assert!(md.contains("&lt;script&gt;"));
+        assert!(md.contains("&amp;"));
     }
 }

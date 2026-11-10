@@ -114,45 +114,46 @@ impl AzureBackend {
 /// to live where deletion can see it.
 use supermgr_core::secret_lifecycle::azure_refresh_token_label as refresh_token_label;
 
-/// Percent-encode a single OAuth2 query-parameter value.
+/// RFC-3986 percent-encode a single OAuth2 query-parameter value.
 ///
-/// Encodes `/` → `%2F` and space → `+`; leaves everything else as-is (GUIDs,
-/// dots, hyphens and alphanumerics are all safe in query values).
+/// Leaves unreserved bytes `[A-Za-z0-9._~-]` verbatim and encodes every other
+/// byte as uppercase `%XX`.
 fn encode_param(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for ch in s.chars() {
-        match ch {
-            '/' => out.push_str("%2F"),
-            ' ' => out.push('+'),
-            c => out.push(c),
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() + 16);
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-') {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
 }
 
-/// Minimal percent-decode for the OAuth2 redirect callback query string.
+/// Percent-decode an OAuth2 redirect callback query parameter as UTF-8.
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
     let b = s.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(hex) =
-                u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(hex as char);
-                i += 3;
-                continue;
+            if let Ok(hex_str) = std::str::from_utf8(&b[i + 1..i + 3]) {
+                if let Ok(decoded_byte) = u8::from_str_radix(hex_str, 16) {
+                    bytes.push(decoded_byte);
+                    i += 3;
+                    continue;
+                }
             }
         } else if b[i] == b'+' {
-            out.push(' ');
+            bytes.push(b' ');
             i += 1;
             continue;
         }
-        out.push(b[i] as char);
+        bytes.push(b[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Perform the OAuth2 PKCE authorization-code flow.
@@ -274,77 +275,122 @@ async fn pkce_auth_code_flow(
     )))
 }
 
-/// Accept exactly one HTTP connection on `listener`, parse the OAuth2
-/// `code` and `state` query parameters, send a "you may close this window"
-/// HTML response, and return the code.
+/// Accept HTTP connections on `listener` until the OAuth2 redirect callback
+/// arrives, ignoring browser TCP preconnects and `/favicon.ico` probes, verify
+/// `state` against `expected_state`, send a response, and return `code`.
 async fn accept_auth_code(
     listener: tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let (stream, _) = listener
-        .accept()
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("accept failed: {e}"))?;
+        let (reader, mut writer) = tokio::io::split(stream);
+        let mut lines = BufReader::new(reader).lines();
+
+        // Read the request line with a short timeout so an idle speculative TCP
+        // preconnect socket cannot block the real redirect connection behind it.
+        let request_line = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            lines.next_line(),
+        )
         .await
-        .map_err(|e| format!("accept failed: {e}"))?;
-    let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
+        {
+            Ok(Ok(Some(line))) if !line.trim().is_empty() => line,
+            // 0-byte browser TCP preconnect close, read error, or idle socket.
+            _ => continue,
+        };
 
-    // Read only the request line; we don't need headers.
-    let request_line = lines
-        .next_line()
-        .await
-        .map_err(|e| format!("read failed: {e}"))?
-        .ok_or_else(|| "empty HTTP request".to_string())?;
+        // Parse "GET /?code=XXX&state=YYY HTTP/1.1"
+        let Some(path) = request_line.split_whitespace().nth(1) else {
+            let bad = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = writer.write_all(bad.as_bytes()).await;
+            let _ = writer.shutdown().await;
+            continue;
+        };
 
-    // Always send a friendly response so the browser shows something.
-    let html = concat!(
-        "HTTP/1.1 200 OK\r\n",
-        "Content-Type: text/html; charset=utf-8\r\n",
-        "Connection: close\r\n\r\n",
-        "<html><head><title>Super Manager</title></head><body>",
-        "<h2>Authentication complete</h2>",
-        "<p>You may close this tab and return to Super Manager.</p>",
-        "</body></html>\r\n",
-    );
-    let _ = writer.write_all(html.as_bytes()).await;
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
-    // Parse "GET /?code=XXX&state=YYY HTTP/1.1"
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| "malformed HTTP request line".to_string())?;
+        // Ignore `/favicon.ico` and any other non-root browser probe.
+        if route != "/" && !route.is_empty() {
+            let not_found =
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = writer.write_all(not_found.as_bytes()).await;
+            let _ = writer.shutdown().await;
+            continue;
+        }
 
-    let query = path.split_once('?').map(|x| x.1).unwrap_or("");
+        let mut code: Option<String> = None;
+        let mut returned_state: Option<String> = None;
+        let mut error_desc: Option<String> = None;
 
-    let mut code: Option<String> = None;
-    let mut returned_state: Option<String> = None;
-    let mut error_desc: Option<String> = None;
-
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            let decoded = percent_decode(v);
-            match k {
-                "code" => code = Some(decoded),
-                "state" => returned_state = Some(decoded),
-                "error_description" => error_desc = Some(decoded),
-                "error" if error_desc.is_none() => error_desc = Some(decoded),
-                _ => {}
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                let decoded = percent_decode(v);
+                match k {
+                    "code" => code = Some(decoded),
+                    "state" => returned_state = Some(decoded),
+                    "error_description" => error_desc = Some(decoded),
+                    "error" if error_desc.is_none() => error_desc = Some(decoded),
+                    _ => {}
+                }
             }
         }
-    }
 
-    if let Some(e) = error_desc {
-        return Err(e);
-    }
-
-    if let Some(s) = &returned_state {
-        if s != expected_state {
+        if returned_state.as_deref() != Some(expected_state) {
+            let bad = concat!(
+                "HTTP/1.1 400 Bad Request\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "Connection: close\r\n\r\n",
+                "OAuth2 state mismatch.\r\n",
+            );
+            let _ = writer.write_all(bad.as_bytes()).await;
+            let _ = writer.shutdown().await;
             return Err("OAuth2 state mismatch — possible CSRF".to_string());
         }
-    }
 
-    code.ok_or_else(|| "no authorization code in redirect".to_string())
+        if let Some(e) = error_desc {
+            let bad = concat!(
+                "HTTP/1.1 400 Bad Request\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "Connection: close\r\n\r\n",
+                "Authentication failed.\r\n",
+            );
+            let _ = writer.write_all(bad.as_bytes()).await;
+            let _ = writer.shutdown().await;
+            return Err(e);
+        }
+
+        let Some(code) = code.filter(|c| !c.is_empty()) else {
+            let bad = concat!(
+                "HTTP/1.1 400 Bad Request\r\n",
+                "Content-Type: text/plain; charset=utf-8\r\n",
+                "Connection: close\r\n\r\n",
+                "Missing authorization code.\r\n",
+            );
+            let _ = writer.write_all(bad.as_bytes()).await;
+            let _ = writer.shutdown().await;
+            return Err("no authorization code in redirect".to_string());
+        };
+
+        let html = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/html; charset=utf-8\r\n",
+            "Connection: close\r\n\r\n",
+            "<html><head><title>Super Manager</title></head><body>",
+            "<h2>Authentication complete</h2>",
+            "<p>You may close this tab and return to Super Manager.</p>",
+            "</body></html>\r\n",
+        );
+        let _ = writer.write_all(html.as_bytes()).await;
+        let _ = writer.shutdown().await;
+
+        return Ok(code);
+    }
 }
 
 /// Try to silently refresh the access token using a cached refresh token.
@@ -363,6 +409,7 @@ async fn try_refresh_token(
         .post(&token_url)
         .form(&[
             ("client_id", audience),
+            ("client_info", "1"),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("scope", scope.as_str()),
@@ -451,6 +498,7 @@ fn jwt_upn(token: &str) -> String {
         v["upn"]
             .as_str()
             .or_else(|| v["preferred_username"].as_str())
+            .filter(|s| !s.is_empty() && !s.chars().any(char::is_control))
             .map(str::to_owned)
     })();
     maybe.unwrap_or_else(|| "AzureAD".to_owned())
@@ -459,6 +507,23 @@ fn jwt_upn(token: &str) -> String {
 // ---------------------------------------------------------------------------
 // File-generation helpers
 // ---------------------------------------------------------------------------
+
+/// Validate untrusted fields on [`AzureVpnConfig`] before initiating OAuth or
+/// rendering an OpenVPN configuration file.
+fn validate_azure_config(cfg: &AzureVpnConfig) -> Result<(), BackendError> {
+    supermgr_core::sanitize::validate_host_or_ip(&cfg.gateway_fqdn)
+        .map_err(|e| BackendError::Config(format!("invalid Azure gateway FQDN: {e}")))?;
+    supermgr_core::sanitize::validate_safe_ident(&cfg.tenant_id, "tenant_id")
+        .map_err(|e| BackendError::Config(format!("invalid Azure tenant_id: {e}")))?;
+    supermgr_core::sanitize::validate_safe_ident(&cfg.client_id, "client_id")
+        .map_err(|e| BackendError::Config(format!("invalid Azure client_id: {e}")))?;
+    if cfg.ca_cert_pem.to_ascii_lowercase().contains("</ca>") {
+        return Err(BackendError::Config(
+            "invalid Azure CA certificate: unexpected closing </ca> tag".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Convert the 512-hex-char `server_secret_hex` to the OpenVPN static key
 /// file format (16 lines × 32 hex chars, wrapped in PEM-like header/footer).
@@ -480,7 +545,14 @@ fn build_ovpn_config(
     key_path: &str,
     auth_path: &str,
     full_tunnel: bool,
-) -> String {
+) -> Result<String, BackendError> {
+    validate_azure_config(cfg)?;
+    if key_path.chars().any(char::is_control) || auth_path.chars().any(char::is_control) {
+        return Err(BackendError::Config(
+            "OpenVPN credential/key path contains control characters".into(),
+        ));
+    }
+
     let mut s = format!(
         "client\n\
          dev tun\n\
@@ -510,7 +582,7 @@ fn build_ovpn_config(
     s.push_str(&format!("auth-user-pass {auth_path}\n"));
     s.push_str(&format!("tls-auth {key_path} 1\n"));
 
-    if full_tunnel || cfg.routes.is_empty() {
+    if full_tunnel {
         s.push_str("redirect-gateway def1\n");
     } else {
         for route in &cfg.routes {
@@ -538,7 +610,7 @@ fn build_ovpn_config(
         s.push('\n');
     }
 
-    s
+    Ok(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +720,8 @@ impl VpnBackend for AzureBackend {
             }
         };
 
+        validate_azure_config(cfg)?;
+
         info!("Azure: connecting profile '{}'", profile.name);
 
         // ── Step 1: Authenticate (cached refresh token or device-code flow) ──
@@ -702,7 +776,7 @@ impl VpnBackend for AzureBackend {
             &key_path.to_string_lossy(),
             &auth_path.to_string_lossy(),
             profile.full_tunnel,
-        );
+        )?;
         // No secret of its own — the CA cert it inlines is public and the
         // credentials are referenced by path — but it names those paths, and
         // there is no reason for it to be the one file here anyone can read.
@@ -715,6 +789,8 @@ impl VpnBackend for AzureBackend {
         let mut child = tokio::process::Command::new("openvpn")
             .arg("--config")
             .arg(&ovpn_path)
+            .arg("--script-security")
+            .arg("1")
             // The systemd unit uses PrivateTmp / ReadOnlyPaths so /tmp is
             // read-only; point openvpn at our already-writable run directory.
             .arg("--tmp-dir")
@@ -1011,4 +1087,190 @@ fn extract_pushed_route(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn sample_cfg() -> AzureVpnConfig {
+        AzureVpnConfig {
+            gateway_fqdn: "azurevpn.example.com".to_owned(),
+            tenant_id: "11111111-2222-3333-4444-555555555555".to_owned(),
+            client_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_owned(),
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n"
+                .to_owned(),
+            server_secret_hex: "00".repeat(256),
+            dns_servers: Vec::new(),
+            routes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn split_tunnel_with_empty_routes_does_not_emit_redirect_gateway() {
+        let cfg = sample_cfg();
+        let ovpn = build_ovpn_config(
+            &cfg,
+            "",
+            "/run/supermgrd/tls-auth.key",
+            "/run/supermgrd/auth.txt",
+            false,
+        )
+        .unwrap();
+        assert!(
+            !ovpn.contains("redirect-gateway"),
+            "split-tunnel Azure P2S relies on server-pushed routes and must not emit redirect-gateway:\n{ovpn}"
+        );
+    }
+
+    #[test]
+    fn full_tunnel_emits_redirect_gateway() {
+        let cfg = sample_cfg();
+        let ovpn = build_ovpn_config(
+            &cfg,
+            "",
+            "/run/supermgrd/tls-auth.key",
+            "/run/supermgrd/auth.txt",
+            true,
+        )
+        .unwrap();
+        assert!(ovpn.contains("redirect-gateway def1\n"), "{ovpn}");
+    }
+
+    #[test]
+    fn split_tunnel_with_explicit_routes_emits_static_routes_without_redirect_gateway() {
+        let mut cfg = sample_cfg();
+        cfg.routes = vec![
+            "10.134.0.0/16".parse().unwrap(),
+            "2001:db8::/32".parse().unwrap(),
+        ];
+        let ovpn = build_ovpn_config(
+            &cfg,
+            "",
+            "/run/supermgrd/tls-auth.key",
+            "/run/supermgrd/auth.txt",
+            false,
+        )
+        .unwrap();
+        assert!(!ovpn.contains("redirect-gateway"), "{ovpn}");
+        assert!(ovpn.contains("route 10.134.0.0 255.255.0.0\n"), "{ovpn}");
+        assert!(ovpn.contains("route-ipv6 2001:db8::/32\n"), "{ovpn}");
+    }
+
+    #[test]
+    fn build_ovpn_config_rejects_injection_in_fqdn_ids_and_ca() {
+        let mut bad_fqdn = sample_cfg();
+        bad_fqdn.gateway_fqdn = "vpn.example.com 443\nscript-security 2\nup /bin/sh".to_owned();
+        assert!(build_ovpn_config(&bad_fqdn, "", "/k", "/a", false).is_err());
+
+        let mut bad_tenant = sample_cfg();
+        bad_tenant.tenant_id = "../../evil".to_owned();
+        assert!(build_ovpn_config(&bad_tenant, "", "/k", "/a", false).is_err());
+
+        let mut bad_client = sample_cfg();
+        bad_client.client_id = "bad&scope=evil".to_owned();
+        assert!(build_ovpn_config(&bad_client, "", "/k", "/a", false).is_err());
+
+        let mut bad_ca = sample_cfg();
+        bad_ca.ca_cert_pem =
+            "-----BEGIN CERTIFICATE-----\n</CA>\nscript-security 2\nup /bin/sh\n<ca>\n".to_owned();
+        assert!(build_ovpn_config(&bad_ca, "", "/k", "/a", false).is_err());
+    }
+
+    #[test]
+    fn percent_decode_handles_multibyte_utf8_and_plus_spaces() {
+        assert_eq!(
+            percent_decode("Kunnskap+m%C3%B8ter+sikkerhet+%E2%82%AC+%F0%9F%94%92"),
+            "Kunnskap møter sikkerhet € 🔒"
+        );
+        assert_eq!(percent_decode("literal%ZZkeep%2"), "literal%ZZkeep%2");
+    }
+
+    #[test]
+    fn encode_param_follows_rfc3986_and_roundtrips_utf8() {
+        let unreserved = "AZaz09._~-";
+        assert_eq!(encode_param(unreserved), unreserved);
+
+        let scope = "41b23e61-6c1e-4545-b367-cd054e0ed4b4/.default openid";
+        assert_eq!(
+            encode_param(scope),
+            "41b23e61-6c1e-4545-b367-cd054e0ed4b4%2F.default%20openid"
+        );
+
+        let tricky = "a&b=c+d/e?f#g blåbær 🔒";
+        let encoded = encode_param(tricky);
+        assert!(
+            !encoded.contains('&') && !encoded.contains('=') && !encoded.contains(' '),
+            "{encoded}"
+        );
+        assert_eq!(percent_decode(&encoded), tricky);
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_rejects_missing_or_mismatched_state() {
+        // Missing `state` parameter must be rejected (CSRF protection).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_auth_code(listener, "expected-state-123"));
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /?code=stolen_code HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = String::new();
+        let _ = client.read_to_string(&mut resp).await;
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+
+        let err = server.await.unwrap().expect_err("missing state must fail");
+        assert!(err.contains("state"), "{err}");
+
+        // Mismatched `state` parameter must also be rejected.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_auth_code(listener, "expected-state-123"));
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /?code=stolen_code&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let err = server.await.unwrap().expect_err("wrong state must fail");
+        assert!(err.contains("state"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_survives_preconnect_and_favicon_before_real_redirect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(accept_auth_code(listener, "csrf-token-xyz"));
+
+        // 1. Browser speculative TCP preconnect (0-byte close).
+        let preconnect = tokio::net::TcpStream::connect(addr).await.unwrap();
+        drop(preconnect);
+
+        // 2. Browser `/favicon.ico` probe -> 404 and listener stays alive.
+        let mut fav = tokio::net::TcpStream::connect(addr).await.unwrap();
+        fav.write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut fav_resp = String::new();
+        fav.read_to_string(&mut fav_resp).await.unwrap();
+        assert!(fav_resp.starts_with("HTTP/1.1 404"), "{fav_resp}");
+
+        // 3. Real OAuth2 callback arrives and succeeds.
+        let mut real = tokio::net::TcpStream::connect(addr).await.unwrap();
+        real.write_all(
+            b"GET /?code=auth_code_ok&state=csrf-token-xyz HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut ok_resp = String::new();
+        real.read_to_string(&mut ok_resp).await.unwrap();
+        assert!(ok_resp.starts_with("HTTP/1.1 200"), "{ok_resp}");
+
+        let code = server.await.unwrap().expect("real callback should succeed");
+        assert_eq!(code, "auth_code_ok");
+    }
 }

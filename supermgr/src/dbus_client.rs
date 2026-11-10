@@ -124,7 +124,7 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
         serde_json::from_str(&profiles_json).context("deserialise profiles")?;
 
     let status_json = proxy.get_status().await.context("GetStatus")?;
-    let mut vpn_state = state_from_json(&status_json).context("deserialise VpnState")?;
+    let vpn_state = state_from_json(&status_json).context("deserialise VpnState")?;
 
     info!(
         "fetched {} profile(s), state = {:?}",
@@ -132,25 +132,10 @@ pub async fn fetch_initial_state(app_state: &Arc<Mutex<AppState>>) -> anyhow::Re
         vpn_state
     );
 
-    // A Connected state on startup means a tunnel from a previous session was
-    // left running (e.g. the GUI crashed without disconnecting).  Tear it down
-    // so the UI starts from a clean Disconnected state.
-    if vpn_state.is_connected() {
-        info!("found stale tunnel on startup, disconnecting");
-        proxy
-            .disconnect()
-            .await
-            .context("Disconnect stale tunnel")?;
-        let status_json = proxy
-            .get_status()
-            .await
-            .context("GetStatus after stale disconnect")?;
-        vpn_state =
-            state_from_json(&status_json).context("deserialise VpnState after stale disconnect")?;
-        info!("state after stale disconnect: {:?}", vpn_state);
-    }
-
     let mut s = app_state.lock().unwrap_or_else(|e| e.into_inner());
+    if s.selected_profile.is_none() {
+        s.selected_profile = vpn_state.profile_id().map(|id| id.to_string());
+    }
     s.profiles = profiles;
     s.vpn_state = vpn_state;
     s.daemon_available = true;

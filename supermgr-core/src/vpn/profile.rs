@@ -703,7 +703,8 @@ pub fn parse_wireguard_conf(
             match key {
                 "PublicKey" => peer.public_key = value.to_owned(),
                 "PresharedKey" => {
-                    let label = format!("{secret_label}/psk/{}", &value[..8.min(value.len())]);
+                    let prefix = crate::sanitize::truncate_utf8(value, 8);
+                    let label = format!("{secret_label}/psk/{prefix}");
                     peer.preshared_key = Some(SecretRef::new(label));
                 }
                 "Endpoint" => {
@@ -860,7 +861,8 @@ pub fn import_wireguard_conf(
             match key {
                 "PublicKey" => peer.public_key = value.to_owned(),
                 "PresharedKey" => {
-                    let label = format!("{secret_label}/psk/{}", &value[..8.min(value.len())]);
+                    let prefix = crate::sanitize::truncate_utf8(value, 8);
+                    let label = format!("{secret_label}/psk/{prefix}");
                     psks.push((label.clone(), value.to_owned()));
                     peer.preshared_key = Some(SecretRef::new(label));
                 }

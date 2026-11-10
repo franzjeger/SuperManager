@@ -10,6 +10,7 @@
 
 pub mod backend;
 pub mod import;
+pub mod openvpn_config;
 pub mod profile;
 pub mod state;
 

@@ -14,22 +14,21 @@
 //!
 //! # Security
 //!
-//! For the skeleton we rely on the default DACL (which permits the
-//! creator's session). The production hardening step is to attach an
-//! explicit security descriptor allowing only:
+//! Every pipe instance is created with [`PipeSecurity::restrictive`], which
+//! attaches a protected DACL (`D:P`) and Medium Mandatory Integrity Label:
 //!
-//! - `NT AUTHORITY\SYSTEM`   — full control
-//! - `BUILTIN\Administrators` — full control
-//! - `NT AUTHORITY\Authenticated Users` — read + write (no change-pipe-mode)
+//! - `NT AUTHORITY\SYSTEM` (`SY`) — full control
+//! - `BUILTIN\Administrators` (`BA`) — full control
+//! - `NT AUTHORITY\INTERACTIVE` (`IU`) — read + write data only (no `WRITE_DAC` / `WRITE_OWNER`, excluding non-interactive services and network logons)
+//! - Mandatory Label Medium (`S:(ML;;NW;;;ME)`) — `No-Write-Up`, blocking Low/Untrusted-integrity sandboxed processes
 //!
-//! That requires constructing a SECURITY_ATTRIBUTES with a SDDL string —
-//! tracked as a TODO in the issue tracker; the current default ACL is safe
-//! on single-user workstations but should not ship to enterprise.
+//! Frame reads are bounded *before* buffering in memory so a connected client
+//! cannot exhaust `LocalSystem` memory with a newline-less stream.
 
 use std::sync::Arc;
 
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+    io::{AsyncWriteExt as _, BufReader},
     net::windows::named_pipe::{NamedPipeServer, ServerOptions},
     sync::Notify,
 };
@@ -40,6 +39,7 @@ use supermgr_core::protocol::{
 };
 
 use super::{daemon::DaemonState, dispatch, pipe_acl::PipeSecurity};
+use crate::rpc_args::{read_bounded_line, BoundedLine};
 
 /// Max number of concurrent pipe instances we will keep allocated. Each
 /// connected client consumes one instance; idle instances are cheap.
@@ -120,27 +120,21 @@ async fn handle_connection(
     loop {
         line.clear();
         let read = tokio::select! {
-            res = reader.read_line(&mut line) => res,
+            res = read_bounded_line(&mut reader, &mut line, MAX_FRAME_BYTES) => res,
             () = shutdown.notified() => return Ok(()),
         };
-        let n = match read {
-            Ok(n) => n,
-            Err(e) => return Err(e),
-        };
-        if n == 0 {
-            // Peer closed the pipe.
-            return Ok(());
-        }
-        if n > MAX_FRAME_BYTES {
-            // Defensive — the buffered reader has no hard ceiling on
-            // line length on its own. Reject oversized frames.
-            let _ = write_error(
-                reader.get_mut(),
-                0,
-                RpcError::Protocol(format!("frame exceeds {MAX_FRAME_BYTES} bytes")),
-            )
-            .await;
-            return Ok(());
+        match read? {
+            BoundedLine::Eof => return Ok(()),
+            BoundedLine::Oversized => {
+                let _ = write_error(
+                    reader.get_mut(),
+                    0,
+                    RpcError::Protocol(format!("frame exceeds {MAX_FRAME_BYTES} bytes")),
+                )
+                .await;
+                return Ok(());
+            }
+            BoundedLine::Frame => {}
         }
 
         let trimmed = line.trim_end();

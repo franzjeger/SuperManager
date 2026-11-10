@@ -56,19 +56,25 @@ fn baseline_path(customer_slug: &str, host_ip: &str) -> PathBuf {
     p
 }
 
-#[must_use]
-pub fn load(customer_slug: &str, host_ip: &str) -> HostBaseline {
+pub fn load(customer_slug: &str, host_ip: &str) -> Result<HostBaseline> {
+    supermgr_core::findings::validate_slug(customer_slug)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let path = baseline_path(customer_slug, host_ip);
-    if !path.exists() {
-        return HostBaseline::default();
-    }
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => HostBaseline::default(),
-    }
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HostBaseline::default());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("read baseline {path:?}"));
+        }
+    };
+    serde_json::from_slice(&bytes).with_context(|| format!("parse baseline {path:?}"))
 }
 
 pub fn save(customer_slug: &str, host_ip: &str, baseline: &HostBaseline) -> Result<()> {
+    supermgr_core::findings::validate_slug(customer_slug)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let dir = baselines_dir(customer_slug);
     std::fs::create_dir_all(&dir).context("create baselines dir")?;
     let path = baseline_path(customer_slug, host_ip);
@@ -91,7 +97,7 @@ pub fn reconcile_host(
     host_ip: &str,
     observed_ports: &[u16],
 ) -> Result<Vec<Finding>> {
-    let baseline = load(customer_slug, host_ip);
+    let baseline = load(customer_slug, host_ip)?;
     let observed: HashSet<u16> = observed_ports.iter().copied().collect();
     let stable: HashSet<u16> = baseline.stable_ports.iter().copied().collect();
     let pending: HashSet<u16> = baseline.pending_ports.iter().copied().collect();
@@ -184,7 +190,7 @@ pub fn reconcile_host(
         stable_since: baseline.stable_since.or(Some(now)),
         updated_at: now,
     };
-    save(customer_slug, host_ip, &new_baseline).ok();
+    save(customer_slug, host_ip, &new_baseline)?;
 
     let _ = baseline.stable_since.is_some(); // touch to avoid dead-code lint
     Ok(findings)
@@ -228,7 +234,7 @@ mod tests {
             findings.is_empty(),
             "stable baseline should not produce findings"
         );
-        let baseline = load(&scope, "10.0.0.1");
+        let baseline = load(&scope, "10.0.0.1").unwrap();
         assert!(baseline.stable_ports.contains(&22));
         assert!(baseline.stable_ports.contains(&80));
         cleanup(&scope);
@@ -258,7 +264,7 @@ mod tests {
         assert_eq!(findings[0].id, "anomaly.missing-port");
         assert_eq!(findings[0].port, Some(443));
         // The dropped port should NOT be in the new stable list.
-        let baseline = load(&scope, "10.0.0.1");
+        let baseline = load(&scope, "10.0.0.1").unwrap();
         assert!(!baseline.stable_ports.contains(&443));
         cleanup(&scope);
     }
@@ -287,8 +293,32 @@ mod tests {
         let scope = unique_scope();
         reconcile_host(&scope, "10.0.0.1", &[22]).unwrap();
         reconcile_host(&scope, "10.0.0.1", &[22]).unwrap();
-        let loaded = load(&scope, "10.0.0.1");
+        let loaded = load(&scope, "10.0.0.1").unwrap();
         assert_eq!(loaded.stable_ports, vec![22]);
+        cleanup(&scope);
+    }
+
+    #[test]
+    fn corrupt_baseline_errors_instead_of_wiping_history() {
+        let scope = unique_scope();
+        let dir = baselines_dir(&scope);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = baseline_path(&scope, "10.0.0.1");
+        std::fs::write(&path, b"{ truncated json").unwrap();
+
+        assert!(
+            load(&scope, "10.0.0.1").is_err(),
+            "corrupt baseline JSON must error rather than default to empty"
+        );
+        assert!(
+            reconcile_host(&scope, "10.0.0.1", &[22, 4444]).is_err(),
+            "reconcile_host must fail rather than treating corrupt baseline as first_scan"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{ truncated json",
+            "corrupt baseline file must not be overwritten on read/parse error"
+        );
         cleanup(&scope);
     }
 }

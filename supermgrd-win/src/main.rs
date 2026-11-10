@@ -28,6 +28,11 @@ mod known_hosts;
 #[allow(dead_code)]
 mod ssh_exec;
 
+#[cfg(all(test, not(target_os = "windows")))]
+#[path = "win/appliance.rs"]
+#[allow(dead_code)]
+mod appliance;
+
 // Likewise the VPN clients' output reader: plain tokio, no Win32. Only its
 // tests run off Windows, so the reader itself is unused there.
 #[cfg(all(test, not(target_os = "windows")))]

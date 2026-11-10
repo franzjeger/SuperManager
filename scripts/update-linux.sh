@@ -202,7 +202,7 @@ fi
 
 say "Building (this can take a few minutes)"
 command -v cargo >/dev/null || die "cargo not found — install Rust, or re-run install-linux.sh"
-(cd "$CHECKOUT" && cargo build --release -p supermgrd -p supermgr -p supermgr-mcp)
+(cd "$CHECKOUT" && cargo build --release --locked -p supermgrd -p supermgr -p supermgr-mcp)
 
 # ---------------------------------------------------------------------------
 # Install + restart the daemon, via install-linux.sh so the two can't drift.

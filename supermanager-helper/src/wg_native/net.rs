@@ -328,7 +328,11 @@ mod tests {
 
     #[test]
     fn interfaces_are_looked_up_in_the_kernel() {
-        assert!(exists("lo0"));
+        #[cfg(target_os = "macos")]
+        let lo = "lo0";
+        #[cfg(not(target_os = "macos"))]
+        let lo = "lo";
+        assert!(exists(lo));
         assert!(!exists("utun-not-there"));
         assert!(!exists("bad\0name"));
     }

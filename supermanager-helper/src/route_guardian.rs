@@ -59,7 +59,7 @@
 
 use anyhow::{anyhow, Result};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -117,7 +117,7 @@ impl Af {
 /// running. Safe to call from helper startup AND from a future
 /// "restart guardian" RPC.
 pub fn spawn_guardian() -> Result<()> {
-    let mut spawned = SPAWNED.lock().unwrap();
+    let mut spawned = SPAWNED.lock().unwrap_or_else(PoisonError::into_inner);
     if *spawned {
         return Ok(());
     }
@@ -150,14 +150,10 @@ pub fn spawn_guardian() -> Result<()> {
 /// stale one bridges that gap cleanly.
 pub fn reset_snapshot() {
     if let Some(m) = SNAPSHOT_V4.get() {
-        if let Ok(mut s) = m.lock() {
-            *s = None;
-        }
+        *m.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
     if let Some(m) = SNAPSHOT_V6.get() {
-        if let Ok(mut s) = m.lock() {
-            *s = None;
-        }
+        *m.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
     tracing::info!("route guardian: snapshots cleared on system wake");
 }
@@ -173,12 +169,10 @@ pub fn reset_snapshot() {
 pub fn force_restore_now() -> Result<()> {
     let v4 = SNAPSHOT_V4
         .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|s| s.clone());
+        .and_then(|m| m.lock().unwrap_or_else(PoisonError::into_inner).clone());
     let v6 = SNAPSHOT_V6
         .get()
-        .and_then(|m| m.lock().ok())
-        .and_then(|s| s.clone());
+        .and_then(|m| m.lock().unwrap_or_else(PoisonError::into_inner).clone());
 
     let mut any_done = false;
     for (snap, af) in [(v4, Af::V4), (v6, Af::V6)] {
@@ -231,17 +225,16 @@ fn tick_one(af: Af, missing: &mut u32) {
     match observed {
         Some(snap) => {
             *missing = 0;
-            if let Ok(mut guard) = cell.lock() {
-                if guard.as_ref() != Some(&snap) {
-                    tracing::info!(
-                        af = %af.label(),
-                        gw = %snap.gateway,
-                        iface = %snap.interface,
-                        "default-route snapshot updated"
-                    );
-                }
-                *guard = Some(snap);
+            let mut guard = cell.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.as_ref() != Some(&snap) {
+                tracing::info!(
+                    af = %af.label(),
+                    gw = %snap.gateway,
+                    iface = %snap.interface,
+                    "default-route snapshot updated"
+                );
             }
+            *guard = Some(snap);
         }
         None => {
             // `read_default_route` filters out utun-bound defaults.
@@ -267,7 +260,7 @@ fn tick_one(af: Af, missing: &mut u32) {
             if *missing < 2 {
                 return;
             }
-            let snap = cell.lock().ok().and_then(|s| s.clone());
+            let snap = cell.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let Some(snap) = snap else { return };
             if !interface_is_up(&snap.interface) {
                 tracing::warn!(

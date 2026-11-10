@@ -77,27 +77,49 @@ fn handle_initialize(id: &Value) -> JsonRpcResponse {
     }
 }
 
-fn handle_tools_list(id: &Value) -> JsonRpcResponse {
+/// Determine whether mutating/remote-exec tools are enabled.
+///
+/// Fails closed (read-only by default): mutating tools require an explicit
+/// `--allow-writes` flag or `SUPERMGR_MCP_ALLOW_WRITES=1`, and
+/// `SUPERMGR_MCP_READ_ONLY` always forces read-only when set.
+fn writes_enabled() -> bool {
+    if std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_some() {
+        return false;
+    }
+    if std::env::args().any(|a| a == "--allow-writes") {
+        return true;
+    }
+    matches!(
+        std::env::var("SUPERMGR_MCP_ALLOW_WRITES").as_deref(),
+        Ok("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn handle_tools_list(id: &Value, allow_writes: bool) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".into(),
         id: id.clone(),
-        result: Some(
-            json!({ "tools": supermgr_mcp::available_tools(std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_none()) }),
-        ),
+        result: Some(json!({ "tools": supermgr_mcp::available_tools(allow_writes) })),
         error: None,
     }
 }
 
-async fn handle_tools_call(proxy: &DaemonClient, id: &Value, params: &Value) -> JsonRpcResponse {
+async fn handle_tools_call(
+    proxy: &DaemonClient,
+    id: &Value,
+    params: &Value,
+    allow_writes: bool,
+) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
 
     debug!("tool call: {tool_name}");
 
-    let result = if std::env::var_os("SUPERMGR_MCP_READ_ONLY").is_some()
-        && !supermgr_mcp::is_read_only(tool_name)
-    {
-        Err("This console session is read-only. Enable Allow changes to use this tool.".into())
+    let result = if !allow_writes && !supermgr_mcp::is_read_only(tool_name) {
+        Err(
+            "This MCP session is read-only by default. Pass --allow-writes (or enable Allow changes in the console) to use mutating tools."
+                .into(),
+        )
     } else {
         execute_tool(proxy, tool_name, &arguments).await
     };
@@ -166,23 +188,42 @@ async fn main() -> anyhow::Result<()> {
             Ok(r) => r,
             Err(e) => {
                 error!("invalid JSON-RPC: {e}");
+                let parse_err = JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id: Value::Null,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32700,
+                        message: format!("parse error: {e}"),
+                    }),
+                };
+                if let Ok(out) = serde_json::to_string(&parse_err) {
+                    writeln!(stdout, "{out}")?;
+                    stdout.flush()?;
+                }
                 continue;
             }
         };
 
         let id = req.id.clone().unwrap_or(Value::Null);
+        let allow_writes = writes_enabled();
 
         let response = match req.method.as_str() {
             "initialize" => handle_initialize(&id),
             "notifications/initialized" => continue, // notification, no response
-            "tools/list" => handle_tools_list(&id),
-            "tools/call" => handle_tools_call(&proxy, &id, &req.params).await,
-            "ping" => JsonRpcResponse {
-                jsonrpc: "2.0".into(),
-                id,
-                result: Some(json!({})),
-                error: None,
-            },
+            "tools/list" => handle_tools_list(&id, allow_writes),
+            "tools/call" => handle_tools_call(&proxy, &id, &req.params, allow_writes).await,
+            "ping" => {
+                if req.id.is_none() {
+                    continue;
+                }
+                JsonRpcResponse {
+                    jsonrpc: "2.0".into(),
+                    id,
+                    result: Some(json!({})),
+                    error: None,
+                }
+            }
             method => {
                 debug!("unhandled method: {method}");
                 // Notifications (no id) don't get responses.
@@ -201,7 +242,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
-        let out = serde_json::to_string(&response).unwrap();
+        let out = serde_json::to_string(&response)?;
         writeln!(stdout, "{out}")?;
         stdout.flush()?;
     }
@@ -365,18 +406,22 @@ mod tests {
         // advertise. The catch-all `unknown` arm is excluded by construction
         // since it doesn't match the `"name" =>` shape.
         let advertised = advertised_tool_names();
-        let mut linux_only = false;
+        let mut cfg_active = true;
         for line in dispatch_body.lines() {
-            if line.trim() == "#[cfg(target_os = \"linux\")]" {
-                linux_only = true;
-                continue;
-            }
-            if linux_only && !cfg!(target_os = "linux") {
-                linux_only = false;
-                continue;
-            }
-            linux_only = false;
             let trimmed = line.trim();
+            if trimmed == "#[cfg(target_os = \"linux\")]" {
+                cfg_active = cfg!(target_os = "linux");
+                continue;
+            }
+            if trimmed == "#[cfg(not(target_os = \"macos\"))]" {
+                cfg_active = !cfg!(target_os = "macos");
+                continue;
+            }
+            if !cfg_active {
+                cfg_active = true;
+                continue;
+            }
+            cfg_active = true;
             let Some(rest) = trimmed.strip_prefix('"') else {
                 continue;
             };
@@ -424,10 +469,20 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_returns_every_advertised_tool() {
-        let response = handle_tools_list(&json!("abc"));
-        assert_eq!(response.id, json!("abc"), "string ids round-trip too");
-        let tools = response.result.expect("result")["tools"]
+    fn tools_list_defaults_to_read_only_and_returns_all_when_writes_allowed() {
+        let ro = handle_tools_list(&json!("ro"), false);
+        assert_eq!(ro.id, json!("ro"));
+        let ro_tools = ro.result.expect("result")["tools"]
+            .as_array()
+            .expect("tools array")
+            .clone();
+        assert!(ro_tools
+            .iter()
+            .all(|t| supermgr_mcp::is_read_only(t["name"].as_str().unwrap_or(""))));
+
+        let rw = handle_tools_list(&json!("abc"), true);
+        assert_eq!(rw.id, json!("abc"), "string ids round-trip too");
+        let tools = rw.result.expect("result")["tools"]
             .as_array()
             .expect("tools array")
             .len();

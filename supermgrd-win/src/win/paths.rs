@@ -9,14 +9,14 @@
 //!
 //! | Subdirectory      | Contents                                          |
 //! |-------------------|---------------------------------------------------|
-//! | `profiles\`       | VPN profile TOMLs (WireGuard, FortiGate, OpenVPN) |
-//! | `hosts\`          | Managed-host inventory (one TOML per host)        |
-//! | `keys\`           | SSH key metadata (private keys live in Credential Manager) |
-//! | `logs\`           | Rolling daemon logs (Event Log is for service lifecycle only) |
-//! | `backups\`        | FortiGate/OPNsense config backups                 |
+//! | `profiles\`       | VPN profile TOMLs — **private** (`SYSTEM` + `Administrators`) |
+//! | `hosts\`          | Managed-host inventory — **private**              |
+//! | `keys\`           | SSH key metadata — **private**                    |
+//! | `logs\`           | Rolling daemon logs — **private**                 |
+//! | `backups\`        | FortiGate/OPNsense config backups — **private**   |
 //! | `templates\`      | Custom Tera templates the user has dropped in     |
-//! | `ovpn\`           | Imported OpenVPN configs — **private**: they carry keys inline |
-//! | `runtime\`        | Per-connect VPN scratch files — **private**        |
+//! | `ovpn\`           | Imported OpenVPN configs — **private**            |
+//! | `runtime\`        | Per-connect VPN scratch files — **private**       |
 
 use std::ffi::c_void;
 use std::io;
@@ -52,7 +52,9 @@ const SECRET_SDDL: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 /// read-for-everyone [`ROOT_SDDL`]. Startup re-applies the ACL of every
 /// top-level entry, so a private directory missing from this list would be
 /// made readable again on the next service start.
-const PRIVATE_DIRS: &[&str] = &["runtime", "ovpn"];
+const PRIVATE_DIRS: &[&str] = &[
+    "runtime", "ovpn", "backups", "logs", "hosts", "keys", "profiles",
+];
 
 fn sddl_for(top_level_name: &str) -> &'static str {
     if PRIVATE_DIRS
@@ -519,7 +521,17 @@ mod tests {
         assert!(!token.exists());
         assert!(second.path().exists());
         drop(second);
-        assert!(secure_directory(&root.join("profiles"), ROOT_SDDL, false).is_err());
+        for sub in ["backups", "logs", "hosts", "keys", "profiles"] {
+            let probe = root.join(sub).join("probe.txt");
+            std::fs::write(&probe, "sensitive").unwrap();
+            assert_eq!(
+                effective_rights(&file_descriptor(&probe), WinAuthenticatedUserSid),
+                0,
+                "{sub} must be protected by SECRET_SDDL"
+            );
+            std::fs::remove_file(&probe).unwrap();
+        }
+        assert!(secure_directory(&root.join("profiles"), SECRET_SDDL, false).is_err());
 
         // An existing writable handle must not survive an ACL repair and keep
         // changing data after the service begins trusting it.

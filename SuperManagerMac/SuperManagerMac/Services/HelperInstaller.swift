@@ -166,24 +166,17 @@ enum HelperInstaller {
         """
 
         // AppleScript wraps the whole shell command. We keep its argument
-        // single-quote escaped for safety.
+        // single-quote escaped for safety, and run `/usr/bin/osascript` off
+        // `@MainActor` so the admin authentication dialog never blocks UI events.
         let osa = "do shell script \(appleScriptStringLiteral(script)) with administrator privileges"
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", osa]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
+        let (status, out): (Int32, String)
         do {
-            try process.run()
+            (status, out) = try await runOsascript(osa)
         } catch {
             throw InstallError.manualInstallFailed(error.localizedDescription)
         }
-        process.waitUntilExit()
-        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        guard process.terminationStatus == 0 else {
+        guard status == 0 else {
             throw InstallError.manualInstallFailed(out.trimmingCharacters(in: .whitespacesAndNewlines))
         }
 
@@ -227,11 +220,25 @@ enum HelperInstaller {
         echo OK
         """
         let osa = "do shell script \(appleScriptStringLiteral(script)) with administrator privileges"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", osa]
-        try? process.run()
-        process.waitUntilExit()
+        _ = try? await runOsascript(osa)
+    }
+
+    /// Execute `/usr/bin/osascript -e <osa>` off `@MainActor` so waiting on
+    /// macOS's administrator password dialog never stalls the main runloop.
+    nonisolated private static func runOsascript(_ osa: String) async throws -> (status: Int32, output: String) {
+        try await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", osa]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            let out = String(data: data, encoding: .utf8) ?? ""
+            return (process.terminationStatus, out)
+        }.value
     }
 
     /// SMAppService status, mostly for diagnostics.

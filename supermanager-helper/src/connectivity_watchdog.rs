@@ -56,7 +56,7 @@
 
 use anyhow::Result;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,7 +74,7 @@ static PAUSE_UNTIL: Mutex<Option<Instant>> = Mutex::new(None);
 /// force_restore or panic_reset fires until pause expires.
 pub fn pause_for(secs: u64) {
     let new_until = Instant::now() + Duration::from_secs(secs);
-    let mut g = PAUSE_UNTIL.lock().unwrap();
+    let mut g = PAUSE_UNTIL.lock().unwrap_or_else(PoisonError::into_inner);
     // Extend rather than shorten — multiple overlapping pauses
     // should result in the latest deadline winning.
     *g = Some(match *g {
@@ -87,18 +87,18 @@ pub fn pause_for(secs: u64) {
 /// Lift any active pause immediately. Called when user
 /// explicitly cancels an operation that armed a pause.
 pub fn resume_now() {
-    *PAUSE_UNTIL.lock().unwrap() = None;
+    *PAUSE_UNTIL.lock().unwrap_or_else(PoisonError::into_inner) = None;
     tracing::info!("watchdog escalation resumed");
 }
 
 fn is_paused() -> bool {
-    let g = PAUSE_UNTIL.lock().unwrap();
+    let g = PAUSE_UNTIL.lock().unwrap_or_else(PoisonError::into_inner);
     matches!(*g, Some(t) if t > Instant::now())
 }
 
 /// Idempotent: spawns the watchdog thread if not running.
 pub fn spawn_watchdog() -> Result<()> {
-    let mut spawned = SPAWNED.lock().unwrap();
+    let mut spawned = SPAWNED.lock().unwrap_or_else(PoisonError::into_inner);
     if *spawned {
         return Ok(());
     }

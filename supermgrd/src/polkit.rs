@@ -518,4 +518,44 @@ mod tests {
              unauthorised caller can bring up a tunnel before being refused"
         );
     }
+
+    #[test]
+    fn newly_hardened_methods_are_gated_at_expected_actions() {
+        let daemon = include_str!("daemon.rs");
+        for (method, expected_action) in [
+            (
+                "async fn fortigate_generate_api_token(",
+                "crate::polkit::ACTION_SECRETS",
+            ),
+            ("async fn get_logs(", "crate::polkit::ACTION_MANAGE"),
+            (
+                "async fn list_config_versions(",
+                "crate::polkit::ACTION_MANAGE",
+            ),
+            (
+                "async fn get_config_version(",
+                "crate::polkit::ACTION_MANAGE",
+            ),
+            (
+                "async fn opnsense_get_status(",
+                "crate::polkit::ACTION_EXECUTE",
+            ),
+        ] {
+            let body: String = daemon
+                .split(method)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{method} exists"))
+                .split("\n    /// ")
+                .next()
+                .expect("something follows the method")
+                .lines()
+                .map(|l| l.split("//").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                body.contains(&format!("authorize(conn, &hdr, {expected_action})")),
+                "{method} no longer authorizes against {expected_action}"
+            );
+        }
+    }
 }

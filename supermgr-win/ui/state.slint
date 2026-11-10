@@ -238,6 +238,7 @@ export global Hosts {
     in-out property <string> add-group: "";
     in-out property <int> add-device-index: 0;
     in-out property <int> add-auth-index: 0;
+    in-out property <int> add-key-index: 0;
     in property <bool> add-busy: false;
     in-out property <string> add-error: "";
     callback submit-add();
@@ -250,6 +251,7 @@ export global Hosts {
         self.add-group = "";
         self.add-device-index = 0;
         self.add-auth-index = 0;
+        self.add-key-index = 0;
         self.add-error = "";
         App.overlay = Overlay.add-host;
     }
@@ -267,6 +269,7 @@ export struct KeyItem {
 
 export global Keys {
     in property <[KeyItem]> items: [];
+    in property <[string]> labels: [];
     callback copy-public(string);
     callback delete(string);
 

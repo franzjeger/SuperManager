@@ -172,8 +172,14 @@ async fn open_session(
     // path can stay linear.
     let auth: AuthMethod = match auth_method {
         "password" => {
+            let pw_label = meta
+                .get("auth_password_ref")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| crate::rpc_args::host_password_label(host_id));
             let secret = secret_store
-                .retrieve(&format!("supermgr/host/{host_id}/password"))
+                .retrieve(&pw_label)
                 .await
                 .map_err(|e| RpcError::Secret(format!("password for host {host_id}: {e}")))?;
             AuthMethod::Password(
@@ -186,8 +192,19 @@ async fn open_session(
             let key_id = auth_key_id.ok_or_else(|| {
                 RpcError::Other("host uses key auth but no auth_key_id is set".into())
             })?;
+            let key_id = crate::rpc_args::validate_uuid_id(key_id, "auth_key_id")?;
+            let key_label = std::fs::read(root.join("keys").join(format!("{key_id}.json")))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+                .and_then(|v| {
+                    v.get("private_key_ref")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| crate::rpc_args::ssh_key_privkey_label(key_id));
             let secret = secret_store
-                .retrieve(&format!("supermgr/ssh/{key_id}/privkey"))
+                .retrieve(&key_label)
                 .await
                 .map_err(|e| RpcError::Secret(format!("private key {key_id}: {e}")))?;
             let pem = std::str::from_utf8(&secret)
@@ -227,11 +244,11 @@ async fn open_session(
             .into())
         }
         Ok(Err(HandshakeError::HostKeyChanged { stored, presented })) => {
-            return Err(OpenError::HostKeyChanged(KeyChange {
+            return Err(OpenError::HostKeyChanged(Box::new(KeyChange {
                 address: addr,
                 stored,
                 presented,
-            }))
+            })))
         }
         Ok(Err(HandshakeError::TrustStore(e))) => {
             return Err(RpcError::Backend(format!(
@@ -290,7 +307,7 @@ pub enum OpenError {
     /// The host presented a different key from the one on file. Nothing
     /// was sent to it: the handshake stopped before any credential left
     /// this machine.
-    HostKeyChanged(KeyChange),
+    HostKeyChanged(Box<KeyChange>),
     /// Every other failure, as the dispatcher reports it.
     Rpc(RpcError),
 }

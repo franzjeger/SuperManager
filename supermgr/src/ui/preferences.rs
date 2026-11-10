@@ -1079,8 +1079,14 @@ fn show_update_dialog(window: &adw::ApplicationWindow) {
             let password = password_row.text();
             password_row.set_text("");
             password_box.set_visible(false);
-            if input.send_password(&password).is_err() {
-                status.set_label("The updater is no longer listening.");
+            if let Err(err) = input.send_password(&password) {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    status.set_label(
+                        "Refused to send password because terminal echo was enabled (prompt may have timed out).",
+                    );
+                } else {
+                    status.set_label("The updater is no longer listening.");
+                }
                 return;
             }
             status.set_label("Installing\u{2026}");
@@ -1264,8 +1270,10 @@ fn show_change_password_dialog(
                 status.set_visible(true);
                 return;
             }
-            {
-                let _ = crate::master_password::set(&new_pw);
+            if let Err(e) = crate::master_password::set(&new_pw) {
+                status.set_text(&format!("Could not save password: {e}"));
+                status.set_visible(true);
+                return;
             }
             dialog.close();
         });

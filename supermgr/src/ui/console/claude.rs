@@ -85,19 +85,25 @@ pub async fn send_message_subscription(
 ) -> Result<()> {
     let mcp_path = mcp_binary_path();
 
+    let mcp_env = if allow_changes {
+        json!({ "SUPERMGR_MCP_ALLOW_WRITES": "1" })
+    } else {
+        json!({ "SUPERMGR_MCP_READ_ONLY": "1" })
+    };
     let mcp_config = json!({
         "mcpServers": {
             "supermgr": {
                 "command": mcp_path,
-                "env": if allow_changes { json!({}) } else { json!({"SUPERMGR_MCP_READ_ONLY":"1"}) }
+                "env": mcp_env
             }
         }
     });
 
-    let allowed_tools = supermgr_mcp::available_tools(allow_changes)
+    let tools_val = supermgr_mcp::available_tools(allow_changes);
+    let allowed_tools = tools_val
         .as_array()
-        .unwrap()
-        .iter()
+        .into_iter()
+        .flatten()
         .filter_map(|tool| {
             tool["name"]
                 .as_str()
@@ -129,13 +135,15 @@ pub async fn send_message_subscription(
         cmd.args(["--resume", sid]);
     }
 
-    if !allow_changes {
-        cmd.env("SUPERMGR_MCP_READ_ONLY", "1");
-    } else {
+    if allow_changes {
+        cmd.env("SUPERMGR_MCP_ALLOW_WRITES", "1");
         cmd.env_remove("SUPERMGR_MCP_READ_ONLY");
+    } else {
+        cmd.env("SUPERMGR_MCP_READ_ONLY", "1");
+        cmd.env_remove("SUPERMGR_MCP_ALLOW_WRITES");
     }
     cmd.kill_on_drop(true);
-    cmd.arg(user_text);
+    cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::null());
 
@@ -147,6 +155,18 @@ pub async fn send_message_subscription(
     let mut child = cmd
         .spawn()
         .context("failed to start `claude` CLI — is it installed?")?;
+
+    {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("failed to capture claude stdin")?;
+        stdin
+            .write_all(user_text.as_bytes())
+            .await
+            .context("failed to write prompt to claude stdin")?;
+    }
 
     let stdout = child
         .stdout
@@ -268,7 +288,7 @@ pub async fn send_message(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
-        .unwrap_or_default();
+        .context("build Anthropic HTTP client")?;
     let model = crate::settings::anthropic_model_id(model);
 
     // Build the full system prompt with injected state context.

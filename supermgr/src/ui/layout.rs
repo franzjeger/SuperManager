@@ -57,11 +57,12 @@ pub fn remember_split(
 }
 
 pub fn adapt_shell(window: &adw::ApplicationWindow, shell: &adw::OverlaySplitView) {
-    let breakpoint =
-        adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 1050sp").unwrap());
-    breakpoint.add_setter(shell, "collapsed", Some(&true.to_value()));
-    breakpoint.add_setter(shell, "show-sidebar", Some(&false.to_value()));
-    window.add_breakpoint(breakpoint);
+    if let Ok(cond) = adw::BreakpointCondition::parse("max-width: 1050sp") {
+        let breakpoint = adw::Breakpoint::new(cond);
+        breakpoint.add_setter(shell, "collapsed", Some(&true.to_value()));
+        breakpoint.add_setter(shell, "show-sidebar", Some(&false.to_value()));
+        window.add_breakpoint(breakpoint);
+    }
 }
 
 pub fn remember_window(

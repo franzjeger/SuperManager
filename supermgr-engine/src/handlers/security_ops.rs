@@ -23,7 +23,13 @@ impl EngineServer {
             .and_then(|v| v.as_str())
             .map(str::to_owned);
 
-        let findings = crate::findings_store::list_findings(&scope).unwrap_or_default();
+        let findings = match crate::findings_store::list_findings(&scope) {
+            Ok(list) => list,
+            Err(e) => {
+                let eng = crate::error::EngineError::from_findings_anyhow(e);
+                return Response::err(id, eng.rpc_code(), eng.to_string());
+            }
+        };
         let selected: Vec<crate::vuln::Finding> = findings
             .into_iter()
             .filter(|f| {
@@ -91,8 +97,14 @@ impl EngineServer {
             .to_owned();
         let findings = match service.as_str() {
             "ssh" => crate::creds::ssh_test_defaults(&host, port).await,
-            "http" => crate::creds::http_test_defaults(&host, port, false).await,
-            "https" => crate::creds::http_test_defaults(&host, port, true).await,
+            "http" => match crate::creds::http_test_defaults(&host, port, false).await {
+                Ok(f) => f,
+                Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            },
+            "https" => match crate::creds::http_test_defaults(&host, port, true).await {
+                Ok(f) => f,
+                Err(e) => return Response::err(id, protocol::INTERNAL_ERROR, format!("{e:#}")),
+            },
             other => {
                 return Response::err(
                     id,

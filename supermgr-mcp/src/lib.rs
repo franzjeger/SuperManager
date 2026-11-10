@@ -43,40 +43,8 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
-            "name": "vpn_status",
-            "description": "Get the current VPN connection status (connected/disconnected, active profile, tunnel stats).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
             "name": "vpn_list_profiles",
             "description": "List all configured VPN profiles with their backend type and connection state.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "vpn_connect",
-            "description": "Connect to a VPN profile by UUID. Returns immediately; the connection is established asynchronously.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "profile_id": {
-                        "type": "string",
-                        "description": "UUID of the VPN profile to connect"
-                    }
-                },
-                "required": ["profile_id"]
-            }
-        },
-        {
-            "name": "vpn_disconnect",
-            "description": "Disconnect the currently active VPN connection.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -212,44 +180,74 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["host_id", "method", "path"]
             }
-        },
-        {
-            "name": "fortigate_push_ssh_key",
-            "description": "Push an SSH public key to a FortiGate admin user via REST API. The host must have an API token configured.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host with API token configured"
-                    },
-                    "key_id": {
-                        "type": "string",
-                        "description": "UUID of the SSH key whose public key will be pushed"
-                    },
-                    "admin_user": {
-                        "type": "string",
-                        "description": "FortiGate admin username (e.g. admin)"
-                    }
-                },
-                "required": ["host_id", "key_id", "admin_user"]
-            }
-        },
-        {
-            "name": "fortigate_backup_config",
-            "description": "Download the FortiGate running configuration and save it to disk. Returns the backup filename on success.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "host_id": {
-                        "type": "string",
-                        "description": "UUID of the FortiGate host with API token configured"
-                    }
-                },
-                "required": ["host_id"]
-            }
         }
     ]);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let definitions = catalog.as_array_mut().expect("tool array");
+        definitions.extend([
+            json!({
+                "name": "vpn_status",
+                "description": "Get the current VPN connection status (connected/disconnected, active profile, tunnel stats).",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            }),
+            json!({
+                "name": "vpn_connect",
+                "description": "Connect to a VPN profile by UUID. Returns immediately; the connection is established asynchronously.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "profile_id": {
+                            "type": "string",
+                            "description": "UUID of the VPN profile to connect"
+                        }
+                    },
+                    "required": ["profile_id"]
+                }
+            }),
+            json!({
+                "name": "vpn_disconnect",
+                "description": "Disconnect the currently active VPN connection.",
+                "inputSchema": { "type": "object", "properties": {}, "required": [] }
+            }),
+            json!({
+                "name": "fortigate_push_ssh_key",
+                "description": "Push an SSH public key to a FortiGate admin user via REST API. The host must have an API token configured.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host_id": {
+                            "type": "string",
+                            "description": "UUID of the FortiGate host with API token configured"
+                        },
+                        "key_id": {
+                            "type": "string",
+                            "description": "UUID of the SSH key whose public key will be pushed"
+                        },
+                        "admin_user": {
+                            "type": "string",
+                            "description": "FortiGate admin username (e.g. admin)"
+                        }
+                    },
+                    "required": ["host_id", "key_id", "admin_user"]
+                }
+            }),
+            json!({
+                "name": "fortigate_backup_config",
+                "description": "Download the FortiGate running configuration and save it to disk. Returns the backup filename on success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "host_id": {
+                            "type": "string",
+                            "description": "UUID of the FortiGate host with API token configured"
+                        }
+                    },
+                    "required": ["host_id"]
+                }
+            }),
+        ]);
+    }
     #[cfg(target_os = "linux")]
     {
         let definitions = catalog.as_array_mut().expect("tool array");
@@ -407,6 +405,7 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)
         }
+        #[cfg(not(target_os = "macos"))]
         "vpn_status" => {
             let json_str = proxy.get_status().await.map_err(|e| e.to_string())?;
             let status: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
@@ -417,6 +416,7 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let profiles: Value = serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
             Ok(profiles)
         }
+        #[cfg(not(target_os = "macos"))]
         "vpn_connect" => {
             let profile_id = args
                 .get("profile_id")
@@ -425,16 +425,29 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             proxy.connect(profile_id).await.map_err(|e| e.to_string())?;
             Ok(json!({ "status": "connecting", "profile_id": profile_id }))
         }
+        #[cfg(not(target_os = "macos"))]
         "vpn_disconnect" => {
             proxy.disconnect().await.map_err(|e| e.to_string())?;
             Ok(json!({ "status": "disconnecting" }))
         }
         "add_host" => {
+            let hostname = args
+                .get("hostname")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            supermgr_core::sanitize::validate_host_or_ip(hostname)?;
+            let username = args
+                .get("username")
+                .and_then(|v| v.as_str())
+                .unwrap_or("root")
+                .trim();
+            supermgr_core::sanitize::validate_ssh_username(username)?;
             let host_json = json!({
                 "label": args.get("label").and_then(|v| v.as_str()).unwrap_or(""),
-                "hostname": args.get("hostname").and_then(|v| v.as_str()).unwrap_or(""),
+                "hostname": hostname,
                 "port": args.get("port").and_then(|v| v.as_u64()).unwrap_or(22),
-                "username": args.get("username").and_then(|v| v.as_str()).unwrap_or("root"),
+                "username": username,
                 "group": args.get("group").and_then(|v| v.as_str()).unwrap_or(""),
                 "device_type": args.get("device_type").and_then(|v| v.as_str()).unwrap_or("linux"),
                 "auth_method": args.get("auth_method").and_then(|v| v.as_str()).unwrap_or("password"),
@@ -509,7 +522,9 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let inform_url = args
                 .get("inform_url")
                 .and_then(|v| v.as_str())
-                .ok_or("missing inform_url")?;
+                .ok_or("missing inform_url")?
+                .trim();
+            supermgr_core::sanitize::validate_inform_url(inform_url)?;
             let result = proxy
                 .unifi_set_inform(host_id, inform_url)
                 .await
@@ -538,6 +553,7 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)
         }
+        #[cfg(not(target_os = "macos"))]
         "fortigate_push_ssh_key" => {
             let host_id = args
                 .get("host_id")
@@ -550,7 +566,9 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let admin_user = args
                 .get("admin_user")
                 .and_then(|v| v.as_str())
-                .ok_or("missing admin_user")?;
+                .ok_or("missing admin_user")?
+                .trim();
+            supermgr_core::sanitize::validate_safe_ident(admin_user, "admin_user")?;
             let result = proxy
                 .fortigate_push_ssh_key(host_id, key_id, admin_user)
                 .await
@@ -558,6 +576,7 @@ pub async fn execute_tool(proxy: &DaemonClient, name: &str, args: &Value) -> Res
             let parsed: Value = serde_json::from_str(&result).map_err(|e| e.to_string())?;
             Ok(parsed)
         }
+        #[cfg(not(target_os = "macos"))]
         "fortigate_backup_config" => {
             let host_id = args
                 .get("host_id")

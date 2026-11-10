@@ -105,6 +105,8 @@ pub async fn set_inform(
     if url.is_empty() {
         return Err(anyhow!("inform URL is empty"));
     }
+    supermgr_core::sanitize::validate_inform_url(url)
+        .map_err(|e| anyhow!("invalid inform URL: {e}"))?;
     // Sanity-check it parses as a URL so we fail fast on
     // typos rather than getting an opaque shell exit.
     let _parsed: reqwest::Url = url
@@ -147,11 +149,12 @@ pub async fn set_inform(
     // the whole probe — saves a round-trip per failed try and
     // ensures the device's chosen variant runs in its own
     // shell environment.
+    let quoted_url = supermgr_core::sanitize::posix_shell_quote(url);
     let cmd = format!(
-        "mca-cli-op set-inform {url} 2>/dev/null \
-            || /sbin/set-inform {url} 2>/dev/null \
-            || /usr/bin/syswrapper.sh set-inform {url} 2>/dev/null \
-            || set-inform {url}"
+        "mca-cli-op set-inform {quoted_url} 2>/dev/null \
+            || /sbin/set-inform {quoted_url} 2>/dev/null \
+            || /usr/bin/syswrapper.sh set-inform {quoted_url} 2>/dev/null \
+            || set-inform {quoted_url}"
     );
     info!("unifi set_inform: {cmd}");
     let (exit, stdout, stderr) = session
@@ -181,11 +184,19 @@ pub async fn set_controller(
     // Sanity-check the URL parses.
     let _parsed: reqwest::Url = url.parse().context("invalid controller URL")?;
 
+    let verify_tls = {
+        let st = state.lock().await;
+        st.ssh_hosts
+            .get(&host_id)
+            .map(|h| h.api_verify_tls)
+            .ok_or_else(|| anyhow!("host not found: {host_id}"))?
+    };
+
     // Validate by attempting login. UniFi controllers redirect
     // browser hits to /manage/ but the API endpoint is stable
     // at /api/auth/login on UniFi Network Application v6+.
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .cookie_store(true)
         .timeout(HTTP_TIMEOUT)
         .build()
@@ -281,7 +292,7 @@ pub async fn api_request(
     path: &str,
     body: &str,
 ) -> Result<ApiResponse> {
-    let (controller_url, creds_label) = {
+    let (controller_url, creds_label, verify_tls) = {
         let st = state.lock().await;
         let host = st
             .ssh_hosts
@@ -297,7 +308,7 @@ pub async fn api_request(
             .ok_or_else(|| anyhow!("no UniFi credentials configured"))?
             .0
             .clone();
-        (url, label)
+        (url, label, host.api_verify_tls)
     };
 
     let creds_bytes = secrets
@@ -314,7 +325,7 @@ pub async fn api_request(
         .ok_or_else(|| anyhow!("missing password in credentials"))?;
 
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .cookie_store(true)
         .timeout(HTTP_TIMEOUT)
         .build()

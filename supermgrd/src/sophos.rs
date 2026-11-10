@@ -104,11 +104,12 @@ pub fn wrap_request(creds: &Credentials, inner_xml: &str) -> String {
 
 /// Build a reqwest client suitable for talking to a Sophos firewall.
 ///
-/// Self-signed certs on Sophos appliances are the norm, so verification is
-/// disabled. 30 s combined connect+read timeout matches the OPNsense client.
-fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+/// Honours the host's `verify_tls` setting (`!verify_tls` accepts self-signed
+/// appliance certificates). 30 s combined connect+read timeout matches the
+/// OPNsense client.
+fn http_client(verify_tls: bool) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(!verify_tls)
         .timeout(Duration::from_secs(30))
         .build()
 }
@@ -125,14 +126,16 @@ fn http_client() -> Result<reqwest::Client, reqwest::Error> {
 pub async fn xml_request(
     hostname: &str,
     port: u16,
+    verify_tls: bool,
     creds: &Credentials,
     inner_xml: &str,
 ) -> Result<Response, String> {
+    supermgr_core::sanitize::validate_host_or_ip(hostname)?;
     let url = format!("https://{hostname}:{port}/webconsole/APIController");
     let envelope = wrap_request(creds, inner_xml);
     debug!("sophos::xml_request -> {url}");
 
-    let client = http_client().map_err(|e| format!("HTTP client build failed: {e}"))?;
+    let client = http_client(verify_tls).map_err(|e| format!("HTTP client build failed: {e}"))?;
 
     // Sophos accepts the payload via `reqxml` form parameter on POST.
     let resp = client

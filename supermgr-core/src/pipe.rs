@@ -27,7 +27,7 @@ use std::sync::{
 };
 
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::windows::named_pipe::{ClientOptions, NamedPipeClient},
     sync::Mutex,
     time::{timeout, Duration},
@@ -191,9 +191,19 @@ impl PipeClient {
         let mut line = String::new();
         loop {
             line.clear();
-            let n = guard.read_line(&mut line).await.map_err(PipeError::Io)?;
+            let max_read = (MAX_FRAME_BYTES as u64).saturating_add(1);
+            let n = (&mut *guard)
+                .take(max_read)
+                .read_line(&mut line)
+                .await
+                .map_err(PipeError::Io)?;
             if n == 0 {
                 return Err(PipeError::Disconnected);
+            }
+            if n > MAX_FRAME_BYTES && !line.ends_with('\n') {
+                return Err(PipeError::Protocol(format!(
+                    "response frame exceeds limit {MAX_FRAME_BYTES}"
+                )));
             }
             let resp: PipeResponse = serde_json::from_str(line.trim_end())
                 .map_err(|e| PipeError::Protocol(format!("response parse: {e}")))?;

@@ -253,21 +253,12 @@ pub fn build_provisioning_page(
             let back_btn = back_btn.clone();
             let next_btn = next_btn.clone();
             let current_step = Rc::clone(&current_step);
-            let state = Rc::clone(&state);
             move || {
                 let step = *current_step.borrow();
                 step_label.set_label(&format!("Step {} of {}", step, TOTAL_STEPS));
                 back_btn.set_sensitive(step > 1);
 
-                // Skip security step for UniFi
-                let is_fortigate = state.borrow().device_type == "FortiGate";
-                let effective_max = if is_fortigate {
-                    TOTAL_STEPS
-                } else {
-                    TOTAL_STEPS
-                };
-
-                if step >= effective_max {
+                if step >= TOTAL_STEPS {
                     next_btn.set_label("Finish");
                     next_btn.set_css_classes(&["suggested-action", "pill"]);
                 } else {
@@ -2446,8 +2437,8 @@ fn build_step5_review(
                 let maybe = result_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
                 if let Some(json) = maybe {
                     btn.set_sensitive(true);
-                    if json.starts_with("ERROR:") {
-                        tracing::warn!("failed to list config versions: {}", &json[6..]);
+                    if let Some(err) = json.strip_prefix("ERROR:") {
+                        tracing::warn!("failed to list config versions: {err}");
                         return glib::ControlFlow::Break;
                     }
                     show_history_dialog(&json, &config_buffer, &rt2);
@@ -2749,11 +2740,11 @@ fn generate_network_svg(state: &WizardState) -> String {
 
 /// Generate a professional HTML report from the wizard state and config text.
 fn generate_html_report(state: &WizardState, config: &str) -> String {
-    let now = glib::DateTime::now_local().unwrap();
-    let date_str = now
-        .format("%Y-%m-%d %H:%M")
+    let date_str = glib::DateTime::now_local()
+        .ok()
+        .and_then(|now| now.format("%Y-%m-%d %H:%M").ok())
         .map(|s| s.to_string())
-        .unwrap_or_else(|_| "Unknown date".into());
+        .unwrap_or_else(|| "Unknown date".into());
 
     let yn = |b: bool| if b { "Enabled" } else { "Disabled" };
     let check = |b: bool| if b { "&#x2705;" } else { "&#x274C;" };
@@ -3340,16 +3331,28 @@ fn build_generation_prompt(s: &WizardState) -> String {
 
 /// Send a provisioning prompt via the Claude Code CLI (subscription mode).
 async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    use tokio::io::AsyncWriteExt as _;
+
     let full_prompt = format!(
         "{}\n\n---\n\nUser request:\n{}",
         PROVISIONING_SYSTEM_PROMPT, prompt
     );
 
-    let output = super::super::console::claude::subscription_command(model)
+    let mut child = super::super::console::claude::subscription_command(model)
         .arg("--no-session-persistence")
-        .arg(&full_prompt)
-        .output()
-        .await?;
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to spawn claude CLI")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(full_prompt.as_bytes())
+            .await
+            .context("failed to write provisioning prompt to claude stdin")?;
+    }
+    let output = child.wait_with_output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3365,10 +3368,11 @@ async fn send_provisioning_subscription(prompt: &str, model: &str) -> anyhow::Re
 
 /// Send a provisioning prompt via the Anthropic API (API key mode).
 async fn send_provisioning_api(api_key: &str, prompt: &str, model: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_default();
+        .context("build Anthropic HTTP client")?;
     let model = crate::settings::anthropic_model_id(model);
     let body = serde_json::json!({
         "model": model,
@@ -3647,12 +3651,8 @@ fn show_history_dialog(
         let filename = entry["filename"].as_str().unwrap_or("unknown").to_string();
         let timestamp = entry["timestamp"].as_str().unwrap_or("").to_string();
 
-        // Trim the timestamp for display
-        let display_ts = if timestamp.len() > 19 {
-            &timestamp[..19]
-        } else {
-            &timestamp
-        };
+        // Trim the timestamp safely on a UTF-8 char boundary for display
+        let display_ts = supermgr_core::sanitize::truncate_utf8(&timestamp, 19);
 
         let row = adw::ActionRow::builder()
             .title(&filename)

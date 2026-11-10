@@ -990,15 +990,16 @@ fn ip_sort_key(s: &str) -> (u32, String) {
 // Inventory persistence
 // ---------------------------------------------------------------------------
 
-fn inventory_dir(customer_slug: &str) -> PathBuf {
+fn inventory_dir(customer_slug: &str) -> Result<PathBuf> {
+    supermgr_core::findings::validate_slug(customer_slug).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut p = crate::secrets::default_data_dir();
     p.push("discovery");
     p.push(customer_slug);
-    p
+    Ok(p)
 }
 
 fn persist_inventory(customer_slug: &str, hosts: &[DiscoveredHost]) -> Result<()> {
-    let dir = inventory_dir(customer_slug);
+    let dir = inventory_dir(customer_slug)?;
     std::fs::create_dir_all(&dir).context("create discovery dir")?;
     let mut path = dir;
     path.push("inventory.json");
@@ -1008,7 +1009,7 @@ fn persist_inventory(customer_slug: &str, hosts: &[DiscoveredHost]) -> Result<()
 }
 
 pub fn load_inventory(customer_slug: &str) -> Result<Vec<DiscoveredHost>> {
-    let mut path = inventory_dir(customer_slug);
+    let mut path = inventory_dir(customer_slug)?;
     path.push("inventory.json");
     if !path.exists() {
         return Ok(Vec::new());
@@ -1439,7 +1440,7 @@ async fn scan_host_active(
 }
 
 fn persist_active_scan(customer_slug: &str, result: &ActiveScanResult) -> Result<()> {
-    let dir = inventory_dir(customer_slug);
+    let dir = inventory_dir(customer_slug)?;
     std::fs::create_dir_all(&dir).context("create discovery dir")?;
     let mut path = dir.clone();
     path.push("active_scan.json");
@@ -1453,7 +1454,7 @@ fn persist_active_scan(customer_slug: &str, result: &ActiveScanResult) -> Result
 }
 
 pub fn load_findings(customer_slug: &str) -> Result<Vec<crate::vuln::Finding>> {
-    let mut path = inventory_dir(customer_slug);
+    let mut path = inventory_dir(customer_slug)?;
     path.push("findings.json");
     if !path.exists() {
         return Ok(Vec::new());

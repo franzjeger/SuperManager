@@ -172,10 +172,6 @@ class AppState {
         // can surface as a banner. macOS deduplicates this prompt
         // per-bundle — repeat calls after first run are silent.
         await NotificationManager.requestAuthorization()
-        // Subscribe to system sleep/wake notifications so we can
-        // trigger immediate reconnect probes after wake instead
-        // of waiting for the 30s watchdog tick.
-        installSleepWakeObservers()
         do {
             try await client.probe()
             DebugLog.write("[AppState] connectToDaemon: socket connected")
@@ -316,49 +312,9 @@ class AppState {
         vpnFastPollUntil = Date().addingTimeInterval(seconds)
     }
 
-    /// Track whether we've already wired up sleep/wake observers
-    /// so a re-entry into `connectToDaemon` doesn't pile up
-    /// duplicate handlers.
-    private var sleepWakeObserversInstalled = false
-
-    /// Subscribe to NSWorkspace sleep / wake notifications.
-    /// Without this, after a long sleep the helper's watchdog
-    /// only notices the dropped tunnel on its next 30s tick —
-    /// causing a 30-second delay before always-on profiles come
-    /// back. With this, we kick a re-poll within 1s of wake so
-    /// the helper RPCs fire immediately.
-    private func installSleepWakeObservers() {
-        guard !sleepWakeObserversInstalled else { return }
-        sleepWakeObserversInstalled = true
-        let center = NSWorkspace.shared.notificationCenter
-        center.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                DebugLog.write("[AppState] system woke — kicking reconnect poll")
-                // Refresh tailscale state, force route guardian
-                // to re-snapshot, and prod the connectivity
-                // watchdog. The auto-reconnect watchdog ticks
-                // on its own 30s schedule but the helper-side
-                // tunnel-status query is fast.
-                await self.refreshTailscale()
-                await self.pollAllVpnStates()
-            }
-        }
-        center.addObserver(
-            forName: NSWorkspace.willSleepNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            DebugLog.write("[AppState] system going to sleep")
-            // Nothing to do proactively — tailscaled handles its
-            // own pre-sleep teardown. Just log so post-mortems
-            // can correlate symptoms with sleep timing.
-        }
-    }
+    /// Guards `startSleepWakeMonitor()` in `AppState+SleepWake.swift` so closing
+    /// and reopening a window never registers duplicate `NSWorkspace` observers.
+    var sleepWakeMonitorStarted = false
 
     /// How far this app has read in the helper's event list. Persisted, so
     /// what the helper did while the app was closed still reaches the

@@ -92,6 +92,7 @@ jobs:
           set -euo pipefail
           # Random one-shot keychain password
           KCHAIN_PW=$(openssl rand -hex 16)
+          echo "::add-mask::$KCHAIN_PW"
           echo "KCHAIN_PW=$KCHAIN_PW" >> "$GITHUB_ENV"
           security create-keychain -p "$KCHAIN_PW" build.keychain
           security default-keychain -s build.keychain
@@ -178,29 +179,38 @@ jobs:
           files: |
             dist/SuperManager-*.zip
             dist/SuperManager-vpn-dns-cleanup-*.pkg
-            dist/appcast.xml
+            dist/appcast*.xml
           generate_release_notes: true
           fail_on_unmatched_files: true
 
-      # Stable builds poll the feed committed to main. Publishing only a
-      # release asset leaves every installed Mac on the previous version.
-      - name: Publish stable appcast to main
-        if: ${{ !contains(github.ref_name, '-') }}
+      # Stable builds poll main/appcast.xml; beta-opted-in builds poll
+      # main/appcast-beta.xml. Keeping separate files keeps stable users off
+      # pre-releases while preventing 404s on the beta channel.
+      - name: Publish appcast to main
         run: |
           set -euo pipefail
-          cp dist/appcast.xml "$RUNNER_TEMP/appcast.xml"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            FEED_FILE="appcast-beta.xml"
+          else
+            FEED_FILE="appcast.xml"
+          fi
+          cp "dist/$FEED_FILE" "$RUNNER_TEMP/$FEED_FILE"
           git fetch origin main
           git checkout --detach origin/main
-          cp "$RUNNER_TEMP/appcast.xml" appcast.xml
-          if git diff --quiet -- appcast.xml; then
-            echo "appcast.xml is already current."
+          cp "$RUNNER_TEMP/$FEED_FILE" "$FEED_FILE"
+          if git diff --quiet -- "$FEED_FILE"; then
+            echo "$FEED_FILE is already current."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add appcast.xml
+          git add "$FEED_FILE"
           git commit -m "chore(release): publish ${GITHUB_REF_NAME} appcast"
-          git push origin HEAD:main
+          git push origin HEAD:main || {
+            git fetch origin main
+            git rebase origin/main
+            git push origin HEAD:main
+          }
 
       # Always clean up the temporary keychain so a failed run
       # doesn't leave the signing identity sitting on the runner

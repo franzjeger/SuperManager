@@ -41,6 +41,7 @@ pub struct SmbShare {
 /// 6s — combined budget under 12s. Returns None if `smbclient`
 /// isn't available on the system.
 pub async fn enumerate(host: &str) -> Option<(SmbInfo, Vec<Finding>)> {
+    supermgr_core::sanitize::validate_host_or_ip(host).ok()?;
     let shares = smbclient_list(host).await;
     let (netbios_name, workgroup, server_role) = nmblookup(host).await;
 
@@ -98,6 +99,7 @@ pub async fn enumerate(host: &str) -> Option<(SmbInfo, Vec<Finding>)> {
 /// Returns `Some(vec)` if smbclient ran (even with empty list);
 /// `None` if smbclient isn't available.
 async fn smbclient_list(host: &str) -> Option<Vec<SmbShare>> {
+    supermgr_core::sanitize::validate_host_or_ip(host).ok()?;
     let target = format!("//{host}");
     let res = tokio::time::timeout(
         Duration::from_secs(6),
@@ -152,6 +154,9 @@ async fn smbclient_list(host: &str) -> Option<Vec<SmbShare>> {
 
 /// Parse `nmblookup -A host` output for `NetBIOS` name + workgroup.
 async fn nmblookup(host: &str) -> (Option<String>, Option<String>, Option<String>) {
+    if supermgr_core::sanitize::validate_host_or_ip(host).is_err() {
+        return (None, None, None);
+    }
     let res = tokio::time::timeout(
         Duration::from_secs(4),
         tokio::process::Command::new("nmblookup")

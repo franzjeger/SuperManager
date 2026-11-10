@@ -116,10 +116,7 @@ impl ReconView {
         self.scan_button.set_sensitive(true);
         self.scan_button.set_label("Scan again");
         // Keep scope form + button; replace only everything following them.
-        while self.body.last_child().is_some_and(|child| {
-            child != self.scan_button && child != self.body.first_child().unwrap()
-        }) {
-            let child = self.body.last_child().unwrap();
+        while let Some(child) = self.scan_button.next_sibling() {
             self.body.remove(&child);
         }
 

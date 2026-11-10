@@ -154,6 +154,7 @@ if [ "$DO_UNINSTALL" = 1 ]; then
         note "removed /etc/supermgr/checkout-path"
     fi
     sudo systemctl daemon-reload
+    sudo systemctl reload dbus 2>/dev/null || sudo systemctl reload messagebus 2>/dev/null || true
     note ""
     note "Left in place, because they are yours and not ours to delete:"
     note "  /etc/supermgrd    profiles, hosts, keys, and the secret store"
@@ -207,7 +208,7 @@ for id in ${ID:-} ${ID_LIKE:-}; do
     esac
 done
 [ -n "$FAMILY" ] || die "unrecognised distribution '${ID:-?}'.
-       Install the equivalents of gtk4, libadwaita, vte4, openssl, dbus and
+       Install the equivalents of gtk4, libadwaita, openssl, dbus and
        glib development packages plus wireguard-tools, strongswan, openvpn,
        nftables, sshpass and polkit, then re-run with --no-deps."
 
@@ -216,43 +217,43 @@ arch)
     INSTALL_CMD=(sudo pacman -S --needed --noconfirm)
     PKGS_RUST=(rust)
     PKGS_BUILD=(pkgconf gcc git)
-    PKGS_GUI=(gtk4 libadwaita vte4 openssl)
+    PKGS_GUI=(gtk4 libadwaita openssl)
     # polkit is not optional: the daemon's credential-reading methods
     # fail closed without it, so a missing polkit looks like a broken
     # install rather than a security posture.
     PKGS_CORE=(polkit openssh sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
-    PKGS_TOOLS=(bind net-tools tcpdump samba net-snmp pandoc-cli python-weasyprint)
+    PKGS_TOOLS=(bind net-tools tcpdump)
     PKGS_OPTIONAL=(freerdp remmina networkmanager)
     ;;
 debian)
     INSTALL_CMD=(sudo apt-get install -y)
     PKGS_RUST=(rustc cargo)
     PKGS_BUILD=(build-essential pkg-config)
-    PKGS_GUI=(libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev libssl-dev libdbus-1-dev libglib2.0-dev)
+    PKGS_GUI=(libgtk-4-dev libadwaita-1-dev libssl-dev libdbus-1-dev libglib2.0-dev)
     PKGS_CORE=(polkitd openssh-client sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan strongswan-swanctl openvpn)
-    PKGS_TOOLS=(dnsutils net-tools tcpdump smbclient samba-common-bin snmp pandoc weasyprint)
+    PKGS_TOOLS=(dnsutils net-tools tcpdump)
     PKGS_OPTIONAL=(freerdp3-x11 remmina network-manager)
     ;;
 fedora)
     INSTALL_CMD=(sudo dnf install -y)
     PKGS_RUST=(rust cargo)
     PKGS_BUILD=(gcc pkg-config)
-    PKGS_GUI=(gtk4-devel libadwaita-devel vte291-gtk4-devel openssl-devel dbus-devel glib2-devel)
+    PKGS_GUI=(gtk4-devel libadwaita-devel openssl-devel dbus-devel glib2-devel)
     PKGS_CORE=(polkit openssh-clients sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
-    PKGS_TOOLS=(bind-utils net-tools tcpdump samba-client net-snmp-utils pandoc python3-weasyprint)
+    PKGS_TOOLS=(bind-utils net-tools tcpdump)
     PKGS_OPTIONAL=(freerdp remmina NetworkManager)
     ;;
 suse)
     INSTALL_CMD=(sudo zypper install -y)
     PKGS_RUST=(rust cargo)
     PKGS_BUILD=(gcc pkg-config)
-    PKGS_GUI=(gtk4-devel libadwaita-devel vte-devel libopenssl-devel dbus-1-devel glib2-devel)
+    PKGS_GUI=(gtk4-devel libadwaita-devel libopenssl-devel dbus-1-devel glib2-devel)
     PKGS_CORE=(polkit openssh sshpass nftables)
     PKGS_VPN=(wireguard-tools strongswan openvpn)
-    PKGS_TOOLS=(bind-utils net-tools tcpdump samba-client net-snmp pandoc python3-WeasyPrint)
+    PKGS_TOOLS=(bind-utils net-tools tcpdump)
     PKGS_OPTIONAL=(freerdp remmina NetworkManager)
     ;;
 esac
@@ -397,7 +398,7 @@ if [ "$DO_BUILD" = 1 ]; then
 
     MISSING_LIBS=()
     if command -v pkg-config >/dev/null; then
-        for lib in gtk4 libadwaita-1 vte-2.91-gtk4 openssl dbus-1 glib-2.0; do
+        for lib in gtk4 libadwaita-1 openssl dbus-1 glib-2.0; do
             pkg-config --exists "$lib" 2>/dev/null || MISSING_LIBS+=("$lib")
         done
     else
@@ -417,9 +418,7 @@ fi
 # exists (transitional and split packages are common).  Fail here with the
 # useful names instead of letting an individual feature fail much later.
 MISSING_TOOLS=()
-for tool in ssh sshpass nft wg wg-quick swanctl ipsec openvpn dig host arp \
-            ifconfig tcpdump smbclient nmblookup snmpget snmpwalk pandoc \
-            weasyprint pkexec; do
+for tool in ssh sshpass nft wg wg-quick swanctl openvpn pkexec; do
     command -v "$tool" >/dev/null 2>&1 || MISSING_TOOLS+=("$tool")
 done
 if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
@@ -643,6 +642,18 @@ sudo systemctl daemon-reload
 # without it the GUI's first connection is refused by the bus.
 sudo systemctl reload dbus 2>/dev/null || sudo systemctl reload messagebus 2>/dev/null || true
 
+# Enable and restart `supermgrd` BEFORE starting auxiliary VPN services so an
+# upgrade that already wrote new binaries to /usr/bin never aborts early with
+# the old daemon binary left running in memory.
+sudo systemctl enable supermgrd
+sudo systemctl restart supermgrd
+
+if systemctl is-active --quiet supermgrd; then
+    note "supermgrd is running ($(systemctl show supermgrd -p MainPID --value 2>/dev/null | sed 's/^/pid /'))"
+else
+    warn "supermgrd did not start. Logs:  sudo journalctl -u supermgrd -n 50"
+fi
+
 # strongSwan is a declared runtime dependency.  Unit names differ between
 # distributions, so try the known names directly instead of parsing
 # `list-unit-files` (whose output and aliases vary by systemd version).
@@ -654,16 +665,17 @@ for unit in strongswan.service strongswan-swanctl.service strongswan-starter.ser
         break
     fi
 done
-[ -n "$STRONGSWAN_UNIT" ] || die "strongSwan was installed, but no supported service could be enabled.
-       Tried: strongswan.service, strongswan-swanctl.service, strongswan-starter.service"
-sudo systemctl is-active --quiet "$STRONGSWAN_UNIT" \
-    || die "$STRONGSWAN_UNIT was enabled but did not start.
-       Logs: sudo journalctl -u $STRONGSWAN_UNIT -n 50"
-note "$STRONGSWAN_UNIT is enabled and running"
+if [ -z "$STRONGSWAN_UNIT" ]; then
+    warn "strongSwan was installed, but no supported service could be enabled (tried strongswan.service, strongswan-swanctl.service, strongswan-starter.service)"
+elif sudo systemctl is-active --quiet "$STRONGSWAN_UNIT"; then
+    note "$STRONGSWAN_UNIT is enabled and running"
+else
+    warn "$STRONGSWAN_UNIT was enabled but did not start. Logs: sudo journalctl -u $STRONGSWAN_UNIT -n 50"
+fi
 
-# Tailscale is best-effort where strongSwan is fatal: the binary may
-# legitimately be absent (distro repo doesn't carry it, see the deps
-# phase), and the daemon's repair path can start the service later from
+# Tailscale is best-effort where strongSwan is optional until IKEv2 is used:
+# the binary may legitimately be absent (distro repo doesn't carry it, see the
+# deps phase), and the daemon's repair path can start the service later from
 # the GUI. What must not happen is tailscale being installed and its page
 # opening on "not running" anyway — hence enable --now whenever it exists.
 if command -v tailscale >/dev/null 2>&1; then
@@ -673,33 +685,6 @@ if command -v tailscale >/dev/null 2>&1; then
     else
         warn "tailscaled could not be enabled — the app's Tailscale page can repair this"
     fi
-fi
-
-# `enable` then `restart`, NOT `enable --now`.
-#
-# `--now` starts a stopped unit and does nothing at all to a running one. On a
-# first install those are the same thing; on every upgrade after that they are
-# not. The new binary lands in /usr/bin, the old one keeps running from memory,
-# and the script cheerfully reports "supermgrd is running" — which is true, and
-# not what the operator asked for. Reinstalling twice today put a daemon from
-# 14:34 in front of a binary from 21:04, and every daemon-side fix in between
-# was invisible until it was restarted by hand.
-#
-# `restart` covers both cases: it starts a stopped unit and replaces a running
-# one, so the process serving D-Bus after this line is always the binary just
-# installed.
-#
-# It does mean an upgrade interrupts the daemon while a VPN is connected. The
-# tunnels themselves live in the kernel (WireGuard) or in separate processes
-# (charon, openvpn3) and survive, but in-flight daemon state does not — so an
-# install is a deliberate act, not something to run mid-session.
-sudo systemctl enable supermgrd
-sudo systemctl restart supermgrd
-
-if systemctl is-active --quiet supermgrd; then
-    note "supermgrd is running ($(systemctl show supermgrd -p MainPID --value 2>/dev/null | sed 's/^/pid /'))"
-else
-    warn "supermgrd did not start. Logs:  sudo journalctl -u supermgrd -n 50"
 fi
 
 # ---------------------------------------------------------------------------

@@ -664,8 +664,8 @@ fn fingerprint_web(
 /// Extract `<meta name="generator" content="<product> <version>">`
 /// for the given product. Returns the version string only.
 fn extract_meta_generator_version(body: &str, product: &str) -> Option<String> {
-    let needle_lc = format!(r#"<meta name="generator" content="{product}"#).to_lowercase();
-    let body_lc = body.to_lowercase();
+    let needle_lc = format!(r#"<meta name="generator" content="{product}"#).to_ascii_lowercase();
+    let body_lc = body.to_ascii_lowercase();
     let start = body_lc.find(&needle_lc)?;
     let after = &body[start + needle_lc.len()..];
     // Take chars up to closing quote.
@@ -689,7 +689,7 @@ fn regex_lite_extract<'a>(haystack: &'a str, needle: &str) -> Option<&'a str> {
 }
 
 fn extract_title(body: &str) -> Option<String> {
-    let lower = body.to_lowercase();
+    let lower = body.to_ascii_lowercase();
     let start = lower.find("<title>")?;
     let end = lower[start + 7..].find("</title>")?;
     let raw = &body[start + 7..start + 7 + end];
@@ -1212,6 +1212,23 @@ New, TLSv1/SSLv3, Cipher is AEAD-AES256-GCM-SHA384
         assert!(!cipher_matches_family(&name, "3DES"));
         assert!(!cipher_matches_family(&name, "EXP"));
         assert!(!cipher_matches_family(&name, "aNULL"));
+    }
+
+    #[test]
+    fn extract_title_handles_turkish_dotted_i_without_byte_offset_panic() {
+        // '\u{0130}' ("İ", 2 UTF-8 bytes) expands to 3 bytes ("i\u{0307}") under
+        // Unicode `.to_lowercase()`, which used to desync byte offsets into `body`.
+        let html = "<html><!-- İİİ --><TITLE>İnternal Portal</TITLE></html>";
+        assert_eq!(extract_title(html).as_deref(), Some("İnternal Portal"));
+    }
+
+    #[test]
+    fn extract_meta_generator_handles_turkish_dotted_i_without_panic() {
+        let html = r#"<html><!-- İİİ --><META NAME="GENERATOR" CONTENT="WordPress 6.4.2 (İ)">"#;
+        assert_eq!(
+            extract_meta_generator_version(html, "WordPress").as_deref(),
+            Some("6.4.2")
+        );
     }
 }
 

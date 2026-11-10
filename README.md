@@ -5,10 +5,10 @@ A unified SSH, VPN, and network device management application for **Linux** (GTK
 SuperManager consolidates SSH key management, VPN connections (WireGuard, FortiGate IPsec + SSL VPN, OpenVPN, Azure VPN, IKEv2), network device monitoring (FortiGate, UniFi, OPNsense, Sophos XG), and remote desktop into a single desktop application with an integrated AI assistant.
 
 - **Linux** — GTK4 + libadwaita GUI talking to a `supermgrd` D-Bus system daemon.
-- **macOS** — native SwiftUI app talking to a privileged `supermanager-helper` LaunchDaemon over a Unix socket.
-- **Windows** — Slint GUI talking to a `supermgrd-win` Windows Service over a named pipe. See [WINDOWS.md](WINDOWS.md) for install + build instructions.
+- **macOS** — native SwiftUI app talking to `supermgrd-mac` (`supermgr-engine`) and a privileged `supermanager-helper` LaunchDaemon over Unix sockets.
+- **Windows** — Slint GUI covering core VPN, SSH host/key management, and in-app updates, talking to a `supermgrd-win` Windows Service over a named pipe. See [WINDOWS.md](WINDOWS.md) for current scope, install, and build instructions.
 
-All three share `supermgr-core` (types, traits, secret-store abstraction, RPC protocol) and `supermgr-engine` (renderers, scan logic).
+All three share `supermgr-core` (domain types, traits, SSH primitives, validation, and RPC clients), while `supermgr-engine` backs the macOS daemon (`supermgrd-mac`).
 
 ## Install
 
@@ -110,12 +110,12 @@ machine by hand or wondering why one profile type won't connect.
 | Feature | Needs |
 |---|---|
 | SSH, key management, network scan, compliance, UniFi, FortiGate API | nothing |
-| Tailscale | nothing — `tailscaled` is bundled and installed on first use |
-| WireGuard | `wireguard-tools` |
-| IKEv2 / FortiGate IPsec | `strongswan` |
+| Tailscale | macOS: bundled (`tailscaled` installed on first use); Linux: `tailscale` package (GUI can install/repair) |
+| WireGuard | `wireguard-tools` (Linux/macOS) / bundled WireGuardNT (Windows) |
+| IKEv2 / FortiGate IPsec | `strongswan` (Linux/macOS) / native Windows RAS (Windows) |
 | FortiGate SSL VPN | **Windows only** — `openfortivpn.exe`, which you supply (no upstream Windows release). Linux and macOS have no backend for it; use the IPsec/IKEv2 profile type instead |
-| OpenVPN 2.x | `openvpn` |
-| Azure VPN (Entra ID) | `openvpn3` — no Homebrew formula and packaged only on Arch; Microsoft's gateway rejects OpenVPN 2.x |
+| Standard `.ovpn` profiles | macOS & Windows: `openvpn` (2.x); Linux: `openvpn3` (AUR on Arch, upstream repo elsewhere) |
+| Azure VPN (Entra ID) | Linux & Windows: `openvpn` (2.7+); macOS: `openvpn3` (`--with-openvpn3` in `install.sh`) |
 | Reading stored credentials (Linux) | `polkit` — the daemon fails closed without it |
 
 The app tells you again if you try to connect a profile whose tool isn't
@@ -212,10 +212,8 @@ installer asks for `sudo` to place system files and start the daemon.
 - Configurable daemon log level (ERROR through TRACE)
 
 ### Security
-- Master password hashed with Argon2id (salted PHC string); hashes written by
-  pre-Argon2 builds still verify and are re-hashed on the next unlock
-- Auto-lock after configurable inactivity timeout
-- Secrets stored via system keyring (Secret Service API)
+- Desktop UI lock with Argon2id (Linux) / PBKDF2-SHA256 (macOS) password verification and configurable inactivity auto-lock (locks the GUI window; daemon secret storage is protected by OS-level access controls)
+- Secrets stored in a root-restricted `0600` store on Linux (`/etc/supermgrd/secrets.json`), Keychain + `0600` user store on macOS, and `LocalSystem` Credential Manager on Windows
 - Audit logging for all SSH, VPN, and API operations
 - **SSH host-key verification** on every platform — trust-on-first-use, then
   a fingerprint mismatch refuses the connection (see below)
@@ -365,12 +363,12 @@ your distro without installing anything.
 
 ```bash
 sudo pacman -S --needed rust pkgconf gcc git \
-    gtk4 libadwaita vte4 openssl \
+    gtk4 libadwaita openssl \
     polkit openssh sshpass nftables \
     wireguard-tools strongswan openvpn \
     freerdp remmina networkmanager
 
-# Optional (AUR) — for Azure VPN and openvpn3-driven OpenVPN profiles
+# Optional (AUR) — for standard .ovpn profiles on Linux (driven via openvpn3)
 paru -S openvpn3
 ```
 </details>
@@ -380,15 +378,14 @@ paru -S openvpn3
 
 ```bash
 sudo dnf install -y rust cargo gcc pkg-config \
-    gtk4-devel libadwaita-devel vte291-gtk4-devel \
+    gtk4-devel libadwaita-devel \
     openssl-devel dbus-devel glib2-devel \
     polkit openssh-clients sshpass nftables \
     wireguard-tools strongswan openvpn \
     freerdp remmina NetworkManager
 ```
 
-`openvpn3` is not packaged for Fedora — needed only for Azure VPN and
-openvpn3-driven OpenVPN profiles.
+`openvpn3` is not in Fedora's default repos — install from OpenVPN's upstream repository if you use standard `.ovpn` profiles (Azure VPN uses `openvpn` 2.x directly).
 </details>
 
 <details>
@@ -396,7 +393,7 @@ openvpn3-driven OpenVPN profiles.
 
 ```bash
 sudo apt install -y rustc cargo build-essential pkg-config \
-    libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev \
+    libgtk-4-dev libadwaita-1-dev \
     libssl-dev libdbus-1-dev libglib2.0-dev \
     polkitd openssh-client sshpass nftables \
     wireguard-tools strongswan strongswan-swanctl openvpn \

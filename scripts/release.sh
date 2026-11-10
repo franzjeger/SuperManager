@@ -149,7 +149,7 @@ echo "→ Building version $VERSION"
 echo "→ Testing VPN helper startup and recovery"
 (cd "$REPO_ROOT" && cargo test --locked -p supermanager-helper)
 echo "→ Building Rust release binaries from Git sources"
-(cd "$REPO_ROOT" && cargo build --release --locked -p supermgrd-mac -p supermanager-helper)
+(cd "$REPO_ROOT" && cargo build --release --locked -p supermgrd-mac -p supermanager-helper -p supermgr-mcp)
 
 echo "→ Building Release configuration"
 cd "$REPO_ROOT/SuperManagerMac"
@@ -518,11 +518,16 @@ echo "→ Wrote appcast: $APPCAST (xmllint: valid)"
 # and the moment a Windows-only release became "latest" (v1.4.0 was
 # exactly that) the URL 404'd and every Mac silently stopped seeing
 # updates. A repo-committed appcast is immune to release ordering.
-# Stable channel only — the beta appcast stays a release asset so a
-# stray beta never reaches main.
+# Stable users poll main/appcast.xml; beta-opted-in users poll
+# main/appcast-beta.xml (see SparkleUpdater.swift). Keeping them in two
+# separate files ensures a beta release never reaches stable users while
+# preventing HTTP 404 on the beta channel.
 if [ "$CHANNEL_LABEL" = "stable" ]; then
     cp "$APPCAST" "$REPO_ROOT/appcast.xml"
-    echo "→ Copied appcast to repo root (commit it with the release)"
+    echo "→ Copied appcast.xml to repo root (commit it with the release)"
+else
+    cp "$APPCAST" "$REPO_ROOT/appcast-beta.xml"
+    echo "→ Copied appcast-beta.xml to repo root (commit it with the release)"
 fi
 
 # ---- 10. Next steps ---------------------------------------------------------

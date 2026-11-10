@@ -72,22 +72,24 @@ pub fn read() -> Option<String> {
     }
 }
 
-/// Persist `hash` to the hash file with `0600` permissions when supported.
-fn write_raw(hash: &str) -> io::Result<()> {
+/// Persist `hash` atomically to the hash file with `0600` permissions from creation.
+fn write_raw(hash: &str) -> anyhow::Result<()> {
     let path = hash_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(parent)?;
+        }
     }
-    fs::write(&path, hash.as_bytes())?;
-
-    // Best-effort permissions tightening — silently skipped on platforms
-    // without Unix permission semantics.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
-    Ok(())
+    crate::backup::write_private(&path, hash.as_bytes())
 }
 
 /// Delete the hash file, if it exists. Idempotent — `NotFound` is treated
@@ -107,18 +109,15 @@ pub fn is_set() -> bool {
 }
 
 /// Hash `password` with Argon2id (OWASP defaults from the `argon2` crate)
-/// and persist. Returns the resulting PHC string on success.
-///
-/// Argon2id failure is exceedingly rare (allocation failure inside the
-/// hashing routine); the caller can choose how to surface it.
-pub fn set(password: &str) -> Result<String, argon2::password_hash::Error> {
+/// and persist atomically with `0600` permissions. Returns the resulting PHC
+/// string on success, or an error if hashing or persistence fails.
+pub fn set(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let phc = Argon2::default()
-        .hash_password(password.as_bytes(), &salt)?
+        .hash_password(password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("hash master password: {e}"))?
         .to_string();
-    if let Err(e) = write_raw(&phc) {
-        warn!("master_password::set: write hash file: {e}");
-    }
+    write_raw(&phc)?;
     Ok(phc)
 }
 
@@ -247,9 +246,25 @@ mod tests {
             assert!(!is_set());
             set("correct horse battery staple").unwrap();
             assert!(is_set());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = fs::metadata(hash_path()).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600);
+            }
             assert!(verify("correct horse battery staple"));
             assert!(!verify("wrong"));
             assert!(!needs_upgrade());
+        });
+    }
+
+    #[test]
+    fn set_propagates_io_failure() {
+        with_tmp_xdg(|| {
+            let blocked = std::env::var_os("XDG_CONFIG_HOME").unwrap();
+            let blocker = PathBuf::from(&blocked).join("supermgr");
+            fs::write(&blocker, b"not-a-directory").unwrap();
+            assert!(set("cannot-save").is_err());
         });
     }
 

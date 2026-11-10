@@ -260,35 +260,19 @@ async fn retrieve_string(
         .map_err(|_| VpnError::MissingDependency(format!("stored {what} is not valid UTF-8")))
 }
 
-/// Register the VPN connection. Idempotent — replaces any existing
-/// connection with the same name first.
+/// PEAP (type 25) wrapping EAP-MSCHAPv2 (type 26) XML configuration.
 ///
-/// Register an IKEv2 + EAP-MSCHAPv2 connection.
+/// Windows IKEv2 EAP requires PEAP as the outer method; raw type-26
+/// standalone XML is rejected by the EAP subsystem with
+/// "Failed to generate the EAP Configuration" (WIN32 1).
 ///
-/// Windows IKEv2 only accepts `Eap` or `MachineCertificate` — `MSChapv2` is
-/// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
-/// explicit EAP type defaults to EAP-TLS (type 13), which tries to show a
-/// certificate-selection dialog.  `rasdial` cannot display UI and exits with
-/// error 703 (ERROR_INTERACTIVE_MODE).
-///
-/// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
-/// the inner auth method so `rasdial` can feed credentials non-interactively.
-async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
-    let _ = remove_connection(conn_name).await;
-
-    // PEAP (type 25) wrapping EAP-MSCHAPv2 (type 26).
-    //
-    // Windows IKEv2 EAP requires PEAP as the outer method; raw type-26
-    // standalone XML is rejected by the EAP subsystem with
-    // "Failed to generate the EAP Configuration" (WIN32 1).
-    //
-    // DisableUserPromptForServerValidation=true + PerformServerValidation=false
-    // prevent an interactive certificate-trust dialog even if the FortiGate
-    // presents a self-signed or private-CA certificate.
-    //
-    // All attribute values use double quotes, which are safe inside the
-    // PowerShell single-quoted string wrapper.
-    let eap_xml = concat!(
+/// `DisableUserPromptForServerValidation=true` prevents an interactive prompt
+/// in Session 0, while `PerformServerValidation=true` and
+/// `RequireCryptoBinding=true` enforce gateway certificate validation against
+/// Trusted Root Certification Authorities and PEAP cryptographic binding
+/// against MITM tunneling/downgrade attacks.
+fn eap_config_xml() -> &'static str {
+    concat!(
         r#"<EapHostConfig xmlns="http://www.microsoft.com/provisioning/EapHostConfig">"#,
         r#"<EapMethod>"#,
         r#"<Type xmlns="http://www.microsoft.com/provisioning/EapCommon">25</Type>"#,
@@ -313,16 +297,37 @@ async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(
         r#"</EapType>"#,
         r#"</Eap>"#,
         r#"<EnableQuarantineChecks>false</EnableQuarantineChecks>"#,
-        r#"<RequireCryptoBinding>false</RequireCryptoBinding>"#,
+        r#"<RequireCryptoBinding>true</RequireCryptoBinding>"#,
         r#"<PeapExtensions>"#,
-        r#"<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</PerformServerValidation>"#,
+        r#"<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation>"#,
         r#"<AcceptServerName xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">false</AcceptServerName>"#,
         r#"</PeapExtensions>"#,
         r#"</EapType>"#,
         r#"</Eap>"#,
         r#"</Config>"#,
         r#"</EapHostConfig>"#,
-    );
+    )
+}
+
+/// Register the VPN connection. Idempotent — replaces any existing
+/// connection with the same name first.
+///
+/// Register an IKEv2 + EAP-MSCHAPv2 connection.
+///
+/// Windows IKEv2 only accepts `Eap` or `MachineCertificate` — `MSChapv2` is
+/// rejected with WIN32 87.  But bare `-AuthenticationMethod Eap` without an
+/// explicit EAP type defaults to EAP-TLS (type 13), which tries to show a
+/// certificate-selection dialog.  `rasdial` cannot display UI and exits with
+/// error 703 (ERROR_INTERACTIVE_MODE).
+///
+/// Fix: supply `-EapConfigXmlStream` with EAP type 26 (MS-CHAPv2).  That pins
+/// the inner auth method so `rasdial` can feed credentials non-interactively.
+async fn register_connection(conn_name: &str, cfg: &FortiGateConfig) -> Result<(), VpnError> {
+    let _ = remove_connection(conn_name).await;
+
+    // All attribute values use double quotes, which are safe inside the
+    // PowerShell single-quoted string wrapper.
+    let eap_xml = eap_config_xml();
 
     let cmd = format!(
         "$xml = [xml]'{eap_xml}'; \
@@ -503,7 +508,18 @@ async fn tear_down(active: FgActive) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ras_error, VpnError};
+    use super::{eap_config_xml, ras_error, VpnError};
+
+    #[test]
+    fn eap_xml_enforces_server_validation_and_crypto_binding() {
+        let xml = eap_config_xml();
+        assert!(xml.contains("<RequireCryptoBinding>true</RequireCryptoBinding>"));
+        assert!(xml.contains(
+            r#"<PerformServerValidation xmlns="http://www.microsoft.com/provisioning/MsPeapConnectionPropertiesV2">true</PerformServerValidation>"#
+        ));
+        assert!(!xml.contains("<RequireCryptoBinding>false</RequireCryptoBinding>"));
+        assert!(!xml.contains(">false</PerformServerValidation>"));
+    }
 
     fn message(e: VpnError) -> String {
         match e {

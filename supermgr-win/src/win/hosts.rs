@@ -1,8 +1,8 @@
 //! The Hosts page.
 
-use slint::{ComponentHandle as _, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 
-use super::{local, App, AppWindow, Ctx, HostInfo, HostItem, Hosts, Overlay};
+use super::{local, App, AppWindow, Ctx, HostInfo, HostItem, Hosts, Keys, Overlay};
 use crate::model;
 
 /// The device types and sign-in methods the add form offers, in the order
@@ -450,32 +450,48 @@ fn submit_add(ctx: &Ctx) {
         return;
     };
     let h = w.global::<Hosts>();
-    let port: u16 = match h.get_add_port().trim().parse() {
-        Ok(p) if p > 0 => p,
-        _ => {
-            h.set_add_error("The SSH port must be a number from 1 to 65535.".into());
-            return;
-        }
-    };
     let pick = |list: &[&str], i: i32| {
         usize::try_from(i)
             .ok()
             .and_then(|i| list.get(i))
             .copied()
             .unwrap_or(list[0])
-            .to_owned()
     };
     let label = h.get_add_label().trim().to_owned();
-    let host_json = serde_json::json!({
-        "label": label,
-        "hostname": h.get_add_hostname().trim(),
-        "port": port,
-        "username": h.get_add_username().trim(),
-        "group": h.get_add_group().trim(),
-        "device_type": pick(&DEVICE_TYPES, h.get_add_device_index()),
-        "auth_method": pick(&AUTH_METHODS, h.get_add_auth_index()),
-    })
-    .to_string();
+    let hostname = h.get_add_hostname();
+    let port_str = h.get_add_port();
+    let username = h.get_add_username();
+    let group = h.get_add_group();
+    let device_type = pick(&DEVICE_TYPES, h.get_add_device_index());
+    let auth_method = pick(&AUTH_METHODS, h.get_add_auth_index());
+
+    let selected_key_id = if auth_method == "key" {
+        let items = w.global::<Keys>().get_items();
+        usize::try_from(h.get_add_key_index())
+            .ok()
+            .and_then(|i| items.row_data(i))
+            .map(|k| k.id.to_string())
+    } else {
+        None
+    };
+
+    let host_json = match model::build_add_host_json(&model::NewHostInput {
+        label: &label,
+        hostname: &hostname,
+        port_str: &port_str,
+        username: &username,
+        group: &group,
+        device_type,
+        auth_method,
+        selected_key_id: selected_key_id.as_deref(),
+    }) {
+        Ok(j) => j,
+        Err(msg) => {
+            h.set_add_error(msg.into());
+            return;
+        }
+    };
+    let uses_key = auth_method == "key";
     h.set_add_busy(true);
     h.set_add_error(SharedString::default());
 
@@ -497,9 +513,13 @@ fn submit_add(ctx: &Ctx) {
                         app.invoke_close_overlay();
                     }
                 });
-                ctx2.toast_ok(format!(
-                    "Added {label}. Save its password or token under Credentials."
-                ));
+                if uses_key {
+                    ctx2.toast_ok(format!("Added {label}."));
+                } else {
+                    ctx2.toast_ok(format!(
+                        "Added {label}. Save its password or token under Credentials."
+                    ));
+                }
                 ctx2.refresh_all();
             }
             Err(e) => ctx2.ui(move |w| {

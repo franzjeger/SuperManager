@@ -257,6 +257,8 @@ impl OpenVpnBackend {
         command
             .arg("--config")
             .arg(&cfg.config_file)
+            .arg("--script-security")
+            .arg("1")
             .arg("--management")
             .arg("127.0.0.1")
             .arg(mgmt_port.to_string())
@@ -293,7 +295,7 @@ impl OpenVpnBackend {
         // explanation when there is no progress to report.
         let (tail, _) = output::capture(&mut child);
 
-        let mgmt_addr: SocketAddr = format!("127.0.0.1:{mgmt_port}").parse().unwrap();
+        let mgmt_addr = SocketAddr::from(([127, 0, 0, 1], mgmt_port));
         let stream = match timeout(Duration::from_secs(5), connect_mgmt(mgmt_addr)).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {

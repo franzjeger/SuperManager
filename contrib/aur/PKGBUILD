@@ -5,11 +5,10 @@ pkgrel=1
 pkgdesc="Unified SSH key + VPN connection manager (GUI + daemon)"
 arch=('x86_64')
 url="https://github.com/franzjeger/SuperManager"
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=(
     'gtk4'
     'libadwaita'
-    'vte4'
     'sshpass'
     'wireguard-tools'
     'strongswan'
@@ -21,15 +20,6 @@ depends=(
     # without a network round-trip. A dependency means the page works on
     # first launch instead of greeting the operator with its own absence.
     'tailscale'
-    # Network discovery, packet analysis, and report export.  These are
-    # runtime tools invoked by the engine, not Rust build dependencies.
-    'bind'
-    'net-tools'
-    'tcpdump'
-    'samba'
-    'net-snmp'
-    'pandoc-cli'
-    'python-weasyprint'
     # Not optional: the daemon's credential-reading methods are gated on
     # polkit and fail closed, so without it a working install behaves
     # like a broken one.
@@ -74,7 +64,7 @@ pkgver() {
 build() {
     cd "$pkgname"
     export CARGO_TARGET_DIR=target
-    cargo build --release
+    cargo build --release --locked -p supermgrd -p supermgr -p supermgr-mcp
 }
 
 package() {
@@ -84,14 +74,21 @@ package() {
     install -Dm755 target/release/supermgrd     "$pkgdir/usr/bin/supermgrd"
     install -Dm755 target/release/supermgr       "$pkgdir/usr/bin/supermgr"
     install -Dm755 target/release/supermgr-mcp   "$pkgdir/usr/bin/supermgr-mcp"
+    install -Dm755 scripts/update-linux.sh       "$pkgdir/usr/bin/supermgr-update"
 
-    # Systemd service
+    # Systemd service & kernel modules
     install -Dm644 contrib/systemd/supermgrd.service \
         "$pkgdir/usr/lib/systemd/system/supermgrd.service"
+    install -Dm644 contrib/modules-load.d/supermgr.conf \
+        "$pkgdir/usr/lib/modules-load.d/supermgr.conf"
 
-    # D-Bus policy
+    # D-Bus & Polkit policy
     install -Dm644 contrib/dbus/org.supermgr.Daemon.conf \
         "$pkgdir/usr/share/dbus-1/system.d/org.supermgr.Daemon.conf"
+    install -Dm644 contrib/polkit/org.supermgr.Daemon.policy \
+        "$pkgdir/usr/share/polkit-1/actions/org.supermgr.Daemon.policy"
+    install -Dm644 contrib/polkit/49-supermgr-operators.rules \
+        "$pkgdir/usr/share/polkit-1/rules.d/49-supermgr-operators.rules"
 
     # D-Bus service activation
     install -Dm644 contrib/dbus/org.supermgr.Daemon.service \

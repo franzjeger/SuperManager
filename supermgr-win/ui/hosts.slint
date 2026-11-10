@@ -4,7 +4,7 @@
 
 import { Button, ComboBox, LineEdit, ListView, ScrollView } from "std-widgets.slint";
 import { Theme, Icons } from "theme.slint";
-import { App, ConfirmAction, HostItem, Hosts, Overlay } from "state.slint";
+import { App, ConfirmAction, HostItem, Hosts, Keys, Overlay } from "state.slint";
 import { Badge, Card, Console, DetailRow, DialogButtons, EmptyState, Field, PageHeader, SectionTitle, Sheet, SubtleButton } from "widgets.slint";
 
 // What the add form's combo boxes show. The values sent for each position
@@ -526,7 +526,8 @@ export component HostsPage inherits VerticalLayout {
 }
 
 export component AddHostSheet inherits Sheet {
-    property <bool> ready: Hosts.add-label != "" && Hosts.add-hostname != "";
+    property <bool> key-ready: Hosts.add-auth-index != 1 || (Keys.labels.length > 0 && Hosts.add-key-index >= 0 && Hosts.add-key-index < Keys.labels.length);
+    property <bool> ready: Hosts.add-label != "" && Hosts.add-hostname != "" && root.key-ready;
     title: "Add a host";
     sheet-width: 560px;
     close => { if !Hosts.add-busy { App.close-overlay(); } }
@@ -577,6 +578,18 @@ export component AddHostSheet inherits Sheet {
                 current-index <=> Hosts.add-auth-index;
             }
         }
+    }
+    if Hosts.add-auth-index == 1 && Keys.labels.length > 0: Field {
+        label: "SSH key";
+        hint: "Choose which stored SSH key SuperManager presents to this host.";
+        ComboBox {
+            model: Keys.labels;
+            current-index <=> Hosts.add-key-index;
+        }
+    }
+    if Hosts.add-auth-index == 1 && Keys.labels.length == 0: Field {
+        label: "SSH key";
+        hint: "No SSH keys exist yet. Generate one on the SSH keys page first.";
     }
     Field {
         label: "Device type";

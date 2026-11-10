@@ -139,3 +139,36 @@ impl EngineError {
         )
     }
 }
+
+impl From<supermgr_core::error::FindingsError> for EngineError {
+    fn from(err: supermgr_core::error::FindingsError) -> Self {
+        use supermgr_core::error::FindingsError;
+        match err {
+            FindingsError::Io { reason } => Self::FindingsIo { reason },
+            FindingsError::Parse { reason } => Self::FindingsParse { reason },
+            FindingsError::InvalidScope { reason } => Self::InvalidScope { reason },
+        }
+    }
+}
+
+impl EngineError {
+    /// Convert an `anyhow::Error` that may wrap [`supermgr_core::error::FindingsError`]
+    /// or [`EngineError`] into a structured [`EngineError`].
+    #[must_use]
+    pub fn from_findings_anyhow(err: anyhow::Error) -> Self {
+        if let Some(fe) = err.downcast_ref::<supermgr_core::error::FindingsError>() {
+            return match fe {
+                supermgr_core::error::FindingsError::Io { reason } => Self::FindingsIo {
+                    reason: reason.clone(),
+                },
+                supermgr_core::error::FindingsError::Parse { reason } => Self::FindingsParse {
+                    reason: reason.clone(),
+                },
+                supermgr_core::error::FindingsError::InvalidScope { reason } => Self::InvalidScope {
+                    reason: reason.clone(),
+                },
+            };
+        }
+        Self::Other(err)
+    }
+}

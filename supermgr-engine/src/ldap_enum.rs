@@ -165,34 +165,76 @@ pub async fn enumerate(host: &str, port: u16) -> Option<(LdapInfo, Vec<Finding>)
     Some((info, findings))
 }
 
-/// Look at the `BindResponse`'s resultCode byte. The `LDAPv3` message
-/// shape after our anonymous bind looks like:
-///   30 LL                 ; outer Sequence
-///     02 01 01            ; messageID
-///     61 LL               ; `BindResponse` [APPLICATION 1]
-///       0a 01 RC          ; resultCode (ENUMERATED 0..)
-///   ...
+/// Parse an ASN.1 BER definite length field starting at `input[0]`.
+/// Returns `(content_len, length_header_bytes)`. Rejects indefinite
+/// length (`0x80`) and length-of-length > 4 octets (`> 0x84`).
+fn parse_ber_length(input: &[u8]) -> Option<(usize, usize)> {
+    let first = *input.first()?;
+    if first < 0x80 {
+        return Some((first as usize, 1));
+    }
+    if !(0x81..=0x84).contains(&first) {
+        return None;
+    }
+    let num_octets = (first & 0x7f) as usize;
+    let octets = input.get(1..=num_octets)?;
+    let mut len = 0usize;
+    for &b in octets {
+        len = (len << 8) | (b as usize);
+    }
+    Some((len, 1 + num_octets))
+}
+
+/// Look at the `BindResponse`'s resultCode byte. Handles both
+/// short-form BER lengths (OpenLDAP: `30 0c 02 01 01 61 07 ...`)
+/// and 4-byte `0x84` definite long-form BER lengths (Windows Active
+/// Directory: `30 84 00 00 00 10 02 01 01 61 84 00 00 00 07 ...`).
 /// resultCode 0 = success.
 fn parse_bind_success(bytes: &[u8]) -> bool {
-    // Skip outer sequence header (2 bytes), messageID (3 bytes).
-    if bytes.len() < 12 || bytes[0] != 0x30 {
-        return false;
+    fn inner(bytes: &[u8]) -> Option<bool> {
+        if *bytes.first()? != 0x30 {
+            return None;
+        }
+        let (seq_len, seq_hdr) = parse_ber_length(&bytes[1..])?;
+        let seq_start = 1 + seq_hdr;
+        let seq_end = seq_start.checked_add(seq_len)?.min(bytes.len());
+        let seq = bytes.get(seq_start..seq_end)?;
+
+        // messageID: INTEGER (0x02)
+        if *seq.first()? != 0x02 {
+            return None;
+        }
+        let (id_len, id_hdr) = parse_ber_length(&seq[1..])?;
+        if id_len == 0 {
+            return None;
+        }
+        let after_id = (1 + id_hdr).checked_add(id_len)?;
+        let rest = seq.get(after_id..)?;
+
+        // BindResponse: [APPLICATION 1] (0x61)
+        if *rest.first()? != 0x61 {
+            return None;
+        }
+        let (bind_len, bind_hdr) = parse_ber_length(&rest[1..])?;
+        let bind_start = 1 + bind_hdr;
+        let bind_end = bind_start.checked_add(bind_len)?.min(rest.len());
+        let bind_body = rest.get(bind_start..bind_end)?;
+
+        // resultCode: ENUMERATED (0x0a)
+        if *bind_body.first()? != 0x0a {
+            return None;
+        }
+        let (rc_len, rc_hdr) = parse_ber_length(&bind_body[1..])?;
+        if rc_len == 0 {
+            return None;
+        }
+        let rc_start = 1 + rc_hdr;
+        let rc_end = rc_start.checked_add(rc_len)?;
+        let rc_bytes = bind_body.get(rc_start..rc_end)?;
+        Some(rc_bytes.iter().all(|&b| b == 0))
     }
-    // After messageID we expect 0x61 (BindResponse tag).
-    let after_id_idx = 5; // 0x30 LL 02 01 ID
-    if bytes[after_id_idx] != 0x61 {
-        return false;
-    }
-    // BindResponse → enumerated tag 0x0a, length 0x01, value.
-    // Find first 0x0a 0x01 sequence inside the BindResponse.
-    let bind_body_start = after_id_idx + 2; // skip 0x61 LL
-    if bind_body_start + 3 > bytes.len() {
-        return false;
-    }
-    if bytes[bind_body_start] == 0x0a && bytes[bind_body_start + 1] == 0x01 {
-        return bytes[bind_body_start + 2] == 0x00;
-    }
-    false
+
+    inner(bytes).unwrap_or(false)
 }
 
 /// Build a `SearchRequest` for rootDSE attributes.
@@ -328,4 +370,66 @@ fn dn_to_dns(dn: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(".")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_openldap_short_form_bind_response() {
+        // Canonical OpenLDAP anonymous BindResponse (resultCode = 0 success).
+        let ok_pkt = [
+            0x30, 0x0c, // SEQUENCE len 12
+            0x02, 0x01, 0x01, // messageID = 1
+            0x61, 0x07, // BindResponse len 7
+            0x0a, 0x01, 0x00, // resultCode = 0 (success)
+            0x04, 0x00, // matchedDN = ""
+            0x04, 0x00, // diagnosticMessage = ""
+        ];
+        assert!(parse_bind_success(&ok_pkt));
+
+        // OpenLDAP invalidCredentials (resultCode = 49 = 0x31).
+        let fail_pkt = [
+            0x30, 0x0c, 0x02, 0x01, 0x01, 0x61, 0x07, 0x0a, 0x01, 0x31, 0x04, 0x00, 0x04, 0x00,
+        ];
+        assert!(!parse_bind_success(&fail_pkt));
+    }
+
+    #[test]
+    fn parses_windows_ad_long_form_0x84_bind_response() {
+        // Windows Active Directory encodes SEQUENCE and BindResponse lengths
+        // using 4-byte definite long-form `0x84 0x00 0x00 0x00 LL`.
+        let ad_ok_pkt = [
+            0x30, 0x84, 0x00, 0x00, 0x00, 0x10, // SEQUENCE (0x84 -> 4-byte len = 16)
+            0x02, 0x01, 0x01, // messageID = 1
+            0x61, 0x84, 0x00, 0x00, 0x00, 0x07, // BindResponse (0x84 -> 4-byte len = 7)
+            0x0a, 0x01, 0x00, // resultCode = 0 (success)
+            0x04, 0x00, // matchedDN = ""
+            0x04, 0x00, // diagnosticMessage = ""
+        ];
+        assert!(parse_bind_success(&ad_ok_pkt));
+
+        // Also test long-form encoding on messageID INTEGER itself + failure resultCode.
+        let ad_fail_pkt = [
+            0x30, 0x84, 0x00, 0x00, 0x00, 0x14, // SEQUENCE
+            0x02, 0x84, 0x00, 0x00, 0x00, 0x01, 0x01, // messageID = 1 (long-form len)
+            0x61, 0x84, 0x00, 0x00, 0x00, 0x07, // BindResponse
+            0x0a, 0x01, 0x30, // resultCode = 48 (inappropriateAuthentication)
+            0x04, 0x00, 0x04, 0x00,
+        ];
+        assert!(!parse_bind_success(&ad_fail_pkt));
+    }
+
+    #[test]
+    fn rejects_malformed_or_indefinite_ber_without_panic() {
+        for bad in [
+            &[][..],
+            &[0x30, 0x80, 0x02, 0x01, 0x01, 0x61, 0x03, 0x0a, 0x01, 0x00][..], // indefinite 0x80
+            &[0x30, 0x85, 0, 0, 0, 0, 1][..],                                  // >4 octets 0x85
+            &[0x30, 0x84, 0x00, 0x00][..],                                     // truncated len
+        ] {
+            assert!(!parse_bind_success(bad));
+        }
+    }
 }

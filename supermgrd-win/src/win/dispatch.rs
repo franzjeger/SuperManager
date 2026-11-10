@@ -31,7 +31,11 @@ use supermgr_core::secret_lifecycle::SecretOwner;
 
 use super::daemon::DaemonState;
 use super::{appliance, known_hosts, ssh_exec};
-use crate::rpc_args::arg_id;
+use crate::rpc_args::{
+    arg_id, build_ssh_key_record, canonical_ssh_key_type, host_api_token_label,
+    host_password_label, host_secret_labels_for_delete, key_secret_labels_for_delete,
+    mutate_host_json, prepare_new_host, ssh_key_privkey_label, summarize_host_json,
+};
 
 /// Clear every credential an entity owned, after its record is gone.
 ///
@@ -94,6 +98,7 @@ pub async fn dispatch(state: &Arc<DaemonState>, req: &PipeRequest) -> PipeRespon
 
         // ----- Network appliances (UniFi / FortiGate / OPNsense / Sophos) -----
         "unifi_set_inform" => handle_unifi_set_inform(state, &req.args).await,
+        "unifi_set_controller" => handle_unifi_set_controller(state, &req.args).await,
         "unifi_api" => handle_unifi_api(state, &req.args).await,
         "fortigate_api" => handle_fortigate_api(state, &req.args).await,
         "fortigate_push_ssh_key" => handle_fortigate_push_ssh_key(state, &req.args).await,
@@ -736,6 +741,7 @@ async fn handle_ssh_generate_key(
     use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey};
 
     let key_type = arg_str(args, "key_type")?;
+    canonical_ssh_key_type(key_type)?;
     let name = arg_str(args, "name")?;
     let description = args
         .get("description")
@@ -804,31 +810,33 @@ async fn handle_ssh_generate_key(
         .map_err(|e| RpcError::Other(format!("keygen spawn_blocking: {e}")))??;
 
     let (public_openssh, fingerprint, private_pem) = generated;
-    let key_id = uuid::Uuid::new_v4().to_string();
+    let key_uuid = uuid::Uuid::new_v4();
+    let key_id = key_uuid.to_string();
+    let label = ssh_key_privkey_label(&key_id);
+    let meta_json = build_ssh_key_record(
+        key_uuid,
+        name,
+        description,
+        key_type,
+        &fingerprint,
+        &public_openssh,
+        tags_json,
+        &label,
+    )?;
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let meta = json!({
-        "id": key_id,
-        "name": name,
-        "description": description,
-        "key_type": key_type,
-        "fingerprint": fingerprint,
-        "public_key": public_openssh,
-        "tags": serde_json::from_str::<Value>(tags_json).unwrap_or(json!([])),
-        "created_at": now,
-    });
-    let path = state.root.join("keys").join(format!("{key_id}.json"));
-    std::fs::write(&path, meta.to_string())
-        .map_err(|e| RpcError::Other(format!("write key metadata: {e}")))?;
-
-    let label = format!("supermgr/ssh/{key_id}/privkey");
     state
         .secret_store
         .store(&label, private_pem.as_bytes())
         .await
         .map_err(|e| RpcError::Secret(e.to_string()))?;
 
-    Ok(Value::String(meta.to_string()))
+    let path = state.root.join("keys").join(format!("{key_id}.json"));
+    if let Err(e) = std::fs::write(&path, &meta_json) {
+        let _ = state.secret_store.delete(&label).await;
+        return Err(RpcError::Other(format!("write key metadata: {e}")));
+    }
+
+    Ok(Value::String(meta_json))
 }
 
 async fn handle_ssh_list_keys(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
@@ -862,27 +870,22 @@ async fn handle_ssh_delete_key(state: &Arc<DaemonState>, args: &Value) -> Result
         return Err(RpcError::NotFound(format!("ssh key {key_id}")));
     }
 
-    // Take the label from the record's own `private_key_ref`, not from a
-    // rebuilt `supermgr/ssh/<id>/privkey`. An imported key keeps whatever
-    // label it was stored under, so the guessed form missed it entirely and
-    // the PEM stayed in Credential Manager.
-    let key: Option<supermgr_core::ssh::key::SshKey> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    // Read before unlinking so any explicit `private_key_ref` is preserved,
+    // while also falling back to the deterministic key label if a legacy
+    // `keys/<id>.json` lacked `private_key_ref` or `updated_at`.
+    let raw_bytes = std::fs::read(&path).ok();
 
     std::fs::remove_file(&path)
         .map_err(|e| RpcError::Other(format!("delete key metadata: {e}")))?;
 
-    if let Some(key) = key {
-        clear_owned_secrets(state, &key, &format!("ssh key {key_id}")).await;
-    } else {
-        // Unreadable record: fall back to the conventional label rather
-        // than leaving a private key behind for certain.
-        warn!("ssh key {key_id}: record unreadable, trying the default label");
-        let _ = state
-            .secret_store
-            .delete(&format!("supermgr/ssh/{key_id}/privkey"))
-            .await;
+    let (owned, fallbacks) = key_secret_labels_for_delete(key_id, raw_bytes.as_deref());
+    for label in owned {
+        if let Err(e) = state.secret_store.delete(&label).await {
+            warn!("ssh key {key_id}: credential {label} not removed: {e}");
+        }
+    }
+    for label in fallbacks {
+        let _ = state.secret_store.delete(&label).await;
     }
     Ok(Value::Null)
 }
@@ -919,8 +922,8 @@ async fn handle_list_hosts(state: &Arc<DaemonState>) -> Result<Value, RpcError> 
             continue;
         }
         if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
-                out.push(v);
+            if let Some(summary) = summarize_host_json(&bytes) {
+                out.push(summary);
             }
         }
     }
@@ -938,18 +941,7 @@ async fn handle_get_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value
 
 async fn handle_add_host(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
     let host_json = arg_str(args, "host_json")?;
-    let mut value: Value = serde_json::from_str(host_json)
-        .map_err(|e| RpcError::Other(format!("parse host_json: {e}")))?;
-    let id = uuid::Uuid::new_v4().to_string();
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("id".into(), Value::String(id.clone()));
-        obj.insert(
-            "created_at".into(),
-            Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-    } else {
-        return Err(RpcError::Other("host_json must be an object".into()));
-    }
+    let (id, value) = prepare_new_host(host_json)?;
     let path = state.root.join("hosts").join(format!("{id}.json"));
     std::fs::write(&path, value.to_string())
         .map_err(|e| RpcError::Other(format!("write host: {e}")))?;
@@ -963,27 +955,24 @@ async fn handle_delete_host(state: &Arc<DaemonState>, args: &Value) -> Result<Va
         return Err(RpcError::NotFound(format!("host {host_id}")));
     }
 
-    // Parse before unlinking: the record is the only thing that knows which
-    // credentials this host owns, and deleting the file used to be the whole
-    // operation — leaving the SSH password, the OpenSSH certificate, the
-    // firewall API token and the UniFi credentials in Credential Manager
-    // with nothing left pointing at them.
-    //
-    // A record that will not parse still gets deleted. Refusing would leave
-    // the operator unable to remove a host at all, and the credentials are
-    // no more reachable either way — but say so, because they are the ones
-    // this cannot clean up.
-    let host: Option<supermgr_core::host::Host> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-    if host.is_none() {
-        warn!("host {host_id}: record unreadable, deleting it without clearing its credentials");
+    // Read before unlinking so recorded `SecretRef` labels are removed, and
+    // also sweep deterministic legacy labels in case an older `hosts/<id>.json`
+    // stored credentials without writing `*_ref` fields.
+    let raw_bytes = std::fs::read(&path).ok();
+    if raw_bytes.is_none() {
+        warn!("host {host_id}: record unreadable, falling back to deterministic credential labels");
     }
 
     std::fs::remove_file(&path).map_err(|e| RpcError::Other(format!("delete host: {e}")))?;
 
-    if let Some(host) = host {
-        clear_owned_secrets(state, &host, &format!("host {host_id}")).await;
+    let (owned, fallbacks) = host_secret_labels_for_delete(host_id, raw_bytes.as_deref());
+    for label in owned {
+        if let Err(e) = state.secret_store.delete(&label).await {
+            warn!("host {host_id}: credential {label} not removed: {e}");
+        }
+    }
+    for label in fallbacks {
+        let _ = state.secret_store.delete(&label).await;
     }
     Ok(Value::Null)
 }
@@ -1105,14 +1094,12 @@ async fn handle_toggle_host_pin(state: &Arc<DaemonState>, args: &Value) -> Resul
     let host_id = arg_id(args, "host_id")?;
     let path = state.root.join("hosts").join(format!("{host_id}.json"));
     let bytes = std::fs::read(&path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
-    let mut v: Value =
-        serde_json::from_slice(&bytes).map_err(|e| RpcError::Other(format!("parse host: {e}")))?;
-    let new_state = !v.get("pinned").and_then(Value::as_bool).unwrap_or(false);
-    if let Some(obj) = v.as_object_mut() {
+    let mut new_state = false;
+    let updated = mutate_host_json(&bytes, |obj| {
+        new_state = !obj.get("pinned").and_then(Value::as_bool).unwrap_or(false);
         obj.insert("pinned".into(), Value::Bool(new_state));
-    }
-    std::fs::write(&path, v.to_string())
-        .map_err(|e| RpcError::Other(format!("write host: {e}")))?;
+    })?;
+    std::fs::write(&path, updated).map_err(|e| RpcError::Other(format!("write host: {e}")))?;
     Ok(Value::String(
         json!({ "host_id": host_id, "pinned": new_state }).to_string(),
     ))
@@ -1124,12 +1111,24 @@ async fn handle_ssh_set_password(
 ) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let password = arg_str(args, "password")?;
-    let label = format!("supermgr/host/{host_id}/password");
+    let host_path = state.root.join("hosts").join(format!("{host_id}.json"));
+    let host_bytes =
+        std::fs::read(&host_path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+
+    let label = host_password_label(host_id);
     state
         .secret_store
         .store(&label, password.as_bytes())
         .await
         .map_err(|e| RpcError::Secret(e.to_string()))?;
+
+    let updated = mutate_host_json(&host_bytes, |obj| {
+        obj.insert("auth_password_ref".into(), Value::String(label.clone()));
+    })?;
+    if let Err(e) = std::fs::write(&host_path, updated) {
+        let _ = state.secret_store.delete(&label).await;
+        return Err(RpcError::Other(format!("write host: {e}")));
+    }
     Ok(Value::Null)
 }
 
@@ -1139,23 +1138,28 @@ async fn handle_ssh_set_api_token(
 ) -> Result<Value, RpcError> {
     let host_id = arg_id(args, "host_id")?;
     let token = arg_str(args, "token")?;
-    let port = arg_u64(args, "port")? as u16;
-    let label = format!("supermgr/host/{host_id}/api-token");
+    let port = u16::try_from(arg_u64(args, "port")?)
+        .ok()
+        .filter(|&p| p > 0)
+        .ok_or_else(|| RpcError::Protocol("port must be from 1 to 65535".into()))?;
+    let host_path = state.root.join("hosts").join(format!("{host_id}.json"));
+    let host_bytes =
+        std::fs::read(&host_path).map_err(|_| RpcError::NotFound(format!("host {host_id}")))?;
+
+    let label = host_api_token_label(host_id);
     state
         .secret_store
         .store(&label, token.as_bytes())
         .await
         .map_err(|e| RpcError::Secret(e.to_string()))?;
-    // Persist the port alongside the host metadata so subsequent calls
-    // know where to hit the appliance.
-    let host_path = state.root.join("hosts").join(format!("{host_id}.json"));
-    if let Ok(bytes) = std::fs::read(&host_path) {
-        if let Ok(mut v) = serde_json::from_slice::<Value>(&bytes) {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("api_port".into(), Value::Number(port.into()));
-            }
-            let _ = std::fs::write(&host_path, v.to_string());
-        }
+
+    let updated = mutate_host_json(&host_bytes, |obj| {
+        obj.insert("api_port".into(), Value::Number(port.into()));
+        obj.insert("api_token_ref".into(), Value::String(label.clone()));
+    })?;
+    if let Err(e) = std::fs::write(&host_path, updated) {
+        let _ = state.secret_store.delete(&label).await;
+        return Err(RpcError::Other(format!("write host: {e}")));
     }
     Ok(Value::Null)
 }
@@ -1246,6 +1250,30 @@ async fn handle_unifi_set_inform(
     )
     .await?;
     Ok(Value::String(resp))
+}
+
+async fn handle_unifi_set_controller(
+    state: &Arc<DaemonState>,
+    args: &Value,
+) -> Result<Value, RpcError> {
+    let host_id = arg_id(args, "host_id")?;
+    let controller_url = args
+        .get("controller_url")
+        .or_else(|| args.get("url"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::Protocol("missing string arg: controller_url".into()))?;
+    let username = arg_str(args, "username")?;
+    let password = arg_str(args, "password")?;
+    appliance::unifi_set_controller(
+        &state.root,
+        state.secret_store.clone(),
+        host_id,
+        controller_url,
+        username,
+        password,
+    )
+    .await?;
+    Ok(Value::Null)
 }
 
 async fn handle_opnsense_api(state: &Arc<DaemonState>, args: &Value) -> Result<Value, RpcError> {
