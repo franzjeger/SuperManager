@@ -48,31 +48,20 @@ fn secrets_lock() -> &'static tokio::sync::Mutex<()> {
 // ---------------------------------------------------------------------------
 
 /// Return the canonical path to the secrets JSON file.
-fn secrets_path() -> PathBuf {
-    // Tests must never reach the real store. The uid check below resolves to
-    // `/etc/supermgrd/secrets.json` whenever the suite runs as root — in a
-    // container, or under `sudo cargo test` — and pointing `XDG_DATA_HOME`
+fn secrets_path() -> Result<PathBuf> {
+    // Test-only override. Look at the branch below: when uid is 0 — sudo test,
+    // a root container, any privileged CI runner — setting `XDG_DATA_HOME` to
     // somewhere safe does not help, because that branch is not taken. The
     // result was a test run that read, rewrote, and deleted entries in a
     // production credential file. Compiled out entirely for the daemon
     // itself: `cfg(test)` covers only this crate's own unit tests.
     #[cfg(test)]
     if let Ok(path) = std::env::var("SUPERMGRD_TEST_SECRETS_PATH") {
-        return PathBuf::from(path);
+        return Ok(PathBuf::from(path));
     }
 
-    if nix::unistd::getuid().is_root() {
-        PathBuf::from("/etc/supermgrd/secrets.json")
-    } else {
-        // Non-root: development / CI path under XDG_DATA_HOME.
-        let base = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
-                PathBuf::from(home).join(".local/share")
-            });
-        base.join("supermgrd/secrets.json")
-    }
+    let dir = supermgr_core::paths::try_default_data_dir().map_err(anyhow::Error::msg)?;
+    Ok(dir.join("secrets.json"))
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +71,7 @@ fn secrets_path() -> PathBuf {
 /// Read the label->base64 map from disk.  Returns an empty map if the file
 /// does not exist yet.
 async fn read_map() -> Result<HashMap<String, String>> {
-    let path = secrets_path();
+    let path = secrets_path()?;
     if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
         return Ok(HashMap::new());
     }
@@ -153,7 +142,7 @@ impl Drop for PrivateTempFile {
 /// 3. Write serialised JSON and `sync_all`.
 /// 4. Atomically `persist` over the target path.
 async fn write_map(map: &HashMap<String, String>) -> Result<()> {
-    let path = secrets_path();
+    let path = secrets_path()?;
     let dir = path
         .parent()
         .map(std::path::Path::to_path_buf)
@@ -350,7 +339,7 @@ mod tests {
         let path = tmp.path().join("secrets.json");
         let _store = test_store(&path);
 
-        assert_eq!(secrets_path(), path);
+        assert_eq!(secrets_path().unwrap(), path);
         store_secret("supermgr/test/isolation", b"x").await.unwrap();
         assert!(path.exists(), "secret went somewhere else entirely");
     }

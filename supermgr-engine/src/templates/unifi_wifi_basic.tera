@@ -54,7 +54,7 @@
   "security": "wpapsk",
   "wpa_mode": "wpa3",
   "wpa_enc": "ccmp",
-  "x_passphrase": "{{ extras.wifi_password | default(value='CHANGE-ME-WPA3-PASS') }}",
+  "x_passphrase": "{{ extras.wifi_password }}",
   "vlan_enabled": true,
   "vlan": {{ vlan.id }},
   "networkconf_id": "REPLACED-AT-DEPLOY-TIME",

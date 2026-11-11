@@ -1288,11 +1288,12 @@ fn compliance_dir() -> PathBuf {
     p
 }
 
-fn host_runs_dir(host_id: &str) -> PathBuf {
+fn host_runs_dir(host_id: &str) -> Result<PathBuf> {
+    crate::sanitize::validate_safe_ident(host_id, "host_id").map_err(anyhow::Error::msg)?;
     let mut p = compliance_dir();
     p.push(host_id);
     p.push("runs");
-    p
+    Ok(p)
 }
 
 /// Write a run to disk under the host's runs directory.
@@ -1300,7 +1301,8 @@ fn host_runs_dir(host_id: &str) -> PathBuf {
 /// Called before responding to the caller, so a GUI that dies between the scan
 /// and the reply does not lose the result.
 pub fn persist_run(run: &ComplianceRun) -> Result<()> {
-    let dir = host_runs_dir(&run.host_id);
+    crate::sanitize::validate_safe_ident(&run.id, "run_id").map_err(anyhow::Error::msg)?;
+    let dir = host_runs_dir(&run.host_id)?;
     std::fs::create_dir_all(&dir).context("create compliance dir")?;
     let mut path = dir;
     path.push(format!("{}.json", run.id));
@@ -1315,7 +1317,7 @@ pub fn persist_run(run: &ComplianceRun) -> Result<()> {
 /// into the summary — a separate `load_run` call retrieves a
 /// single run with its full check breakdown.
 pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
-    let dir = host_runs_dir(host_id);
+    let dir = host_runs_dir(host_id)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -1348,7 +1350,8 @@ pub fn load_history(host_id: &str, limit: usize) -> Result<Vec<RunSummary>> {
 
 /// Load one specific run by id with its full check breakdown.
 pub fn load_run(host_id: &str, run_id: &str) -> Result<ComplianceRun> {
-    let mut path = host_runs_dir(host_id);
+    crate::sanitize::validate_safe_ident(run_id, "run_id").map_err(anyhow::Error::msg)?;
+    let mut path = host_runs_dir(host_id)?;
     path.push(format!("{run_id}.json"));
     let bytes = std::fs::read(&path).with_context(|| format!("read {path:?}"))?;
     let run: ComplianceRun = serde_json::from_slice(&bytes).context("deserialize run")?;
@@ -3037,5 +3040,38 @@ mod tests {
         let summary: RunSummary =
             serde_json::from_str(json).expect("legacy summary with no baseline_kind must decode");
         assert_eq!(summary.baseline_kind, BaselineKind::Fortigate);
+    }
+
+    #[test]
+    fn persistence_and_load_reject_path_traversal_identifiers() {
+        let valid_host = "00000000000000000000000000000001";
+        let valid_run = "11111111111111111111111111111111";
+
+        for bad in ["", ".", "..", "../secrets", "a/b", r"a\b", "-leading"] {
+            assert!(load_history(bad, 10).is_err(), "accepted host_id {bad:?}");
+            assert!(
+                load_run(bad, valid_run).is_err(),
+                "accepted host_id {bad:?}"
+            );
+            assert!(
+                load_run(valid_host, bad).is_err(),
+                "accepted run_id {bad:?}"
+            );
+            assert!(
+                drift_against_previous(valid_host, bad).is_err(),
+                "drift accepted run_id {bad:?}"
+            );
+
+            let mut bad_run = run_fixture(bad, 100, vec![]);
+            bad_run.host_id = valid_host.to_owned();
+            assert!(persist_run(&bad_run).is_err(), "persist accepted {bad:?}");
+
+            let mut bad_host_run = run_fixture(valid_run, 100, vec![]);
+            bad_host_run.host_id = bad.to_owned();
+            assert!(
+                persist_run(&bad_host_run).is_err(),
+                "persist accepted host_id {bad:?}"
+            );
+        }
     }
 }

@@ -254,6 +254,108 @@ fn template_body(template_id: &str) -> Result<String> {
 // Render
 // ---------------------------------------------------------------------------
 
+const SECRET_EXTRA_KEYS: &[&str] = &[
+    "vpn_psk",
+    "vpn_admin_password",
+    "pppoe_password",
+    "radius_secret",
+    "s2s_psk",
+    "wifi_password",
+];
+
+fn validate_secret_value(key: &str, raw: &str) -> Result<()> {
+    let trimmed = raw.trim();
+    if trimmed.len() < 8 {
+        return Err(anyhow!(
+            "extras.{key} must be at least 8 characters long"
+        ));
+    }
+    if raw.chars().any(|c| c.is_control() || c == '"') {
+        return Err(anyhow!(
+            "extras.{key} must not contain control characters or double quotes"
+        ));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if matches!(lower.as_str(), "admin" | "password" | "changeme" | "12345678")
+        || lower.starts_with("change-me")
+    {
+        return Err(anyhow!(
+            "extras.{key} must not use a placeholder or default value"
+        ));
+    }
+    Ok(())
+}
+
+fn require_secret_extra(
+    extras: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    template_id: &str,
+) -> Result<()> {
+    let val = extras
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            anyhow!("template '{template_id}' requires secret parameter 'extras.{key}'")
+        })?;
+    validate_secret_value(key, val)
+}
+
+fn validate_template_secrets(
+    template_id: &str,
+    site: &Site,
+    extras: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    for &key in SECRET_EXTRA_KEYS {
+        if let Some(val) = extras.get(key) {
+            let s = val
+                .as_str()
+                .ok_or_else(|| anyhow!("extras.{key} must be a string"))?;
+            validate_secret_value(key, s)?;
+        }
+    }
+
+    match template_id {
+        "fortigate.branch_office" => {
+            require_secret_extra(extras, "vpn_psk", template_id)?;
+            require_secret_extra(extras, "vpn_admin_password", template_id)?;
+            if site.wan_type == "pppoe" {
+                let user = extras
+                    .get("pppoe_user")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("");
+                if user.is_empty()
+                    || user.eq_ignore_ascii_case("change-me")
+                    || user.chars().any(|c| c.is_control() || c == '"')
+                {
+                    return Err(anyhow!(
+                        "template '{template_id}' with PPPoE WAN requires a valid 'extras.pppoe_user'"
+                    ));
+                }
+                require_secret_extra(extras, "pppoe_password", template_id)?;
+            }
+        }
+        "fortigate.hq" => {
+            require_secret_extra(extras, "radius_secret", template_id)?;
+            require_secret_extra(extras, "vpn_psk", template_id)?;
+            let has_s2s = extras
+                .get("s2s_peer_ip")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|s| !s.trim().is_empty());
+            if has_s2s {
+                require_secret_extra(extras, "s2s_psk", template_id)?;
+            }
+        }
+        "unifi.wifi_basic" => {
+            if site.vlans.iter().any(|v| v.purpose != "iot") {
+                require_secret_extra(extras, "wifi_password", template_id)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Render a template against a (customer, site) pair. Returns
 /// `RenderResult` with the output string. Errors propagate from
 /// Tera's parser/renderer with full diagnostic — the GUI surfaces
@@ -272,24 +374,7 @@ pub fn render(req: &RenderRequest) -> Result<RenderResult> {
                 req.customer_slug
             )
         })?;
-    let body = template_body(&req.template_id)?;
-
-    let mut tera = Tera::default();
-    tera.add_raw_template(&req.template_id, &body)
-        .with_context(|| format!("parse template {}", req.template_id))?;
-    register_filters(&mut tera);
-
-    let context = build_context(&customer, site, &req.extras)?;
-    let output = tera
-        .render(&req.template_id, &context)
-        .with_context(|| format!("render template {}", req.template_id))?;
-
-    let extras_used: Vec<String> = req.extras.keys().cloned().collect();
-    Ok(RenderResult {
-        template_id: req.template_id.clone(),
-        output,
-        extras_used,
-    })
+    render_with_customer(&customer, site, &req.template_id, &req.extras)
 }
 
 /// Render and return the rendered text directly without re-fetching
@@ -301,6 +386,7 @@ pub fn render_with_customer(
     template_id: &str,
     extras: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<RenderResult> {
+    validate_template_secrets(template_id, site, extras)?;
     let body = template_body(template_id)?;
     let mut tera = Tera::default();
     tera.add_raw_template(template_id, &body)
@@ -1476,6 +1562,97 @@ mod backup_tests {
         assert!(super::list_deployments("../escape", 10).is_err());
         assert!(super::load_deployment("../escape", "dep1").is_err());
         assert!(super::load_deployment("validhost", "../escape").is_err());
+    }
+
+    #[test]
+    fn built_in_templates_refuse_missing_or_placeholder_secrets_and_render_explicit_ones() {
+        use crate::customer::{Customer, Site, Vlan};
+
+        let customer = Customer {
+            slug: "acme".into(),
+            display_name: "Acme Corp".into(),
+            ..Customer::default()
+        };
+        let site = Site {
+            id: "oslo".into(),
+            display_name: "Oslo".into(),
+            wan_type: "dhcp".into(),
+            lan_base: "10.10.0.0/24".into(),
+            vlans: vec![Vlan {
+                id: 10,
+                name: "Corp".into(),
+                subnet: "10.10.10.0/24".into(),
+                purpose: "internal".into(),
+            }],
+            ..Site::default()
+        };
+
+        let empty = serde_json::Map::new();
+        for tmpl in ["fortigate.branch_office", "fortigate.hq", "unifi.wifi_basic"] {
+            assert!(
+                super::render_with_customer(&customer, &site, tmpl, &empty).is_err(),
+                "{tmpl} must refuse rendering without explicit secrets"
+            );
+        }
+
+        // Placeholder / weak secrets must also be refused.
+        for bad in ["admin", "CHANGE-ME", "CHANGE-ME-LONG-PASSPHRASE", "short", "bad\"quote123"] {
+            let mut ex = serde_json::Map::new();
+            ex.insert("vpn_psk".into(), serde_json::Value::String(bad.into()));
+            ex.insert(
+                "vpn_admin_password".into(),
+                serde_json::Value::String("ValidAdminPass!2026".into()),
+            );
+            assert!(
+                super::render_with_customer(&customer, &site, "fortigate.branch_office", &ex)
+                    .is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+
+        // Explicit strong secrets render cleanly.
+        let mut branch_extras = serde_json::Map::new();
+        branch_extras.insert(
+            "vpn_psk".into(),
+            serde_json::Value::String("R9x#kL29!mPq81$vN4zW".into()),
+        );
+        branch_extras.insert(
+            "vpn_admin_password".into(),
+            serde_json::Value::String("T7y@bQ44!zXc92#pL8mK".into()),
+        );
+        let rendered = super::render_with_customer(
+            &customer,
+            &site,
+            "fortigate.branch_office",
+            &branch_extras,
+        )
+        .unwrap();
+        assert!(rendered.output.contains("R9x#kL29!mPq81$vN4zW"));
+        assert!(!rendered.output.contains("CHANGE-ME"));
+
+        let mut hq_extras = serde_json::Map::new();
+        hq_extras.insert(
+            "radius_secret".into(),
+            serde_json::Value::String("F4c!R8d1uS#S3cr3t99".into()),
+        );
+        hq_extras.insert(
+            "vpn_psk".into(),
+            serde_json::Value::String("H9q#VpnPsk!2026Strong".into()),
+        );
+        let hq = super::render_with_customer(&customer, &site, "fortigate.hq", &hq_extras).unwrap();
+        assert!(hq.output.contains("F4c!R8d1uS#S3cr3t99"));
+        assert!(!hq.output.contains("CHANGE-ME"));
+
+        let mut wifi_extras = serde_json::Map::new();
+        wifi_extras.insert(
+            "wifi_password".into(),
+            serde_json::Value::String("Wpa3StrongPass!2026".into()),
+        );
+        let wifi =
+            super::render_with_customer(&customer, &site, "unifi.wifi_basic", &wifi_extras)
+                .unwrap();
+        assert!(wifi.output.contains("Wpa3StrongPass!2026"));
+        assert!(!wifi.output.contains("CHANGE-ME"));
     }
 
     #[test]

@@ -7,6 +7,16 @@
 use crate::protocol::{self, Response};
 use crate::server::{get_uuid_param, EngineServer};
 
+fn parse_run_id_param(params: &serde_json::Value) -> Result<String, String> {
+    let raw = params
+        .get("run_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing run_id".to_owned())?;
+    uuid::Uuid::parse_str(raw)
+        .map(|u| u.simple().to_string())
+        .map_err(|e| format!("invalid run_id: {e}"))
+}
+
 impl EngineServer {
     /// Run all baseline compliance checks against a host. Returns
     /// the run record (with full check breakdown), and persists
@@ -103,11 +113,9 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
-            }
+        let run_id = match parse_run_id_param(&params) {
+            Ok(rid) => rid,
+            Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
         };
         match crate::compliance::load_run(&host_id.simple().to_string(), &run_id) {
             Ok(run) => match serde_json::to_value(&run) {
@@ -139,11 +147,9 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
-            }
+        let run_id = match parse_run_id_param(&params) {
+            Ok(rid) => rid,
+            Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
         };
         match crate::compliance::drift_against_previous(&host_id.simple().to_string(), &run_id) {
             Ok(report) => match serde_json::to_value(&report) {
@@ -325,11 +331,9 @@ impl EngineServer {
             Ok(id) => id,
             Err(r) => return r,
         };
-        let run_id = match params.get("run_id").and_then(|v| v.as_str()) {
-            Some(s) => s.to_owned(),
-            None => {
-                return Response::err(id, protocol::INVALID_PARAMS, "missing run_id".to_owned())
-            }
+        let run_id = match parse_run_id_param(&params) {
+            Ok(rid) => rid,
+            Err(msg) => return Response::err(id, protocol::INVALID_PARAMS, msg),
         };
         let host_str = host_id.simple().to_string();
         let run = match crate::compliance::load_run(&host_str, &run_id) {

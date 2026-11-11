@@ -95,6 +95,9 @@ pub async fn api_request(
         )
     };
 
+    let url = supermgr_core::sanitize::build_https_api_url(&hostname, api_port, path)
+        .map_err(|e| anyhow!("{e}"))?;
+
     let token_bytes = secrets
         .retrieve(&token_label)
         .await
@@ -102,7 +105,6 @@ pub async fn api_request(
     let token = String::from_utf8(token_bytes.to_vec()).context("API token is not valid UTF-8")?;
     let token = token.trim().to_owned();
 
-    let url = format!("https://{hostname}:{api_port}{path}");
     info!("fortigate_api: {method} {url}");
 
     // FortiGate appliances ship a self-signed cert by default (`api_verify_tls`

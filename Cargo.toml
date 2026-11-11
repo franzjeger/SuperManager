@@ -91,6 +91,7 @@ rand        = "0.10"
 # and is embedded so users can ship custom templates as plain
 # `.tera` files in `~/Library/Application Support/SuperManager/templates/`.
 tera        = { version = "1.20", default-features = false, features = ["builtins"] }
+url         = "2.5"
 
 # ---------------------------------------------------------------------------
 # Workspace-wide lint configuration

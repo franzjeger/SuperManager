@@ -104,6 +104,9 @@ pub async fn fortigate_api(
         .map(str::to_owned)
         .unwrap_or_else(|| crate::rpc_args::host_api_token_label(host_id));
 
+    let url = supermgr_core::sanitize::build_https_api_url(hostname, api_port, path)
+        .map_err(RpcError::Protocol)?;
+
     let token_bytes = secret_store
         .retrieve(&token_label)
         .await
@@ -113,7 +116,6 @@ pub async fn fortigate_api(
         .trim()
         .to_owned();
 
-    let url = format!("https://{hostname}:{api_port}{path}");
     info!("fortigate_api: {method} {url}");
 
     let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
@@ -226,8 +228,12 @@ pub async fn fortigate_backup_config(
         .trim()
         .to_owned();
 
-    let url =
-        format!("https://{hostname}:{api_port}/api/v2/monitor/system/config/backup?scope=global");
+    let url = supermgr_core::sanitize::build_https_api_url(
+        hostname,
+        api_port,
+        "/api/v2/monitor/system/config/backup?scope=global",
+    )
+    .map_err(RpcError::Protocol)?;
     info!("fortigate_backup_config: GET {url}");
 
     let client = http_client(API_TIMEOUT_LONG, false, verify_tls)?;
@@ -470,8 +476,9 @@ async fn opnsense_request(
     path: &str,
     body: &str,
 ) -> Result<(u16, String), RpcError> {
+    let url = supermgr_core::sanitize::build_https_api_url(hostname, port, path)
+        .map_err(RpcError::Protocol)?;
     let creds = load_opnsense_creds(secret_store, host_id).await?;
-    let url = format!("https://{hostname}:{port}{path}");
     info!("opnsense::request {method} {url}");
     let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let mut req = match method.to_ascii_uppercase().as_str() {
@@ -673,7 +680,12 @@ pub async fn sophos_xml_api(
         inner = inner_xml,
     );
 
-    let url = format!("https://{hostname}:{port}/webconsole/APIController");
+    let url = supermgr_core::sanitize::build_https_api_url(
+        hostname,
+        port,
+        "/webconsole/APIController",
+    )
+    .map_err(RpcError::Protocol)?;
     info!("sophos_xml_api -> {url}");
     let client = http_client(API_TIMEOUT_SHORT, false, verify_tls)?;
     let password_clone = creds.password.clone();
