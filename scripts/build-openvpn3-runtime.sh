@@ -7,7 +7,11 @@ set -euo pipefail
 out="${1:?usage: build-openvpn3-runtime.sh OUT_DIR}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 adapter="$repo/contrib/openvpn3"
-cache="${SUPERMANAGER_OPENVPN3_CACHE_DIR:-$repo/target/openvpn3-runtime}"
+default_cache="$repo/target/openvpn3-runtime"
+if [ ! -w "$repo" ] || [[ "$repo" == *.app/* ]]; then
+    default_cache="${HOME}/Library/Caches/com.sybr.supermanager/openvpn3-runtime"
+fi
+cache="${SUPERMANAGER_OPENVPN3_CACHE_DIR:-$default_cache}"
 revision=0b27d9df493db8bc9dc459a2b1cb6b67037742b2
 archive_sha256=7c54159ff28ad2f477ce3bf12ea83c57cf1385f250aa782ac3481bab48732df9
 source_url="https://codeload.github.com/OpenVPN/openvpn3/tar.gz/$revision"

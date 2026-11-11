@@ -84,24 +84,21 @@ struct SecuritySettingsView: View {
                 onError: { errorMessage = $0 }
             )
         }
-        // Remove-password confirmation
-        .alert("Remove master password?",
-               isPresented: $showingRemoveConfirm) {
-            Button("Cancel", role: .cancel) {
-                settings.requireMasterPassword = true   // revert toggle
-            }
-            Button("Remove", role: .destructive) {
-                do {
-                    try MasterPassword.remove()
+        // Remove-password verification sheet: requires proving knowledge of the
+        // current master password before disabling protection.
+        .sheet(isPresented: $showingRemoveConfirm) {
+            RemoveMasterPasswordSheet(
+                onRemoved: {
                     passwordIsSet = MasterPassword.isSet
                     settings.requireMasterPassword = false
-                } catch {
-                    errorMessage = error.localizedDescription
-                    settings.requireMasterPassword = true
-                }
-            }
-        } message: {
-            Text("Anyone with access to this Mac will be able to open SuperManager and view stored credentials.")
+                },
+                onCancelled: {
+                    if MasterPassword.isSet {
+                        settings.requireMasterPassword = true
+                    }
+                },
+                onError: { errorMessage = $0 }
+            )
         }
         // Error surface
         .alert("Error",
@@ -190,6 +187,92 @@ private struct SetMasterPasswordSheet: View {
             }
             try MasterPassword.set(newPassword)
             onSaved()
+            dismiss()
+        } catch {
+            inlineError = error.localizedDescription
+            onError(error.localizedDescription)
+        }
+    }
+}
+
+/// Sheet that verifies the current master password before removing it.
+private struct RemoveMasterPasswordSheet: View {
+    let onRemoved: () -> Void
+    let onCancelled: () -> Void
+    let onError: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var currentPassword = ""
+    @State private var isWorking = false
+    @State private var inlineError: String?
+    @State private var didRemove = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Remove master password")
+                .font(.headline)
+
+            Text("Enter your current master password to remove password protection. Anyone with access to this Mac will be able to open SuperManager.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Form {
+                SecureField("Current password", text: $currentPassword)
+                    .onSubmit { Task { await remove() } }
+            }
+            .formStyle(.columns)
+
+            if let inlineError {
+                Text(inlineError)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Button("Cancel") {
+                    onCancelled()
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Remove Password", role: .destructive) {
+                    Task { await remove() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(currentPassword.isEmpty || isWorking)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+        .onDisappear {
+            if !didRemove {
+                onCancelled()
+            }
+        }
+    }
+
+    private func remove() async {
+        guard !currentPassword.isEmpty, !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+        inlineError = nil
+        do {
+            let pwd = currentPassword
+            let ok = try await Task.detached(priority: .userInitiated) {
+                try MasterPassword.verify(pwd)
+            }.value
+            guard ok else {
+                inlineError = "Current password is incorrect."
+                currentPassword = ""
+                return
+            }
+            try MasterPassword.remove()
+            didRemove = true
+            onRemoved()
             dismiss()
         } catch {
             inlineError = error.localizedDescription

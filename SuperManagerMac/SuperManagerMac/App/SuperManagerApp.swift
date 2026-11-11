@@ -143,6 +143,7 @@ struct SuperManagerApp: App {
                 // WebCapture and stash on AppState; ContentView's
                 // sheet binding handles the rest.
                 .onOpenURL { url in
+                    guard !LockState.shared.isLocked else { return }
                     if let cap = WebCapture.from(url: url) {
                         appState.pendingWebCapture = cap
                     } else {
@@ -179,32 +180,7 @@ struct SuperManagerApp: App {
             // open a new instance of the scene's view, which is exactly
             // what we want for a single-window app like this one.
             CommandMenu("Navigation") {
-                Button("SSH") { appState.selectedSection = .ssh }
-                    .keyboardShortcut("1", modifiers: .command)
-                Button("VPN") { appState.selectedSection = .vpn }
-                    .keyboardShortcut("2", modifiers: .command)
-                Button("Tailscale") { appState.selectedSection = .tailscale }
-                    .keyboardShortcut("3", modifiers: .command)
-                Button("Compliance") { appState.selectedSection = .compliance }
-                    .keyboardShortcut("4", modifiers: .command)
-                Button("Provisioning") { appState.selectedSection = .provisioning }
-                    .keyboardShortcut("5", modifiers: .command)
-                Divider()
-                // Opens WebCaptureSheet with whatever's on the
-                // clipboard auto-parsed. Lets the operator
-                // capture a device without first having to
-                // install the bookmarklet — useful when working
-                // remotely and just copy/pasting an IP from a
-                // ticket.
-                Button("Capture from Web…") {
-                    appState.pendingWebCapture = WebCapture(
-                        hostname: "",
-                        label: "",
-                        deviceType: .linux,
-                        username: "root"
-                    )
-                }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
+                NavigationCommandsContent(appState: appState)
             }
             // Replace the default "About SuperManager" with one
             // that posts a notification ContentView listens for —
@@ -267,12 +243,14 @@ struct SuperManagerApp: App {
                 }
                 Divider()
                 Button("Explain Configuration…") {
+                    guard !LockState.shared.isLocked else { return }
                     NotificationCenter.default.post(
                         name: .superManagerShowExplain,
                         object: nil
                     )
                 }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(LockState.shared.isLocked)
                 Divider()
                 Button("Reveal Helper Log in Finder") {
                     let url = URL(fileURLWithPath: "/var/log/supermanager-helper.log")
@@ -288,8 +266,10 @@ struct SuperManagerApp: App {
                 // issue, not buried inside the Tailscale overflow
                 // menu (where it currently is the only entry-point).
                 Button("Save Support Bundle…") {
+                    guard !LockState.shared.isLocked else { return }
                     Task { _ = await SupportBundle.saveInteractive(appState: appState) }
                 }
+                .disabled(LockState.shared.isLocked)
             }
         }
 
@@ -314,10 +294,9 @@ struct SuperManagerApp: App {
 
         // `Settings { }` is the SwiftUI scene that wires up the
         // SuperManager → Settings… menu item and Cmd+, automatically.
-        // The window's content size is driven by the TabView inside.
+        // Gated on `LockState` so Cmd+, cannot bypass the master password.
         Settings {
-            SettingsView()
-                .environment(appState)
+            LockedSettingsGateView(appState: appState)
         }
     }
 
@@ -471,6 +450,9 @@ struct SuperManagerApp: App {
     /// macOS tints the icon for the active state automatically;
     /// no need to vary colour here.
     private func menuBarSymbol(for appState: AppState) -> String {
+        if LockState.shared.isLocked {
+            return "lock.fill"
+        }
         // Tailscale exit-node is the most "loud" state — all
         // user traffic is being relayed through a peer.
         if let prefs = appState.tailscalePrefs,
@@ -554,5 +536,59 @@ private struct CheckForUpdatesView: View {
             updater.checkForUpdates()
         }
         .disabled(!updater.canCheckForUpdates)
+    }
+}
+
+/// Observes `LockState.shared` inside the `Settings` scene so `Cmd+,`
+/// presents `LockScreenView` whenever the app is locked.
+private struct LockedSettingsGateView: View {
+    let appState: AppState
+    @State private var lockState = LockState.shared
+
+    var body: some View {
+        if lockState.isLocked {
+            LockScreenView()
+                .frame(minWidth: 520, minHeight: 360)
+        } else {
+            SettingsView()
+                .environment(appState)
+        }
+    }
+}
+
+/// Observes `LockState.shared` inside `CommandMenu("Navigation")` so keyboard
+/// shortcuts (`Cmd+1..5`, `Cmd+Shift+W`) are disabled while locked.
+private struct NavigationCommandsContent: View {
+    let appState: AppState
+    @State private var lockState = LockState.shared
+
+    var body: some View {
+        Button("SSH") { appState.selectedSection = .ssh }
+            .keyboardShortcut("1", modifiers: .command)
+            .disabled(lockState.isLocked)
+        Button("VPN") { appState.selectedSection = .vpn }
+            .keyboardShortcut("2", modifiers: .command)
+            .disabled(lockState.isLocked)
+        Button("Tailscale") { appState.selectedSection = .tailscale }
+            .keyboardShortcut("3", modifiers: .command)
+            .disabled(lockState.isLocked)
+        Button("Compliance") { appState.selectedSection = .compliance }
+            .keyboardShortcut("4", modifiers: .command)
+            .disabled(lockState.isLocked)
+        Button("Provisioning") { appState.selectedSection = .provisioning }
+            .keyboardShortcut("5", modifiers: .command)
+            .disabled(lockState.isLocked)
+        Divider()
+        Button("Capture from Web…") {
+            guard !lockState.isLocked else { return }
+            appState.pendingWebCapture = WebCapture(
+                hostname: "",
+                label: "",
+                deviceType: .linux,
+                username: "root"
+            )
+        }
+        .keyboardShortcut("w", modifiers: [.command, .shift])
+        .disabled(lockState.isLocked)
     }
 }

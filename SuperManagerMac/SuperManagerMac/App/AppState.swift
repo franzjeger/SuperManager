@@ -1069,6 +1069,10 @@ class AppState {
     /// ON, but the helper cannot actually reconnect it yet, and the UI
     /// must say so rather than imply protection.
     var autoReconnectUnarmed: Set<String> = []
+    /// Profiles for which automatic Keychain re-arming failed during this
+    /// session (e.g. missing Keychain credentials), preventing repeated
+    /// background retry attempts until profiles are refreshed or edited.
+    var autoReconnectRearmFailed: Set<String> = []
     /// Per-profile bandwidth counters from the helper's status
     /// RPC (rx_bytes / tx_bytes). nil if the backend doesn't
     /// expose them or the tunnel isn't connected.

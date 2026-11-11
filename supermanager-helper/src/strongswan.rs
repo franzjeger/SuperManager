@@ -591,27 +591,67 @@ impl Strongswan {
                 "split-tunnel mode requires at least one route — got an empty list"
             ));
         }
-        tokio::fs::write(&conf_path, conf)
+
+        // Guard removes `secrets_path` on EVERY exit path and removes
+        // `conf_path` unless `keep_conf` is armed after the SA comes up.
+        struct ConnectFilesGuard {
+            conf_path: PathBuf,
+            secrets_path: PathBuf,
+            keep_conf: bool,
+        }
+        impl Drop for ConnectFilesGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.secrets_path);
+                if !self.keep_conf {
+                    let _ = std::fs::remove_file(&self.conf_path);
+                }
+            }
+        }
+        let mut files_guard = ConnectFilesGuard {
+            conf_path: conf_path.clone(),
+            secrets_path: secrets_path.clone(),
+            keep_conf: false,
+        };
+
+        write_private_config(&conf_path, conf.as_bytes())
             .await
             .with_context(|| format!("write {}", conf_path.display()))?;
 
         let secrets = build_swanctl_secrets(args);
         write_private_config(&secrets_path, secrets.as_bytes()).await?;
 
-        run(&swanctl, &["--load-all"]).await?;
+        // Once `--load-all` finishes, charon holds the credentials in memory
+        // over VICI; unlink `secrets_path` immediately regardless of outcome.
+        let load_res = run(&swanctl, &["--load-all"]).await;
+        let _ = tokio::fs::remove_file(&secrets_path).await;
+        load_res?;
 
         // --initiate is async — the call returns once the IKE handshake has
         // either succeeded or failed, but for fast networks ~1s is enough.
         // We give it 30s to allow for slow gateways.
-        let out = run_with_timeout(
+        let out = match run_with_timeout(
             &swanctl,
             &["--initiate", "--child", &args.profile_id],
             std::time::Duration::from_secs(30),
         )
-        .await?;
+        .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = std::fs::remove_file(&conf_path);
+                let _ = run(&swanctl, &["--load-all"]).await;
+                return Err(e);
+            }
+        };
 
         // swanctl prints "initiate completed successfully" on the happy path.
         let ok = out.contains("completed successfully") || out.contains("CHILD_SA");
+        if ok {
+            files_guard.keep_conf = true;
+        } else {
+            let _ = std::fs::remove_file(&conf_path);
+            let _ = run(&swanctl, &["--load-all"]).await;
+        }
 
         // A gateway grants the selectors it allows, which can be less than a
         // full tunnel asks for. Then only those networks go through the

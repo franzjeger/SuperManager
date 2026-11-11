@@ -27,6 +27,25 @@ enum HelperInstaller {
 
     static let plistName = "com.sybr.supermanager.helper.plist"
     static let helperLabel = "com.sybr.supermanager.helper"
+    static let teamID = "LY6LJ395B8"
+
+    /// Designated code-signing requirement for the privileged helper binary:
+    /// anchored at Apple, issued to SuperManager's Team ID, with the helper's
+    /// exact bundle identifier. Satisfied by both Developer ID Application and
+    /// Apple Development certificates on this team, and rejected for ad-hoc,
+    /// third-party, or system binaries.
+    nonisolated static let helperDesignatedRequirement =
+        "anchor apple generic and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(helperLabel)\""
+
+    /// Matches a bundle signed with a Developer ID Application certificate on
+    /// SuperManager's team (same OIDs `supermanager-helper/src/client_auth.rs`
+    /// checks). Developer-ID builds use `SMAppService` exclusively and never
+    /// fall back to `osascript`.
+    nonisolated private static let developerIDRequirement =
+        "anchor apple generic"
+        + " and certificate 1[field.1.2.840.113635.100.6.2.6] exists"
+        + " and certificate leaf[field.1.2.840.113635.100.6.1.13] exists"
+        + " and certificate leaf[subject.OU] = \"\(teamID)\""
 
     /// `/Library/LaunchDaemons/com.sybr.supermanager.helper.plist`
     private static let systemPlistPath =
@@ -37,6 +56,8 @@ enum HelperInstaller {
 
     enum InstallError: Error, LocalizedError {
         case registrationFailed(String)
+        case approvalRequired
+        case invalidSignature(String)
         case bundlePathUnavailable
         case bundledMetadataUnavailable
         case manualInstallFailed(String)
@@ -46,6 +67,10 @@ enum HelperInstaller {
             switch self {
             case .registrationFailed(let m):
                 return "Helper registration failed: \(m)"
+            case .approvalRequired:
+                return "SuperManager needs permission to run its background helper. Enable SuperManager in System Settings → General → Login Items & Extensions, then try again."
+            case .invalidSignature(let m):
+                return "Bundled helper failed code-signature verification: \(m)"
             case .bundlePathUnavailable:
                 return "Could not find helper binary inside app bundle"
             case .bundledMetadataUnavailable:
@@ -58,17 +83,10 @@ enum HelperInstaller {
         }
     }
 
-    /// Install the helper as a system LaunchDaemon. Tries SMAppService first
-    /// then falls back to a manual install. Either way, a successful return
-    /// means the helper is up and listening on its socket within ~1 s.
-    ///
-    /// **Idempotency contract:** if the helper is *already* installed and
-    /// reachable with the bundled build, `install()` is a fast no-op — no SMAppService call, no
-    /// osascript admin prompt. Earlier versions skipped this check, so a
-    /// poll race or transient socket blip would re-trigger the entire
-    /// install dance (and the user got hit with a password prompt every
-    /// time they clicked Connect after a fresh app launch). The block
-    /// below short-circuits that path.
+    /// Install the helper as a system LaunchDaemon. Tries `SMAppService` first;
+    /// Developer-ID builds stop there (surfacing Login Items approval when
+    /// needed), while non-Developer-ID local development builds may fall back
+    /// to administrator installation after verifying the team signature.
     static func install() async throws {
         guard #available(macOS 13.0, *) else { throw InstallError.unsupportedPlatform }
 
@@ -77,6 +95,11 @@ enum HelperInstaller {
         guard FileManager.default.isExecutableFile(atPath: bundledHelper.path) else {
             throw InstallError.bundlePathUnavailable
         }
+
+        // Verify the bundled helper's signature BEFORE running `--version` or
+        // registering it with launchd.
+        let requirement = try await verifiedRequirement(for: bundledHelper)
+
         // The app and helper have independent version numbers. Compare
         // the running helper with the actual bundled binary, including
         // its build identity and RPC capabilities, before skipping install.
@@ -88,22 +111,122 @@ enum HelperInstaller {
         }
         if await installedHelperMatches(bundled) { return }
 
-        // Try the modern API first. Skip silently if it errors — the
-        // fallback handles the "ad-hoc signed" case that SMAppService
-        // rejects.
-        if (try? trySMAppService()) != nil {
-            // Wait for socket to come up.
+        let svc = SMAppService.daemon(plistName: plistName)
+        if svc.status == .requiresApproval {
+            openLoginItemsSettings()
+            throw InstallError.approvalRequired
+        }
+
+        var registrationError: InstallError?
+        do {
+            try svc.register()
+            if svc.status == .requiresApproval {
+                openLoginItemsSettings()
+                throw InstallError.approvalRequired
+            }
             for _ in 0 ..< 30 {
                 if await installedHelperMatches(bundled) {
                     return
                 }
+                if svc.status == .requiresApproval {
+                    openLoginItemsSettings()
+                    throw InstallError.approvalRequired
+                }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            // SMAppService said yes but the daemon never bound the socket.
-            // Fall through to manual install which will replace the plist.
+        } catch let err as InstallError {
+            throw err
+        } catch {
+            if svc.status == .requiresApproval {
+                openLoginItemsSettings()
+                throw InstallError.approvalRequired
+            }
+            let ns = error as NSError
+            registrationError = .registrationFailed(
+                "\(ns.localizedDescription) (domain=\(ns.domain) code=\(ns.code))"
+            )
         }
 
-        try await manualInstall(bundledHelper: bundledHelper, expected: bundled)
+        // Shipped Developer-ID builds never fall back to osascript.
+        if await isDeveloperIDSignedBundle() {
+            throw registrationError ?? InstallError.registrationFailed(
+                "helper registered with launchd (status: \(status())), but socket did not become ready; check /var/log/supermanager-helper.log"
+            )
+        }
+
+        #if DEBUG
+        try await manualInstall(
+            bundledHelper: bundledHelper,
+            expected: bundled,
+            requirement: requirement
+        )
+        #else
+        // Local Apple-Development builds (`scripts/install_mac_app.sh`) compile
+        // in Release configuration without a Developer ID cert, which macOS's
+        // `SMAppService.daemon` rejects with `Operation not permitted`. Allow
+        // manualInstall ONLY when the helper carries SuperManager's team cert.
+        guard let requirement else {
+            throw registrationError ?? InstallError.invalidSignature("missing team signature")
+        }
+        try await manualInstall(
+            bundledHelper: bundledHelper,
+            expected: bundled,
+            requirement: requirement
+        )
+        #endif
+    }
+
+    /// Verify `bundledHelper` against `helperDesignatedRequirement` and return
+    /// the requirement to enforce during staging. In `DEBUG` only, an ad-hoc
+    /// signature is tolerated (`nil` requirement) so unsigned local test runs
+    /// can still exercise non-Release builds.
+    private static func verifiedRequirement(for bundledHelper: URL) async throws -> String? {
+        let strict = await checkCodesign(path: bundledHelper.path, requirement: helperDesignatedRequirement)
+        if strict.status == 0 {
+            return helperDesignatedRequirement
+        }
+        #if DEBUG
+        let basic = await checkCodesign(path: bundledHelper.path, requirement: nil)
+        if basic.status == 0 {
+            return nil
+        }
+        #endif
+        let detail = strict.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        throw InstallError.invalidSignature(detail.isEmpty ? "exit \(strict.status)" : detail)
+    }
+
+    nonisolated private static func isDeveloperIDSignedBundle(
+        _ bundleURL: URL = Bundle.main.bundleURL
+    ) async -> Bool {
+        let res = await checkCodesign(path: bundleURL.path, requirement: developerIDRequirement)
+        return res.status == 0
+    }
+
+    nonisolated private static func checkCodesign(
+        path: String,
+        requirement: String?
+    ) async -> (status: Int32, output: String) {
+        await Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
+            var args = ["--verify", "--strict"]
+            if let requirement, !requirement.isEmpty {
+                args.append("-R=\(requirement)")
+            }
+            args.append(path)
+            process.arguments = args
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            do {
+                try process.run()
+            } catch {
+                return (-1, error.localizedDescription)
+            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }.value
     }
 
     private static func installedHelperMatches(_ expected: HelperBuildInfo) async -> Bool {
@@ -112,25 +235,16 @@ enum HelperInstaller {
         return deployed.matches(expected)
     }
 
-    /// Modern path. Throws on failure so the caller can fall back.
-    @available(macOS 13.0, *)
-    private static func trySMAppService() throws {
-        let svc = SMAppService.daemon(plistName: plistName)
-        do {
-            try svc.register()
-        } catch {
-            let ns = error as NSError
-            throw InstallError.registrationFailed(
-                "\(ns.localizedDescription) (domain=\(ns.domain) code=\(ns.code))"
-            )
-        }
-    }
-
-    /// Fallback: write the LaunchDaemon plist + helper binary to the system
-    /// locations and bootstrap them, all under one `osascript with
-    /// administrator privileges` call so the user enters their password
-    /// exactly once.
-    private static func manualInstall(bundledHelper: URL, expected: HelperBuildInfo) async throws {
+    /// Fallback for non-Developer-ID local builds: write the LaunchDaemon plist
+    /// + helper binary to the system locations and bootstrap them under one
+    /// `osascript with administrator privileges` call, verifying the designated
+    /// code requirement before stopping the existing service and again on the
+    /// root-owned staged inode before `mv`.
+    private static func manualInstall(
+        bundledHelper: URL,
+        expected: HelperBuildInfo,
+        requirement: String?
+    ) async throws {
         // Plist is generated rather than copied so we can rewrite the
         // `BundleProgram` (relative path used by SMAppService) into a
         // `Program` (absolute path) for launchd's traditional bootstrap.
@@ -143,6 +257,12 @@ enum HelperInstaller {
         // Single bash script run as root via osascript. We base64-decode
         // the plist body in-line to avoid shell-quoting concerns.
         let q: (String) -> String = { Self.shellQuote($0) }
+        let verifySourceCmd: String
+        if let requirement, !requirement.isEmpty {
+            verifySourceCmd = "/usr/bin/codesign --verify --strict -R=\(q(requirement)) \(q(bundledHelper.path))"
+        } else {
+            verifySourceCmd = "/usr/bin/codesign --verify --strict \(q(bundledHelper.path))"
+        }
         let script = """
         set -e
         mkdir -p /Library/LaunchDaemons /Library/PrivilegedHelperTools
@@ -151,9 +271,9 @@ enum HelperInstaller {
         chmod 644 \(q(systemPlistPath))
         # Verify before stopping the existing service. Never overwrite a
         # signed executable in place: macOS may retain its old code pages.
-        /usr/bin/codesign --verify --strict \(q(bundledHelper.path))
+        \(verifySourceCmd)
         launchctl bootout system/\(helperLabel) >/dev/null 2>&1 || true
-        \(atomicReplacementScript(source: bundledHelper.path, destination: systemBinaryPath))
+        \(atomicReplacementScript(source: bundledHelper.path, destination: systemBinaryPath, requirement: requirement))
         chown root:wheel \(q(systemBinaryPath))
         for attempt in {1..5}; do
             if launchctl bootstrap system \(q(systemPlistPath)); then break; fi
@@ -197,14 +317,24 @@ enum HelperInstaller {
     /// inode. In-place copies of a previously executed signed Mach-O can be
     /// killed by macOS even when codesign says the on-disk bytes are valid.
     /// Exposed internally so tests execute the exact installer operation.
-    static func atomicReplacementScript(source: String, destination: String) -> String {
+    static func atomicReplacementScript(
+        source: String,
+        destination: String,
+        requirement: String? = helperDesignatedRequirement
+    ) -> String {
         let stagedTemplate = destination + ".XXXXXX"
+        let verifyStagedCmd: String
+        if let requirement, !requirement.isEmpty {
+            verifyStagedCmd = "/usr/bin/codesign --verify --strict -R=\(shellQuote(requirement)) \"$helper_staged\""
+        } else {
+            verifyStagedCmd = "/usr/bin/codesign --verify --strict \"$helper_staged\""
+        }
         return """
         helper_staged=$(/usr/bin/mktemp \(shellQuote(stagedTemplate)))
         trap '/bin/rm -f "$helper_staged"' EXIT
         /bin/cp \(shellQuote(source)) "$helper_staged"
         /bin/chmod 755 "$helper_staged"
-        /usr/bin/codesign --verify --strict "$helper_staged"
+        \(verifyStagedCmd)
         /bin/mv -f "$helper_staged" \(shellQuote(destination))
         trap - EXIT
         """

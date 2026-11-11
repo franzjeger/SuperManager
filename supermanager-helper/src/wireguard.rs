@@ -269,7 +269,23 @@ impl WireGuard {
         )
         .with_context(|| format!("chmod 700 {WG_CONF_DIR}"))?;
 
-        // Write the conf with mode 0600 + O_NOFOLLOW from creation.
+        // Write the conf with mode 0600 + O_NOFOLLOW from creation, guarded so
+        // any spawn/timeout error before tunnel setup completes unlinks it.
+        struct WgConfGuard {
+            path: std::path::PathBuf,
+            keep: bool,
+        }
+        impl Drop for WgConfGuard {
+            fn drop(&mut self) {
+                if !self.keep {
+                    let _ = std::fs::remove_file(&self.path);
+                }
+            }
+        }
+        let mut conf_guard = WgConfGuard {
+            path: conf_path.clone(),
+            keep: false,
+        };
         crate::private_file::write(&conf_path, args.conf_content.as_bytes())
             .with_context(|| format!("write {}", conf_path.display()))?;
 
@@ -286,9 +302,6 @@ impl WireGuard {
         .with_context(|| format!("run {}", wg_quick.describe()))?;
 
         if !output.status.success() {
-            // Best-effort cleanup so the next attempt isn't poisoned
-            // by a half-up state.
-            let _ = std::fs::remove_file(&conf_path);
             let message = format!(
                 "wg-quick up failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -300,6 +313,7 @@ impl WireGuard {
                 interface: None,
             });
         }
+        conf_guard.keep = true;
 
         let interface = detect_interface(&name).await.ok();
         tracing::info!(tunnel = %name, interface = ?interface, wg_quick = %wg_quick.describe(), "WireGuard tunnel up");

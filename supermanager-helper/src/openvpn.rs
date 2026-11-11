@@ -269,6 +269,31 @@ impl OpenVpn {
         let config_path = config_path_for(&safe);
 
         ensure_private_dir()?;
+        struct OvpnFilesGuard {
+            config_path: PathBuf,
+            auth_path: Option<PathBuf>,
+            keep_config: bool,
+            keep_auth: bool,
+        }
+        impl Drop for OvpnFilesGuard {
+            fn drop(&mut self) {
+                if !self.keep_auth {
+                    if let Some(ref auth) = self.auth_path {
+                        let _ = std::fs::remove_file(auth);
+                    }
+                }
+                if !self.keep_config {
+                    let _ = std::fs::remove_file(&self.config_path);
+                }
+            }
+        }
+        let mut files_guard = OvpnFilesGuard {
+            config_path: config_path.clone(),
+            auth_path: None,
+            keep_config: false,
+            keep_auth: false,
+        };
+
         crate::private_file::write(&config_path, config_body.as_bytes())
             .with_context(|| format!("write {}", config_path.display()))?;
         // Start the log empty. Otherwise our post-spawn diagnostic check
@@ -296,7 +321,9 @@ impl OpenVpn {
                     u,
                     p.len()
                 );
-                Some(write_auth_file(&safe, u, p)?)
+                let p = write_auth_file(&safe, u, p)?;
+                files_guard.auth_path = Some(p.clone());
+                Some(p)
             } else {
                 None
             }
@@ -306,7 +333,9 @@ impl OpenVpn {
                 u,
                 p.len()
             );
-            Some(write_auth_file(&safe, u, p)?)
+            let p = write_auth_file(&safe, u, p)?;
+            files_guard.auth_path = Some(p.clone());
+            Some(p)
         } else {
             tracing::info!("ovpn_connect: no auth-user-pass (no username/password)");
             None
@@ -379,6 +408,7 @@ impl OpenVpn {
             }
             // Reap the child asynchronously so it doesn't become a zombie,
             // and wipe its 0600 credentials file as soon as the process exits.
+            files_guard.keep_auth = true;
             let auth_for_exit = auth_path.clone();
             tokio::spawn(async move {
                 let mut child = child;
@@ -586,6 +616,7 @@ impl OpenVpn {
             }
         }
 
+        files_guard.keep_config = true;
         Ok(OvpnConnectResult {
             success: true,
             message: if is_v3 {
