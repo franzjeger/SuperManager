@@ -7,18 +7,29 @@ const ruleName = '49-supermgr-operators.rules';
 const ruleText = readFileSync(new URL(`../contrib/polkit/${ruleName}`, import.meta.url), 'utf8');
 let rule;
 vm.runInNewContext(ruleText, {
-  polkit: { Result: { YES: 'yes' }, addRule(callback) { rule = callback; } },
+  polkit: {
+    Result: {
+      YES: 'yes',
+      AUTH_ADMIN_KEEP: 'auth_admin_keep',
+    },
+    addRule(callback) { rule = callback; },
+  },
 });
-const routine = ['manage', 'execute', 'ssh-connect'];
-const actions = [...routine, 'secrets', 'tailscale-exit-node', 'tailscale-repair', 'future-action'];
+const oncePerSession = ['execute', 'ssh-connect'];
+const actions = ['manage', ...oncePerSession, 'secrets', 'tailscale-exit-node', 'tailscale-repair', 'future-action'];
 let checks = 0;
 for (const id of actions) {
   for (const local of [false, true]) {
     for (const active of [false, true]) {
       for (const operator of [false, true]) {
         const subject = { local, active, isInGroup(group) { return group === 'supermgr' && operator; } };
+        let expected = undefined;
+        if (local && active && operator) {
+          if (id === 'manage') expected = 'yes';
+          else if (oncePerSession.includes(id)) expected = 'auth_admin_keep';
+        }
         assert.equal(rule({ id: `org.supermgr.daemon.${id}` }, subject),
-          routine.includes(id) && local && active && operator ? 'yes' : undefined,
+          expected,
           JSON.stringify({ id, local, active, operator }));
         checks++;
       }
