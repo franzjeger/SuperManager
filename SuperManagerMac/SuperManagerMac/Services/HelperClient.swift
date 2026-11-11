@@ -97,10 +97,11 @@ final class HelperClient {
         fullTunnel: Bool,
         routes: [String] = [],
         dnsServers: [String] = [],
-        localId: String = ""
+        localId: String = "",
+        killSwitch: Bool? = nil
     ) async throws -> [String: Any] {
         try await installBundledVPNRuntime()
-        return try await call("vpn_connect", params: [
+        var params: [String: Any] = [
             "profile_id": profileId,
             "name": name,
             "host": host,
@@ -111,7 +112,9 @@ final class HelperClient {
             "routes": routes,
             "dns_servers": dnsServers,
             "local_id": localId,
-        ])
+        ]
+        if let ks = killSwitch { params["kill_switch"] = ks }
+        return try await call("vpn_connect", params: params)
     }
 
     @discardableResult
@@ -130,14 +133,20 @@ final class HelperClient {
     /// reconnect an always-on profile, so both go through here. `native`
     /// has the helper set the tunnel up without wg-quick.
     nonisolated static func wgConnectArgs(
-        profileId: String, confContent: String, dnsServers: [String], native: Bool
+        profileId: String,
+        confContent: String,
+        dnsServers: [String],
+        native: Bool,
+        killSwitch: Bool? = nil
     ) -> [String: Any] {
-        [
+        var params: [String: Any] = [
             "profile_id": profileId,
             "conf_content": confContent,
             "dns_servers": dnsServers,
             "native": native,
         ]
+        if let ks = killSwitch { params["kill_switch"] = ks }
+        return params
     }
 
     /// Bring up a WireGuard tunnel. The helper writes
@@ -147,11 +156,19 @@ final class HelperClient {
     /// including the spliced-in private key.
     @discardableResult
     func wgConnect(
-        profileId: String, confContent: String, dnsServers: [String], native: Bool
+        profileId: String,
+        confContent: String,
+        dnsServers: [String],
+        native: Bool,
+        killSwitch: Bool? = nil
     ) async throws -> [String: Any] {
         try await call("wg_connect", params: Self.wgConnectArgs(
-            profileId: profileId, confContent: confContent, dnsServers: dnsServers,
-            native: native))
+            profileId: profileId,
+            confContent: confContent,
+            dnsServers: dnsServers,
+            native: native,
+            killSwitch: killSwitch
+        ))
     }
 
     /// The VPN programs this app bundles, in
@@ -207,7 +224,8 @@ final class HelperClient {
         config: String,
         username: String? = nil,
         password: String? = nil,
-        requireOpenVPN3: Bool = false
+        requireOpenVPN3: Bool = false,
+        killSwitch: Bool? = nil
     ) async throws -> [String: Any] {
         try await installBundledVPNRuntime()
         var params: [String: Any] = [
@@ -217,6 +235,7 @@ final class HelperClient {
         ]
         if let u = username { params["username"] = u }
         if let p = password { params["password"] = p }
+        if let ks = killSwitch { params["kill_switch"] = ks }
         return try await call("ovpn_connect", params: params)
     }
 
@@ -358,22 +377,41 @@ final class HelperClient {
 
     // MARK: - Kill-switch
 
-    /// Install pf rules that block all egress except via the
-    /// named tunnel interface + LAN. Helper rebuilds /etc/pf.conf
-    /// references and reloads pf. Idempotent. Caller must already
-    /// know the tunnel iface (e.g. utun7) — typically pulled from
-    /// the connect-result of wg/ovpn/ikev2.
+    /// Persist per-profile kill-switch intent in the helper (`kill_switch.json`).
+    /// When `enabled == false` and the profile currently holds an active lease,
+    /// the helper releases ONLY that profile's lease and rebuilds/removes the
+    /// pf anchor without disturbing other connected profiles.
     @discardableResult
-    func killSwitchEnable(tunnelInterface: String) async throws -> [String: Any] {
-        try await call("kill_switch_enable",
-                       params: ["tunnel_interface": tunnelInterface])
+    func killSwitchSetIntent(profileId: String, enabled: Bool) async throws -> [String: Any] {
+        try await call("kill_switch_set_intent", params: [
+            "profile_id": profileId,
+            "enabled": enabled,
+        ])
     }
 
-    /// Tear down the kill-switch. Idempotent — safe to call when
-    /// no kill-switch is active.
+    /// Read current kill-switch intents and active per-profile leases from the helper.
+    func killSwitchStatus() async throws -> (intents: Set<String>, active: Set<String>, pfActive: Bool) {
+        let r = try await call("kill_switch_status", params: [:])
+        let intents = Set((r["intents"] as? [String]) ?? [])
+        let activeDict = (r["active"] as? [String: Any]) ?? [:]
+        let pfActive = (r["pf_active"] as? Bool) ?? !activeDict.isEmpty
+        return (intents: intents, active: Set(activeDict.keys), pfActive: pfActive)
+    }
+
+    /// Legacy compatibility RPC: install pf rules on a tunnel interface.
     @discardableResult
-    func killSwitchDisable() async throws -> [String: Any] {
-        try await call("kill_switch_disable", params: [:])
+    func killSwitchEnable(tunnelInterface: String, profileId: String? = nil) async throws -> [String: Any] {
+        var params: [String: Any] = ["tunnel_interface": tunnelInterface]
+        if let profileId { params["profile_id"] = profileId }
+        return try await call("kill_switch_enable", params: params)
+    }
+
+    /// Tear down kill-switch lease (for `profileId` when given, or all leases).
+    @discardableResult
+    func killSwitchDisable(profileId: String? = nil) async throws -> [String: Any] {
+        var params: [String: Any] = [:]
+        if let profileId { params["profile_id"] = profileId }
+        return try await call("kill_switch_disable", params: params)
     }
 
     /// Pause the connectivity watchdog's panic_reset escalation
@@ -521,7 +559,7 @@ final class HelperClient {
     /// coming up.
     private static func budget(for method: String) -> Duration {
         switch method {
-        case "ping", "events_since":
+        case "ping", "events_since", "kill_switch_status":
             // Neither waits on anything in the helper, and both are polled.
             return .seconds(3)
         case "tailscaled_install", "tailscale_panic_reset":
@@ -539,7 +577,7 @@ final class HelperClient {
              "tailscale_install_exit_routes", "tailscale_remove_exit_routes",
              "tailscale_test_exit_reachability", "tailscale_force_dns_state",
              "tailscale_install_magicdns_resolver", "kill_switch_enable",
-             "kill_switch_disable", "system_wake":
+             "kill_switch_disable", "kill_switch_set_intent", "system_wake":
             return .seconds(45)
         default:
             return .seconds(15)

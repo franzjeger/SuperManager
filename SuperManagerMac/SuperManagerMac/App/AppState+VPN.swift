@@ -81,6 +81,9 @@ extension AppState {
         case .healthy:
             break
         }
+        if let ks = try? await HelperClient.shared.killSwitchStatus() {
+            killSwitchActiveProfiles = ks.active
+        }
         guard !vpnProfiles.isEmpty else {
             DebugLog.write("[AppState] pollAllVpnStates: vpnProfiles empty, nothing to poll")
             return
@@ -418,11 +421,9 @@ extension AppState {
         }
     }
 
-    /// Set the `kill_switch` flag on a profile. Persisted in the
-    /// daemon's profile state; takes effect on next connect (the
-    /// connect path inspects the profile and asks the helper to
-    /// install pf rules if true). To enable kill-switch on an
-    /// already-connected profile: toggle on + reconnect.
+    /// Set the `kill_switch` flag on a profile. Persisted in both the
+    /// daemon's profile store and the helper's `kill_switch.json`. When
+    /// disabled while connected, releases ONLY this profile's active pf lease.
     @discardableResult
     func setKillSwitch(profileId: String, enabled: Bool) async -> Bool {
         do {
@@ -431,11 +432,21 @@ extension AppState {
                 params: ["profile_id": profileId, "enabled": enabled]
             )
             await refreshProfiles()
-            // If user is turning kill-switch OFF and tunnel is up,
-            // tear down the pf rules immediately (don't wait for
-            // disconnect+reconnect).
-            if !enabled {
-                _ = try? await HelperClient.shared.killSwitchDisable()
+            let wasActive = killSwitchActiveProfiles.contains(profileId)
+            if await HelperClient.shared.health() == .healthy {
+                let status = try await HelperClient.shared.killSwitchSetIntent(
+                    profileId: profileId,
+                    enabled: enabled
+                )
+                let activeDict = (status["active"] as? [String: Any]) ?? [:]
+                killSwitchActiveProfiles = Set(activeDict.keys)
+                if wasActive && !killSwitchActiveProfiles.contains(profileId) {
+                    ActivityLog.shared.record(
+                        profileId: profileId,
+                        kind: .killSwitchReleased,
+                        message: "Kill-switch released"
+                    )
+                }
             }
             return true
         } catch {
@@ -526,7 +537,8 @@ extension AppState {
                 profileId: profileId,
                 confContent: r.conf,
                 dnsServers: r.dnsServers,
-                native: AppSettings.shared.wireguardNativeSetup
+                native: AppSettings.shared.wireguardNativeSetup,
+                killSwitch: summary.killSwitch
             )
             return ("wireguard", args)
         } else if backendLower.contains("openvpn") || backendLower.contains("open_vpn") {
@@ -543,6 +555,7 @@ extension AppState {
             var args: [String: Any] = [
                 "profile_id": profileId,
                 "config": try String(contentsOfFile: cfg.configFile, encoding: .utf8),
+                "kill_switch": profile.killSwitch,
             ]
             if let u = try? VPNKeychain.getString(account: "vpn/\(profileId)/ovpn-username") {
                 args["username"] = u
@@ -581,6 +594,7 @@ extension AppState {
                 "routes": cfg.routes,
                 "dns_servers": cfg.dnsServers,
                 "local_id": cfg.localId,
+                "kill_switch": profile.killSwitch,
             ]
             return ("ikev2", args)
         } else {
@@ -677,15 +691,38 @@ extension AppState {
     }
 
     func deleteVpnProfile(_ id: String, profileName: String? = nil) async {
+        let summary = vpnProfiles.first(where: { $0.id == id })
         do {
-            // If the tunnel is currently up, ask the helper to bring it
-            // down — this also clears the swanctl config the helper wrote.
-            // Best-effort: a "helper unreachable" error here is fine, the
-            // helper will discard stale configs on its next start anyway.
-            _ = try? await HelperClient.shared.vpnDisconnect(profileId: id)
+            // Unenroll from Always-on, clear helper kill-switch intent/lease,
+            // and tear down the tunnel using the profile's actual backend
+            // (WireGuard, OpenVPN, Azure VPN, or strongSwan IKEv2).
+            _ = try? await HelperClient.shared.autoReconnectDisable(profileId: id)
+            _ = try? await HelperClient.shared.killSwitchSetIntent(profileId: id, enabled: false)
+            if let summary {
+                await dispatchDisconnect(profileId: id, backend: summary.backend)
+            } else {
+                _ = try? await HelperClient.shared.vpnDisconnect(profileId: id)
+                _ = try? await HelperClient.shared.wgDisconnect(profileId: id)
+                _ = try? await HelperClient.shared.ovpnDisconnect(profileId: id)
+            }
 
             try await client.callVoid("vpn_delete_profile", params: ["id": id])
             VPNKeychain.deleteAll(profileId: id)
+
+            autoReconnectEnabled.remove(id)
+            autoReconnectUnarmed.remove(id)
+            autoReconnectRearmFailed.remove(id)
+            killSwitchActiveProfiles.remove(id)
+            vpnBusyProfiles.remove(id)
+            vpnConnectionStates.removeValue(forKey: id)
+            vpnStatusMissStreak.removeValue(forKey: id)
+            vpnByteCounters.removeValue(forKey: id)
+            vpnByteRates.removeValue(forKey: id)
+            vpnLastByteSample.removeValue(forKey: id)
+            vpnLastHandshakeUnix.removeValue(forKey: id)
+            vpnPeerEndpoints.removeValue(forKey: id)
+            vpnLiveRouting.removeValue(forKey: id)
+
             await refreshProfiles()
             if selectedProfileId == id { selectedProfileId = nil }
         } catch {
@@ -807,22 +844,24 @@ extension AppState {
                 "vpn_render_wireguard_conf",
                 params: ["profile_id": profileId]
             )
+            let wantKillSwitch = vpnProfiles.first(where: { $0.id == profileId })?.killSwitch ?? false
             let result = try await HelperClient.shared.wgConnect(
                 profileId: profileId,
                 confContent: rendered.conf,
                 dnsServers: rendered.dnsServers,
-                native: AppSettings.shared.wireguardNativeSetup
+                native: AppSettings.shared.wireguardNativeSetup,
+                killSwitch: wantKillSwitch
             )
             let success = (result["success"] as? Bool) ?? false
             let message = (result["message"] as? String)
                 ?? (success ? "Connected" : "Connect failed")
-            // Engage kill-switch if profile has it enabled. The
-            // helper response includes the just-installed utun
-            // name; without that we'd guess the wrong iface for
-            // the pf rules.
-            if success,
-               let iface = result["interface"] as? String {
-                await applyKillSwitchIfEnabled(profileId: profileId, iface: iface)
+            if success && wantKillSwitch {
+                let iface = (result["interface"] as? String) ?? "tunnel"
+                ActivityLog.shared.record(
+                    profileId: profileId,
+                    kind: .killSwitchEngaged,
+                    message: "Kill-switch installed on \(iface)"
+                )
             }
             ActivityLog.shared.record(
                 profileId: profileId,
@@ -843,39 +882,6 @@ extension AppState {
         }
     }
 
-    /// If the profile has `kill_switch=true` and we just brought
-    /// up its tunnel, ask the helper to install the pf rules.
-    /// Idempotent on the helper side — safe to call repeatedly.
-    /// Failures here are non-fatal: the tunnel is up and the user
-    /// just doesn't have leak protection.
-    fileprivate func applyKillSwitchIfEnabled(profileId: String, iface: String) async {
-        // We check the cached profile flag rather than fetching
-        // the full profile — the GUI already has it via
-        // refreshProfiles. ProfileSummary doesn't carry
-        // kill_switch yet so we fall through to fetching the
-        // full profile if needed.
-        let enabled: Bool
-        do {
-            let p: VpnProfile = try await client.call(
-                "vpn_get_profile",
-                params: ["id": profileId]
-            )
-            enabled = p.killSwitch
-        } catch {
-            DebugLog.write("[killSwitch] couldn't read profile: \(error.localizedDescription)")
-            return
-        }
-        guard enabled else { return }
-        do {
-            _ = try await HelperClient.shared.killSwitchEnable(tunnelInterface: iface)
-            DebugLog.write("[killSwitch] enabled on \(iface) for profile \(profileId)")
-            ActivityLog.shared.record(profileId: profileId, kind: .killSwitchEngaged,
-                                      message: "Kill-switch installed on \(iface)")
-        } catch {
-            DebugLog.write("[killSwitch] enable failed: \(error.localizedDescription)")
-        }
-    }
-
     @discardableResult
     func wireguardDisconnect(profileId: String) async -> (success: Bool, message: String) {
         ActivityLog.shared.record(profileId: profileId, kind: .disconnectRequested,
@@ -885,9 +891,6 @@ extension AppState {
         // effect somewhere. The poll afterwards reconciles.
         vpnConnectionStates[profileId] = "disconnected"
         bumpVpnFastPolling()
-        // Tear down kill-switch first so the user isn't trapped
-        // with a tunnel down + pf blocking everything. Idempotent.
-        _ = try? await HelperClient.shared.killSwitchDisable()
         do {
             let result = try await HelperClient.shared.wgDisconnect(profileId: profileId)
             let success = (result["success"] as? Bool) ?? false
@@ -934,17 +937,24 @@ extension AppState {
         vpnConnectionStates[profileId] = "connecting"
         bumpVpnFastPolling()
         do {
+            let wantKillSwitch = vpnProfiles.first(where: { $0.id == profileId })?.killSwitch ?? false
             let result = try await HelperClient.shared.ovpnConnect(
                 profileId: profileId,
                 config: config,
                 username: username,
-                password: password
+                password: password,
+                killSwitch: wantKillSwitch
             )
             let success = (result["success"] as? Bool) ?? false
             let message = (result["message"] as? String)
                 ?? (success ? "Connected" : "Connect failed")
-            if success, let iface = result["interface"] as? String {
-                await applyKillSwitchIfEnabled(profileId: profileId, iface: iface)
+            if success && wantKillSwitch {
+                let iface = (result["interface"] as? String) ?? "tunnel"
+                ActivityLog.shared.record(
+                    profileId: profileId,
+                    kind: .killSwitchEngaged,
+                    message: "Kill-switch installed on \(iface)"
+                )
             }
             ActivityLog.shared.record(
                 profileId: profileId,
@@ -964,7 +974,6 @@ extension AppState {
     func openVPNDisconnect(profileId: String) async -> (success: Bool, message: String) {
         vpnConnectionStates[profileId] = "disconnected"
         bumpVpnFastPolling()
-        _ = try? await HelperClient.shared.killSwitchDisable()
         do {
             let result = try await HelperClient.shared.ovpnDisconnect(profileId: profileId)
             let success = (result["success"] as? Bool) ?? false
@@ -1025,6 +1034,7 @@ extension AppState {
             _ = try? await HelperClient.shared.wgDisconnect(profileId: profileId)
             _ = try? await HelperClient.shared.ovpnDisconnect(profileId: profileId)
         }
+        _ = try? await HelperClient.shared.killSwitchDisable(profileId: profileId)
         vpnConnectionStates[profileId] = "disconnected"
         await pollAllVpnStates()
     }
@@ -1032,13 +1042,13 @@ extension AppState {
     /// Single source of truth for backend → disconnect-RPC. Uses
     /// substring matching against the daemon's display-form
     /// `backend` string ("WireGuard", "FortiGate (IPsec/IKEv2)",
-    /// "OpenVPN3") rather than the discriminator names — see
+    /// "OpenVPN3", "Azure VPN") rather than the discriminator names — see
     /// `fetchProfileState` for the same reasoning.
     fileprivate func dispatchDisconnect(profileId: String, backend: String) async {
         let b = backend.lowercased()
         if b.contains("wireguard") || b.contains("wire_guard") {
             _ = try? await HelperClient.shared.wgDisconnect(profileId: profileId)
-        } else if b.contains("openvpn") || b.contains("open_vpn") {
+        } else if b.contains("openvpn") || b.contains("open_vpn") || b.contains("azure") {
             _ = try? await HelperClient.shared.ovpnDisconnect(profileId: profileId)
         } else if b.contains("fortigate") || b.contains("forti_gate") || b.contains("ikev2") || b.contains("ipsec") {
             _ = try? await HelperClient.shared.vpnDisconnect(profileId: profileId)

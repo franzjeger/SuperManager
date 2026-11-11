@@ -1073,6 +1073,9 @@ class AppState {
     /// session (e.g. missing Keychain credentials), preventing repeated
     /// background retry attempts until profiles are refreshed or edited.
     var autoReconnectRearmFailed: Set<String> = []
+    /// Profile IDs that currently hold an active pf kill-switch lease in the
+    /// privileged helper (`kill_switch_status`).
+    var killSwitchActiveProfiles: Set<String> = []
     /// Per-profile bandwidth counters from the helper's status
     /// RPC (rx_bytes / tx_bytes). nil if the backend doesn't
     /// expose them or the tunnel isn't connected.
