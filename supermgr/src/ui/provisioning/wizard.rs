@@ -2233,7 +2233,7 @@ fn build_step5_review(
                             let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
                                 .map(std::path::PathBuf::from)
                                 .filter(|p| p.is_dir())
-                                .or_else(|| supermgr_core::paths::user_data_dir().ok())
+                                .or_else(|| supermgr_core::paths::try_default_data_dir().ok())
                                 .unwrap_or_else(std::env::temp_dir);
                             let mut tmp_file = match tempfile::Builder::new()
                                 .prefix("supermgr-report-")
